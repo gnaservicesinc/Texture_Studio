@@ -367,6 +367,36 @@ def _model_configuration(checkpoint_name: str) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+def checkpoint_model_configuration(checkpoint: Any, checkpoint_name: str) -> SimpleNamespace:
+    """Restore explicit IPDE RAFT architecture metadata independent of filename.
+
+    Upstream raw checkpoints retain the established filename-based presets.
+    IPDE-trained weights carry a bounded, strict whitelist of model fields so
+    renaming a realtime/instance-normalized checkpoint cannot change its model.
+    """
+    fallback = _model_configuration(checkpoint_name)
+    if not isinstance(checkpoint, Mapping) or "ipde_configuration" not in checkpoint:
+        return fallback
+    values = checkpoint["ipde_configuration"]
+    if not isinstance(values, Mapping) or set(values) != set(vars(fallback)):
+        raise RaftStereoError("trained RAFT checkpoint has incomplete or unknown architecture fields")
+    values = dict(values)
+    for name in ("shared_backbone", "slow_fast_gru", "mixed_precision"):
+        if type(values[name]) is not bool:
+            raise RaftStereoError(f"trained RAFT architecture field {name} must be boolean")
+    if values["mixed_precision"]:
+        raise RaftStereoError("trained RAFT checkpoint must use portable float32 inference")
+    hidden = values["hidden_dims"]
+    if not isinstance(hidden, list) or len(hidden) != 3 or any(type(item) is not int or not 32 <= item <= 512 for item in hidden):
+        raise RaftStereoError("trained RAFT hidden_dims must contain three bounded integer dimensions")
+    for name, allowed in {"corr_levels": range(1, 9), "corr_radius": range(1, 9), "n_downsample": (2, 3), "n_gru_layers": (1, 2, 3)}.items():
+        if type(values[name]) is not int or values[name] not in allowed:
+            raise RaftStereoError(f"trained RAFT architecture field {name} is unsupported")
+    if values["corr_implementation"] not in {"alt", "reg"} or values["context_norm"] not in {"batch", "instance", "group", "none"}:
+        raise RaftStereoError("trained RAFT checkpoint has unsupported correlation/normalization settings")
+    return SimpleNamespace(**values)
+
+
 def _select_device(torch: Any, requested: str) -> str:
     if requested not in {"auto", "cpu", "mps", "cuda"}:
         raise RaftStereoError(f"unsupported RAFT-Stereo device {requested!r}")
@@ -1239,12 +1269,13 @@ def run_raft_stereo(
     device = _select_device(torch, options.device)
     configuration = _model_configuration(checkpoint_name)
     try:
-        model = RAFTStereo(configuration)
         state = torch.load(
             io.BytesIO(checkpoint_bytes),
             map_location="cpu",
             weights_only=True,
         )
+        configuration = checkpoint_model_configuration(state, checkpoint_name)
+        model = RAFTStereo(configuration)
         if isinstance(state, Mapping) and "state_dict" in state:
             state = state["state_dict"]
         if not isinstance(state, Mapping):

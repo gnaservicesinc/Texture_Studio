@@ -3,7 +3,7 @@ PYTHON := $(if $(wildcard .venv/bin/python),$(CURDIR)/.venv/bin/python,$(PYTHON_
 QT_CMAKE := /opt/Qt/6.12.0/macos/lib/cmake/Qt6
 BUILD_DIR := build
 
-.PHONY: setup configure build gui test smoke clean
+.PHONY: setup configure build gui studio test smoke clean
 
 setup:
 	$(PYTHON_BASE) -m venv .venv
@@ -21,6 +21,9 @@ build: configure
 
 gui: build
 	open "$(CURDIR)/$(BUILD_DIR)/IPDE.app"
+
+studio: build
+	open "$(CURDIR)/$(BUILD_DIR)/RAFT Studio.app"
 
 test:
 	PYTHONPATH=$(CURDIR)/src $(PYTHON) -m unittest discover -s tests -v

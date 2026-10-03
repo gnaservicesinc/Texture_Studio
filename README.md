@@ -7,6 +7,11 @@ display-oriented processing. The project has two parts:
 - a Python command-line extractor built on `pillow-heif >= 1.5.0`;
 - a native Qt 6 desktop GUI that runs the extractor with structured JSON I/O.
 
+[RAFT Studio](docs/raft-studio.md) is a separate Qt app for depth-teacher datasets,
+RAFT distillation, and verified checkpoint exports. Launch it with `make studio`.
+IPDE continues to use exported models through its existing RAFT model field;
+dataset and training controls are kept out of its GUI and CLI.
+
 ## Precision model
 
 IPDE preserves the values produced by the HEIF decoder. Raw outputs never receive

@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 ipde = "ipde.cli:main"
+raft-studio = "ipde.trainer_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

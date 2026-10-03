@@ -1,0 +1,15 @@
+# Optional high-detail learned depth inference, beyond the base IPDE dependencies.
+# Apple source is loaded locally; avoid its packaging-time numpy<2 downgrade.
+torch>=2.0
+torchvision>=0.15
+timm>=1.0.15
+huggingface_hub>=1.0
+safetensors>=0.6
+# DA3 network/configuration dependencies. Its export/web/CUDA-only packages
+# are not imported or installed by IPDE's local FP32 adapter.
+omegaconf>=2.3
+addict>=2.4
+einops>=0.8
+evo>=1.30
+e3nn>=0.5
+imageio>=2.36

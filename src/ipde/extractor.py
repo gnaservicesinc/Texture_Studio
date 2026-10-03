@@ -32,6 +32,7 @@ from .formats import (
     write_png,
 )
 from .libheif_aux import HighBitAuxiliaryError, decode_high_bit_auxiliary
+from .learned_depth import LearnedDepthConfig, LearnedDepthError, infer_learned_depth
 from .spatial import (
     ColorMatchingError,
     DisplacementMappingError,
@@ -83,6 +84,12 @@ class ExtractOptions:
     raft_model_member: str | None = None
     raft_device: str = "auto"
     raft_iterations: int = 32
+    learned_model: str = "depthpro"
+    learned_model_path: Path | None = None
+    learned_source_dir: Path | None = None
+    learned_device: str = "auto"
+    learned_input_size: int = 1036
+    write_learned_depth: bool = False
     overwrite: bool = False
 
 
@@ -1124,12 +1131,31 @@ def _stereo_review_outputs(
     stem = output_dir / f"{discovery.source.stem}_spatial_{filename_engine}{color_suffix}"
     pending: list[PendingOutput] = []
     products = [f"{engine}-support", f"{engine}-preview", f"{engine}-supported-depth"]
+    if engine == "raft":
+        products.extend(("raft-display-depth", "raft-display-preview"))
     if engine == "stereo":
         products.append("stereo-depth")
+    display_depth = None
+    registration = None
+    if selected.intersection({"raft-display-depth", "raft-display-preview"}):
+        from .registration import RegistrationError, estimate_display_registration, project_left_depth_to_display
+        try:
+            registration = estimate_display_registration(discovery)
+            _, left_depth = derive_raft_height_and_depth(-disparity, {
+                **discovery.spatial_photo, "principal_point_delta_x_pixels": 0.0,
+            })
+            if support is None:
+                raise RegistrationError("display reprojection requires correspondence support")
+            display_depth = project_left_depth_to_display(np.where(support, left_depth, np.nan), discovery, registration)
+        except RegistrationError as exc:
+            raise ExtractionError(f"Display depth cannot be registered reliably: {exc}. Use left-grid RAFT depth or an independent display AI estimate.") from exc
     for product in products:
         if product not in selected:
             continue
         inference_details = dict(inference)
+        if "-display-" in product:
+            inference_details.update({"reference_image": "display", "display_registration": registration,
+                                      "resampled_derivative": True, "unsupported_is_nan": True})
         if product.endswith("-support"):
             array = support.astype(np.float32)
             suffix, units = "support", "binary support (0 or 1)"
@@ -1140,23 +1166,31 @@ def _stereo_review_outputs(
                 **discovery.spatial_photo, "principal_point_delta_x_pixels": 0.0,
             })
             masked = product.endswith("-supported-depth")
-            array = np.where(support, depth, np.float32(np.nan)) if masked else depth
-            suffix, units = "supported_depth_meters" if masked else "depth_meters", "meters"
+            array = display_depth if product == "raft-display-depth" else np.where(support, depth, np.float32(np.nan)) if masked else depth
+            suffix, units = "display_depth_meters" if product == "raft-display-depth" else "supported_depth_meters" if masked else "depth_meters", "meters"
             semantic = ("camera-axis depth restricted to supported correspondences; NaN is unknown" if masked else
                         "classical camera-axis depth estimate; local support exported separately; NaN is unmatched")
             transform = "Z = float32(focal_px) * float32(baseline_m) / disparity" + ("; unsupported = NaN" if masked else "")
             inference_details["depth_and_disparity_filtered_by_support"] = masked
         else:
-            try:
-                mapped, mapping = linear_depth_displacement(disparity, discovery.spatial_photo)
-            except DisplacementMappingError:
+            if product == "raft-display-preview":
+                finite_display = np.isfinite(display_depth) & (display_depth > 0)
+                mapped = np.full(display_depth.shape, np.nan, np.float32)
+                if finite_display.any():
+                    near, far = display_depth[finite_display].min(), display_depth[finite_display].max()
+                    mapped[finite_display] = (far-display_depth[finite_display])/(far-near) if far > near else 0
+                mapping = {"formula": "(far-Z)/(far-near) on registered supported display depth"}
+            else:
+                try:
+                    mapped, mapping = linear_depth_displacement(disparity, discovery.spatial_photo)
+                except DisplacementMappingError:
                 # An entirely unmatched classical result has a useful empty preview.
-                mapped = np.full(disparity.shape, np.nan, np.float32)
-                mapping = {"empty_map": True, "formula": "no finite positive depth"}
+                    mapped = np.full(disparity.shape, np.nan, np.float32)
+                    mapping = {"empty_map": True, "formula": "no finite positive depth"}
             finite = np.isfinite(mapped)
             gray = np.rint(np.where(finite, mapped, 0).astype(np.float64) * 65535).astype(np.uint16)
             array = np.stack((gray, np.where(finite, 65535, 0).astype(np.uint16)), axis=-1)
-            suffix, units = "depth_preview", "16-bit display codes, not scientific data"
+            suffix, units = "display_depth_preview" if product == "raft-display-preview" else "depth_preview", "16-bit display codes, not scientific data"
             semantic = "linear camera-axis depth preview; near white, far black; unknown pixels transparent"
             transform = "round(65535 * (far_m - Z) / (far_m - near_m)); alpha = finite depth"
             inference_details.update({
@@ -1191,7 +1225,120 @@ def _stereo_review_outputs(
 
 
 # Product IDs are stable within a decoded inventory and also serve as CLI selectors.
+_LEARNED_PRODUCTS = {
+    "learned-depth": ("AI depth — selected model, source image grid", "derived_learned_depth"),
+    "learned-native": ("AI depth — original model prediction grid", "derived_learned_native"),
+    "learned-preview": ("AI depth preview — view only, near white", "derived_learned_preview"),
+    "learned-displacement": ("AI depth — explicit linear 0–1 displacement", "derived_learned_displacement"),
+}
+_LEARNED_PRODUCTS.update({key.replace("learned-", "learned-display-"): (
+    name.replace("AI depth", "Display AI depth"), role.replace("derived_learned_", "derived_learned_display_")
+) for key, (name, role) in list(_LEARNED_PRODUCTS.items())})
+
+
+def _learned_reference(discovery: Discovery, *, display: bool = False) -> tuple[int, Asset] | None:
+    for semantic in (("display",) if display else ("spatial_left",)):
+        for index, asset in enumerate(discovery.assets):
+            if asset.semantic_name == semantic and asset.array.ndim == 3:
+                return index, asset
+    return None
+
+
+def _learned_paths(output_dir: Path, discovery: Discovery, config: ExtractOptions,
+                   reference: Asset, product: str) -> list[Path]:
+    suffix = {"learned-depth": "depth", "learned-native": "native_depth",
+              "learned-preview": "depth_preview", "learned-displacement": "displacement_0_to_1"}[product.replace("learned-display-", "learned-")]
+    base = output_dir / f"{discovery.source.stem}_{reference.semantic_name}_{config.learned_model}_{suffix}"
+    if product.endswith("-preview"):
+        return [Path(f"{base}.png")]
+    return [Path(f"{base}.exr")] + ([Path(f"{base}.npy")] if config.write_npy else [])
+
+
+def _learned_pending_outputs(output_dir: Path, discovery: Discovery, config: ExtractOptions,
+                             selected: set[str] | None) -> list[PendingOutput]:
+    products = selected.intersection(_LEARNED_PRODUCTS) if selected is not None else {"learned-depth"}
+    pending = []
+    for display in (False, True):
+        subset = {key for key in products if key.startswith("learned-display-") == display}
+        if subset:
+            pending.extend(_learned_reference_outputs(output_dir, discovery, config, subset, display=display))
+    return pending
+
+
+def _learned_reference_outputs(output_dir: Path, discovery: Discovery, config: ExtractOptions,
+                               products: set[str], *, display: bool) -> list[PendingOutput]:
+    reference = _learned_reference(discovery, display=display)
+    if reference is None:
+        raise ExtractionError("AI depth requires an exposed spatial left or display image")
+    index, asset = reference
+    focal = None if display else (discovery.spatial_photo or {}).get("focal_length_pixels_for_depth")
+    try:
+        result = infer_learned_depth(asset.array, LearnedDepthConfig(
+            model=config.learned_model, model_path=config.learned_model_path, source_dir=config.learned_source_dir,
+            device=config.learned_device, input_size=config.learned_input_size,
+        ), focal_pixels=focal, reference_label=asset.semantic_name)
+    except (LearnedDepthError, ValueError, OSError) as exc:
+        raise ExtractionError(str(exc)) from exc
+    metadata = dict(result.metadata)
+    metric = metadata.get("units") in ("m", "meters")
+    inverse = metadata.get("units") == "relative_inverse_depth"
+    units = "meters" if metric else "relative inverse depth (unscaled)" if inverse else "relative depth (unscaled)"
+    depth = result.source_depth
+    if depth.shape != asset.array.shape[:2]:
+        raise ExtractionError("AI depth output does not match its source image grid")
+    pending = []
+    for product in sorted(products):
+        base_product = product.replace("learned-display-", "learned-")
+        array = result.native_depth if base_product == "learned-native" else depth
+        details_metadata = {**metadata, "source_image_sha256": sha256_array(asset.array),
+                            "source_heic_sha256": discovery.source_sha256,
+                            "reference_image": asset.semantic_name, "normalization": False}
+        output_units = units
+        direction = "larger values indicate nearer geometry" if inverse else "smaller values indicate nearer geometry"
+        if base_product in ("learned-preview", "learned-displacement"):
+            # Separate, explicitly requested display/displacement derivatives.
+            finite = np.isfinite(depth) & (depth > 0)
+            mapped = np.full(depth.shape, np.nan, np.float32)
+            if finite.any():
+                near, far = np.float32(depth[finite].min()), np.float32(depth[finite].max())
+                if far > near:
+                    mapped[finite] = ((depth[finite]-near) if inverse else (far-depth[finite])) / (far-near)
+                else:
+                    mapped[finite] = 0
+                details_metadata["mapping_bounds"] = [float(near), float(far)]
+            details_metadata.update({"normalization": True, "mapping_domain": units,
+                                     "formula": "(inverse_depth-min)/(max-min)" if inverse else "(far-Z)/(far-near)"})
+            array, output_units = mapped, "normalized 0..1"
+            direction = "near high; invalid is NaN"
+            if base_product == "learned-preview":
+                gray = np.rint(np.where(finite, mapped, 0).astype(np.float64)*65535).astype(np.uint16)
+                array = np.stack((gray, np.where(finite, 65535, 0).astype(np.uint16)), axis=-1)
+                output_units = "16-bit display codes (view only)"
+                details_metadata["preview_only"] = True
+        role = _LEARNED_PRODUCTS[product][1]
+        details = _inference_output_details(array, details_metadata, name=role, units=output_units, value_direction=direction)
+        attrs = {"ipdeUnits": output_units, "ipdeSemantic": direction,
+                 "ipdePrecision": "model estimate; float32 arithmetic does not create measured precision",
+                 "ipdeDerivation": json.dumps(details["derivation"], sort_keys=True, allow_nan=False)}
+        paths = _learned_paths(output_dir, discovery, config, asset, product)
+        for path in paths:
+            if path.suffix == ".png":
+                writer = lambda p, a=array, at=attrs: write_png(p, a, attributes=at)
+                verifier = lambda p, a=array: verify_png(p, a)
+            elif path.suffix == ".npy":
+                writer = lambda p, a=array: write_npy(p, a)
+                verifier = lambda p, a=array: verify_npy(p, a)
+            else:
+                writer = lambda p, a=array, at=attrs: write_exr(p, a, attributes=at)
+                verifier = lambda p, a=array: verify_exr(p, a)
+            pending.append(PendingOutput(path, role + ("_exact_array" if path.suffix == ".npy" else ""),
+                                         index, writer, verifier, details))
+    return pending
+
+
 _SPATIAL_PRODUCTS = {
+    "raft-display-depth": ("RAFT registered display depth — supported meters, partial coverage", "derived_raft_display_metric_depth"),
+    "raft-display-preview": ("RAFT registered display preview — partial coverage, view only", "derived_raft_display_preview"),
     "raft-displacement": ("RAFT dense estimate — linear depth 0–1 displacement", "derived_raft_stereo_displacement_0_to_1"),
     "raft-preview": ("RAFT depth preview — view only, near white", "derived_raft_stereo_depth_preview"),
     "raft-depth": ("RAFT dense estimate — camera-axis depth in meters", "derived_raft_stereo_metric_depth"),
@@ -1208,7 +1355,7 @@ _SPATIAL_PRODUCTS = {
 }
 
 
-def _available_products(discovery: Discovery) -> list[dict[str, Any]]:
+def _available_products(discovery: Discovery, *, include_learned: bool = False) -> list[dict[str, Any]]:
     products = []
     for index, asset in enumerate(discovery.assets):
         common = {"asset_index": index, "width": asset.array.shape[1], "height": asset.array.shape[0],
@@ -1241,10 +1388,29 @@ def _available_products(discovery: Discovery) -> list[dict[str, Any]]:
                                  "precision": "32-bit float EXR", "source_precision": source_precision,
                                  "origin": "Calculated", "description": "Calculated from encoded depth codes. Float32 is export storage, not import bit depth. "
                                  f"Apple depth accuracy: {asset.metadata.get('apple_depth_accuracy') or 'unspecified'}."})
+    for key, (name, _) in (_LEARNED_PRODUCTS.items() if include_learned else ()):
+        reference = _learned_reference(discovery, display=key.startswith("learned-display-"))
+        if reference is not None:
+            _, asset = reference
+            products.append({"id": key, "name": name,
+                             "width": 0 if key.endswith("-native") else asset.array.shape[1],
+                             "height": 0 if key.endswith("-native") else asset.array.shape[0],
+                             "precision": "16-bit PNG + alpha (view only)" if key.endswith("-preview") else "32-bit float EXR",
+                             "source_precision": "Generated estimate", "origin": "Inferred",
+                             "description": f"Selected AI model on {asset.semantic_name}. DepthPro estimates meters; Depth Anything V2/DA3 estimate relative depth. "
+                             "Native prediction dimensions depend on the model. Source-grid output is resampled and adds no independent detail. "
+                             "Preview and 0–1 displacement are separate explicit derivatives; raw decoded arrays stay untouched."})
     if discovery.spatial_photo and discovery.spatial_photo.get("rectified_stereo_ready"):
         camera = discovery.spatial_photo["left_camera"]
         for key, (label, _) in _SPATIAL_PRODUCTS.items():
             description = "Computed on the left-view grid; inferred, not measured source depth. "
+            product_camera = camera
+            if "-display-" in key:
+                display_reference = _learned_reference(discovery, display=True)
+                if display_reference is None:
+                    continue
+                product_camera = {"width": display_reference[1].array.shape[1], "height": display_reference[1].array.shape[0]}
+                description = "Reprojected supported RAFT depth onto the display grid using evidence-checked same-camera registration. Approximate derived grid; unknown regions stay NaN. Registration can be rejected per photo. "
             if key.endswith("-preview"):
                 description += ("Viewable PNG with explicit linear depth mapping and transparent missing pixels. "
                                 "Quantized for viewing only; use the 0–1 float EXR for displacement.")
@@ -1261,8 +1427,8 @@ def _available_products(discovery: Discovery) -> list[dict[str, Any]]:
             else:
                 description += ("Dense forward estimate, including unverified occluded regions. "
                                 "Export the support mask to identify them; no hole filling or confidence masking.")
-            products.append({"id": key, "name": label, "width": camera["width"],
-                             "height": camera["height"],
+            products.append({"id": key, "name": label, "width": product_camera["width"],
+                             "height": product_camera["height"],
                              "precision": "16-bit PNG + alpha (view only)" if key.endswith("-preview") else "32-bit float EXR",
                              "source_precision": "Generated estimate", "origin": "Inferred",
                              "description": description})
@@ -1271,14 +1437,14 @@ def _available_products(discovery: Discovery) -> list[dict[str, Any]]:
 
 def _product_id(output: PendingOutput) -> str:
     role = output.role.removesuffix("_exact_array")
-    for key, (_, spatial_role) in _SPATIAL_PRODUCTS.items():
+    for key, (_, spatial_role) in {**_SPATIAL_PRODUCTS, **_LEARNED_PRODUCTS}.items():
         if role == spatial_role:
             return key
     prefix = {"derived_physical_disparity": "disparity", "derived_metric_depth": "meters"}.get(role, "raw")
     return f"{prefix}:{output.asset_index}"
 
 
-def _build_manifest(discovery: Discovery, asset_records: list[dict[str, Any]], warnings: list[str]) -> dict[str, Any]:
+def _build_manifest(discovery: Discovery, asset_records: list[dict[str, Any]], warnings: list[str], *, include_learned: bool = False) -> dict[str, Any]:
     try:
         numpy_version = version("numpy")
     except PackageNotFoundError:
@@ -1320,7 +1486,7 @@ def _build_manifest(discovery: Discovery, asset_records: list[dict[str, Any]], w
             "explicitly identified inferred float32 estimates derived from the preserved stereo views. "
             "No output can restore information lost when the source HEIF was encoded."
         ),
-        "available_products": _available_products(discovery),
+        "available_products": _available_products(discovery, include_learned=include_learned),
         "asset_count": len(asset_records),
         "assets": asset_records,
         "warnings": warnings,
@@ -1343,18 +1509,18 @@ def _discovery_warnings(discovery: Discovery) -> list[str]:
     return warnings
 
 
-def _report(discovery: Discovery) -> dict[str, Any]:
+def _report(discovery: Discovery, *, include_learned: bool = False) -> dict[str, Any]:
     records = [_asset_record(asset) for asset in discovery.assets]
     warnings = _discovery_warnings(discovery)
     if not records:
         warnings.append(
             "No depth, non-alpha auxiliary, alpha, or spatial-view planes were exposed."
         )
-    return _build_manifest(discovery, records, warnings)
+    return _build_manifest(discovery, records, warnings, include_learned=include_learned)
 
 
-def inspect_file(source: Path | str) -> dict[str, Any]:
-    return _report(discover_file(Path(source)))
+def inspect_file(source: Path | str, *, include_learned: bool = False) -> dict[str, Any]:
+    return _report(discover_file(Path(source)), include_learned=include_learned)
 
 
 def _temporary_path(final_path: Path) -> Path:
@@ -1443,7 +1609,7 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
     discovery = discover_file(Path(source))
     selected = None if config.selected_products is None else set(config.selected_products)
     if selected is not None:
-        available = {product["id"] for product in _available_products(discovery)}
+        available = {product["id"] for product in _available_products(discovery, include_learned=True)}
         if not selected or selected - available:
             raise ExtractionError(f"Select available products from --inspect; unavailable selection: {sorted(selected - available)}")
         config = replace(
@@ -1454,6 +1620,7 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
             write_displacement_maps=bool(selected & {"raft-displacement", "stereo-displacement"}),
             write_metric_depth=any(key.startswith("meters:") for key in selected),
             write_physical_disparity=any(key.startswith("disparity:") for key in selected),
+            write_learned_depth=any(key in _LEARNED_PRODUCTS for key in selected),
         )
     def wanted(output: PendingOutput) -> bool:
         return selected is None or _product_id(output) in selected
@@ -1521,10 +1688,22 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
             )
 
     pending = [item for item in pending if wanted(item)]
-    selection_suffix = "" if selected is None else "_" + hashlib.sha256(
-        "\n".join(sorted(selected)).encode("utf-8")).hexdigest()[:12]
+    selection_key = "\n".join(sorted(selected)) if selected is not None else ""
+    if config.write_learned_depth:
+        selection_key += f"\nmodel:{config.learned_model}"
+    selection_suffix = "_" + hashlib.sha256(selection_key.encode("utf-8")).hexdigest()[:12] if selection_key else ""
     manifest_path = output_dir / f"{discovery.source.stem}{selection_suffix}_aux_manifest.json"
     manifest_paths = [manifest_path] if config.write_manifest else []
+    if config.write_learned_depth:
+        products = selected.intersection(_LEARNED_PRODUCTS) if selected is not None else {"learned-depth"}
+        predicted = []
+        for product in products:
+            reference = _learned_reference(discovery, display=product.startswith("learned-display-"))
+            if reference is None:
+                raise ExtractionError("AI depth requires the selected spatial left or display image")
+            predicted.extend(_learned_paths(output_dir, discovery, config, reference[1], product))
+        _check_output_paths([item.final_path for item in pending] + predicted + manifest_paths, overwrite=config.overwrite)
+        pending.extend(_learned_pending_outputs(output_dir, discovery, config, selected))
     write_raft = config.write_raft_stereo or config.write_raft_diagnostics
     write_spatial_height = config.write_stereo_matching or write_raft
     if config.write_displacement_maps and not write_spatial_height:
@@ -1570,6 +1749,8 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
                 "raft-displacement": f"raft_stereo{color_suffix}_displacement_0_to_1",
                 "raft-flow": f"raft_stereo{color_suffix}_signed_flow",
                 "raft-depth": f"raft_stereo{color_suffix}_depth_meters",
+                "raft-display-depth": f"raft_stereo{color_suffix}_display_depth_meters",
+                "raft-display-preview": f"raft_stereo{color_suffix}_display_depth_preview",
                 "stereo-height": f"stereo_matching{color_suffix}_height",
                 "stereo-depth": f"stereo_matching{color_suffix}_depth_meters",
                 "stereo-displacement": f"stereo_matching{color_suffix}_displacement_0_to_1",
@@ -1773,7 +1954,7 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
             if item.asset_index is not None:
                 records[item.asset_index]["outputs"].append(output_record)
 
-        manifest = _build_manifest(discovery, records, warnings)
+        manifest = _build_manifest(discovery, records, warnings, include_learned=config.write_learned_depth)
         manifest["selected_products"] = sorted(selected) if selected is not None else None
         manifest["manifest_path"] = str(manifest_path) if config.write_manifest else None
 
