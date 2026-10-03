@@ -185,12 +185,50 @@ class SelectionTests(unittest.TestCase):
         np.testing.assert_array_equal(self.raft.signed_flow_pixels, -self.height)
 
     def test_classical_empty_preview_is_transparent_and_runs_no_raft(self):
-        sparse = StereoMatchingResult(np.full((2, 3), np.nan, np.float32), {})
+        sparse = StereoMatchingResult(np.full((2, 3), np.nan, np.float32), {}, np.zeros((2, 3), bool))
         with patch("ipde.extractor.run_stereo_matching", return_value=sparse), patch("ipde.extractor.run_raft_stereo") as raft:
             self.export("stereo-preview", "stereo-support")
         raft.assert_not_called()
         preview = read_png_exact(self.directory / "out/photo_spatial_stereo_matching_depth_preview.png")
         self.assertFalse(preview.any())
+
+    def test_classical_estimate_preview_and_local_support_are_distinct(self):
+        classical = StereoMatchingResult(self.height.copy(), {}, self.support)
+        with patch("ipde.extractor.run_stereo_matching", return_value=classical), patch("ipde.extractor.run_raft_stereo") as raft:
+            self.export("stereo-depth", "stereo-supported-depth", "stereo-support", "stereo-preview",
+                        "stereo-displacement", "stereo-height")
+        raft.assert_not_called()
+        root = self.directory / "out"
+        dense = read_exr_exact(root / "photo_spatial_stereo_matching_depth_meters.exr", (2, 3))
+        checked = read_exr_exact(root / "photo_spatial_stereo_matching_supported_depth_meters.exr", (2, 3))
+        support = read_exr_exact(root / "photo_spatial_stereo_matching_support.exr", (2, 3))
+        disparity = read_exr_exact(root / "photo_spatial_stereo_matching_height.exr", (2, 3))
+        preview = read_png_exact(root / "photo_spatial_stereo_matching_depth_preview.png")
+        displacement = read_exr_exact(root / "photo_spatial_stereo_matching_displacement_0_to_1.exr", (2, 3))
+        np.testing.assert_array_equal(dense, 1 / self.height)
+        np.testing.assert_array_equal(checked[self.support], dense[self.support])
+        self.assertTrue(np.isnan(checked[~self.support]).all())
+        np.testing.assert_array_equal(support, self.support.astype(np.float32))
+        self.assertTrue((preview[:, :, 1] == 65535).all())
+        np.testing.assert_array_equal(displacement, (dense.max()-dense)/(dense.max()-dense.min()))
+        np.testing.assert_array_equal(disparity, self.height)
+        np.testing.assert_array_equal(classical.height_disparity_pixels, self.height)
+
+    def test_classical_metric_depth_only_is_selective_and_preflights_collisions(self):
+        with patch("ipde.extractor.run_stereo_matching", return_value=StereoMatchingResult(self.height, {})) as stereo:
+            self.export("stereo-depth")
+            stereo.assert_called_once()
+        self.assertEqual(self.files(), {"photo_spatial_stereo_matching_depth_meters.exr"})
+        with patch("ipde.extractor.run_stereo_matching") as stereo:
+            with self.assertRaisesRegex(ExtractionError, "already exists"):
+                self.export("stereo-depth")
+        stereo.assert_not_called()
+
+    def test_missing_classical_support_cannot_be_replaced_with_finite_estimates(self):
+        with patch("ipde.extractor.run_stereo_matching", return_value=StereoMatchingResult(self.height, {})):
+            with self.assertRaisesRegex(ExtractionError, "did not return correspondence support"):
+                self.export("stereo-support")
+        self.assertEqual(self.files(), set())
 
     def test_new_product_collision_preflight_avoids_expensive_inference(self):
         out = self.directory / "out"

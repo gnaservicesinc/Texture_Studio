@@ -225,8 +225,8 @@ public:
             "Stereo outputs use the left view's pixel grid; the separate display image can have different framing. "
             "For displacement, choose linear depth 0–1 and import the EXR as non-color data. "
             "For viewing, choose Depth preview. Signed flow and pixel disparity are diagnostics, not brightness. "
-            "RAFT dense estimates retain unverified predictions; the support mask identifies unknown regions. "
-            "Supported depth and classical matches leave unknown pixels as NaN, not zero depth."), central);
+            "Stereo estimates can lack local evidence on smooth or occluded surfaces; export the support mask to check them. "
+            "Supported depth applies that mask. Missing values are NaN, not zero depth."), central);
         help->setWordWrap(true);
         root->addWidget(help);
 

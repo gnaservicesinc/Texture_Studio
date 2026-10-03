@@ -48,13 +48,15 @@ class DepthGeometryTests(unittest.TestCase):
         original_left, original_right = left.copy(), right.copy()
         results = [run_stereo_matching(left, right, calibration,
                    StereoMatchingOptions(maximum_disparity=64, noise_sigma_pixels=sigma))
-                   .height_disparity_pixels for sigma in (0, 1)]
-        native, shared = [value[12:-12, 24:-12] for value in results]
+                   for sigma in (0, 1)]
+        native, shared = [value.height_disparity_pixels[12:-12, 24:-12] for value in results]
         self.assertGreater(np.isfinite(shared).mean(), .9)
-        self.assertGreater(np.isfinite(shared).mean() - np.isfinite(native).mean(), .5)
+        native_support, shared_support = [value.support_mask[12:-12, 24:-12] for value in results]
+        self.assertGreater(shared_support.mean() - native_support.mean(), .5)
         # A constant-depth textured plane must stay flat, even though each
         # camera has independent high-frequency variation.
-        self.assertLess(np.nanmax(abs(shared - 8)), .2)
+        self.assertLess(np.nanpercentile(abs(shared - 8), 99), .2)
+        self.assertLess(np.nanmax(abs(shared - 8)), 1)
         np.testing.assert_array_equal(left, original_left)
         np.testing.assert_array_equal(right, original_right)
 
@@ -171,7 +173,7 @@ class DepthGeometryTests(unittest.TestCase):
         self.assertIs(aligned, right)
         self.assertTrue(valid.all())
 
-    def test_flat_bidirectionally_consistent_regions_are_not_geometry(self):
+    def test_flat_bidirectionally_consistent_estimates_are_not_claimed_as_supported(self):
         rgb = np.full((64, 96, 3), 80, np.uint8)
         fake = np.full((64, 96), 16, np.int16)
         with patch("ipde.spatial._sgbm_correspondences", return_value=(fake, fake.copy())):
@@ -179,7 +181,51 @@ class DepthGeometryTests(unittest.TestCase):
                 "left_camera": {"width": 96, "height": 64},
                 "rectified_stereo_ready": True, "principal_point_delta_x_pixels": 0,
             }, StereoMatchingOptions(maximum_disparity=16))
-        self.assertTrue(np.isnan(result.height_disparity_pixels).all())
+        self.assertFalse(result.support_mask.any())
+        # Local texture is evidence, not a validity requirement for a nonlocal
+        # SGBM estimate. It must not be conflated with preview alpha.
+        self.assertTrue(np.isfinite(result.height_disparity_pixels[:, 1:]).all())
+        self.assertTrue(np.isnan(result.height_disparity_pixels[:, :1]).all())
+        self.assertFalse(result.details["depth_and_disparity_filtered_by_support"])
+
+    def test_uniform_surface_interior_survives_with_separate_local_support(self):
+        rng = np.random.default_rng(74)
+        left = np.full((96, 256, 3), 100, np.uint8)
+        # Two features on one frontoparallel plane constrain its uniform interior.
+        left[:, 20:48] = rng.integers(50, 150, (96, 28, 3), np.uint8)
+        left[:, 184:224] = rng.integers(50, 150, (96, 40, 3), np.uint8)
+        right = np.zeros_like(left)
+        right[:, :-8] = left[:, 8:] + 60  # different camera exposure; no clipping
+        original_left, original_right = left.copy(), right.copy()
+        result = run_stereo_matching(left, right, {
+            "left_camera": {"width": 256, "height": 96},
+            "rectified_stereo_ready": True, "principal_point_delta_x_pixels": 0,
+        }, StereoMatchingOptions(maximum_disparity=32))
+        # Regression for the outlined doors: actual SGBM, no mocked disparity or
+        # hole filling. The old local texture gate deleted this entire region.
+        np.testing.assert_array_equal(result.height_disparity_pixels[16:-16, 72:160], 8)
+        self.assertFalse(result.support_mask[16:-16, 72:160].any())
+        self.assertTrue(result.support_mask[16:-16, 28:40].all())
+        np.testing.assert_array_equal(left, original_left)
+        np.testing.assert_array_equal(right, original_right)
+
+    def test_camera_brightness_offset_cannot_be_mistaken_for_parallax(self):
+        rng = np.random.default_rng(108)
+        _, x = np.indices((96, 256))
+        # A weakly textured plane with an albedo/illumination ramp. Direct RGB
+        # costs mistake the +30 exposure offset for ~60 pixels of extra shift,
+        # even under independent reverse consistency. True parallax is 8 px.
+        gray = np.rint(30 + .5 * x + rng.normal(0, 2, x.shape)).astype(np.uint8)
+        left = np.repeat(gray[:, :, None], 3, axis=2)
+        right = np.zeros_like(left)
+        right[:, :-8] = left[:, 8:] + 30
+        result = run_stereo_matching(left, right, {
+            "left_camera": {"width": 256, "height": 96},
+            "rectified_stereo_ready": True, "principal_point_delta_x_pixels": 0,
+        }, StereoMatchingOptions(maximum_disparity=64))
+        core = result.height_disparity_pixels[16:-16, 80:-24]
+        self.assertGreater(np.isfinite(core).mean(), .98)
+        self.assertLess(np.nanmax(abs(core - 8)), .2)
 
     def test_patch_support_accepts_exposure_change_but_rejects_false_disparity(self):
         rng = np.random.default_rng(18)

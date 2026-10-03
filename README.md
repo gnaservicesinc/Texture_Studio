@@ -112,20 +112,32 @@ pixel-disparity maps:
   filter (sigma 1 pixel, 7×7 kernel) to accommodate differences in camera detail,
   noise, and sharpening. Raw extracted views are untouched. Disable this with
   **Tolerate camera detail differences** in the GUI or `--stereo-noise-sigma 0`.
-  No resizing, normalization, gamma correction, or hole filling is applied.
+  The matcher also subtracts a 31×31 local mean in each RGB channel and adds a
+  fixed 128-code offset on inference copies. This reduces exposure/local
+  brightness differences between the physical cameras; the result is rounded
+  and clipped to uint8 for SGBM. It does not stretch each image's range or
+  transform raw extracted samples. No depth resizing, normalization, gamma
+  correction, smoothing, or hole filling is applied.
   OpenCV's 1/16-pixel fixed-point disparities are preserved in float32;
   pixels rejected by the matcher are explicit `NaN` values. An independent reverse
   match must agree within one pixel at both bracketing coordinates. Small disparity
   components (200 pixels or fewer, with a two-pixel neighbor tolerance) are rejected
-  after consistency and photometric checking. At either the native or shared
+  after visibility and consistency checking. These estimates include smooth
+  interiors inferred by SGBM's nonlocal regularization. Local texture is
+  **separate support evidence**, not a requirement for preserving an estimate.
+  Requiring it at every output pixel previously erased walls and doors while
+  retaining their outlines.
+  For the separate support mask, at either the native or shared
   detail scale, a 9×9 grayscale patch must have correlation
   at least 0.8 and mean squared **horizontal** gradient at least 1 in both
   views (Sobel derivative scaled by 1/8, in code values per pixel). Rectified
   stereo searches in one dimension; vertical edges constrain that search and
   must not be rejected merely for lacking a 2-D corner. Flat surfaces and
   horizontal edges can otherwise agree on a false near-zero
-  disparity in both directions, producing enormous false distances. These checks
-  reject unsupported values as NaN; accepted samples are never smoothed or filled.
+  disparity in both directions, producing enormous false distances. The
+  **Classical supported depth** product applies this stricter mask and a component
+  filter; **Classical estimate**, displacement, and preview retain regularized
+  interiors. Neither output claims independently verified depth on flat surfaces.
   Equal computational margins on both inputs avoid OpenCV's automatic exclusion
   of a full search-width strip at the image edges. The margins are removed from
   the output, and only correspondences inside the original images can pass
@@ -164,7 +176,7 @@ matrix, support counts, residuals, and interpolation policy are embedded in each
 inference EXR, including when the JSON manifest is disabled.
 
 Correspondences outside the right image or across padded registration borders
-are marked unsupported. Classical matches and RAFT's explicitly selected supported
+are marked unsupported. Classical estimates and RAFT's explicitly selected supported
 depth product exclude them as NaN. RAFT's dense estimates retain them, with the
 support policy recorded in the EXR. This validation cannot identify every
 inference error or recover geometry the cameras did not observe.
@@ -257,7 +269,10 @@ applied to either the preview or the scientific data.
 and 0 for unsupported/occluded estimates. This mask is not depth or a confidence
 probability. `--select raft-supported-depth` exports metric depth with unsupported
 pixels as NaN. The equivalent `stereo-support` and `stereo-supported-depth`
-products expose the sparse classical result. Preview alpha indicates whether an
+products expose the conservative classical result. `--select stereo-depth`
+exports the classical estimate in meters without applying the local support
+mask; visibility, reverse consistency and geometric component checks still apply.
+Preview alpha indicates whether an
 estimate exists, not whether it passes support checks. All products remain
 individually selectable; requesting one does not silently write the others.
 

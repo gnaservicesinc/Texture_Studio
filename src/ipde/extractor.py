@@ -1112,7 +1112,7 @@ def _displacement_pending_outputs(
 
 def _stereo_review_outputs(
     output_dir: Path, discovery: Discovery, asset_index: int,
-    engine: str, disparity: np.ndarray, support: np.ndarray,
+    engine: str, disparity: np.ndarray, support: np.ndarray | None,
     inference: Mapping[str, Any], selected: set[str] | None, *,
     color_matched: bool, write_npy_companions: bool,
 ) -> list[PendingOutput]:
@@ -1123,7 +1123,10 @@ def _stereo_review_outputs(
     color_suffix = "_color_matched" if color_matched else ""
     stem = output_dir / f"{discovery.source.stem}_spatial_{filename_engine}{color_suffix}"
     pending: list[PendingOutput] = []
-    for product in (f"{engine}-support", f"{engine}-preview", f"{engine}-supported-depth"):
+    products = [f"{engine}-support", f"{engine}-preview", f"{engine}-supported-depth"]
+    if engine == "stereo":
+        products.append("stereo-depth")
+    for product in products:
         if product not in selected:
             continue
         inference_details = dict(inference)
@@ -1132,15 +1135,17 @@ def _stereo_review_outputs(
             suffix, units = "support", "binary support (0 or 1)"
             semantic = "1 = supported correspondence; 0 = unknown, not zero depth or a confidence probability"
             transform = "binary correspondence support; no modification of depth samples"
-        elif product.endswith("-supported-depth"):
+        elif product.endswith("-depth"):
             _, depth = derive_raft_height_and_depth(-disparity, {
                 **discovery.spatial_photo, "principal_point_delta_x_pixels": 0.0,
             })
-            array = np.where(support, depth, np.float32(np.nan))
-            suffix, units = "supported_depth_meters", "meters"
-            semantic = "camera-axis depth restricted to supported correspondences; NaN is unknown"
-            transform = "Z = float32(focal_px * baseline_m) / disparity; unsupported = NaN"
-            inference_details["depth_and_disparity_filtered_by_support"] = True
+            masked = product.endswith("-supported-depth")
+            array = np.where(support, depth, np.float32(np.nan)) if masked else depth
+            suffix, units = "supported_depth_meters" if masked else "depth_meters", "meters"
+            semantic = ("camera-axis depth restricted to supported correspondences; NaN is unknown" if masked else
+                        "classical camera-axis depth estimate; local support exported separately; NaN is unmatched")
+            transform = "Z = float32(focal_px) * float32(baseline_m) / disparity" + ("; unsupported = NaN" if masked else "")
+            inference_details["depth_and_disparity_filtered_by_support"] = masked
         else:
             try:
                 mapped, mapping = linear_depth_displacement(disparity, discovery.spatial_photo)
@@ -1194,8 +1199,9 @@ _SPATIAL_PRODUCTS = {
     "raft-supported-depth": ("RAFT supported depth — meters, unknown is NaN", "derived_raft_stereo_supported_depth"),
     "raft-height": ("RAFT disparity diagnostic — pixels, inverse depth", "derived_raft_stereo_height_map"),
     "raft-flow": ("RAFT signed flow diagnostic — negative pixels", "derived_raft_stereo_signed_flow"),
-    "stereo-displacement": ("Classical sparse matches — linear depth 0–1 displacement", "derived_stereo_matching_displacement_0_to_1"),
-    "stereo-preview": ("Classical depth preview — unknown transparent", "derived_stereo_matching_depth_preview"),
+    "stereo-displacement": ("Classical estimate — linear depth 0–1 displacement", "derived_stereo_matching_displacement_0_to_1"),
+    "stereo-preview": ("Classical depth preview — view only, near white", "derived_stereo_matching_depth_preview"),
+    "stereo-depth": ("Classical estimate — camera-axis depth in meters", "derived_stereo_matching_metric_depth"),
     "stereo-supported-depth": ("Classical supported depth — meters, unknown is NaN", "derived_stereo_matching_supported_depth"),
     "stereo-support": ("Classical support mask — white supported, black unknown", "derived_stereo_matching_support"),
     "stereo-height": ("Classical disparity diagnostic — pixels, inverse depth", "derived_stereo_matching_height_map"),
@@ -1247,8 +1253,11 @@ def _available_products(discovery: Discovery) -> list[dict[str, Any]]:
             elif key.endswith("-height") or key.endswith("-flow"):
                 description += ("Pixel units are not brightness. Signed flow can be negative and disparity can exceed 1; "
                                 "direct PNG conversion clips them. Choose Depth preview for viewing.")
-            elif key == "raft-supported-depth" or key.startswith("stereo-"):
+            elif key.endswith("-supported-depth"):
                 description += "Unsupported pixels remain NaN. Do not turn them into zero displacement."
+            elif key.startswith("stereo-"):
+                description += ("Regularized estimate with visibility and reverse-match checks; smooth surfaces can lack local texture support. "
+                                "Export the separate support mask to identify them. Unmatched pixels remain NaN; no hole filling.")
             else:
                 description += ("Dense forward estimate, including unverified occluded regions. "
                                 "Export the support mask to identify them; no hole filling or confidence masking.")
@@ -1562,6 +1571,7 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
                 "raft-flow": f"raft_stereo{color_suffix}_signed_flow",
                 "raft-depth": f"raft_stereo{color_suffix}_depth_meters",
                 "stereo-height": f"stereo_matching{color_suffix}_height",
+                "stereo-depth": f"stereo_matching{color_suffix}_depth_meters",
                 "stereo-displacement": f"stereo_matching{color_suffix}_displacement_0_to_1",
             }
             for engine, filename in (("raft", "raft_stereo"), ("stereo", "stereo_matching")):
@@ -1653,11 +1663,14 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
                     color_matched=config.histogram_color_matching,
                 )
             )
-            pending.extend(_stereo_review_outputs(
-                output_dir, discovery, left_asset_index, "stereo", stereo_result.height_disparity_pixels,
-                np.isfinite(stereo_result.height_disparity_pixels), stereo_result.details, selected,
-                color_matched=config.histogram_color_matching, write_npy_companions=config.write_npy,
-            ))
+            if selected and selected & {"stereo-support", "stereo-supported-depth", "stereo-preview", "stereo-depth"}:
+                if stereo_result.support_mask is None and selected & {"stereo-support", "stereo-supported-depth"}:
+                    raise ExtractionError("Classical inference did not return correspondence support")
+                pending.extend(_stereo_review_outputs(
+                    output_dir, discovery, left_asset_index, "stereo", stereo_result.height_disparity_pixels,
+                    stereo_result.support_mask, stereo_result.details, selected,
+                    color_matched=config.histogram_color_matching, write_npy_companions=config.write_npy,
+                ))
         if write_raft:
             try:
                 raft_result = run_raft_stereo(
