@@ -25,6 +25,12 @@ an independent scene: use scene groups only for related captures that must stay
 together during validation. Metadata columns and search expose phone model,
 capture date/time and source filenames.
 
+Dataset Studio keeps the dataset library in a left sidebar. Select any row and
+open **Photos and depth**; checks on **Training split** are separate
+choices for combining datasets. **Dataset actions** holds inspection, storage,
+archive, removal and linking commands. Each dataset keeps its own membership,
+split and version-name draft while you switch rows during the session.
+
 **Scan spatial directory** recurses without following links. Nonspatial photos,
 portraits without calibrated stereo, malformed containers and inconsistent views
 are skipped with a reason. Apple camera metadata and supported stereo structure
@@ -57,17 +63,23 @@ RAFT Studio opens **Train model & compare**. Select an existing dataset and
 click **Start model training** to run epochs and save weights; a single dataset
 does not need a preparation copy.
 
-The optional **Prepare training set** step in Dataset Studio accepts many datasets. Choose a dedicated
+The optional **Training split** page in Dataset Studio accepts many datasets. Choose a dedicated
 validation dataset, seeded random selection across all datasets, or equal random
 counts of independent groups per dataset. Group preservation/override enables
 A/B experiments; exact duplicates, teacher variants and known bursts always stay
 together. External validation overlapping training sources is rejected. Use
 **Compare selected model with baseline** on a spatial photo to inspect the
 original and trained RAFT results with the same grid and meter contrast.
-With a single available dataset, **Use for training** starts checked. The
-message above **Create training set & continue** explains missing selections,
-name conflicts, unsaved review exclusions, or an active task. Save a reviewed
-copy after excluding samples, then select that copy for the training set.
+For an automatic split, set **Validation size** (20% by default). It counts
+independent capture components, rather than individual teacher entries.
+**Advanced split options** exposes the repeatable seed and authored-group
+preservation. **Set split…** in **Photos and depth** instead controls individual
+capture assignments in a saved version. **Open selected dataset in Trainer**
+uses that dataset's existing split.
+With a single available dataset, **Include dataset** starts checked. The
+message above **Create training set and continue** explains missing selections,
+name conflicts, unsaved photo/split edits, or an active task. Save the new version
+after editing, then select it for the training set.
 Creating a set verifies the selected arrays and reuses their existing storage.
 On supported macOS filesystems it creates independent copy-on-write clones;
 otherwise it uses immutable hard links on the same filesystem. It does not
@@ -154,7 +166,7 @@ See [model setup](model-setup.md) for explicit, revision-pinned downloads.
 
 ## Create a dataset
 
-Add spatial HEICs in the **Create dataset** tab. A **teacher** is the depth model
+Add spatial HEICs in **Add photos / new dataset**. A **teacher** is the depth model
 that generates the target maps RAFT will learn to imitate. Its targets are
 estimates: a detailed-looking map can still contain incorrect surfaces or
 distances. Review the maps before training.
@@ -237,18 +249,35 @@ targets never pass through an 8-bit preview. Normalized RGB tensors used by a
 model are separate from the saved raw data. Training checks array hashes before
 loading targets.
 
-## Review depth maps and exclude poor samples
+## Manage photos and review depth maps
 
-**Generate & review dataset** opens the review tab after generation. To
-inspect an existing dataset, select it in the library and choose **Review depth
-maps**. Select a sample to see its RGB image beside its generated depth map.
+Generation opens **Photos and depth** when it finishes. Select any existing dataset
+in the sidebar to inspect its photos and teacher targets. Select a photo or a
+teacher row to see its RGB image beside its generated depth map.
 Click either image to open a native-pixel preview centered on that point. Drag
 to pan, and right-click or click outside to dismiss it. Hover for a synchronized
 1:1 magnifier.
 Look for incorrect object boundaries, flattened or invented surfaces, holes,
-and inconsistent near/far order. Clear the sample's **Include** checkbox to
-exclude it from the reviewed copy. This removes the whole training sample,
-including both stereo views, rather than only its preview image.
+and inconsistent near/far order. Select multiple photo rows and choose
+**Remove selected** to exclude their targets from the next version;
+**Restore selected** includes them again. A teacher row's checkbox removes just
+that result while keeping other teachers for the same photo. **Remove & next**
+supports reviewing one photo or teacher target at a time. Removed rows remain
+visible with a strike-through. Removing a target excludes its complete training
+sample, including both stereo views.
+
+Use **Set split…** to move selected entries to training or validation. The change
+also moves their entire known duplicate/photo/teacher/burst/scene component,
+including related rows outside a filter. The totals show included targets and
+unsaved changes immediately. Use **Undo changes** to restore this dataset's
+original membership and splits.
+
+**Add photos…** stages new spatial HEICs in the generation page. Generate their
+depth targets to join them and your current edits into a new saved version.
+**Add from dataset…** includes every photo and teacher target from another
+prepared dataset and saves the version using existing array storage, without
+running inference. Any conflict between existing split assignments for the same
+capture must be resolved by assigning its component one common split.
 
 Start with **Selected training target**, which shows the map this sample would
 actually use for distillation. Depending on the sample, that can be the direct left-view
@@ -267,15 +296,16 @@ preview is a visualization only: the original float arrays, masks, and raw
 RGB/auxiliary data are untouched. A visually plausible map still needs
 independent accuracy checks for displacement work.
 
-Choose **Save reviewed copy** to create a new dataset containing only included
-samples. It copies the existing data without running inference again and
-preserves the original dataset, sample IDs, groups, and train/validation splits.
-Train from the reviewed copy in the library. Studio asks you to save unchecked
-samples before training the dataset you are reviewing, so unsaved exclusions
-cannot be silently ignored. Keep usable samples in both
-splits. If all validation samples are excluded, create another dataset with
-suitable held-out groups before training; the review does not silently move
-training samples into validation.
+Enter an unused folder name in **Save version as** and choose **Save changes as
+new version**. The new dataset contains included entries and the selected split
+assignments. It reuses exact original NPY/NPZ files without changing their values
+or rerunning existing teachers; base sample IDs and provenance are retained.
+Original datasets remain available. Train from the saved version in the library;
+unsaved photo or split edits must be saved before preparation or training can
+use them. Keep usable independent groups in both splits. If validation becomes
+empty, set aside a suitable independent capture group using **Set split…**, or
+use **Training split** to create a new automatic split. See
+[dataset library](dataset-library.md) for the `edit-dataset` CLI and edit JSON.
 
 ## Display image and stereo alignment
 

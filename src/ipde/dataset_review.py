@@ -153,6 +153,8 @@ def _registration_summary(sample: dict[str, Any]) -> dict[str, Any] | None:
 
 def review_dataset(directory: Path | str) -> dict[str, Any]:
     root, manifest = _read_manifest(directory)
+    from .dataset_edit import review_split_components
+    management_groups = review_split_components(root, manifest)
     samples = []
     for sample in manifest["samples"]:
         chosen, training_label = _label(sample, "training")
@@ -188,6 +190,7 @@ def review_dataset(directory: Path | str) -> dict[str, Any]:
         samples.append({
             "id": sample["id"], "source_path": sample["source_path"], "split": sample["split"],
             "group_id": sample["group_id"], "requested_group": sample.get("requested_group"),
+            "management_group_id": management_groups[sample["id"]],
             "training_target_choice": chosen, "labels": labels, "warnings": warnings,
             "source_id": sample.get("source_id", sample.get("source_sha256", sample["source_path"])),
             "teacher_id": sample.get("teacher_id", sample.get("teacher_model", sample.get("teacher", {}).get("metadata", {}).get("model_id", "Teacher"))),

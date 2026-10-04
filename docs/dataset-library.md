@@ -7,9 +7,38 @@ or scene groups describe related photographs that should stay together when
 training and validation are separated. Preserve verified scene groups when
 measuring generalization to new scenes.
 
+Select any dataset in the left sidebar and open **Photos and depth**. Selecting a
+row chooses the dataset you are viewing; the checkboxes on **Training split**
+choose datasets to combine. **Dataset actions** contains inspection, storage,
+archive, removal and link actions.
+
+Photos are grouped with their teacher targets underneath. Select several photo
+rows and use **Remove selected** or **Restore selected**; select a teacher row
+to remove just that target. Removed entries remain visible with a strike-through
+until you save. **Set split…** moves the selected entries and their entire known
+photo/teacher/burst/scene component to training or validation, including related
+entries outside the current filter. Conflicting assignments are rejected.
+
+Enter an unused name in **Save version as**, then choose **Save changes as new
+version**. Membership and split drafts stay separate for each dataset when you
+switch sidebar rows during the session. **Undo changes** restores the selected
+dataset's original membership and splits. A saved version becomes a new library
+dataset; the source remains unchanged.
+
+**Add photos…** opens generation for new spatial photos. Generate their depth
+targets, and Studio joins them with the current edits in the named new version.
+**Add from dataset…** adds all photos and teacher targets from another prepared
+dataset and saves a new version using its existing array files, without inference.
+If imported captures disagree with an existing training/validation assignment,
+set a common split for that capture component before saving again.
+
 Train an existing dataset directly from **Train model & compare** when its current
 split is suitable. To combine datasets or choose new validation groups, select
-datasets in Dataset Studio's **Prepare training set** and create a collection. Preparation reuses
+datasets in Dataset Studio's **Training split** and create a collection. Set
+**Validation size** to the desired percentage; the default is 20%. The percentage
+applies to independent capture components, so teacher-entry counts can differ.
+**Advanced split options** exposes group preservation and the repeatable seed.
+Preparation reuses
 the original array storage without a full payload copy. Original dataset files
 remain unchanged. Every teacher variant of a photo stays on the same side of the
 training/validation boundary. Identical source files, identical left RGB planes,
@@ -73,6 +102,30 @@ explicit, expose uncertain results to a person, and require human rights/consent
 review. Review reports should remain valid only for the source bytes they name.
 
 The command-line equivalents are:
+
+Save an edit description as `edits.json`. `keep` lists base sample IDs to retain
+(omitting it keeps all); `splits` overrides selected sample assignments and moves
+each linked component together. Added datasets contribute all their entries.
+
+```json
+{
+  "keep": ["sample-1", "sample-3"],
+  "splits": {"sample-3": "validation"}
+}
+```
+
+```sh
+raft-studio edit-dataset original-dataset --edits-json edits.json --add-dataset more-photos --output-dir edited-version --workers 4
+```
+
+The destination must be new and outside every source dataset. Base sample IDs
+remain stable; added IDs are namespaced with their original IDs in provenance.
+Without an explicit choice, contradictory existing splits for duplicate or
+related captures cause an actionable error. Every source and the completed
+output is verified before atomic publication. Editing preserves each original
+NPY/NPZ file's bytes and hashes and requires storage on the same filesystem.
+
+For automatic collections:
 
 ```sh
 raft-studio compose-datasets flowers rooms --output-dir experiment-global --split-mode global-random --seed 42

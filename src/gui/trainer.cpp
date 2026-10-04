@@ -21,6 +21,8 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMainWindow>
+#include <QMenu>
+#include <QToolButton>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
@@ -347,7 +349,7 @@ public:
         auto *title = new QLabel(datasetMode_ ? "Dataset Studio" : "RAFT Studio", central);
         QFont font = title->font(); font.setPointSize(font.pointSize() + 7); font.setBold(true); title->setFont(font);
         root->addWidget(title);
-        auto *purpose = new QLabel(datasetMode_ ? "Import, link, review and prepare datasets for your project." : "Train from prepared datasets, manage model runs, and compare with your original model.", central);
+        auto *purpose = new QLabel(datasetMode_ ? "Choose a dataset, manage its photos, then prepare it for training." : "Train from prepared datasets, manage model runs, and compare with your original model.", central);
         purpose->setWordWrap(true); root->addWidget(purpose);
 
         auto *workspaceRow = new QHBoxLayout;
@@ -375,9 +377,12 @@ public:
         datasets_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
         datasets_->setColumnWidth(1, 65); datasets_->setColumnWidth(2, 140); datasets_->setColumnWidth(3, 185);
         datasets_->setRootIsDecorated(false); datasets_->setAlternatingRowColors(true);
+        datasets_->setObjectName("datasetLibrary");
+        datasets_->setSelectionMode(QAbstractItemView::SingleSelection);
+        if (datasetMode_) { for (int column : {2, 3, 4, 5}) datasets_->setColumnHidden(column, true); datasets_->setColumnWidth(1, 65); }
         datasetLayout->addWidget(datasets_);
         auto *datasetButtons = new QHBoxLayout;
-        auto *inspect = new QPushButton("Inspect selected", datasetBox);
+        auto *inspect = new QPushButton("Inspect selected", datasetBox); inspect->setObjectName("inspectDataset");
         auto *review = new QPushButton("Review depth maps", datasetBox);
         auto *showDataset = new QPushButton("Show files", datasetBox);
         auto *archive = new QPushButton("Archive selected", datasetBox);
@@ -387,7 +392,7 @@ public:
         cleanupDataset_ = new QPushButton("Remove generated dataset…", datasetBox); cleanupDataset_->setVisible(datasetMode_);
         cleanupDataset_->setToolTip("After training, remove this generated dataset to reclaim disk space. Original photos and trained models stay in place. Requires confirmation.");
         auto *manageDatasets = new QPushButton("Manage in Dataset Studio", datasetBox); manageDatasets->setVisible(!datasetMode_);
-        review->setText(datasetMode_ ? "Review depth maps" : "Review in Dataset Studio");
+        review->setText(datasetMode_ ? "Open photos and depth" : "Review in Dataset Studio");
         review->setIcon(IPDE::appIcon("datasets")); inspect->setIcon(IPDE::appIcon("datasets"));
         datasetButtons->addWidget(review); datasetButtons->addWidget(inspect); datasetButtons->addWidget(showDataset); datasetButtons->addWidget(compact); datasetButtons->addWidget(archive); datasetButtons->addWidget(cleanupDataset_); datasetButtons->addWidget(manageDatasets); datasetButtons->addStretch();
         datasetLayout->addLayout(datasetButtons);
@@ -396,6 +401,22 @@ public:
         connect(linkProject, &QPushButton::clicked, this, [this] { importProjectDatasets(); });
         connect(linkDataset, &QPushButton::clicked, this, [this] { const QString path = QFileDialog::getExistingDirectory(this, "Link an existing dataset folder containing dataset.json", projectRoot_); if (!path.isEmpty()) addDatasetLinks({path}); });
         connect(manageLinks, &QPushButton::clicked, this, [this] { editDatasetLinks(); });
+        if (datasetMode_) {
+            // Keep everyday actions visible and less frequent file operations in one menu.
+            for (auto *button : {inspect, showDataset, compact, archive, cleanupDataset_, manageDatasets, linkProject, linkDataset, manageLinks}) button->hide();
+            datasetButtons->removeWidget(review); datasetLayout->insertWidget(1, review);
+            auto *more = new QToolButton(datasetBox); more->setText("Dataset actions"); more->setPopupMode(QToolButton::InstantPopup);
+            auto *menu = new QMenu(more);
+            for (auto *button : {inspect, showDataset, compact, archive, cleanupDataset_, linkDataset, linkProject, manageLinks}) {
+                if ((button == linkDataset || button == linkProject || button == manageLinks) && !projectSettings_) continue;
+                auto *action = menu->addAction(button->text());
+                connect(action, &QAction::triggered, button, &QPushButton::click);
+                connect(menu, &QMenu::aboutToShow, action, [button, action] { action->setEnabled(button->isEnabled()); });
+            }
+            more->setMenu(menu); datasetLayout->addWidget(more);
+            auto *hint = new QLabel("Select any dataset to open its photos.\nChecks in Training split choose which datasets to combine.", datasetBox); hint->setWordWrap(true); datasetLayout->addWidget(hint);
+        }
+
         auto *runBox = new QGroupBox("Trained models", library);
         auto *runLayout = new QVBoxLayout(runBox);
         runs_ = new QTreeWidget(runBox);
@@ -414,7 +435,7 @@ public:
         runLayout->addLayout(runButtons);
         library->addWidget(datasetBox); library->addWidget(runBox);
         root->addWidget(library, 2);
-        library->setMaximumHeight(datasetMode_ ? 235 : 170);
+        if (!datasetMode_) library->setMaximumHeight(170);
         connect(review, &QPushButton::clicked, this, [this] { reviewDataset(selectedPath(datasets_)); });
         connect(inspect, &QPushButton::clicked, this, [this] {
             const QString path = selectedPath(datasets_);
@@ -446,21 +467,40 @@ public:
         tabs_ = new QTabWidget(central);
         tabs_->setMinimumHeight(380);
         buildDatasetTab(); buildReviewTab(); buildCollectionTab(); buildTrainingTab();
-        connect(tabs_, &QTabWidget::currentChanged, this, [this](int index) { if (datasetMode_ && index == 1 && previewProcess_) reviewSelectionChanged(); });
-        auto *globalGoal = new QHBoxLayout; globalGoal->addWidget(new QLabel("Main purpose", central)); globalGoal->addWidget(goal_, 1); globalGoal->addWidget(advanced_); root->insertLayout(2, globalGoal);
+        connect(tabs_, &QTabWidget::currentChanged, this, [this](int index) {
+            if (datasetMode_ && index == 1 && previewProcess_) {
+                if (selectedPath(datasets_) != reviewedDataset_ && selectedPath(datasets_) != requestedReviewPath_) reviewDataset(selectedPath(datasets_), false); else reviewSelectionChanged();
+            }
+        });
+        auto *goalControls = new QWidget(central); auto *globalGoal = new QHBoxLayout(goalControls); globalGoal->setContentsMargins(0, 0, 0, 0); globalGoal->addWidget(new QLabel("Main purpose", central)); globalGoal->addWidget(goal_, 1); globalGoal->addWidget(advanced_); root->insertWidget(2, goalControls);
+        connect(tabs_, &QTabWidget::currentChanged, this, [this, goalControls](int index) { goalControls->setVisible(!datasetMode_ || index == 0); });
         if (datasetMode_) { tabs_->setTabVisible(4, false); runBox->hide(); }
         else { for (int index : {0, 2, 3}) tabs_->setTabVisible(index, false); tabs_->setTabText(1, "Compare models"); tabs_->setTabText(4, "Train model and compare"); tabs_->setCurrentIndex(4); }
-        connect(datasets_, &QTreeWidget::itemSelectionChanged, this, [this] { updateTrainingSelection(); updateCleanupActions(); });
+        connect(datasets_, &QTreeWidget::itemSelectionChanged, this, [this] {
+            syncDatasetSelection(datasets_, collectionSources_); updateTrainingSelection(); updateCleanupActions();
+            if (datasetMode_ && tabs_->currentIndex() == 1 && process_ && !busy_ && !selectedPath(datasets_).isEmpty() && selectedPath(datasets_) != requestedReviewPath_) reviewDataset(selectedPath(datasets_), false);
+        });
+        connect(collectionSources_, &QTreeWidget::currentItemChanged, this, [this] { syncDatasetSelection(collectionSources_, datasets_); });
+        connect(datasets_, &QTreeWidget::itemDoubleClicked, this, [this] { reviewDataset(selectedPath(datasets_)); });
         connect(runs_, &QTreeWidget::itemSelectionChanged, this, [this] { updateCleanupActions(); });
-        root->addWidget(tabs_, 3);
+        if (datasetMode_) {
+            root->removeWidget(library);
+            auto *manager = new QSplitter(Qt::Horizontal, central); manager->setObjectName("datasetManagerSplit");
+            manager->addWidget(library); manager->addWidget(tabs_); manager->setChildrenCollapsible(false);
+            library->setMinimumWidth(240); library->setMaximumWidth(380); manager->setStretchFactor(1, 1); manager->setSizes({280, 1000});
+            root->addWidget(manager, 1); tabs_->setCurrentIndex(1);
+        } else root->addWidget(tabs_, 3);
         generate_->setIcon(IPDE::appIcon("datasets")); train_->setIcon(IPDE::appIcon("trainer"));
         export_->setIcon(IPDE::appIcon("trainer"));
-        auto *notice = new QLabel("Teacher depth is an estimate, not measured ground truth. Capture groups are held out by default; scene validation requires correctly grouped independent scenes.", central);
+        auto *notice = new QLabel(datasetMode_ ? "Edits are saved as a new dataset version. Original photo and depth values are preserved. Related captures stay together in training or validation." : "Teacher depth is an estimate. Use correctly grouped independent scenes for validation.", central);
         notice->setWordWrap(true);
         notice->setToolTip("Dataset checks help catch accidental omissions, altered files, and validation overlap. They do not detect intentional poisoning or establish permission, copyright, or content suitability for externally obtained data.");
         root->addWidget(notice);
         log_ = new QPlainTextEdit(central); log_->setReadOnly(true); log_->setMaximumBlockCount(1500);
-        log_->setMaximumHeight(90); log_->setPlaceholderText("Progress and results appear here."); root->addWidget(log_);
+        log_->setMaximumHeight(90); log_->setPlaceholderText("Progress and results appear here.");
+        auto *details = new QToolButton(central); details->setText("Show task details"); details->setCheckable(true); root->addWidget(details);
+        connect(details, &QToolButton::toggled, this, [this, details](bool visible) { log_->setVisible(visible); details->setText(visible ? "Hide task details" : "Show task details"); });
+        root->addWidget(log_); log_->setVisible(!datasetMode_); details->setChecked(!datasetMode_);
         auto *progressRow = new QHBoxLayout;
         progress_ = new QProgressBar(central); progress_->setRange(0, 1); progress_->setValue(0); progress_->setTextVisible(false);
         cancel_ = new QPushButton("Cancel current task", central); cancel_->setEnabled(false);
@@ -475,7 +515,7 @@ public:
         connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
             if (error == QProcess::FailedToStart) {
                 log_->appendPlainText("Could not launch Python: " + process_->errorString());
-                setBusy(false); groupsFile_.reset(); teachersFile_.reset(); refreshAfter_ = false;
+                setBusy(false); groupsFile_.reset(); teachersFile_.reset(); editsFile_.reset(); refreshAfter_ = false;
                 if (job_ == "Generate dataset") stopGenerationStreaming("Generation could not start. Generate a new dataset to try again.");
                 statusBar()->showMessage(job_ + " failed to start; see the progress log.");
                 if (job_ == "Train RAFT-Stereo") trainingStatus_->setText("Model training failed to start: " + process_->errorString());
@@ -483,7 +523,12 @@ public:
             }
         });
         connect(cancel_, &QPushButton::clicked, this, [this] {
-            cancelled_ = true; process_->kill(); log_->appendPlainText("Cancellation requested; partial work will not be presented as complete.");
+            cancelled_ = true;
+            if (activeOperation_ == "edit-dataset") {
+                const auto pid = process_->processId(); process_->terminate();
+                QTimer::singleShot(5000, this, [this, pid] { if (process_->state() != QProcess::NotRunning && process_->processId() == pid) process_->kill(); });
+            } else process_->kill();
+            log_->appendPlainText("Cancellation requested; partial work will not be presented as complete.");
         });
         previewProcess_ = new QProcess(this);
         connect(previewProcess_, &QProcess::readyReadStandardOutput, this, [this] { previewStdout_ += previewProcess_->readAllStandardOutput(); });
@@ -493,15 +538,19 @@ public:
             if (previewKind_ == "discarded") return;
             const auto doc = QJsonDocument::fromJson(previewStdout_.trimmed());
             if (status == QProcess::NormalExit && code == 0 && doc.isObject()) {
-                if (previewKind_ == "review") populateReview(doc.object()); else populatePreview(doc.object());
-            } else if (previewKind_ != "review") previewStats_->setText("This preview could not be generated. Other photos and teachers remain available. " + QString::fromUtf8(previewStdout_).left(800));
+                if (previewKind_ == "review") { if (doc.object().value("dataset_path").toString() == requestedReviewPath_) populateReview(doc.object()); } else populatePreview(doc.object());
+            } else if (previewKind_ == "review") {
+                const QString error = doc.isObject() ? doc.object().value("error").toString() : QString::fromUtf8(previewStdout_).left(800);
+                reviewPath_->setText("Could not open " + QFileInfo(requestedReviewPath_).fileName() + ". Select it and click Open photos and depth to retry.");
+                previewStats_->setText(error); statusBar()->showMessage("Dataset could not be opened: " + error);
+            } else previewStats_->setText("This preview could not be generated. Other photos and teachers remain available. " + QString::fromUtf8(previewStdout_).left(800));
         });
         connect(previewProcess_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-            if (error == QProcess::FailedToStart) previewStats_->setText("Preview process could not start: " + previewProcess_->errorString());
+            if (error == QProcess::FailedToStart) { previewStats_->setText("Preview process could not start: " + previewProcess_->errorString()); if (previewKind_ == "review") reviewPath_->setText("Dataset could not be opened. Click Open photos and depth to retry."); }
         });
         streamingTimer_ = new QTimer(this); streamingTimer_->setSingleShot(true); streamingTimer_->setInterval(750);
         connect(streamingTimer_, &QTimer::timeout, this, [this] {
-            if (!streamingDataset_.isEmpty()) reviewDataset(streamingDataset_, reviewedDataset_.isEmpty());
+            if (!streamingDataset_.isEmpty() && appendBase_.isEmpty()) reviewDataset(streamingDataset_, reviewedDataset_.isEmpty());
         });
         statusBar()->showMessage("Ready");
         updateTrainingSelection(); updateCleanupActions();
@@ -516,6 +565,8 @@ public:
     }
 
     ~TrainerWindow() override {
+        // Focus-out signals during QWidget teardown must not access destroyed members.
+        for (auto *child : findChildren<QObject *>()) disconnect(child, nullptr, this, nullptr);
         streamingTimer_->stop(); streamingTimer_->disconnect(this);
         process_->disconnect(this); previewProcess_->disconnect(this);
         settings_.setValue("workspace", workspace_->text());
@@ -571,6 +622,9 @@ private:
         projectSettings_->sync(); return qMax(0, projectSettings_->value("performance/workers", 0).toInt());
     }
     void openApp(const QString &role, const QString &section = {}, const QString &dataset = {}) {
+        if (datasetMode_ && role == "trainer" && hasUnsavedReviewExclusions(dataset)) {
+            statusBar()->showMessage("Save changes as a new version before training so your photo and split edits are used."); reviewDataset(dataset); return;
+        }
         lastAppRequest_ = QJsonObject{{"role", role}, {"section", section}, {"dataset", dataset}};
         if (session_ && session_->openApp(role, QJsonObject{{"section", section}, {"dataset", dataset}}))
             statusBar()->showMessage("Opening " + (role == "datasets" ? QString("Dataset Studio") : QString("Trainer")) + " for this project…");
@@ -602,6 +656,15 @@ private:
         if (QMessageBox::warning(this, "Clean run files", "Remove intermediate files from this training run?\n\n" + QFileInfo(checkpoint).absolutePath() + "\n\nThe output checkpoint and its training report are retained. Original photos and datasets remain available.", QMessageBox::Cancel | QMessageBox::Yes, QMessageBox::Cancel) != QMessageBox::Yes) return;
         refreshAfter_ = true; startJob("Clean run files", {"cleanup-run", checkpoint, "--workspace", workspace_->text(), "--confirm"});
     }
+    void syncDatasetSelection(QTreeWidget *source, QTreeWidget *target) {
+        const QString path = selectedPath(source);
+        if (path.isEmpty() || path == selectedPath(target)) return;
+        for (int i = 0; i < target->topLevelItemCount(); ++i) {
+            auto *item = target->topLevelItem(i);
+            if (item->data(0, Qt::UserRole).toString() == path) { target->setCurrentItem(item); return; }
+        }
+    }
+
     static QString selectedPath(QTreeWidget *tree) {
         return tree->currentItem() ? tree->currentItem()->data(0, Qt::UserRole).toString() : QString();
     }
@@ -655,6 +718,9 @@ private:
 
     void buildDatasetTab() {
         auto *tab = new QWidget; auto *root = new QVBoxLayout(tab);
+        addingPhotosHint_ = new QLabel(tab); addingPhotosHint_->setWordWrap(true); addingPhotosHint_->hide(); root->addWidget(addingPhotosHint_);
+        cancelAdding_ = new QPushButton("Cancel adding photos", tab); cancelAdding_->hide(); root->addWidget(cancelAdding_);
+        connect(cancelAdding_, &QPushButton::clicked, this, [this] { appendBase_.clear(); appendEdits_ = {}; appendVersionName_.clear(); addingPhotosHint_->hide(); cancelAdding_->hide(); generate_->setText("Generate dataset"); tabs_->setCurrentIndex(1); });
         auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(tab);
         auto *intro = new QLabel("A depth teacher is the AI model that generates estimated depth for training. Generate the dataset, then review its depth maps before training.", tab);
         intro->setWordWrap(true); root->addWidget(intro);
@@ -746,7 +812,7 @@ private:
         goal_->setCurrentIndex(qMax(0, goal_->findData(configuredGoal))); applyGoal();
         generate_ = new QPushButton("Generate & review dataset", tab); root->addWidget(generate_);
         connect(generate_, &QPushButton::clicked, this, [this] { generateDataset(); });
-        tabs_->addTab(scroll, "1. Generate dataset");
+        tabs_->addTab(scroll, "Add photos / new dataset");
     }
 
     void applyGoal(bool save = true) {
@@ -794,15 +860,29 @@ private:
 
     void buildReviewTab() {
         auto *tab = new QWidget; auto *root = new QVBoxLayout(tab);
-        reviewPath_ = new QLabel("Select a dataset above and click Review depth maps, or generate a new dataset.", tab);
+        reviewPath_ = new QLabel("Choose a dataset from the library to manage its photos.", tab);
         reviewPath_->setWordWrap(true); reviewPath_->setTextInteractionFlags(Qt::TextSelectableByMouse); root->addWidget(reviewPath_);
+        auto *photoActions = new QHBoxLayout;
+        addPhotos_ = new QPushButton("Add photos…", tab); addPhotos_->setObjectName("addDatasetPhotos");
+        auto *addExisting = new QPushButton("Add from dataset…", tab);
+        removePhotos_ = new QPushButton("Remove selected", tab); restorePhotos_ = new QPushButton("Restore selected", tab);
+        photoActions->addWidget(addPhotos_); photoActions->addWidget(addExisting); photoActions->addWidget(removePhotos_); photoActions->addWidget(restorePhotos_); photoActions->addStretch();
+        if (datasetMode_) root->addLayout(photoActions); else { delete photoActions; addPhotos_->hide(); addExisting->hide(); removePhotos_->hide(); restorePhotos_->hide(); }
+        connect(addPhotos_, &QPushButton::clicked, this, [this] { beginAddingPhotos(); });
+        connect(addExisting, &QPushButton::clicked, this, [this] { addPreparedDataset(); });
+        connect(removePhotos_, &QPushButton::clicked, this, [this] { setReviewIncluded(false); });
+        connect(restorePhotos_, &QPushButton::clicked, this, [this] { setReviewIncluded(true); });
+        editActions_ << addPhotos_ << addExisting << removePhotos_ << restorePhotos_;
+
         auto *body = new QSplitter(Qt::Horizontal, tab);
         reviewSamples_ = new QTreeWidget(body);
         reviewSamples_->setHeaderLabels({"Include / photo / teacher", "Split", "Group", "Camera", "Captured"});
         reviewSamples_->setRootIsDecorated(true); reviewSamples_->setAlternatingRowColors(true);
+        reviewSamples_->setSelectionMode(QAbstractItemView::ExtendedSelection); reviewSamples_->setObjectName("datasetPhotos");
         reviewSamples_->header()->setStretchLastSection(false);
         reviewSamples_->header()->setSectionResizeMode(QHeaderView::Interactive);
-        reviewSamples_->setColumnWidth(0, 220); reviewSamples_->setColumnWidth(1, 85); reviewSamples_->setColumnWidth(2, 110); reviewSamples_->setColumnWidth(3, 130); reviewSamples_->setColumnWidth(4, 155);
+        reviewSamples_->setColumnWidth(0, 170); reviewSamples_->setColumnWidth(1, 90); reviewSamples_->setColumnWidth(2, 90); reviewSamples_->setColumnWidth(3, 130); reviewSamples_->setColumnWidth(4, 155);
+        if (datasetMode_) { reviewSamples_->setColumnHidden(3, true); reviewSamples_->setColumnHidden(4, true); }
         auto *previewScroll = new QScrollArea(body); previewScroll->setObjectName("reviewPreviewScroll");
         previewScroll->setWidgetResizable(true); previewScroll->setFrameShape(QFrame::NoFrame);
         auto *preview = new QWidget; preview->setObjectName("reviewPreviewContent");
@@ -846,19 +926,34 @@ private:
         auto *legend = new QLabel("White = nearer · Black = farther · Magenta = invalid. Hover for synchronized 1:1 detail. Click an image to open native pixels centered on that point; drag to pan. Right-click or click outside the popup to close. Metric comparisons share contrast; relative views use separate ranges. Overlay, relief and disagreement are display copies; saved values stay unchanged.", preview);
         legend->setObjectName("reviewPreviewLegend"); legend->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
         legend->setWordWrap(true); previewRoot->addWidget(legend);
-        body->addWidget(reviewSamples_); body->addWidget(previewScroll); body->setChildrenCollapsible(false); body->setSizes({330, 860}); root->addWidget(body, 1);
+        body->addWidget(reviewSamples_); body->addWidget(previewScroll); body->setChildrenCollapsible(false); body->setSizes({420, 700}); root->addWidget(body, 1);
         auto *filterRow = new QHBoxLayout; reviewFilter_ = new QLineEdit(tab); reviewFilter_->setPlaceholderText("Filter photo, teacher, group, or date…");
         reviewCamera_ = new QComboBox(tab); reviewCamera_->addItem("All cameras"); filterRow->addWidget(reviewFilter_, 1); filterRow->addWidget(reviewCamera_); root->addLayout(filterRow);
         auto *navigation = new QHBoxLayout;
         auto *previous = new QPushButton("Previous", tab); auto *next = new QPushButton("Next", tab);
-        auto *exclude = new QPushButton("Exclude & next", tab);
+        auto *exclude = new QPushButton("Remove and next", tab);
+        auto *toTraining = new QPushButton("Move to training", tab); auto *toValidation = new QPushButton("Move to validation", tab);
+        auto *undo = new QPushButton("Undo changes", tab);
+        toTraining->hide(); toValidation->hide();
+        if (datasetMode_) {
+            auto *setSplit = new QToolButton(tab); setSplit->setText("Set split…"); setSplit->setPopupMode(QToolButton::InstantPopup); auto *menu = new QMenu(setSplit);
+            auto *trainingAction = menu->addAction("Move selected to training"); auto *validationAction = menu->addAction("Move selected to validation");
+            connect(trainingAction, &QAction::triggered, toTraining, &QPushButton::click); connect(validationAction, &QAction::triggered, toValidation, &QPushButton::click);
+            setSplit->setMenu(menu); navigation->addWidget(setSplit); navigation->addWidget(undo);
+        } else undo->hide();
+        editActions_ << toTraining << toValidation << undo;
+        connect(toTraining, &QPushButton::clicked, this, [this] { setReviewSplit("train"); });
+        connect(toValidation, &QPushButton::clicked, this, [this] { setReviewSplit("validation"); });
+        connect(undo, &QPushButton::clicked, this, [this] { reviewDrafts_.remove(reviewedDataset_); reviewAdditions_.remove(reviewedDataset_); { QSignalBlocker blocker(reviewSamples_); reviewSamples_->clear(); } reviewDataset(reviewedDataset_); });
         navigation->addWidget(previous); navigation->addWidget(next); navigation->addWidget(exclude);
         reviewCount_ = new QLabel("No dataset loaded", tab); reviewCount_->setWordWrap(true); navigation->addWidget(reviewCount_, 1); root->addLayout(navigation);
-        auto *saveRow = new QHBoxLayout; saveRow->addWidget(new QLabel("Reviewed dataset name", tab));
+        auto *saveRow = new QHBoxLayout; saveRow->addWidget(new QLabel("Save version as", tab));
         reviewedName_ = new QLineEdit(tab); saveRow->addWidget(reviewedName_, 1);
-        saveReviewed_ = new QPushButton("Save reviewed copy", tab); saveReviewed_->setEnabled(false); saveRow->addWidget(saveReviewed_); root->addLayout(saveRow);
+        saveReviewed_ = new QPushButton("Save changes as new version", tab); saveReviewed_->setObjectName("saveDatasetVersion"); saveReviewed_->setEnabled(false); saveRow->addWidget(saveReviewed_); root->addLayout(saveRow);
         connect(reviewSamples_, &QTreeWidget::currentItemChanged, this, [this] { reviewSelectionChanged(); });
         connect(reviewSamples_, &QTreeWidget::itemChanged, this, [this] { updateReviewCount(); });
+        connect(reviewSamples_, &QTreeWidget::itemSelectionChanged, this, [this] { updateReviewCount(); });
+        connect(reviewedName_, &QLineEdit::textChanged, this, [this] { updateReviewCount(); });
         connect(reviewLabel_, &QComboBox::currentIndexChanged, this, [this] { previewSelectedSample(); });
         connect(compareTeachers_, &QCheckBox::toggled, this, [this] { previewSelectedSample(); });
         connect(visualView_, &QComboBox::currentIndexChanged, this, [this] { updateVisualView(); });
@@ -867,7 +962,14 @@ private:
         connect(previous, &QPushButton::clicked, this, [this] { advanceReview(-1); });
         connect(next, &QPushButton::clicked, this, [this] { advanceReview(1); });
         connect(exclude, &QPushButton::clicked, this, [this] {
-            if (auto *item = reviewSamples_->currentItem()) { item->setCheckState(0, Qt::Unchecked); advanceReview(1); }
+            if (auto *item = reviewSamples_->currentItem()) {
+                if (item->childCount()) {
+                    const int index = reviewSamples_->indexOfTopLevelItem(item); item->setCheckState(0, Qt::Unchecked);
+                    for (int nextIndex = index + 1; nextIndex < reviewSamples_->topLevelItemCount(); ++nextIndex) {
+                        auto *nextPhoto = reviewSamples_->topLevelItem(nextIndex); if (!nextPhoto->isHidden()) { reviewSamples_->setCurrentItem(nextPhoto); break; }
+                    }
+                } else { item->setCheckState(0, Qt::Unchecked); advanceReview(1); }
+            }
         });
         connect(saveReviewed_, &QPushButton::clicked, this, [this] { saveReviewedDataset(); });
         if (!datasetMode_) {
@@ -876,14 +978,22 @@ private:
             for (auto *layout : {labelRow, filterRow, navigation, saveRow}) for (int index=0; index<layout->count(); ++index)
                 if (auto *widget = layout->itemAt(index)->widget()) widget->hide();
         }
-        tabs_->addTab(tab, "2. Review depth maps");
+        tabs_->addTab(tab, "Photos and depth");
     }
 
     void reviewDataset(const QString &path, bool openTab = true) {
         if (path.isEmpty()) return;
         if (!datasetMode_) { openApp("datasets", "review", path); return; }
+        if (!reviewedDataset_.isEmpty() && !reviewEntries().isEmpty()) rememberReviewDraft();
         requestedReviewPath_ = path;
         requestedReviewOpen_ = openTab;
+        { QSignalBlocker blocker(reviewSamples_); reviewSamples_->clear(); }
+        reviewSamples_->setEnabled(false); saveReviewed_->setEnabled(false); for (auto *button : editActions_) button->setEnabled(false);
+        previewRecords_ = {}; differencePath_.clear(); rgbPreview_->reset("Loading dataset…");
+        for (int i=0; i<depthPreviews_.size(); ++i) { depthPreviews_[i]->reset("Choose a photo after it loads."); depthPreviews_[i]->setVisible(i == 0); depthTitles_[i]->setVisible(i == 0); }
+        previewStats_->clear();
+        reviewPath_->setText("Opening " + QFileInfo(path).fileName() + "…"); reviewCount_->setText("Loading photos…");
+        if (openTab) tabs_->setCurrentIndex(1);
         requestPreview("review", {"review-dataset", path});
     }
 
@@ -915,17 +1025,25 @@ private:
         QMap<QString, Qt::CheckState> previousChecks;
         QString selectedId;
         if (auto *item = selectedReviewEntry()) selectedId = item->data(0, Qt::UserRole).toJsonObject().value("id").toString();
-        for (auto *item : reviewEntries()) previousChecks.insert(item->data(0, Qt::UserRole).toJsonObject().value("id").toString(), item->checkState(0));
-        reviewedDataset_ = result.value("dataset_path").toString(requestedReviewPath_);
+        const QString nextDataset = result.value("dataset_path").toString(requestedReviewPath_);
+        if (!reviewedDataset_.isEmpty() && !reviewEntries().isEmpty()) rememberReviewDraft();
+        if (nextDataset == reviewedDataset_) {
+            for (auto *item : reviewEntries()) previousChecks.insert(item->data(0, Qt::UserRole).toJsonObject().value("id").toString(), item->checkState(0));
+        } else selectedId.clear();
+        const QJsonObject draft = reviewDrafts_.value(nextDataset); const auto savedKeep = draft.value("keep").toArray(), savedKnown = draft.value("known").toArray(); const auto savedSplits = draft.value("all_splits").toObject(draft.value("splits").toObject());
+        reviewedDataset_ = nextDataset;
         reviewGenerating_ = result.value("generation_state").toString() == "generating" || result.value("splits_provisional").toBool();
-        reviewPath_->setText((reviewGenerating_ ? "Generating — review ready entries; save after completion: " : "Reviewing: ") + reviewedDataset_);
-        reviewedName_->setText(QFileInfo(reviewedDataset_).fileName() + "-reviewed");
+        reviewPath_->setText((reviewGenerating_ ? "Generating: " : "Dataset: ") + QFileInfo(reviewedDataset_).fileName()); reviewPath_->setToolTip(reviewedDataset_);
+        reviewedName_->setText(draft.value("version_name").toString(QFileInfo(reviewedDataset_).fileName() + "-edited-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss")));
         if (!reviewPreviews_) reviewPreviews_ = std::make_unique<QTemporaryDir>();
         QTreeWidgetItem *selected = nullptr; QMap<QString, QTreeWidgetItem *> photos; QStringList cameras;
         {
             QSignalBlocker blocker(reviewSamples_); reviewSamples_->clear();
             for (const auto &value : result.value("samples").toArray()) {
-                const auto sample = value.toObject(); const QString path = sample.value("source_path").toString();
+                auto sample = value.toObject(); const QString id = sample.value("id").toString();
+                sample.insert("original_split", sample.value("split"));
+                if (savedSplits.contains(id)) { sample.insert("split", savedSplits.value(id)); sample.insert("split_chosen", true); }
+                const QString path = sample.value("source_path").toString();
                 QString group = sample.value("requested_group").toString();
                 if (group.isEmpty()) group = sample.value("group_id").toString().left(12);
                 const auto metadata = sample.value("photo_metadata").toObject(); const QString camera = metadata.value("camera_model").toString();
@@ -936,7 +1054,7 @@ private:
                     if (!camera.isEmpty() && !cameras.contains(camera)) cameras << camera;
                 }
                 auto *item = new QTreeWidgetItem(photo, {sample.value("teacher_id").toString("Teacher"), sample.value("split").toString(), group});
-                item->setData(0, Qt::UserRole, sample); item->setToolTip(0, path); item->setCheckState(0, previousChecks.value(sample.value("id").toString(), Qt::Checked));
+                item->setData(0, Qt::UserRole, sample); item->setToolTip(0, path); item->setCheckState(0, draft.contains("keep") ? (!savedKnown.contains(id) || savedKeep.contains(id) ? Qt::Checked : Qt::Unchecked) : previousChecks.value(id, Qt::Checked));
                 if (sample.value("id").toString() == selectedId) selected = item;
                 QStringList warnings; for (const auto &warning : sample.value("warnings").toArray()) warnings << warning.toString();
                 item->setToolTip(1, warnings.join('\n')); item->setToolTip(2, sample.value("group_id").toString());
@@ -944,6 +1062,7 @@ private:
         }
         { QSignalBlocker blocker(reviewCamera_); const QString camera = reviewCamera_->currentText(); reviewCamera_->clear(); reviewCamera_->addItem("All cameras"); cameras.sort(); reviewCamera_->addItems(cameras); reviewCamera_->setCurrentIndex(qMax(0, reviewCamera_->findText(camera))); }
         filterReview();
+        reviewSamples_->setEnabled(true);
         if (requestedReviewOpen_) tabs_->setCurrentIndex(1); updateReviewCount();
         if (reviewSamples_->topLevelItemCount()) {
             QSignalBlocker blocker(reviewSamples_); reviewSamples_->setCurrentItem(selected ? selected : reviewSamples_->topLevelItem(0));
@@ -968,7 +1087,7 @@ private:
 
     void previewSelectedSample() {
         auto *item = selectedReviewEntry();
-        if (!item || reviewLabel_->currentIndex() < 0) return;
+        if (!item || reviewLabel_->currentIndex() < 0 || (!requestedReviewPath_.isEmpty() && requestedReviewPath_ != reviewedDataset_)) return;
         rgbPreview_->reset("Loading source view…"); depthPreview_->reset("Loading generated depth…"); previewStats_->clear();
         if (!reviewPreviews_ || !reviewPreviews_->isValid()) {
             previewStats_->setText("Could not create a temporary folder for display previews."); return;
@@ -1059,66 +1178,181 @@ private:
     }
 
     void advanceReview(int direction) {
-        const auto entries = reviewEntries(); const int index = entries.indexOf(selectedReviewEntry()) + direction;
+        QList<QTreeWidgetItem *> entries;
+        for (auto *item : reviewEntries()) if (!item->isHidden() && !item->parent()->isHidden()) entries << item;
+        const int index = entries.indexOf(selectedReviewEntry()) + direction;
         if (index >= 0 && index < entries.size()) reviewSamples_->setCurrentItem(entries[index]);
     }
 
+    void rememberReviewDraft() {
+        QJsonObject draft = selectedReviewEdits(); QJsonArray known; QJsonObject allSplits;
+        for (auto *item : reviewEntries()) {
+            const auto sample = item->data(0, Qt::UserRole).toJsonObject(); const QString id = sample.value("id").toString(); known.append(id);
+            if (sample.contains("original_split") && (sample.value("split_chosen").toBool() || sample.value("split") != sample.value("original_split"))) allSplits.insert(id, sample.value("split"));
+        }
+        draft.insert("known", known); draft.insert("all_splits", allSplits); draft.insert("version_name", reviewedName_->text()); reviewDrafts_.insert(reviewedDataset_, draft);
+    }
+
+    QJsonObject selectedReviewEdits() const {
+        QJsonArray keep; QJsonObject splits;
+        for (auto *item : reviewEntries()) {
+            const auto sample = item->data(0, Qt::UserRole).toJsonObject(); const QString id = sample.value("id").toString();
+            if (item->checkState(0) == Qt::Checked) keep.append(id);
+            if (item->checkState(0) == Qt::Checked && (sample.value("split_chosen").toBool() || sample.value("split") != sample.value("original_split")) && sample.contains("original_split")) splits.insert(id, sample.value("split"));
+        }
+        return {{"keep", keep}, {"splits", splits}};
+    }
+
+    QList<QTreeWidgetItem *> selectedReviewEntries() const {
+        QList<QTreeWidgetItem *> result;
+        for (auto *item : reviewSamples_->selectedItems()) {
+            if (item->childCount()) { for (int i=0; i<item->childCount(); ++i) if (!result.contains(item->child(i))) result << item->child(i); }
+            else if (!result.contains(item)) result << item;
+        }
+        return result;
+    }
+
+    void setReviewIncluded(bool include) {
+        if (busy_ || reviewGenerating_ || reviewEntries().isEmpty()) return;
+        { QSignalBlocker blocker(reviewSamples_); for (auto *item : selectedReviewEntries()) item->setCheckState(0, include ? Qt::Checked : Qt::Unchecked); }
+        updateReviewCount();
+    }
+
+    void setReviewSplit(const QString &split) {
+        if (busy_ || reviewGenerating_ || (split != "train" && split != "validation")) return;
+        QSet<QString> groups, sources;
+        for (auto *item : selectedReviewEntries()) {
+            const auto sample = item->data(0, Qt::UserRole).toJsonObject(); const QString group = sample.value("management_group_id").toString(sample.value("group_id").toString());
+            if (!group.isEmpty()) groups.insert(group);
+            const QString source = sample.value("source_id").toString(sample.value("source_path").toString()); if (!source.isEmpty()) sources.insert(source);
+        }
+        if (groups.isEmpty() && sources.isEmpty()) return;
+        {
+            QSignalBlocker blocker(reviewSamples_);
+            for (auto *item : reviewEntries()) {
+                auto sample = item->data(0, Qt::UserRole).toJsonObject();
+                if (!groups.contains(sample.value("management_group_id").toString(sample.value("group_id").toString())) && !sources.contains(sample.value("source_id").toString(sample.value("source_path").toString()))) continue;
+                if (!sample.contains("original_split")) sample.insert("original_split", sample.value("split"));
+                sample.insert("split", split); sample.insert("split_chosen", true); item->setData(0, Qt::UserRole, sample); item->setText(1, split); item->parent()->setText(1, split);
+            }
+        }
+        statusBar()->showMessage("Split changed for the selected photos and their related capture group. Save the new version to apply it."); updateReviewCount();
+    }
+
     void updateReviewCount() {
-        int kept = 0, train = 0, validation = 0;
+        if (!saveReviewed_ || !reviewSamples_) return;
+        QSignalBlocker treeBlocker(reviewSamples_);
+        int kept = 0, train = 0, validation = 0, photos = 0, changed = 0;
         const auto entries = reviewEntries();
         for (auto *item : entries) {
-            if (item->checkState(0) != Qt::Checked) continue;
-            ++kept; train += item->text(1) == "train"; validation += item->text(1) == "validation";
+            const bool included = item->checkState(0) == Qt::Checked;
+            QFont font = item->font(0); font.setStrikeOut(!included); item->setFont(0, font);
+            if (included) { ++kept; train += item->text(1) == "train"; validation += item->text(1) == "validation"; }
+            const auto sample = item->data(0, Qt::UserRole).toJsonObject();
+            changed += !included || (sample.contains("original_split") && (sample.value("split_chosen").toBool() || sample.value("split") != sample.value("original_split")));
         }
-        QString text = QString("%1 of %2 teacher entries included · %3 train / %4 validation").arg(kept).arg(entries.size()).arg(train).arg(validation);
-        if (kept && (!train || !validation)) text += " · Training needs samples in both splits; use more held-out groups in a new dataset.";
-        reviewCount_->setText(text); saveReviewed_->setEnabled(datasetMode_ && kept > 0 && !reviewGenerating_ && (!process_ || process_->state() == QProcess::NotRunning));
+        for (int i=0; i<reviewSamples_->topLevelItemCount(); ++i) {
+            auto *photo = reviewSamples_->topLevelItem(i); const bool included = photo->checkState(0) != Qt::Unchecked;
+            photos += included; QFont font = photo->font(0); font.setStrikeOut(!included); photo->setFont(0, font);
+        }
+        QString text = entries.isEmpty() ? "Choose a dataset to view its photos." : QString("%1 photos · %2 targets included · %3 train / %4 validation%5").arg(photos).arg(kept).arg(train).arg(validation).arg(changed ? " · Unsaved changes" : " · No changes");
+        if (kept && (!train || !validation)) text += " · Set aside a related photo group for validation before training.";
+        if (!reviewAdditions_.value(reviewedDataset_).isEmpty()) text += " · Added photos ready to save";
+        reviewCount_->setText(text);
+        const bool editable = datasetMode_ && !entries.isEmpty() && !reviewGenerating_ && !busy_ && (requestedReviewPath_.isEmpty() || requestedReviewPath_ == reviewedDataset_);
+        saveReviewed_->setEnabled(editable && (kept > 0 || !reviewAdditions_.value(reviewedDataset_).isEmpty()) && validName(reviewedName_->text().trimmed()) && !QFileInfo::exists(QDir(workspace_->text()).filePath("datasets/" + reviewedName_->text().trimmed())));
+        for (auto *button : editActions_) button->setEnabled(editable);
+        addPhotos_->setEnabled(editable && validName(reviewedName_->text().trimmed()) && !QFileInfo::exists(QDir(workspace_->text()).filePath("datasets/" + reviewedName_->text().trimmed())));
+        removePhotos_->setEnabled(editable && !reviewSamples_->selectedItems().isEmpty()); restorePhotos_->setEnabled(removePhotos_->isEnabled());
         updateCollectionReadiness();
+    }
+
+    bool writeReviewEdits(const QJsonObject &edits) {
+        editsFile_ = std::make_unique<QTemporaryFile>();
+        if (!editsFile_->open() || editsFile_->write(QJsonDocument(edits).toJson()) < 0 || !editsFile_->flush()) {
+            log_->appendPlainText("Could not save the edit instructions."); editsFile_.reset(); return false;
+        }
+        return true;
+    }
+
+    void saveDatasetVersion(const QString &source, const QJsonObject &edits, const QStringList &additions = {}) {
+        const QString name = reviewedName_->text().trimmed();
+        if (!validName(name) || source.isEmpty() || busy_ || QFileInfo::exists(QDir(workspace_->text()).filePath("datasets/" + name))) {
+            statusBar()->showMessage("Choose a new dataset version name before saving."); return;
+        }
+        if (!writeReviewEdits(edits)) return;
+        savingVersionSource_ = source;
+        if (!additions.isEmpty()) reviewAdditions_.insert(source, additions);
+        QStringList args{"edit-dataset", source, "--edits-json", editsFile_->fileName(), "--output-dir", QDir(workspace_->text()).filePath("datasets/" + name), "--workers", QString::number(workerCount())};
+        for (const auto &path : reviewAdditions_.value(source)) args << "--add-dataset" << path;
+        refreshAfter_ = true; startJob("Save dataset version", args);
     }
 
     void saveReviewedDataset() {
         if (!datasetMode_) { openApp("datasets", "review", reviewedDataset_); return; }
-        const QString name = reviewedName_->text().trimmed();
-        if (!validName(name)) { QMessageBox::information(this, "Reviewed dataset name", "Use a folder name without path separators."); return; }
-        QStringList args{"curate-dataset", reviewedDataset_, "--output-dir", QDir(workspace_->text()).filePath("datasets/" + name)};
-        int kept = 0;
-        for (auto *item : reviewEntries()) {
-            if (item->checkState(0) != Qt::Checked) continue;
-            args << "--keep" << item->data(0, Qt::UserRole).toJsonObject().value("id").toString(); ++kept;
-        }
-        if (!kept) return;
-        args << "--workers" << QString::number(workerCount()); refreshAfter_ = true; startJob("Save reviewed dataset", args);
+        if (!selectedReviewEdits().value("keep").toArray().isEmpty() || !reviewAdditions_.value(reviewedDataset_).isEmpty()) saveDatasetVersion(reviewedDataset_, selectedReviewEdits());
+    }
+
+    void beginAddingPhotos() {
+        if (reviewedDataset_.isEmpty() || busy_ || reviewGenerating_) return;
+        if (!validName(reviewedName_->text().trimmed()) || QFileInfo::exists(QDir(workspace_->text()).filePath("datasets/" + reviewedName_->text().trimmed()))) { statusBar()->showMessage("Enter an unused version name before adding photos."); return; }
+        const auto files = QFileDialog::getOpenFileNames(this, "Add photos to " + QFileInfo(reviewedDataset_).fileName(), settings_.value("photo_folder").toString(), "HEIC / HEIF photos (*.heic *.HEIC *.heif *.HEIF *.hif *.HIF)");
+        if (files.isEmpty()) return;
+        appendBase_ = reviewedDataset_; appendEdits_ = selectedReviewEdits(); appendVersionName_ = reviewedName_->text();
+        sources_->clear(); for (const auto &file : files) addSourcePhoto(file);
+        settings_.setValue("photo_folder", QFileInfo(files.first()).absolutePath());
+        datasetName_->setText(QFileInfo(appendBase_).fileName() + "-added-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"));
+        addingPhotosHint_->setText("Adding photos to " + QFileInfo(appendBase_).fileName() + ". Generate their depth targets, then they will be included in the new dataset version.");
+        addingPhotosHint_->show(); cancelAdding_->show(); generate_->setText("Generate depth and add to dataset"); tabs_->setCurrentIndex(0);
+    }
+
+    void addPreparedDataset() {
+        if (reviewedDataset_.isEmpty() || busy_) return;
+        QDialog dialog(this); dialog.setWindowTitle("Add photos from another dataset"); auto *layout = new QVBoxLayout(&dialog);
+        auto *hint = new QLabel("Select a prepared dataset to include its photos and full-quality depth targets in your new version.", &dialog); hint->setWordWrap(true); layout->addWidget(hint);
+        auto *choice = new QComboBox(&dialog);
+        for (int i=0; i<datasets_->topLevelItemCount(); ++i) { auto *item = datasets_->topLevelItem(i); const QString path = item->data(0, Qt::UserRole).toString(); if (path != reviewedDataset_) choice->addItem(item->text(0), path); }
+        layout->addWidget(choice); auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog); buttons->button(QDialogButtonBox::Ok)->setText("Add and save new version"); buttons->button(QDialogButtonBox::Ok)->setEnabled(choice->count() > 0); layout->addWidget(buttons);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept); connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() == QDialog::Accepted) saveDatasetVersion(reviewedDataset_, selectedReviewEdits(), {choice->currentData().toString()});
     }
 
     void buildCollectionTab() {
         auto *tab = new QWidget; auto *root = new QVBoxLayout(tab);
         auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(tab);
-        auto *intro = new QLabel("Optional: combine datasets or change validation groups. Preparation reuses existing arrays without another full data copy. To train an existing dataset with its current split, select it above and open Trainer.", tab); intro->setWordWrap(true); root->addWidget(intro);
-        collectionSources_ = new QTreeWidget(tab); collectionSources_->setHeaderLabels({"Use for training", "Use as validation", "Category", "Teacher entries"});
+        auto *intro = new QLabel("Use this page to create an automatic training/validation split or combine datasets. For individual photo assignments, use Set split in Photos and depth and save a new version. To use that existing split, open the selected dataset in Trainer.", tab); intro->setWordWrap(true); root->addWidget(intro);
+        collectionSources_ = new QTreeWidget(tab); collectionSources_->setHeaderLabels({"Include dataset", "Hold out whole dataset", "Category", "Depth targets"});
         collectionSources_->setRootIsDecorated(false); collectionSources_->header()->setSectionResizeMode(0, QHeaderView::Stretch); collectionSources_->setMinimumHeight(140); root->addWidget(collectionSources_, 1);
         connect(collectionSources_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int column) {
             if (column < 2 && item->checkState(column) == Qt::Checked) { QSignalBlocker blocker(collectionSources_); item->setCheckState(1-column, Qt::Unchecked); }
+            if (column < 2) collectionSources_->setCurrentItem(item);
             updateCollectionReadiness();
         });
         auto *form = new QFormLayout;
+        collectionForm_ = form;
         collectionName_ = new QLineEdit("training-set-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"), tab); form->addRow("Training set name", collectionName_);
         form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
         splitMode_ = new QComboBox(tab); splitMode_->addItem("Random across all selected datasets", "global-random"); splitMode_->addItem("Same number chosen from each dataset", "equal-per-dataset"); splitMode_->addItem("Use designated validation datasets", "explicit");
         form->addRow("Validation strategy", splitMode_);
-        validationFraction_ = new QDoubleSpinBox(tab); validationFraction_->setRange(.01, .9); validationFraction_->setSingleStep(.05); validationFraction_->setValue(.2); validationFraction_->setSuffix(" of photo groups"); form->addRow("Validation fraction", validationFraction_);
+        validationFraction_ = new QDoubleSpinBox(tab); validationFraction_->setRange(1, 90); validationFraction_->setDecimals(0); validationFraction_->setSingleStep(5); validationFraction_->setValue(20); validationFraction_->setSuffix("% for validation"); form->addRow("Validation size", validationFraction_);
         validationCount_ = spin(tab, 0, 100000, 0); validationCount_->setSpecialValueText("Automatic equal count"); form->addRow("Equal validation groups per dataset", validationCount_);
         groupingPolicy_ = new QComboBox(tab); groupingPolicy_->addItem("Keep photo groups together", "preserve"); groupingPolicy_->addItem("Treat as one pile — ignore authored groups", "ignore"); form->addRow("Groups", groupingPolicy_);
         splitSeed_ = spin(tab, 0, 2147483647, 42); form->addRow("Repeatable random seed", splitSeed_); root->addLayout(form);
+        form->setRowVisible(groupingPolicy_, false); form->setRowVisible(splitSeed_, false);
+        auto *advancedSplit = new QToolButton(tab); advancedSplit->setText("Advanced split options"); advancedSplit->setCheckable(true); root->addWidget(advancedSplit);
+        connect(advancedSplit, &QToolButton::toggled, this, [this, form](bool visible) { form->setRowVisible(groupingPolicy_, visible); form->setRowVisible(splitSeed_, visible); });
         splitHelp_ = new QLabel(tab); splitHelp_->setWordWrap(true); root->addWidget(splitHelp_);
         auto updateSplit = [this] {
             const QString mode = splitMode_->currentData().toString(); validationFraction_->setEnabled(mode != "explicit"); validationCount_->setEnabled(mode == "equal-per-dataset");
+            collectionSources_->setColumnHidden(1, mode != "explicit");
+            collectionForm_->setRowVisible(validationFraction_, mode != "explicit"); collectionForm_->setRowVisible(validationCount_, mode == "equal-per-dataset");
             splitHelp_->setText(mode == "explicit" ? "Tick dedicated validation datasets in the second column. They are held out entirely; overlapping source photos and groups are rejected." : mode == "equal-per-dataset" ? "Each dataset contributes the same count of randomly chosen independent photo groups. Zero uses an automatic count based on the smallest dataset. Related captures and all teachers remain together." : "Validation groups are drawn randomly from the combined selected datasets. Larger datasets usually contribute more validation photos. The seed repeats the same selection.");
         };
         connect(splitMode_, &QComboBox::currentIndexChanged, this, [this, updateSplit] { updateSplit(); updateCollectionReadiness(); }); updateSplit();
         collectionStatus_ = new QLabel(tab); collectionStatus_->setWordWrap(true); root->addWidget(collectionStatus_);
         auto *useExisting = new QPushButton("Open selected dataset in Trainer", tab); root->addWidget(useExisting);
         connect(useExisting, &QPushButton::clicked, this, [this] { openApp("trainer", "train", selectedPath(datasets_)); });
-        compose_ = new QPushButton("Create training set & continue", tab); root->addWidget(compose_);
+        compose_ = new QPushButton("Create training set and continue", tab); root->addWidget(compose_);
         connect(collectionName_, &QLineEdit::textChanged, this, [this] { updateCollectionReadiness(); });
         updateCollectionReadiness();
         connect(compose_, &QPushButton::clicked, this, [this] {
@@ -1129,7 +1363,7 @@ private:
             if (inputs.isEmpty()) { QMessageBox::information(this, "Select datasets", "Tick one or more datasets for training."); return; }
             const QString mode = splitMode_->currentData().toString();
             if (mode == "explicit" && validation.isEmpty()) { QMessageBox::information(this, "Select validation", "Tick a dedicated validation dataset in the second column."); return; }
-            QStringList args{"compose-datasets"}; args << inputs << "--output-dir" << QDir(workspace_->text()).filePath("datasets/" + name) << "--split-mode" << mode << "--validation-fraction" << QString::number(validationFraction_->value()) << "--seed" << QString::number(splitSeed_->value()) << "--grouping" << groupingPolicy_->currentData().toString();
+            QStringList args{"compose-datasets"}; args << inputs << "--output-dir" << QDir(workspace_->text()).filePath("datasets/" + name) << "--split-mode" << mode << "--validation-fraction" << QString::number(validationFraction_->value() / 100.0) << "--seed" << QString::number(splitSeed_->value()) << "--grouping" << groupingPolicy_->currentData().toString();
             if (mode == "explicit") for (const QString &path : validation) args << "--validation-dataset" << path;
             if (mode == "equal-per-dataset" && validationCount_->value()) args << "--validation-count-per-dataset" << QString::number(validationCount_->value());
             args << "--workers" << QString::number(workerCount()); continueToTrainer_ = true; refreshAfter_ = true; startJob("Create training set", args);
@@ -1156,7 +1390,7 @@ private:
             if (!hfAssetDir_->text().trimmed().isEmpty()) args << "--asset-dir" << hfAssetDir_->text().trimmed();
             args << "--workers" << QString::number(workerCount()); refreshAfter_ = true; startJob("Import Hugging Face dataset", args);
         });
-        root->addStretch(); hfRoot->addWidget(hf); hfRoot->addStretch(); tabs_->addTab(scroll, "3. Prepare training set"); tabs_->addTab(hfScroll, "Import datasets");
+        root->addStretch(); hfRoot->addWidget(hf); hfRoot->addStretch(); tabs_->addTab(scroll, "Training split"); tabs_->addTab(hfScroll, "Import datasets");
     }
 
     void buildTrainingTab() {
@@ -1361,7 +1595,7 @@ private:
 
     void startJob(const QString &label, const QStringList &arguments) {
         const QString operation = arguments.value(0);
-        const bool mutatesDataset = QStringList{"dataset", "compose-datasets", "compact-dataset", "curate-dataset", "import-hf", "cleanup-dataset", "archive-dataset"}.contains(operation);
+        const bool mutatesDataset = QStringList{"dataset", "compose-datasets", "compact-dataset", "curate-dataset", "edit-dataset", "import-hf", "cleanup-dataset", "archive-dataset"}.contains(operation);
         if ((!datasetMode_ && mutatesDataset) || (datasetMode_ && QStringList{"train", "export", "cleanup-run"}.contains(operation))) {
             openApp(mutatesDataset ? "datasets" : "trainer", mutatesDataset ? "prepare" : "train", selectedPath(datasets_));
             groupsFile_.reset(); teachersFile_.reset(); refreshAfter_ = false; return;
@@ -1387,8 +1621,8 @@ private:
             line.remove(QRegularExpression("\\x1b\\[[0-9;]*m"));
             if (line.startsWith("IPDE_EVENT ")) {
                 const auto event = QJsonDocument::fromJson(line.mid(11).toUtf8()).object(); const QString type = event.value("event").toString(), phase = event.value("phase").toString();
-                if (type == "dataset_started") streamingDataset_ = event.value("dataset_dir").toString();
-                else if (type == "sample_ready") { streamingDataset_ = event.value("dataset_dir").toString(streamingDataset_); if (!streamingTimer_->isActive()) streamingTimer_->start(); }
+                if (type == "dataset_started" && appendBase_.isEmpty()) streamingDataset_ = event.value("dataset_dir").toString();
+                else if (type == "sample_ready" && appendBase_.isEmpty()) { streamingDataset_ = event.value("dataset_dir").toString(streamingDataset_); if (!streamingTimer_->isActive()) streamingTimer_->start(); }
                 else if (type == "photo_skipped") log_->appendPlainText("Skipped " + QFileInfo(event.value("source_path").toString()).fileName() + ": " + event.value("reason").toString());
                 else if (job_ == "Scan spatial photos" && type == "scan_started") {
                     log_->appendPlainText("Searching " + event.value("directory").toString() + ". Photos appear as they are validated; cancelling keeps photos already found.");
@@ -1409,13 +1643,14 @@ private:
                     const int processed = event.value("processed").toInt(), total = event.value("total").toInt();
                     if (phase == "verifying_dataset") message = QString("Checking source dataset %1 of %2: %3. Large datasets can take several minutes.").arg(processed).arg(total).arg(QFileInfo(event.value("dataset_path").toString()).fileName());
                     else if (phase == "sample_composed") message = QString("Preparing training set: %1 of %2 entries · %3 arrays %4.").arg(processed).arg(total).arg(event.value("unique_arrays").toInt()).arg(event.value("storage_mode").toString() == "copy" ? "copied losslessly" : "reused without a full data copy");
+                    else if (phase == "editing_dataset") message = QString("Saving dataset version: %1 of %2 arrays preserved.").arg(processed).arg(total);
                     else if (phase == "compressing") message = QString("Compressing arrays losslessly: %1 of %2 records (%3 unique arrays).").arg(processed).arg(total).arg(event.value("unique_arrays").toInt());
                     else if (phase == "verifying_output") message = "Checking the saved arrays before publishing the completed training set. Large datasets can take several minutes.";
                     else if (phase == "publishing_dataset") message = "Publishing the verified training set…";
                     if (!message.isEmpty()) {
                         statusBar()->showMessage(message);
                         if (job_ == "Create training set") collectionStatus_->setText(message + " Use Cancel current task to stop.");
-                        if ((phase == "sample_composed" || phase == "compressing") && total > 0) { progress_->setRange(0, total); progress_->setValue(processed); }
+                        if ((phase == "sample_composed" || phase == "compressing" || phase == "editing_dataset") && total > 0) { progress_->setRange(0, total); progress_->setValue(processed); }
                         else progress_->setRange(0, 0);
                     }
                 }
@@ -1427,13 +1662,15 @@ private:
         busy_ = busy;
         if (session_) session_->setBusy(busy && job_ != "Refresh library" ? activeOperation_ : QString());
         workspace_->setEnabled(!busy); chooseWorkspace_->setEnabled(!busy); refresh_->setEnabled(!busy); export_->setEnabled(!busy);
-        generate_->setEnabled(!busy); train_->setEnabled(!busy); importHf_->setEnabled(!busy);
+        generate_->setEnabled(!busy); train_->setEnabled(!busy); importHf_->setEnabled(!busy); cancelAdding_->setEnabled(!busy);
+        for (auto *button : editActions_) button->setEnabled(!busy && !reviewGenerating_ && !reviewEntries().isEmpty());
+        reviewSamples_->setEnabled(!busy || job_ == "Generate dataset"); reviewedName_->setEnabled(!busy);
         train_->setText(busy && job_ == "Train RAFT-Stereo" ? "Training model…" : "Start model training");
         for (auto *control : QList<QWidget *>{runName_, raftRoot_, raftModel_, epochs_, steps_, patch_, iterations_, scope_, trainDevice_, trainingMode_}) control->setEnabled(!busy);
         collectionSources_->setEnabled(!busy); collectionName_->setEnabled(!busy); splitMode_->setEnabled(!busy); groupingPolicy_->setEnabled(!busy); splitSeed_->setEnabled(!busy);
         validationFraction_->setEnabled(!busy && splitMode_->currentData().toString() != "explicit"); validationCount_->setEnabled(!busy && splitMode_->currentData().toString() == "equal-per-dataset");
         updateCollectionReadiness();
-        if (busy) saveReviewed_->setEnabled(false); else updateReviewCount();
+        updateReviewCount();
         cancel_->setEnabled(busy);
         if (job_ == "Train RAFT-Stereo") {
             if (busy) {
@@ -1448,8 +1685,17 @@ private:
     }
 
     bool hasUnsavedReviewExclusions(const QString &path) const {
-        if (path.isEmpty() || path != reviewedDataset_) return false;
-        for (auto *item : reviewEntries()) if (item->checkState(0) == Qt::Unchecked) return true;
+        if (path.isEmpty()) return false;
+        if (!reviewAdditions_.value(path).isEmpty()) return true;
+        if (path == reviewedDataset_ && !reviewEntries().isEmpty()) {
+            for (auto *item : reviewEntries()) {
+                const auto sample = item->data(0, Qt::UserRole).toJsonObject();
+                if (item->checkState(0) == Qt::Unchecked || (sample.contains("original_split") && (sample.value("split_chosen").toBool() || sample.value("split") != sample.value("original_split")))) return true;
+            }
+        } else if (reviewDrafts_.contains(path)) {
+            const auto draft = reviewDrafts_.value(path);
+            if (draft.value("keep").toArray().size() != draft.value("known").toArray().size() || !draft.value("all_splits").toObject().isEmpty()) return true;
+        }
         return false;
     }
 
@@ -1486,14 +1732,14 @@ private:
         if (!datasetMode_) reason = "Open Dataset Studio to prepare or manage training datasets.";
         else if (busy_) reason = job_ == "Create training set" ? "Preparing the training set using existing array storage. Checking full-quality arrays may take several minutes. Use Cancel current task to stop." : job_ + " is running. Finish or cancel it before creating a training set.";
         else if (!collectionSources_->topLevelItemCount()) reason = "Import or generate a dataset first; it will appear here and can be used for training.";
-        else if (!training) reason = "Tick a dataset in the Use for training column. One dataset is enough; validation photos are held out automatically.";
+        else if (!training) reason = "Tick a dataset in Include dataset. One dataset is enough; validation photos are held out automatically.";
         else if (!entries) reason = "The selected training datasets have no teacher entries. Finish generating or import a complete dataset first.";
-        else if (unsavedExclusions) reason = "This dataset has unsaved photo exclusions. Click Save reviewed copy in Review depth maps, then select that saved copy here so the training set respects your choices.";
+        else if (unsavedExclusions) reason = "This dataset has unsaved photo or split edits. Save reviewed copy using Save changes as new version in Photos and depth, then select the saved version here.";
         else if (!validName(collectionName_->text().trimmed())) reason = "Enter a training set name without folder separators.";
         else if (QFileInfo::exists(QDir(workspace_->text()).filePath("datasets/" + collectionName_->text().trimmed()))) reason = "A dataset with this name already exists. Enter a new training set name.";
-        else if (splitMode_->currentData().toString() == "explicit" && !validation) reason = "Tick a separate dataset in Use as validation, or choose random validation to hold out photos from your training dataset.";
+        else if (splitMode_->currentData().toString() == "explicit" && !validation) reason = "Tick a separate dataset in Hold out whole dataset, or choose random validation to hold out photos from your training dataset.";
         compose_->setEnabled(reason.isEmpty());
-        compose_->setText(busy_ && job_ == "Create training set" ? "Creating training set…" : "Create training set & continue");
+        compose_->setText(busy_ && job_ == "Create training set" ? "Creating training set…" : "Create training set and continue");
         const QString ready = QString("Ready: %1 training dataset(s), %2 teacher entries. %3 The set needs at least two independent photo groups.").arg(training).arg(entries).arg(splitMode_->currentData().toString() == "explicit" ? QString("%1 validation dataset(s) will be held out.").arg(validation) : "Validation photos will be held out automatically.");
         collectionStatus_->setText(reason.isEmpty() ? ready : reason);
         compose_->setToolTip(reason.isEmpty() ? "Prepare validation splits using shared array storage, then open the model training step." : reason);
@@ -1502,7 +1748,7 @@ private:
     void processFinished(int code, QProcess::ExitStatus status) {
         stdout_ += process_->readAllStandardOutput(); appendProgress(process_->readAllStandardError());
         if (!progressBuffer_.trimmed().isEmpty()) { log_->appendPlainText(QString::fromUtf8(progressBuffer_).trimmed()); progressBuffer_.clear(); }
-        setBusy(false); groupsFile_.reset(); teachersFile_.reset();
+        setBusy(false); groupsFile_.reset(); teachersFile_.reset(); editsFile_.reset();
         if (cancelled_) {
             if (job_ == "Create training set") continueToTrainer_ = false;
             if (job_ == "Generate dataset") stopGenerationStreaming("Generation cancelled. Generate a new dataset before saving a reviewed copy.");
@@ -1533,6 +1779,19 @@ private:
             refreshAfter_ = false; return;
         }
         const QJsonObject result = doc.object();
+        if (job_ == "Generate dataset" && !appendBase_.isEmpty()) {
+            const QString source = appendBase_, addition = result.value("dataset_path").toString(); const QJsonObject edits = appendEdits_;
+            reviewedName_->setText(appendVersionName_); appendBase_.clear(); appendEdits_ = {}; appendVersionName_.clear();
+            addingPhotosHint_->hide(); cancelAdding_->hide(); generate_->setText("Generate dataset");
+            log_->appendPlainText("New photo targets generated. Adding them to the saved version…");
+            saveDatasetVersion(source, edits, {addition}); return;
+        }
+        if (job_ == "Save dataset version") {
+            reviewAdditions_.remove(savingVersionSource_);
+            // The saved version contains this draft; returning to the source starts from its original membership.
+            reviewDrafts_.remove(savingVersionSource_);
+            if (reviewedDataset_ == savingVersionSource_) { QSignalBlocker blocker(reviewSamples_); reviewSamples_->clear(); }
+        }
         if (job_ == "Refresh library") {
             populateLibrary(result);
             for (const auto &warning : result.value("warnings").toArray()) log_->appendPlainText(warning.toString());
@@ -1567,7 +1826,7 @@ private:
             clearUnavailableReview(result.value("cleaned_dataset").toString(), "Generated dataset removed. Original photos and trained models retained.");
             log_->appendPlainText(QString("Removed %1 generated files (%2 MiB logical size). Shared storage may remain in other datasets.").arg(result.value("removed_files").toInt()).arg(result.value("removed_logical_bytes").toDouble() / (1024*1024), 0, 'f', 1));
         }
-        else if (job_ == "Generate dataset" || job_ == "Save reviewed dataset" || job_ == "Import Hugging Face dataset" || job_ == "Compact dataset") {
+        else if (job_ == "Generate dataset" || job_ == "Save reviewed dataset" || job_ == "Save dataset version" || job_ == "Import Hugging Face dataset" || job_ == "Compact dataset") {
             pendingReview_ = result.value("dataset_path").toString();
             log_->appendPlainText("Dataset saved: " + pendingReview_ + "\n" + QString::fromUtf8(QJsonDocument(result.value("summary").toObject()).toJson(QJsonDocument::Compact)));
             for (const auto &warning : result.value("warnings").toArray()) log_->appendPlainText(warning.toString());
@@ -1607,7 +1866,7 @@ private:
         const QString oldDataset = !pendingTrainingPath_.isEmpty() ? pendingTrainingPath_ : pendingReview_.isEmpty() ? selectedPath(datasets_) : pendingReview_, oldRun = selectedPath(runs_);
         QMap<QString, QPair<Qt::CheckState, Qt::CheckState>> collectionChecks;
         for (int i=0; i<collectionSources_->topLevelItemCount(); ++i) { auto *item = collectionSources_->topLevelItem(i); collectionChecks.insert(item->data(0, Qt::UserRole).toString(), {item->checkState(0), item->checkState(1)}); }
-        datasets_->clear(); runs_->clear(); QSignalBlocker collectionBlocker(collectionSources_); collectionSources_->clear();
+        QSignalBlocker datasetBlocker(datasets_); datasets_->clear(); runs_->clear(); QSignalBlocker collectionBlocker(collectionSources_); collectionSources_->clear();
         for (const QJsonValue &value : result.value("datasets").toArray()) {
             const auto obj = value.toObject(); const QString path = obj.value("path").toString();
             QString teacher = obj.value("teacher").toString();
@@ -1645,8 +1904,9 @@ private:
             auto *item = collectionSources_->topLevelItem(0);
             if (!collectionChecks.contains(item->data(0, Qt::UserRole).toString())) item->setCheckState(0, Qt::Checked);
         }
-        updateCollectionReadiness();
-        updateTrainingSelection();
+        syncDatasetSelection(datasets_, collectionSources_);
+        datasetBlocker.unblock(); collectionBlocker.unblock(); updateCollectionReadiness(); updateTrainingSelection(); updateCleanupActions();
+        if (datasetMode_ && tabs_->currentIndex() == 1 && pendingReview_.isEmpty() && !selectedPath(datasets_).isEmpty() && selectedPath(datasets_) != reviewedDataset_) reviewDataset(selectedPath(datasets_), false);
     }
 
     void importProjectDatasets() {
@@ -1739,7 +1999,7 @@ private:
     QGroupBox *datasetAdvanced_ = nullptr, *trainingAdvanced_ = nullptr;
     QSpinBox *inputSize_ = nullptr, *epochs_ = nullptr, *steps_ = nullptr, *patch_ = nullptr, *iterations_ = nullptr;
     QSpinBox *splitSeed_ = nullptr, *validationCount_ = nullptr;
-    QDoubleSpinBox *validationFraction_ = nullptr;
+    QDoubleSpinBox *validationFraction_ = nullptr; QFormLayout *collectionForm_ = nullptr;
     QTabWidget *tabs_ = nullptr; QPlainTextEdit *log_ = nullptr; QProgressBar *progress_ = nullptr;
     QPushButton *chooseWorkspace_ = nullptr, *refresh_ = nullptr, *generate_ = nullptr, *train_ = nullptr, *cancel_ = nullptr, *export_ = nullptr;
     QPushButton *saveReviewed_ = nullptr, *compose_ = nullptr, *importHf_ = nullptr, *compareBaseline_ = nullptr;
@@ -1750,7 +2010,12 @@ private:
     QStringList pendingPreviewArgs_; QJsonArray previewRecords_; QTimer *streamingTimer_ = nullptr;
     QSet<QString> scanDeliveredPaths_;
     bool cancelled_ = false, refreshAfter_ = false, reviewGenerating_ = false, requestedReviewOpen_ = true, busy_ = false;
-    std::unique_ptr<QTemporaryFile> groupsFile_, teachersFile_;
+    std::unique_ptr<QTemporaryFile> groupsFile_, teachersFile_, editsFile_;
+    QMap<QString, QJsonObject> reviewDrafts_;
+    QMap<QString, QStringList> reviewAdditions_; QString savingVersionSource_;
+    QString appendBase_, appendVersionName_; QJsonObject appendEdits_;
+    QLabel *addingPhotosHint_ = nullptr; QPushButton *cancelAdding_ = nullptr;
+    QPushButton *addPhotos_ = nullptr, *removePhotos_ = nullptr, *restorePhotos_ = nullptr; QList<QPushButton *> editActions_;
     std::unique_ptr<QTemporaryDir> reviewPreviews_;
 };
 

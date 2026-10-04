@@ -35,16 +35,27 @@ def backend_smoke(app_root: Path, project: Path) -> None:
 
     invoke("Dataset Studio", ["inspect-dataset", str(source), "--workers", "2"])
     invoke("Dataset Studio", ["compose-datasets", str(source), "--output-dir", str(prepared), "--workers", "2"])
+    edited = owner / "edited"
+    edits_file = project / "edits.json"
+    source_samples = json.loads((source / "dataset.json").read_text())["samples"]
+    edits_file.write_text(json.dumps({"keep": [s["id"] for s in source_samples[1:]],
+                                      "splits": {source_samples[1]["id"]: "validation"}}))
+    invoke("Dataset Studio", ["edit-dataset", str(source), "--edits-json", str(edits_file),
+                              "--output-dir", str(edited), "--workers", "2"])
+    review = invoke("Dataset Studio", ["review-dataset", str(edited)])
+    if len(review["samples"]) != 2 or not all(s.get("management_group_id") for s in review["samples"]):
+        raise RuntimeError("Embedded editor/review omitted membership edits or split component IDs")
     report = invoke("RAFT Studio", ["workspace", str(workspace)])
-    if len(report["datasets"]) != 2 or report["warnings"]:
+    if len(report["datasets"]) != 3 or report["warnings"]:
         raise RuntimeError("Embedded Trainer did not recognize the prepared fixture")
+    invoke("Dataset Studio", ["cleanup-dataset", str(edited), "--workspace", str(workspace), "--confirm"])
     invoke("Dataset Studio", ["cleanup-dataset", str(prepared), "--workspace", str(workspace), "--confirm"])
     if prepared.exists() or not source.is_dir():
         raise RuntimeError("Embedded cleanup affected the wrong fixture")
     archived = invoke("Dataset Studio", ["archive-dataset", str(source), "--workspace", str(workspace)])
     if source.exists() or not Path(archived["archived_dataset"]).is_dir():
         raise RuntimeError("Embedded archive did not preserve the source fixture")
-    print("Packaged dataset/trainer backends: threaded verification/composition, workspace, confirmed cleanup and locked archive passed")
+    print("Packaged dataset/trainer backends: threaded verification/composition, lossless membership/split editing, review, workspace, confirmed cleanup and locked archive passed")
 
 
 def main() -> None:

@@ -2,11 +2,29 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stdout
 import json
 import sys
 from pathlib import Path
 from typing import Sequence
+
+
+@contextmanager
+def _edit_cancellation():
+    """Let QProcess.terminate() unwind atomic edit staging before exit."""
+    import signal
+    import threading
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+    def cancelled(signum, frame):
+        raise RuntimeError("Dataset editing cancelled; source datasets remain unchanged")
+    signal.signal(signal.SIGTERM, cancelled)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def _model_arguments(parser: argparse.ArgumentParser) -> None:
@@ -79,6 +97,11 @@ def _parser() -> argparse.ArgumentParser:
     curate.add_argument("dataset", type=Path)
     curate.add_argument("--keep", action="append", required=True, help="sample ID to retain; repeat for each kept sample")
     curate.add_argument("--output-dir", required=True, type=Path)
+    edit = commands.add_parser("edit-dataset", help="save image additions, removals and linked-group split choices into a fresh lossless dataset")
+    edit.add_argument("dataset", type=Path)
+    edit.add_argument("--edits-json", required=True, type=Path, help="object with keep base sample IDs and splits mapping IDs to train/validation")
+    edit.add_argument("--add-dataset", action="append", type=Path, default=[], help="add every image/teacher entry from another prepared dataset")
+    edit.add_argument("--output-dir", required=True, type=Path)
     dataset = commands.add_parser("dataset", help="generate a lossless teacher-target dataset")
     dataset.add_argument("sources", type=Path, nargs="+")
     dataset.add_argument("--output-dir", required=True, type=Path)
@@ -127,7 +150,7 @@ def _parser() -> argparse.ArgumentParser:
         cleanup.add_argument("dataset" if command == "cleanup-dataset" else "checkpoint", type=Path)
         cleanup.add_argument("--workspace", required=True, type=Path)
         cleanup.add_argument("--confirm", action="store_true", help="explicitly confirm permanent removal")
-    for command in (inspect, scan, compose, compact, hf, curate, dataset, train):
+    for command in (inspect, scan, compose, compact, hf, curate, edit, dataset, train):
         command.add_argument("--workers", type=int, default=0,
                              help="CPU file/preparation workers; 0 uses available cores (default)")
     return parser
@@ -225,13 +248,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Third-party model imports/loggers must not corrupt the GUI JSON protocol.
         with redirect_stdout(sys.stderr), ExitStack() as locks:
             from .resource_lock import resource_lock
-            if args.command in {"inspect-dataset", "review-dataset", "preview-sample", "compare-samples", "compose-datasets", "compact-dataset", "curate-dataset", "train"}:
-                inputs = [*args.datasets, *args.validation_dataset] if args.command == "compose-datasets" else [args.dataset]
+            if args.command == "edit-dataset":
+                locks.enter_context(_edit_cancellation())
+            if args.command in {"inspect-dataset", "review-dataset", "preview-sample", "compare-samples", "compose-datasets", "compact-dataset", "curate-dataset", "edit-dataset", "train"}:
+                inputs = [*args.datasets, *args.validation_dataset] if args.command == "compose-datasets" else [args.dataset, *args.add_dataset] if args.command == "edit-dataset" else [args.dataset]
                 for path in sorted({path.expanduser().resolve() for path in inputs}):
                     locks.enter_context(resource_lock(path, shared=True))
             if args.command == "train":
                 locks.enter_context(resource_lock(args.checkpoint.expanduser().resolve().parent))
-            if args.command in {"dataset", "compose-datasets", "compact-dataset", "curate-dataset", "import-hf"}:
+            if args.command in {"dataset", "compose-datasets", "compact-dataset", "curate-dataset", "edit-dataset", "import-hf"}:
                 locks.enter_context(resource_lock(args.output_dir))
             if args.command == "export":
                 locks.enter_context(resource_lock(args.checkpoint.expanduser().resolve().parent, shared=True))
@@ -271,6 +296,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             elif args.command == "curate-dataset":
                 from .dataset_review import curate_dataset
                 report = curate_dataset(args.dataset, args.keep, args.output_dir, workers=args.workers)
+            elif args.command == "edit-dataset":
+                from .dataset_edit import edit_dataset
+                report = edit_dataset(args.dataset, json.loads(args.edits_json.read_text(encoding="utf-8")), args.output_dir,
+                                      add_datasets=args.add_dataset, progress_callback=_progress, workers=args.workers)
             elif args.command == "dataset":
                 from .dataset import DatasetOptions, build_dataset
                 from .learned_depth import LearnedDepthConfig

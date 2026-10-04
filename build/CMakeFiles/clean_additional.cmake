@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.16)
 
 if("${CONFIG}" STREQUAL "" OR "${CONFIG}" STREQUAL "")
   file(REMOVE_RECURSE
+  "CMakeFiles/dataset_management_regression_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/dataset_management_regression_autogen.dir/ParseCache.txt"
   "CMakeFiles/dataset_studio_autogen.dir/AutogenUsed.txt"
   "CMakeFiles/dataset_studio_autogen.dir/ParseCache.txt"
   "CMakeFiles/ipde_gui_autogen.dir/AutogenUsed.txt"
@@ -27,6 +29,7 @@ if("${CONFIG}" STREQUAL "" OR "${CONFIG}" STREQUAL "")
   "CMakeFiles/trainer_workflow_regression_autogen.dir/ParseCache.txt"
   "CMakeFiles/window_layout_regression_autogen.dir/AutogenUsed.txt"
   "CMakeFiles/window_layout_regression_autogen.dir/ParseCache.txt"
+  "dataset_management_regression_autogen"
   "dataset_studio_autogen"
   "ipde_gui_autogen"
   "ipde_icon_builder_autogen"
