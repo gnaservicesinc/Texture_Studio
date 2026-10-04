@@ -76,6 +76,21 @@ class LinkedWorkspaceTests(unittest.TestCase):
         self.assertEqual(len(report["warnings"]), 1)
         self.assertIn(str(loop), report["warnings"][0])
 
+    def test_materialized_copies_do_not_claim_inherited_shared_storage(self):
+        manifest_path = self.local / "dataset.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["collection"] = {"storage_mode": "shared", "added_storage_bytes": 42,
+                                  "reused_array_storage_bytes": 1024}
+        manifest_path.write_text(json.dumps(manifest))
+        report = workspace_report(self.workspace)
+        self.assertEqual(report["datasets"][0]["storage"]["storage_mode"], "shared")
+        for operation in ("curation", "storage_compaction"):
+            with self.subTest(operation=operation):
+                materialized = {**manifest, operation: {"source_manifest_sha256": "fixture"}}
+                manifest_path.write_text(json.dumps(materialized))
+                report = workspace_report(self.workspace)
+                self.assertEqual(report["datasets"][0]["storage"], {})
+
 
 if __name__ == "__main__":
     unittest.main()

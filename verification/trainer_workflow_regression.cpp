@@ -29,12 +29,16 @@ QJsonObject dataset(const QString &path) {
 
 void trainingSetReadiness(TrainerWindow &window, const QString &workspace) {
     window.workspace_->setText(workspace);
+    require(window.tabs_->currentIndex() == 4, "trainer did not open directly on model training");
     require(!window.compose_->isEnabled(), "empty library enabled composition");
     const QString first = QDir(workspace).filePath("datasets/imported");
-    const auto single = QJsonObject{{"datasets", QJsonArray{dataset(first)}}};
+    QJsonObject imported = dataset(first); imported.insert("training_eligibility", QJsonObject{{"eligible_count", 3}, {"excluded_count", 1}});
+    const auto single = QJsonObject{{"datasets", QJsonArray{imported}}};
     window.populateLibrary(single);
     auto *source = window.collectionSources_->topLevelItem(0);
     require(source->checkState(0) == Qt::Checked && window.compose_->isEnabled(), "one imported dataset was not immediately usable");
+    require(window.train_->isEnabled() && window.train_->text() == "Start model training" && window.trainingDataset_->text().contains("imported"), "an imported dataset did not enable direct model training with a visible selection");
+    require(window.trainingDataset_->text().contains("3 usable targets") && window.trainingDataset_->text().contains("1 unusable target"), "direct training did not explain which targets will be skipped");
     window.reviewedDataset_ = first;
     auto *reviewPhoto = new QTreeWidgetItem(window.reviewSamples_, {"review fixture"});
     auto *reviewEntry = new QTreeWidgetItem(reviewPhoto, {"Teacher"}); reviewEntry->setData(0, Qt::UserRole, QJsonObject{{"id", "excluded"}, {"split", "train"}}); reviewEntry->setCheckState(0, Qt::Unchecked);
@@ -83,9 +87,11 @@ void trainingSetReadiness(TrainerWindow &window, const QString &workspace) {
     window.job_ = "Create training set"; window.stdout_ = QJsonDocument(QJsonObject{{"dataset_path", output}}).toJson(); window.setBusy(true);
     window.processFinished(0, QProcess::NormalExit);
     require(window.pendingTrainingPath_ == output, "completed composition did not retain its output for continuation");
+    require(window.trainingStatus_->text().contains("Start model training") && !window.trainingStatus_->text().contains("Training complete", Qt::CaseInsensitive), "preparing a training set was presented as model training completion");
     window.job_ = "Refresh library"; window.stdout_ = QJsonDocument(QJsonObject{{"datasets", QJsonArray{dataset(first), dataset(output)}}}).toJson(); window.setBusy(true);
     window.processFinished(0, QProcess::NormalExit);
     require(window.pendingTrainingPath_.isEmpty() && window.tabs_->currentIndex() == 4 && TrainerWindow::selectedPath(window.datasets_) == output, "completed composition did not select its set and continue to training");
+    require(window.train_->isEnabled() && window.trainingDataset_->text().contains("test-training-set") && window.trainingStatus_->text().contains("Start model training"), "continuation hid the selected prepared set or erased the next training action");
     window.startJob("Inspect dataset", {"inspect-dataset", QDir(workspace).filePath("missing")});
     require(window.busy_, "real backend failure fixture did not start");
     require(await([&] { return !window.busy_; }), "backend failure left the interface busy");
@@ -144,6 +150,68 @@ void failedGenerationStreaming(TrainerWindow &window, const QString &workspace) 
     require(window.reviewedDataset_ == unrelated && window.pendingPreviewArgs_.contains(unrelated) && window.requestedReviewPath_ == unrelated, "generation cleanup discarded unrelated review work");
     window.pendingPreviewArgs_.clear();
 }
+
+void modelTrainingProgress(TrainerWindow &window, const QString &workspace) {
+    const QString selectedDataset = TrainerWindow::selectedPath(window.datasets_);
+    require(!selectedDataset.isEmpty(), "training progress fixture has no selected dataset");
+    window.job_ = "Train RAFT-Stereo"; window.stdout_.clear(); window.progressBuffer_.clear();
+    window.refreshAfter_ = false; window.setBusy(true);
+    require(!window.train_->isEnabled() && window.cancel_->isEnabled(), "training did not disable duplicate starts or enable cancellation");
+    require(window.trainingStatus_ && !window.trainingStatus_->text().trimmed().isEmpty(), "training has no visible progress explanation");
+    auto event = [&](const QString &stage, int epoch, int step, int completed, const QJsonObject &extra = {}) {
+        QJsonObject payload{{"phase", "training_progress"}, {"stage", stage}, {"epoch", epoch}, {"epochs", 4},
+            {"step", step}, {"steps_per_epoch", 3}, {"completed_steps", completed}, {"total_steps", 12}};
+        for (auto it = extra.begin(); it != extra.end(); ++it) payload.insert(it.key(), it.value());
+        window.appendProgress("IPDE_EVENT " + QJsonDocument(payload).toJson(QJsonDocument::Compact) + "\n");
+    };
+    event("checking_dataset", 0, 0, 0);
+    require(window.progress_->maximum() == 12 && window.progress_->value() == 0 && window.progress_->isTextVisible(), "checking the dataset was presented as training updates or hid the update count");
+    require(window.trainingStatus_->text().contains("check", Qt::CaseInsensitive), "dataset verification stage was hidden");
+    event("filtering_targets", 0, 0, 0, {{"eligible_count", 4}, {"excluded_count", 2}});
+    require(window.progress_->value() == 0 && window.trainingStatus_->text().contains("2 invalid targets skipped"), "automatically skipped training targets were not explained");
+    event("preparing_targets", 0, 0, 0, {{"processed", 2}, {"total", 4}, {"role", "train"}});
+    require(window.progress_->value() == 0 && window.trainingStatus_->text().contains("2"), "target preparation did not explain its progress before model updates");
+    event("model_setup", 0, 0, 0);
+    require(window.trainingStatus_->text().contains("model", Qt::CaseInsensitive), "model loading stage was hidden");
+    event("baseline_validation", 0, 0, 0, {{"processed", 1}, {"total", 2}, {"sample_patch", 2}, {"sample_patches", 8}, {"status", "running"}});
+    require(window.progress_->value() == 0 && window.trainingStatus_->text().contains("baseline", Qt::CaseInsensitive), "baseline validation was presented as trained model progress");
+    require(window.trainingStatus_->text().contains("crop 2 / 8"), "baseline crop progress hid long validation work within a photo");
+    event("epoch_step", 1, 1, 0, {{"status", "started"}});
+    require(window.progress_->value() == 0 && window.trainingStatus_->text().contains("Epoch 1 / 4") && window.trainingStatus_->text().contains("step 1 / 3"), "a running optimizer step was counted as finished or lacked cycle and step counts");
+    window.appendProgress("IPDE_EVENT {\"phase\":\"training_progress\",\"stage\":\"epoch_step\",\"epoch\":1,\"epochs\":4,\"step\":1,");
+    require(window.progress_->value() == 0, "a fragmented progress event was consumed before its newline");
+    window.appendProgress("\"steps_per_epoch\":3,\"completed_steps\":1,\"total_steps\":12,\"status\":\"finished\",\"loss\":0.125}\n");
+    require(window.progress_->maximum() == 12 && window.progress_->value() == 1 && window.trainingStatus_->text().contains("1 / 12"), "completed optimizer update did not advance visible training progress");
+    event("epoch_validation", 1, 3, 3, {{"processed", 1}, {"total", 2}, {"status", "running"}});
+    require(window.progress_->value() == 3 && window.trainingStatus_->text().contains("validation", Qt::CaseInsensitive), "held-out validation reset the update count or was not explained");
+    event("writing_checkpoint", 1, 3, 3, {{"best_epoch", 1}, {"status", "started"}});
+    require(window.progress_->value() == 3 && window.trainingStatus_->text().contains("checkpoint", Qt::CaseInsensitive), "checkpoint saving was reported as another optimizer update");
+    event("final_validation", 4, 3, 12, {{"processed", 1}, {"total", 2}, {"status", "running"}});
+    require(window.progress_->value() == 12 && window.trainingStatus_->text().contains("validation", Qt::CaseInsensitive) && window.busy_, "final validation hid its stage or reported process completion early");
+    const QString checkpoint = QDir(workspace).filePath("runs/progress-fixture/checkpoint.pth");
+    event("completed", 4, 3, 12, {{"checkpoint_path", checkpoint}, {"best_epoch", 1}, {"status", "finished"}});
+    require(window.busy_ && !window.train_->isEnabled() && window.cancel_->isEnabled(), "checkpoint publication allowed another run before process exit");
+    require(!window.trainingStatus_->text().contains("Training complete", Qt::CaseInsensitive), "structured completion claimed process success before exit");
+    window.stdout_ = QJsonDocument(QJsonObject{{"checkpoint_path", checkpoint}, {"best_epoch", 1}, {"epochs_completed", 4}, {"total_steps", 12},
+        {"history", QJsonArray{QJsonObject{{"epoch", 1}}, QJsonObject{{"epoch", 2}}, QJsonObject{{"epoch", 3}}, QJsonObject{{"epoch", 4}}}},
+        {"validation", QJsonObject{{"mean_absolute_flow_error_pixels", 1.25}}}}).toJson();
+    window.processFinished(0, QProcess::NormalExit);
+    require(window.train_->isEnabled() && !window.cancel_->isEnabled() && window.trainingStatus_->text().contains("complete", Qt::CaseInsensitive), "successful training did not report a completed model and restore controls");
+    const QString completedStatus = window.trainingStatus_->text();
+    window.job_ = "Refresh library"; window.stdout_ = QJsonDocument(QJsonObject{{"datasets", QJsonArray{dataset(selectedDataset)}}, {"runs", QJsonArray{}}}).toJson(); window.setBusy(true);
+    window.processFinished(0, QProcess::NormalExit);
+    require(window.trainingStatus_->text() == completedStatus, "automatic library refresh erased the training result");
+    window.job_ = "Train RAFT-Stereo"; window.setBusy(true); event("epoch_step", 2, 1, 3, {{"status", "started"}});
+    window.stdout_ = "{\"error\":\"optimizer fixture failure\"}"; window.processFinished(2, QProcess::NormalExit);
+    require(window.train_->isEnabled() && !window.cancel_->isEnabled() && window.trainingStatus_->text().contains("failed", Qt::CaseInsensitive), "failed training retained a running or completed status");
+    require(window.trainingStatus_->text().contains("optimizer fixture failure"), "training failure reason was hidden from the training step");
+    window.job_ = "Train RAFT-Stereo"; window.setBusy(true); event("epoch_step", 2, 2, 4, {{"status", "started"}});
+    window.cancelled_ = true; window.processFinished(9, QProcess::CrashExit); window.cancelled_ = false;
+    require(window.train_->isEnabled() && !window.cancel_->isEnabled() && window.trainingStatus_->text().contains("cancel", Qt::CaseInsensitive), "cancelled training was not clearly distinguished from completion");
+    window.job_ = "Train RAFT-Stereo"; window.setBusy(true); window.process_->setProgram("/missing/ipde-training-python"); window.process_->start();
+    require(await([&] { return !window.busy_; }), "failed training launch left the interface busy");
+    require(window.trainingStatus_->text().contains("failed", Qt::CaseInsensitive), "failed training launch hid its result from the training step");
+}
 } // namespace
 
 int main(int argc, char **argv) {
@@ -162,7 +230,8 @@ int main(int argc, char **argv) {
         trainingSetReadiness(window, workspace);
         streamedFolderImport(window, workspace);
         failedGenerationStreaming(window, workspace);
-        std::cout << "Trainer: readiness, review exclusions, progress, retry/cancel, continuation, scan removals, and failed generation streaming passed\n";
+        modelTrainingProgress(window, workspace);
+        std::cout << "Trainer: readiness, review exclusions, progress, retry/cancel, continuation, scan removals, failed generation streaming, and model training progress passed\n";
         return 0;
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }
 }

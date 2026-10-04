@@ -61,6 +61,8 @@ def _parser() -> argparse.ArgumentParser:
     compose.add_argument("--seed", type=int, default=0)
     compose.add_argument("--grouping", choices=("preserve", "ignore"), default="preserve")
     compose.add_argument("--validation-count-per-dataset", type=int)
+    compose.add_argument("--storage-mode", choices=("shared", "copy"), default="shared",
+                         help="reuse array storage without a full copy (default), or make a portable compressed copy")
     compact = commands.add_parser("compact-dataset", help="write a verified lossless compressed, deduplicated dataset copy")
     compact.add_argument("dataset", type=Path)
     compact.add_argument("--output-dir", required=True, type=Path)
@@ -120,6 +122,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def workspace_report(workspace: Path, linked_datasets: Sequence[Path] = ()) -> dict:
+    from .training import training_target_eligibility
     root = workspace.expanduser().resolve()
     if root.exists() and not root.is_dir():
         raise ValueError("workspace path is not a directory")
@@ -142,11 +145,19 @@ def workspace_report(workspace: Path, linked_datasets: Sequence[Path] = ()) -> d
             if data.get("schema") != "ipde-depth-dataset-v1":
                 raise ValueError("unsupported dataset schema")
             samples = data.get("samples", [])
+            collection = data.get("collection") or {}
+            storage = {key: collection[key] for key in ("storage_mode", "storage_format", "storage_methods",
+                       "array_storage_bytes", "reused_array_storage_bytes", "added_array_storage_bytes", "added_storage_bytes") if key in collection}
+            # Reviewed and compacted copies own newly copied payloads; inherited collection
+            # provenance must not describe them as shared storage.
+            if data.get("curation") or data.get("storage_compaction"):
+                storage = {}
             result["datasets"].append({"path": str(directory), "name": data.get("name") or directory.name, "linked": linked,
                 "sample_count": len(samples), "source_count": len({s.get("source_sha256", s.get("id")) for s in samples}),
                 "training_mode": "supervised" if samples and all(s.get("training_target_choice") == "reference" for s in samples) else "mixed" if any(s.get("training_target_choice") == "reference" for s in samples) else "distillation",
                 "category": data.get("category", ""), "generation_state": data.get("generation_state", "complete"),
                 "storage_bytes": sum(p.stat().st_size for p in path.parent.rglob("*") if p.is_file() and not p.is_symlink()),
+                "storage": storage, "training_eligibility": training_target_eligibility(data),
                 "teacher": ", ".join(sorted({s.get("teacher", {}).get("metadata", {}).get("model_id", "") for s in samples} - {""})),
                 "train_count": sum(s.get("split") == "train" for s in samples),
                 "validation_count": sum(s.get("split") == "validation" for s in samples)})
@@ -226,7 +237,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 from .dataset_collection import CollectionOptions, compose_datasets
                 report = compose_datasets(args.datasets, args.output_dir, CollectionOptions(split_mode=args.split_mode,
                     validation_fraction=args.validation_fraction, split_seed=args.seed, grouping=args.grouping,
-                    validation_count_per_dataset=args.validation_count_per_dataset), validation_datasets=args.validation_dataset, progress_callback=_progress)
+                    validation_count_per_dataset=args.validation_count_per_dataset, storage_mode=args.storage_mode), validation_datasets=args.validation_dataset, progress_callback=_progress)
             elif args.command == "compact-dataset":
                 from .dataset_collection import compress_dataset
                 report = compress_dataset(args.dataset, args.output_dir, progress_callback=_progress)
@@ -266,18 +277,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )) for source in args.sources]}
             elif args.command == "train":
                 from .training import TrainingOptions, train_dataset
-                mode = args.mode
-                if mode == "auto":
-                    from .dataset import load_dataset
-                    manifest = load_dataset(args.dataset, verify=False)
-                    choices = {s.get("training_target_choice", "teacher") for s in manifest["samples"]}
-                    mode = "supervised" if choices == {"reference"} else "mixed" if "reference" in choices else "distillation"
                 report = train_dataset(args.dataset, args.checkpoint, TrainingOptions(
-                    epochs=args.epochs, steps_per_epoch=args.steps, patch_size=args.patch_size, mode=mode,
+                    epochs=args.epochs, steps_per_epoch=args.steps, patch_size=args.patch_size, mode=args.mode,
                     iterations=args.iterations, train_scope=args.scope, device=args.device,
                     raft_root=args.raft_root, raft_model=args.raft_model, raft_model_member=args.raft_model_member,
                     require_photometric_support=args.photometric_support,
-                ))
+                ), progress_callback=_progress)
             else:
                 from .training import export_raft_checkpoint
                 report = export_raft_checkpoint(args.checkpoint, args.output)

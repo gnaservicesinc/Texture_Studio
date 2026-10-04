@@ -398,7 +398,8 @@ public:
         connect(tabs_, &QTabWidget::currentChanged, this, [this](int index) { if (index == 1 && previewProcess_) reviewSelectionChanged(); });
         auto *globalGoal = new QHBoxLayout; globalGoal->addWidget(new QLabel("Main purpose", central)); globalGoal->addWidget(goal_, 1); globalGoal->addWidget(advanced_); root->insertLayout(2, globalGoal);
         if (datasetMode_) { tabs_->setTabVisible(2, false); tabs_->setTabVisible(4, false); runBox->hide(); }
-        else { tabs_->setTabVisible(0, false); tabs_->setCurrentIndex(2); }
+        else { tabs_->setTabVisible(0, false); tabs_->setCurrentIndex(4); }
+        connect(datasets_, &QTreeWidget::itemSelectionChanged, this, [this] { updateTrainingSelection(); });
         root->addWidget(tabs_, 3);
         generate_->setIcon(IPDE::appIcon("datasets")); train_->setIcon(IPDE::appIcon("trainer"));
         export_->setIcon(IPDE::appIcon("trainer"));
@@ -425,6 +426,7 @@ public:
                 setBusy(false); groupsFile_.reset(); teachersFile_.reset(); refreshAfter_ = false;
                 if (job_ == "Generate dataset") stopGenerationStreaming("Generation could not start. Generate a new dataset to try again.");
                 statusBar()->showMessage(job_ + " failed to start; see the progress log.");
+                if (job_ == "Train RAFT-Stereo") trainingStatus_->setText("Model training failed to start: " + process_->errorString());
                 if (job_ == "Preview depth") previewStats_->setText("Preview failed: Python could not be launched.");
             }
         });
@@ -954,7 +956,7 @@ private:
     void buildCollectionTab() {
         auto *tab = new QWidget; auto *root = new QVBoxLayout(tab);
         auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(tab);
-        auto *intro = new QLabel("Build a training set from any number of reviewed datasets. Teacher variants of a photo stay in the same split. Group handling can be overridden for A/B experiments.", tab); intro->setWordWrap(true); root->addWidget(intro);
+        auto *intro = new QLabel("Optional: combine datasets or change validation groups. Preparation reuses existing arrays without another full data copy. To train an existing dataset with its current split, select it above and open Train model & compare.", tab); intro->setWordWrap(true); root->addWidget(intro);
         collectionSources_ = new QTreeWidget(tab); collectionSources_->setHeaderLabels({"Use for training", "Use as validation", "Category", "Teacher entries"});
         collectionSources_->setRootIsDecorated(false); collectionSources_->header()->setSectionResizeMode(0, QHeaderView::Stretch); collectionSources_->setMinimumHeight(140); root->addWidget(collectionSources_, 1);
         connect(collectionSources_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int column) {
@@ -977,6 +979,8 @@ private:
         };
         connect(splitMode_, &QComboBox::currentIndexChanged, this, [this, updateSplit] { updateSplit(); updateCollectionReadiness(); }); updateSplit();
         collectionStatus_ = new QLabel(tab); collectionStatus_->setWordWrap(true); root->addWidget(collectionStatus_);
+        auto *useExisting = new QPushButton("Use selected dataset directly for model training", tab); root->addWidget(useExisting);
+        connect(useExisting, &QPushButton::clicked, this, [this] { tabs_->setCurrentIndex(4); updateTrainingSelection(); });
         compose_ = new QPushButton("Create training set & continue", tab); root->addWidget(compose_);
         connect(collectionName_, &QLineEdit::textChanged, this, [this] { updateCollectionReadiness(); });
         updateCollectionReadiness();
@@ -1015,15 +1019,20 @@ private:
             if (!hfAssetDir_->text().trimmed().isEmpty()) args << "--asset-dir" << hfAssetDir_->text().trimmed();
             refreshAfter_ = true; startJob("Import Hugging Face dataset", args);
         });
-        root->addStretch(); hfRoot->addWidget(hf); hfRoot->addStretch(); tabs_->addTab(scroll, "3. Training set"); tabs_->addTab(hfScroll, "Import datasets");
+        root->addStretch(); hfRoot->addWidget(hf); hfRoot->addStretch(); tabs_->addTab(scroll, "3. Prepare training set"); tabs_->addTab(hfScroll, "Import datasets");
     }
 
     void buildTrainingTab() {
         auto *tab = new QWidget; auto *root = new QVBoxLayout(tab);
         auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(tab);
-        auto *instruction = new QLabel("Create a training set in the previous step, or select an existing one above. After training, compare an unseen spatial photo against the original RAFT model.", tab);
+        auto *instruction = new QLabel("Select an existing dataset above, then Start model training. Training reads its arrays, skips unusable targets, and saves RAFT weights in Trained models. Preparing another training set is optional.", tab);
         instruction->setWordWrap(true); root->addWidget(instruction);
+        trainingDataset_ = new QLabel("Select a dataset from the library above.", tab); trainingDataset_->setObjectName("trainingDataset");
+        trainingDataset_->setWordWrap(true); trainingDataset_->setTextFormat(Qt::PlainText); root->addWidget(trainingDataset_);
+        trainingStatus_ = new QLabel("Ready to start model training.", tab); trainingStatus_->setObjectName("trainingStatus");
+        trainingStatus_->setWordWrap(true); trainingStatus_->setTextFormat(Qt::PlainText); trainingStatus_->setTextInteractionFlags(Qt::TextSelectableByMouse); root->addWidget(trainingStatus_);
         auto *form = new QFormLayout;
+        form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
         runName_ = new QLineEdit("run-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"), tab); form->addRow("New run", runName_);
         form->addRow("RAFT source", pathRow(raftRoot_, projectSettings_ ? projectSettings_->value("raft/root", "/opt/ipde/RAFT-Stereo").toString() : settings_.value("raft_root", "/opt/ipde/RAFT-Stereo").toString(), true, "Choose RAFT-Stereo source", tab));
         form->addRow("Initial RAFT model", pathRow(raftModel_, projectSettings_ ? projectSettings_->value("raft/model", "/opt/ipde/models/raftstereo-middlebury.pth").toString() : settings_.value("raft_model", "/opt/ipde/models/raftstereo-middlebury.pth").toString(), false, "Choose original RAFT checkpoint", tab));
@@ -1047,7 +1056,9 @@ private:
         auto *trainingModeForm = new QFormLayout; trainingModeForm->addRow("Training labels", trainingMode_); trainingAdvancedLayout->addLayout(trainingModeForm);
         auto *trainingHelp = new QLabel("Epochs × steps sets the number of training updates. Each update uses a native-resolution crop (Patch pixels); RAFT iterations sets how often its prediction is refined. Update block is a useful starting scope; Full network adjusts all weights. More training can also learn the teacher's mistakes. Hover over a control for details.", tab);
         trainingHelp->setWordWrap(true); trainingAdvancedLayout->addWidget(trainingHelp); root->addWidget(trainingAdvanced_); trainingAdvanced_->setVisible(advanced_->isChecked()); root->addStretch();
-        train_ = new QPushButton("Train selected dataset", tab); root->addWidget(train_);
+        train_ = new QPushButton("Start model training", tab); root->addWidget(train_);
+        connect(epochs_, qOverload<int>(&QSpinBox::valueChanged), this, [this] { updateTrainingSelection(); });
+        connect(steps_, qOverload<int>(&QSpinBox::valueChanged), this, [this] { updateTrainingSelection(); });
         connect(train_, &QPushButton::clicked, this, [this] { trainDataset(); });
         compareBaseline_ = new QPushButton("Compare selected trained model with baseline on a photo…", tab); root->addWidget(compareBaseline_);
         connect(compareBaseline_, &QPushButton::clicked, this, [this] {
@@ -1058,7 +1069,51 @@ private:
             requestPreview("baseline", {"compare-models", photo, "--baseline-model", raftModel_->text(), "--candidate-model", candidate, "--raft-root", raftRoot_->text(), "--device", trainDevice_->currentText(), "--output-dir", comparisonOutput});
             tabs_->setCurrentIndex(1); previewStats_->setText("Comparing the baseline and trained model in the background…");
         });
-        tabs_->addTab(scroll, "4. Train & compare");
+        tabs_->addTab(scroll, "4. Train model & compare");
+    }
+
+    void updateTrainingSelection() {
+        if (!trainingDataset_ || !train_) return;
+        if (busy_ && job_ == "Train RAFT-Stereo") return;
+        auto *item = datasets_->currentItem();
+        train_->setEnabled(!busy_ && item);
+        if (!item) { trainingDataset_->setText("Select a dataset from the library above."); return; }
+        const auto eligibility = item->data(0, Qt::UserRole + 1).toJsonObject().value("training_eligibility").toObject();
+        QString details = QString("Dataset: %1 · %2 entries · %3 train / validation\nPlanned training: %4 epochs × %5 steps = %6 optimizer updates.")
+            .arg(item->text(0), item->text(1), item->text(2)).arg(epochs_->value()).arg(steps_->value()).arg(epochs_->value() * steps_->value());
+        if (!eligibility.isEmpty()) details += QString("\n%1 usable targets; %2 unusable targets will be skipped automatically. Dataset files remain unchanged.")
+            .arg(eligibility.value("eligible_count").toInt()).arg(eligibility.value("excluded_count").toInt());
+        trainingDataset_->setText(details); trainingDataset_->setToolTip(item->data(0, Qt::UserRole).toString());
+    }
+
+    void updateTrainingProgress(const QJsonObject &event) {
+        const QString stage = event.value("stage").toString();
+        const int epoch = event.value("epoch").toInt(), epochs = event.value("epochs").toInt();
+        const int step = event.value("step").toInt(), steps = event.value("steps_per_epoch").toInt();
+        const int completed = event.value("completed_steps").toInt(), total = event.value("total_steps").toInt();
+        const int processed = event.value("processed").toInt(), samples = event.value("total").toInt();
+        QString message;
+        if (stage == "checking_dataset") message = "Checking dataset arrays before model training. Large datasets can take several minutes.";
+        else if (stage == "filtering_targets") message = QString("Selecting usable targets; %1 invalid targets skipped. Dataset files remain unchanged.").arg(event.value("excluded_count").toInt());
+        else if (stage == "skipped_sample") message = "Skipping unusable target: " + QFileInfo(event.value("source_path").toString(event.value("sample_id").toString())).fileName() + " · " + event.value("reason").toString();
+        else if (stage == "preparing_targets") message = QString("Preparing %1 targets · %2 / %3").arg(event.value("role").toString()).arg(processed).arg(samples);
+        else if (stage == "model_setup") message = "Loading the RAFT model and preparing the training device.";
+        else if (stage == "baseline_validation") message = QString("Checking baseline validation · %1 / %2 photos").arg(processed).arg(samples);
+        else if (stage == "epoch_step") message = QString("Epoch %1 / %2 · step %3 / %4").arg(epoch).arg(epochs).arg(step).arg(steps);
+        else if (stage == "epoch_validation") message = QString("Epoch %1 / %2 · validation %3 / %4 photos").arg(epoch).arg(epochs).arg(processed).arg(samples);
+        else if (stage == "final_validation") message = QString("Final validation of the selected checkpoint · %1 / %2 photos").arg(processed).arg(samples);
+        else if (stage == "writing_checkpoint") message = "Saving and verifying the model checkpoint.";
+        else if (stage == "completed") message = "Model checkpoint saved. Finishing the training run.";
+        if (message.isEmpty()) return;
+        if (event.value("sample_patches").toInt() > 0) message += QString(" · crop %1 / %2").arg(event.value("sample_patch").toInt()).arg(event.value("sample_patches").toInt());
+        message += QString(" · %1 / %2 updates").arg(completed).arg(total);
+        if (event.value("loss").isDouble()) message += " · loss " + QString::number(event.value("loss").toDouble(), 'g', 6);
+        if (event.value("mean_absolute_flow_error_pixels").isDouble()) message += " · held-out error " + QString::number(event.value("mean_absolute_flow_error_pixels").toDouble(), 'f', 3) + " px";
+        trainingStatus_->setText(message); statusBar()->showMessage(message);
+        progress_->setTextVisible(true); progress_->setFormat("%v / %m updates");
+        if (total > 0) { progress_->setRange(0, total); progress_->setValue(qBound(0, completed, total)); }
+        if (stage != "epoch_step" && stage != "preparing_targets" && stage != "skipped_sample"
+            && (event.value("status").toString() == "finished" || stage == "model_setup" || stage == "writing_checkpoint" || stage == "completed")) log_->appendPlainText(message);
     }
 
     bool validName(const QString &name) {
@@ -1201,11 +1256,12 @@ private:
                     statusBar()->showMessage(QString("Found %1 spatial photos — %2 photos in the list. Scanning continues…").arg(event.value("accepted_count").toInt()).arg(sources_->topLevelItemCount()));
                 }
                 else if (type == "dataset_complete") { streamingTimer_->stop(); streamingDataset_.clear(); }
+                else if (job_ == "Train RAFT-Stereo" && phase == "training_progress") updateTrainingProgress(event);
                 else if (!phase.isEmpty()) {
                     QString message;
                     const int processed = event.value("processed").toInt(), total = event.value("total").toInt();
                     if (phase == "verifying_dataset") message = QString("Checking source dataset %1 of %2: %3. Large datasets can take several minutes.").arg(processed).arg(total).arg(QFileInfo(event.value("dataset_path").toString()).fileName());
-                    else if (phase == "sample_composed") message = QString("Creating training set: %1 of %2 teacher entries copied losslessly (%3 unique arrays).").arg(processed).arg(total).arg(event.value("unique_arrays").toInt());
+                    else if (phase == "sample_composed") message = QString("Preparing training set: %1 of %2 entries · %3 arrays %4.").arg(processed).arg(total).arg(event.value("unique_arrays").toInt()).arg(event.value("storage_mode").toString() == "copy" ? "copied losslessly" : "reused without a full data copy");
                     else if (phase == "compressing") message = QString("Compressing arrays losslessly: %1 of %2 records (%3 unique arrays).").arg(processed).arg(total).arg(event.value("unique_arrays").toInt());
                     else if (phase == "verifying_output") message = "Checking the saved arrays before publishing the completed training set. Large datasets can take several minutes.";
                     else if (phase == "publishing_dataset") message = "Publishing the verified training set…";
@@ -1224,11 +1280,21 @@ private:
         busy_ = busy;
         workspace_->setEnabled(!busy); chooseWorkspace_->setEnabled(!busy); refresh_->setEnabled(!busy); export_->setEnabled(!busy);
         generate_->setEnabled(!busy); train_->setEnabled(!busy); importHf_->setEnabled(!busy);
+        train_->setText(busy && job_ == "Train RAFT-Stereo" ? "Training model…" : "Start model training");
+        for (auto *control : QList<QWidget *>{runName_, raftRoot_, raftModel_, epochs_, steps_, patch_, iterations_, scope_, trainDevice_, trainingMode_}) control->setEnabled(!busy);
         collectionSources_->setEnabled(!busy); collectionName_->setEnabled(!busy); splitMode_->setEnabled(!busy); groupingPolicy_->setEnabled(!busy); splitSeed_->setEnabled(!busy);
         validationFraction_->setEnabled(!busy && splitMode_->currentData().toString() != "explicit"); validationCount_->setEnabled(!busy && splitMode_->currentData().toString() == "equal-per-dataset");
         updateCollectionReadiness();
         if (busy) saveReviewed_->setEnabled(false); else updateReviewCount();
-        cancel_->setEnabled(busy); progress_->setRange(0, busy ? 0 : 1); progress_->setValue(0);
+        cancel_->setEnabled(busy);
+        if (job_ == "Train RAFT-Stereo") {
+            if (busy) {
+                trainingStatus_->setText("Starting model training. Checking the selected dataset before the first epoch.");
+                progress_->setRange(0, epochs_->value() * steps_->value()); progress_->setValue(0);
+            }
+            progress_->setTextVisible(true); progress_->setFormat("%v / %m updates");
+        } else { progress_->setTextVisible(false); progress_->setRange(0, busy ? 0 : 1); progress_->setValue(0); }
+        updateTrainingSelection();
         statusBar()->showMessage(busy ? job_ : "Ready");
     }
 
@@ -1268,7 +1334,7 @@ private:
                 unsavedExclusions |= hasUnsavedReviewExclusions(item->data(0, Qt::UserRole).toString());
         }
         QString reason;
-        if (busy_) reason = job_ == "Create training set" ? "Creating the training set. Checking and losslessly copying full-quality arrays may take several minutes. Use Cancel current task to stop." : job_ + " is running. Finish or cancel it before creating a training set.";
+        if (busy_) reason = job_ == "Create training set" ? "Preparing the training set using existing array storage. Checking full-quality arrays may take several minutes. Use Cancel current task to stop." : job_ + " is running. Finish or cancel it before creating a training set.";
         else if (!collectionSources_->topLevelItemCount()) reason = "Import or generate a dataset first; it will appear here and can be used for training.";
         else if (!training) reason = "Tick a dataset in the Use for training column. One dataset is enough; validation photos are held out automatically.";
         else if (!entries) reason = "The selected training datasets have no teacher entries. Finish generating or import a complete dataset first.";
@@ -1280,7 +1346,7 @@ private:
         compose_->setText(busy_ && job_ == "Create training set" ? "Creating training set…" : "Create training set & continue");
         const QString ready = QString("Ready: %1 training dataset(s), %2 teacher entries. %3 The set needs at least two independent photo groups.").arg(training).arg(entries).arg(splitMode_->currentData().toString() == "explicit" ? QString("%1 validation dataset(s) will be held out.").arg(validation) : "Validation photos will be held out automatically.");
         collectionStatus_->setText(reason.isEmpty() ? ready : reason);
-        compose_->setToolTip(reason.isEmpty() ? "Create a lossless training set, then open the training step." : reason);
+        compose_->setToolTip(reason.isEmpty() ? "Prepare validation splits using shared array storage, then open the model training step." : reason);
     }
 
     void processFinished(int code, QProcess::ExitStatus status) {
@@ -1289,6 +1355,7 @@ private:
         setBusy(false); groupsFile_.reset(); teachersFile_.reset();
         if (cancelled_) {
             if (job_ == "Generate dataset") stopGenerationStreaming("Generation cancelled. Generate a new dataset before saving a reviewed copy.");
+            if (job_ == "Train RAFT-Stereo") trainingStatus_->setText("Model training cancelled. The dataset is unchanged; this run did not finish.");
             streamingTimer_->stop(); streamingDataset_.clear();
             refreshAfter_ = false; statusBar()->showMessage("Cancelled");
             if (job_ == "Scan spatial photos") { log_->appendPlainText("Scan cancelled; photos already found remain in the list."); statusBar()->showMessage("Scan cancelled; photos already found remain in the list."); }
@@ -1304,6 +1371,7 @@ private:
                 log_->appendPlainText(explanation);
                 if (job_ == "Create training set") collectionStatus_->setText("Could not create the training set: " + explanation + " Adjust the selection or settings and retry.");
             } else if (!stdout_.trimmed().isEmpty()) log_->appendPlainText(QString::fromUtf8(stdout_).left(12000));
+            if (job_ == "Train RAFT-Stereo") trainingStatus_->setText("Model training failed: " + (explanation.isEmpty() ? "see the progress log." : explanation) + " Dataset files remain unchanged.");
             if (code == 0 && error.error != QJsonParseError::NoError) log_->appendPlainText("Could not parse the result: " + error.errorString());
             if (job_ == "Preview depth") {
                 rgbPreview_->reset("Preview unavailable."); depthPreview_->reset("Preview unavailable.");
@@ -1335,11 +1403,24 @@ private:
         }
         else if (job_ == "Create training set") {
             pendingTrainingPath_ = result.value("dataset_path").toString(); log_->appendPlainText("Training set saved: " + pendingTrainingPath_);
+            trainingStatus_->setText("Training set prepared. Click Start model training to run epochs and save a model checkpoint.");
             for (const auto &warning : result.value("warnings").toArray()) log_->appendPlainText(warning.toString());
         }
         else if (job_ == "Generate dataset" || job_ == "Save reviewed dataset" || job_ == "Import Hugging Face dataset" || job_ == "Compact dataset") {
             pendingReview_ = result.value("dataset_path").toString();
             log_->appendPlainText("Dataset saved: " + pendingReview_ + "\n" + QString::fromUtf8(QJsonDocument(result.value("summary").toObject()).toJson(QJsonDocument::Compact)));
+            for (const auto &warning : result.value("warnings").toArray()) log_->appendPlainText(warning.toString());
+        }
+        else if (job_ == "Train RAFT-Stereo") {
+            const auto metrics = result.value("validation").toObject();
+            QString summary = QString("Model training complete · %1 epochs · %2 updates · best epoch %3.")
+                .arg(result.value("epochs_completed").toInt(result.value("history").toArray().size()))
+                .arg(result.value("total_steps").toInt()).arg(result.value("best_epoch").toInt());
+            if (metrics.value("mean_absolute_flow_error_pixels").isDouble()) summary += " Held-out error: " + QString::number(metrics.value("mean_absolute_flow_error_pixels").toDouble(), 'f', 3) + " px.";
+            summary += " Checkpoint: " + result.value("checkpoint_path").toString();
+            const auto excluded = result.value("excluded_samples").toArray();
+            if (!excluded.isEmpty()) summary += QString(" %1 unusable targets skipped; dataset unchanged.").arg(excluded.size());
+            trainingStatus_->setText(summary); log_->appendPlainText(summary);
             for (const auto &warning : result.value("warnings").toArray()) log_->appendPlainText(warning.toString());
         }
         else log_->appendPlainText(QString::fromUtf8(QJsonDocument(result).toJson(QJsonDocument::Indented)).left(18000));
@@ -1371,6 +1452,12 @@ private:
             const bool linked = obj.value("linked").toBool();
             const QString location = path + (linked ? "\nLinked from another location; source files stay there. Reviewed copies are saved in this project." : QString());
             item->setData(0, Qt::UserRole, path); item->setToolTip(0, location);
+            item->setData(0, Qt::UserRole + 1, obj);
+            const auto storage = obj.value("storage").toObject();
+            if (storage.value("storage_mode").toString() == "shared") {
+                item->setText(5, QString("Shared arrays · %1 MiB added").arg(storage.value("added_storage_bytes").toDouble() / (1024*1024), 'f', 2));
+                item->setToolTip(5, "Reuses existing array storage without another full data copy. " + QString::number(storage.value("reused_array_storage_bytes").toDouble() / (1024*1024), 'f', 1) + " MiB of arrays reused.");
+            }
             if (linked) item->setText(0, item->text(0) + " ↗");
             if (path == oldDataset) datasets_->setCurrentItem(item);
             auto *collection = new QTreeWidgetItem(collectionSources_, {obj.value("name").toString(QFileInfo(path).fileName()), "", obj.value("category").toString(), QString::number(obj.value("sample_count").toInt())});
@@ -1394,6 +1481,7 @@ private:
             if (!collectionChecks.contains(item->data(0, Qt::UserRole).toString())) item->setCheckState(0, Qt::Checked);
         }
         updateCollectionReadiness();
+        updateTrainingSelection();
     }
 
     void showFolder(const QString &path) {
@@ -1413,6 +1501,7 @@ private:
     QComboBox *teacher_ = nullptr, *teacherDevice_ = nullptr, *trainDevice_ = nullptr, *scope_ = nullptr, *trainingMode_ = nullptr;
     QComboBox *reviewLabel_ = nullptr, *goal_ = nullptr, *reviewCamera_ = nullptr, *visualView_ = nullptr, *splitMode_ = nullptr, *groupingPolicy_ = nullptr;
     QLabel *scaleHelp_ = nullptr, *reviewPath_ = nullptr, *reviewCount_ = nullptr, *previewStats_ = nullptr, *goalHelp_ = nullptr, *splitHelp_ = nullptr, *collectionStatus_ = nullptr;
+    QLabel *trainingStatus_ = nullptr, *trainingDataset_ = nullptr;
     QList<QLabel *> depthTitles_;
     DepthPreview *rgbPreview_ = nullptr, *depthPreview_ = nullptr;
     QList<DepthPreview *> depthPreviews_;

@@ -7,8 +7,10 @@ or scene groups describe related photographs that should stay together when
 training and validation are separated. Preserve verified scene groups when
 measuring generalization to new scenes.
 
-After reviewing individual photos and teacher variants, select several datasets
-in the Training Set tab and create a new training collection. Original datasets
+Train an existing dataset directly from **Train model & compare** when its current
+split is suitable. To combine datasets or choose new validation groups, select
+datasets in **Prepare training set** and create a collection. Preparation reuses
+the original array storage without a full payload copy. Original dataset files
 remain unchanged. Every teacher variant of a photo stays on the same side of the
 training/validation boundary. Identical source files, identical left RGB planes,
 and explicit burst identifiers are protected even when supplied groups are
@@ -80,8 +82,16 @@ raft-studio compose-datasets flowers rooms --output-dir experiment-ignore-groups
 
 ## Lossless storage
 
-New collections store each unique plane once using NPZ (a ZIP archive containing
-one NPY plane named `data`). Compression changes the file representation; the
+New collections reuse each unique original NPY/NPZ file through independent
+copy-on-write clones on supported macOS filesystems, or immutable hard links on
+the same filesystem. No array values or file containers are rewritten. Each
+collection has contained array paths and survives removal of its source folder.
+Cross-volume preparation requires an explicit `--storage-mode copy`, or direct
+training from the existing dataset.
+
+Newly generated datasets and explicit portable copies store each unique plane
+once using NPZ (a ZIP archive containing one NPY plane named `data`). Compression
+changes the file representation; the
 array dtype, dimensions, byte order, NaN payloads, signed zero, and numerical
 values are checked by exact array hashes. Preview PNGs are disposable viewing
 images and never become training labels.

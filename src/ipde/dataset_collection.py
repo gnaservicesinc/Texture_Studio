@@ -9,10 +9,14 @@ protection. The resulting ordinary v1 dataset is usable by the existing trainer.
 from __future__ import annotations
 
 import copy
+import ctypes
+import errno
 import hashlib
 import json
 import math
+import os
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +35,7 @@ class CollectionOptions:
     split_seed: int = 0
     grouping: str = "preserve"
     validation_count_per_dataset: int | None = None
+    storage_mode: str = "shared"
 
 
 def _require_complete(manifest: Mapping[str, Any]) -> None:
@@ -39,6 +44,8 @@ def _require_complete(manifest: Mapping[str, Any]) -> None:
 
 
 def _validate_options(options: CollectionOptions) -> None:
+    if options.storage_mode not in {"shared", "copy"}:
+        raise DatasetError("storage_mode must be shared or copy")
     if options.split_mode not in {"global-random", "equal-per-dataset", "explicit"}:
         raise DatasetError("split_mode must be global-random, equal-per-dataset, or explicit")
     if options.grouping not in {"preserve", "ignore"}:
@@ -52,6 +59,51 @@ def _validate_options(options: CollectionOptions) -> None:
         raise DatasetError("validation_count_per_dataset must be a positive integer")
     if count is not None and options.split_mode != "equal-per-dataset":
         raise DatasetError("A per-dataset validation count requires equal-per-dataset splitting")
+
+
+def _clone_array_file(source: Path, destination: Path) -> bool:
+    """Use macOS copy-on-write storage when the filesystem supports it.
+
+    A clone has its own inode and remains independent when either file is
+    changed. Unsupported platforms/filesystems may instead share immutable
+    files using hard links; other failures must never cause a full copy.
+    """
+    if sys.platform != "darwin":
+        return False
+    library = ctypes.CDLL(None, use_errno=True)
+    clone = getattr(library, "clonefile", None)
+    if clone is None:
+        return False
+    clone.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    clone.restype = ctypes.c_int
+    if clone(os.fsencode(source), os.fsencode(destination), 0) == 0:
+        return True
+    error = ctypes.get_errno()
+    if error in {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS}:
+        return False
+    raise OSError(error, os.strerror(error), str(destination))
+
+
+def _share_array_file(source: Path, destination: Path) -> str:
+    """Give this dataset a local path without duplicating the array payload."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if source.stat().st_dev != destination.parent.stat().st_dev:
+            raise OSError(errno.EXDEV, "Source and training set are on different filesystems")
+        if _clone_array_file(source, destination):
+            return "clonefile"
+        # Array writers only publish new datasets; they never edit an existing
+        # payload in place. Deleting/archiving either directory keeps the other
+        # link usable, unlike an external path reference or symbolic link.
+        os.link(source, destination, follow_symlinks=False)
+        return "hardlink"
+    except OSError as exc:
+        raise DatasetError(
+            f"Cannot reuse dataset array storage without copying: {source.name}: {exc}. "
+            "Choose a training-set destination on the same filesystem as the source, "
+            "train the existing dataset directly, or explicitly request a portable copy. "
+            "No full array copy was made."
+        ) from exc
 
 
 def _components(samples: list[dict[str, Any]], grouping: str) -> dict[str, list[int]]:
@@ -163,6 +215,10 @@ def compose_datasets(
     random splitting samples independent components from the whole collection;
     equal splitting samples equal counts from each dataset. External validation
     datasets are held out completely and overlapping captures are rejected.
+    The default reuses immutable array storage with copy-on-write clones or
+    hard links. Every array still has a contained local path, so removing a
+    source directory does not invalidate the collection. ``storage_mode=copy``
+    explicitly creates a portable, compressed copy instead.
     """
     options = options or CollectionOptions()
     _validate_options(options)
@@ -253,9 +309,13 @@ def compose_datasets(
     collection = {"sources": source_reports, "split_mode": options.split_mode, "grouping": options.grouping,
                   "validation_count_per_dataset": options.validation_count_per_dataset,
                   "random_sampling_unit": "independent photo/burst/scene component; all teacher variants stay together",
-                  "array_bytes_preserved": True, "original_split_assignments_preserved": False}
+                  "array_bytes_preserved": True, "original_split_assignments_preserved": False,
+                  "storage_mode": options.storage_mode}
     manifest = {
-        "schema": "ipde-depth-dataset-v1", "precision_policy": "Array payloads preserved bit-for-bit in deduplicated lossless NPZ without changing any array values",
+        "schema": "ipde-depth-dataset-v1", "precision_policy": (
+            "Original deduplicated NPY/NPZ files preserved byte-for-byte using copy-on-write clones or immutable hard links; no array rewriting"
+            if options.storage_mode == "shared" else
+            "Array payloads preserved bit-for-bit in deduplicated lossless NPZ without changing any array values"),
         "split_seed": options.split_seed, "validation_fraction": options.validation_fraction,
         "group_ids": sorted({sample["group_id"] for sample in samples}), "explicit_scene_groups": bool(explicit_scenes),
         "grouping_semantics": "scene" if explicit_scenes else "capture", "warnings": sorted(set(warnings)),
@@ -265,9 +325,10 @@ def compose_datasets(
     temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination.parent))
     try:
         copied: dict[tuple[str, tuple[int, ...], str], dict[str, Any]] = {}
+        storage_methods: dict[str, int] = {}
         for sample_index, sample in enumerate(samples, 1):
             origin = sample["collection_provenance"]
-            dataset_id, root = origin["dataset_id"], sources[origin["dataset_id"]]
+            root = sources[origin["dataset_id"]]
             for record in _array_records(sample):
                 source_name = record["path"]
                 key = record["dtype"], tuple(record["shape"]), record["array_sha256"]
@@ -276,19 +337,50 @@ def compose_datasets(
                     # RGB repeated in raw_assets and teacher-variant datasets.
                     identity = hashlib.sha256(json.dumps(key).encode()).hexdigest()
                     value = _verified_array(root, record)
-                    copied[key] = array_record(temporary, temporary / "arrays" / f"{identity}.npz", value, compressed=True)
+                    if options.storage_mode == "shared":
+                        source = _array_path(root, record)
+                        target = temporary / "arrays" / f"{identity}{source.suffix.lower()}"
+                        method = _share_array_file(source, target)
+                        saved = {field: record[field] for field in ("shape", "dtype", "array_sha256", "file_sha256")}
+                        saved["path"] = target.relative_to(temporary).as_posix()
+                        copied[key] = saved
+                    else:
+                        method = "compressed-copy"
+                        copied[key] = array_record(temporary, temporary / "arrays" / f"{identity}.npz", value, compressed=True)
+                    storage_methods[method] = storage_methods.get(method, 0) + 1
                     if any(copied[key][field] != record[field] for field in ("array_sha256", "shape", "dtype")):
                         raise DatasetError(f"Lossless composition changed source array values: {source_name}")
                 record.update(copied[key])
             if progress_callback is not None:
                 progress_callback({"phase": "sample_composed", "sample_id": sample["id"], "unique_arrays": len(copied),
-                                   "processed": sample_index, "total": len(samples)})
+                                   "processed": sample_index, "total": len(samples), "storage_mode": options.storage_mode})
         collection["unique_arrays"] = len(copied)
-        collection["storage_format"] = "deduplicated lossless NPZ"
+        collection["storage_methods"] = storage_methods
+        collection["storage_format"] = "deduplicated original NPY/NPZ with " + ", ".join(
+            "copy-on-write clones" if method == "clonefile" else "immutable hard links" for method in storage_methods
+        ) if options.storage_mode == "shared" else "deduplicated lossless NPZ"
+        array_bytes = sum((temporary / record["path"]).stat().st_size for record in copied.values())
+        collection["array_storage_bytes"] = array_bytes
+        collection["reused_array_storage_bytes"] = array_bytes if options.storage_mode == "shared" else 0
+        collection["added_array_storage_bytes"] = 0 if options.storage_mode == "shared" else array_bytes
+        collection["shared_array_files_immutable"] = bool(storage_methods.get("hardlink"))
+        if storage_methods.get("hardlink"):
+            warnings.append("Prepared arrays share immutable files with their sources. Archiving or removing a source directory keeps the set usable; do not edit shared array files in place.")
+            manifest["warnings"] = sorted(set(warnings))
         for report in source_reports:
             if sha256_file(sources[report["dataset_id"]] / "dataset.json") != report["source_manifest_sha256"]:
                 raise DatasetError("Source dataset manifest changed during composition")
-        (temporary / "dataset.json").write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+        # Include the metadata itself in added logical file bytes. COW/hard-link
+        # filesystem bookkeeping is not a second array payload and is excluded.
+        collection["added_metadata_bytes"] = 0
+        collection["added_storage_bytes"] = collection["added_array_storage_bytes"]
+        while True:
+            serialized = (json.dumps(manifest, indent=2, allow_nan=False) + "\n").encode("utf-8")
+            if collection["added_metadata_bytes"] == len(serialized):
+                break
+            collection["added_metadata_bytes"] = len(serialized)
+            collection["added_storage_bytes"] = collection["added_array_storage_bytes"] + len(serialized)
+        (temporary / "dataset.json").write_bytes(serialized)
         if progress_callback is not None:
             progress_callback({"phase": "verifying_output"})
         load_dataset(temporary, verify=True)

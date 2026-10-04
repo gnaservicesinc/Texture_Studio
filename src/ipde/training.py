@@ -11,9 +11,9 @@ import sys
 import tempfile
 import warnings
 from collections import OrderedDict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -47,6 +47,61 @@ class TrainingOptions:
     train_scope: str = "update"
     require_photometric_support: bool = False
     cache_samples: int = 2
+    skip_incompatible_targets: bool = True
+
+
+def _selected_target(sample: Mapping[str, Any], mode: str) -> str:
+    return "reference" if mode == "supervised" else sample.get("training_target_choice", "teacher")
+
+
+def _target_exclusion(sample: Mapping[str, Any], mode: str) -> dict[str, Any] | None:
+    choice = _selected_target(sample, mode)
+    allowed = {"reference"} if mode == "supervised" else {"teacher", "registered_display_teacher", "anchored_teacher"}
+    if mode == "mixed":
+        allowed.add("reference")
+    label = sample.get(choice) if isinstance(choice, str) else None
+    reason = None
+    if not isinstance(choice, str) or choice not in allowed or not isinstance(label, Mapping):
+        reason = "Selected training target is unavailable or incompatible with the training mode"
+    elif choice == "registered_display_teacher" and label.get("reference_role") != "left":
+        reason = "Selected display teacher is not registered to the LEFT stereo grid"
+    elif label.get("units") != "meters":
+        reason = "Selected target has no accepted meter scale; relative values remain unchanged"
+    elif choice != "reference":
+        metadata = label.get("metadata", {})
+        checkpoint = metadata.get("checkpoint_sha256") if isinstance(metadata, Mapping) else None
+        if not isinstance(checkpoint, str) or not checkpoint:
+            reason = "Selected teacher target does not identify its checkpoint"
+    if reason is None:
+        return None
+    return {"sample_id": sample.get("id", ""), "source_path": sample.get("source_path", ""),
+        "target_choice": choice, "units": label.get("units") if isinstance(label, Mapping) else None, "reason": reason}
+
+
+def training_target_eligibility(manifest: Mapping[str, Any], mode: str = "auto") -> dict[str, Any]:
+    """Inspect selected target metadata without reading or changing any arrays.
+
+    A rejected relative teacher is never replaced by another stored label.
+    Geometry/support and dataset integrity are checked by training preflight.
+    """
+    if mode not in {"auto", "distillation", "supervised", "mixed"}:
+        raise TrainingError("Use auto/distillation/supervised/mixed training mode")
+    samples = manifest.get("samples", [])
+    if not isinstance(samples, list) or any(not isinstance(sample, Mapping) for sample in samples):
+        raise TrainingError("Dataset samples must be a list of sample records")
+    if mode == "auto":
+        choices = {choice for sample in samples if isinstance(choice := sample.get("training_target_choice", "teacher"), str)}
+        mode = "supervised" if choices == {"reference"} else "mixed" if "reference" in choices else "distillation"
+    excluded, eligible = [], []
+    for sample in samples:
+        rejection = _target_exclusion(sample, mode)
+        if rejection is None:
+            eligible.append(sample)
+        else:
+            excluded.append(rejection)
+    return {"mode": mode, "sample_count": len(samples), "eligible_count": len(eligible),
+        "excluded_count": len(excluded), "train_count": sum(sample.get("split") == "train" for sample in eligible),
+        "validation_count": sum(sample.get("split") == "validation" for sample in eligible), "excluded": excluded}
 
 
 def _check_splits(samples: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -144,6 +199,7 @@ class _SamplePool(Sequence):
         self.root, self.samples, self.options = root, samples, options
         self.cache: OrderedDict[int, dict[str, Any]] = OrderedDict()
         self.details: dict[int, dict[str, Any]] = {}
+        self.crop_origins: dict[int, tuple[int, int]] = {}
 
     def __len__(self):
         return len(self.samples)
@@ -160,10 +216,47 @@ class _SamplePool(Sequence):
         self.cache.move_to_end(index)
         return self.cache[index]
 
-    def prepare(self, role: str):
+    def prepare(self, role: str, progress_callback: Callable[[dict[str, Any]], None] | None = None,
+                skipped_callback: Callable[[dict[str, Any]], None] | None = None) -> list[dict[str, Any]]:
+        retained, excluded = [], []
         for index in range(len(self)):
-            self[index]
+            if progress_callback is not None:
+                progress_callback({"role": role, "processed": index, "total": len(self),
+                    "sample_id": self.samples[index]["id"], "status": "running"})
+            try:
+                value = self[index]
+                if role == "training":
+                    origin = _training_crop_origin(value, self.options.patch_size)
+                    if origin is None:
+                        raise TrainingError(f"No supported teacher correspondence fits the requested {self.options.patch_size}-pixel training crop")
+                    self.crop_origins[index] = origin
+                elif not any(_patch(value, y, x, self.options.patch_size)[3].any()
+                             for y, x in _validation_crop_origins(value, self.options.patch_size)):
+                    raise TrainingError("Fixed validation crops contain no supported teacher correspondences")
+            except TrainingError as exc:
+                if not self.options.skip_incompatible_targets:
+                    raise
+                sample = self.samples[index]
+                choice = _selected_target(sample, self.options.mode)
+                rejection = {"sample_id": sample["id"], "source_path": sample.get("source_path", ""),
+                    "target_choice": choice, "units": sample[choice].get("units"), "reason": str(exc)}
+                excluded.append(rejection)
+                if skipped_callback is not None:
+                    skipped_callback(rejection)
+            else:
+                retained.append(index)
             print(f"Preparing {role} target {index + 1}/{len(self)}", file=sys.stderr, flush=True)
+            if progress_callback is not None:
+                progress_callback({"role": role, "processed": index + 1, "total": len(self),
+                    "sample_id": self.samples[index]["id"], "status": "running"})
+        # Keep already decoded values under their new indices without another
+        # decode or an unbounded second collection of scientific arrays.
+        remap = {previous: current for current, previous in enumerate(retained)}
+        self.samples = [self.samples[index] for index in retained]
+        self.cache = OrderedDict((remap[index], value) for index, value in self.cache.items() if index in remap)
+        self.details = {remap[index]: value for index, value in self.details.items() if index in remap}
+        self.crop_origins = {remap[index]: value for index, value in self.crop_origins.items() if index in remap}
+        return excluded
 
     def preprocessing(self):
         return [self.details[index] for index in sorted(self.details)]
@@ -183,6 +276,34 @@ def _patch(sample: Mapping[str, Any], y: int, x: int, size: int) -> tuple[np.nda
     return left, right, flow, valid
 
 
+def _training_crop_origin(sample: Mapping[str, Any], size: int) -> tuple[int, int] | None:
+    """Find one supported native crop without random draws or modifying arrays.
+
+    A full-image match fits a crop only when both corresponding x positions
+    lie inside its width. Scan one row at a time to keep temporary storage
+    bounded, then check the exact patch/loss validity predicate.
+    """
+    h, w = sample["flow"].shape
+    ph, pw = min(size, h), min(size, w)
+    for y in range(h):
+        flow = sample["flow"][y]
+        supported = sample["valid"][y] & np.isfinite(flow) & (np.abs(flow) < 700) & (np.abs(flow) <= pw - 1)
+        for x in np.flatnonzero(supported):
+            origin_y = min(y, h - ph)
+            origin_x = int(np.clip(math.floor(min(float(x), float(x) + float(flow[x]))), 0, w - pw))
+            patch = _patch(sample, origin_y, origin_x, size)
+            accepted = patch[3] & np.isfinite(patch[2]) & (np.abs(patch[2]) < 700)
+            if accepted.any():
+                return origin_y, origin_x
+    return None
+
+
+def _validation_crop_origins(sample: Mapping[str, Any], size: int) -> list[tuple[int, int]]:
+    h, w = sample["flow"].shape
+    my, mx = max(0, h - size), max(0, w - size)
+    return sorted({(0, 0), (my, mx), (my // 2, mx // 2)})
+
+
 def _tensors(torch: Any, device: str, padder_class: Any, patch: Any) -> tuple[Any, Any, Any, Any, Any]:
     left, right, flow, valid = patch
     lt = torch.from_numpy(left).permute(2, 0, 1)[None].to(device=device, dtype=torch.float32)
@@ -194,17 +315,25 @@ def _tensors(torch: Any, device: str, padder_class: Any, patch: Any) -> tuple[An
     return lt, rt, ft, vt, padder
 
 
-def _evaluate(torch: Any, model: Any, device: str, padder_class: Any, samples: Sequence[dict[str, Any]], options: TrainingOptions) -> dict[str, Any]:
+def _evaluate(torch: Any, model: Any, device: str, padder_class: Any, samples: Sequence[dict[str, Any]], options: TrainingOptions, *,
+              progress_callback: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     errors, patches = [], []
     model.eval()
     with torch.inference_mode():
-        for index, sample in enumerate(samples):
-            h, w = sample["flow"].shape
-            my, mx = max(0, h - options.patch_size), max(0, w - options.patch_size)
-            for y, x in sorted({(0, 0), (my, mx), (my // 2, mx // 2)}):
+        for index in range(len(samples)):
+            if progress_callback is not None:
+                progress_callback({"processed": index, "total": len(samples), "sample_index": index,
+                    "evaluated_patches": len(patches), "status": "running"})
+            sample = samples[index]
+            crop_origins = _validation_crop_origins(sample, options.patch_size)
+            for crop_index, (y, x) in enumerate(crop_origins):
                 patch = _patch(sample, y, x, options.patch_size)
                 if not patch[3].any():
                     continue
+                if progress_callback is not None:
+                    progress_callback({"processed": index, "total": len(samples), "sample_index": index,
+                        "sample_patch": crop_index + 1, "sample_patches": len(crop_origins),
+                        "evaluated_patches": len(patches), "status": "running"})
                 lt, rt, ft, vt, padder = _tensors(torch, device, padder_class, patch)
                 _, prediction = model(lt, rt, iters=options.iterations, test_mode=True)
                 difference = (padder.unpad(prediction) - ft).abs()[vt].cpu().numpy().astype(np.float64)
@@ -212,63 +341,122 @@ def _evaluate(torch: Any, model: Any, device: str, padder_class: Any, samples: S
                     raise TrainingError("RAFT produced nonfinite validation predictions")
                 errors.append(difference)
                 patches.append({"sample_index": index, "x": x, "y": y, "width": patch[0].shape[1], "height": patch[0].shape[0]})
+                if progress_callback is not None:
+                    progress_callback({"processed": index, "total": len(samples), "sample_index": index,
+                        "sample_patch": crop_index + 1, "sample_patches": len(crop_origins),
+                        "evaluated_patches": len(patches), "status": "running"})
+            if progress_callback is not None:
+                progress_callback({"processed": index + 1, "total": len(samples), "sample_index": index,
+                    "evaluated_patches": len(patches), "status": "running"})
     if not errors:
         raise TrainingError("Held-out crops lack supported correspondences; enlarge patch_size or add a scene")
     values = np.concatenate(errors)
-    return {"mean_absolute_flow_error_pixels": float(values.mean()), "within_one_pixel_fraction": float(np.mean(values < 1)),
+    result = {"mean_absolute_flow_error_pixels": float(values.mean()), "within_one_pixel_fraction": float(np.mean(values < 1)),
         "within_three_pixels_fraction": float(np.mean(values < 3)), "evaluated_pixels_including_overlapping_patches": int(values.size),
         "scope": "Fixed native-resolution stereo crops; overlapping pixels may count more than once", "patches": patches,
         "reference": "teacher-derived flow pseudo-label agreement" if options.mode == "distillation" else "user-supplied measured meter-depth references" if options.mode == "supervised" else "mixed measured-reference and teacher pseudo-label agreement"}
+    if progress_callback is not None:
+        progress_callback({"processed": len(samples), "total": len(samples), "evaluated_patches": len(patches),
+            "mean_absolute_flow_error_pixels": result["mean_absolute_flow_error_pixels"], "status": "finished"})
+    return result
 
 
-def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options: TrainingOptions | None = None) -> dict[str, Any]:
-    """Fine-tune real RAFT weights locally and save the best held-out checkpoint."""
+def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options: TrainingOptions | None = None, *,
+                  progress_callback: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+    """Fine-tune real RAFT weights and report stages and completed optimizer steps.
+
+    Progress contains no timing estimates. Validation counters count samples;
+    completed_steps counts only successful optimizer updates, independently of
+    setup, validation, and checkpoint publication.
+    """
     options = options or TrainingOptions()
-    if options.mode not in {"distillation", "supervised", "mixed"} or options.train_scope not in {"update", "full"}:
-        raise TrainingError("Use distillation/supervised/mixed mode and update/full train_scope")
+    if options.mode not in {"auto", "distillation", "supervised", "mixed"} or options.train_scope not in {"update", "full"}:
+        raise TrainingError("Use auto/distillation/supervised/mixed mode and update/full train_scope")
     if min(options.epochs, options.steps_per_epoch) < 1 or options.patch_size < 64 or options.patch_size % 32:
         raise TrainingError("Epochs/steps must be positive; native patch_size must be a multiple of 32 and at least 64")
     if not isinstance(options.cache_samples, int) or isinstance(options.cache_samples, bool) or not 1 <= options.cache_samples <= 64:
         raise TrainingError("cache_samples must be an integer from 1 to 64")
+    if not isinstance(options.skip_incompatible_targets, bool):
+        raise TrainingError("skip_incompatible_targets must be boolean")
     if not 1 <= options.iterations <= 256 or not math.isfinite(options.learning_rate) or options.learning_rate <= 0:
         raise TrainingError("RAFT iterations must be 1..256 and learning_rate finite and positive")
+    progress_state = {"epoch": 0, "epochs": options.epochs, "step": 0,
+        "steps_per_epoch": options.steps_per_epoch, "completed_steps": 0,
+        "total_steps": options.epochs * options.steps_per_epoch}
+
+    def progress(stage: str, **details: Any) -> None:
+        if progress_callback is not None:
+            progress_callback({"phase": "training_progress", "stage": stage, **progress_state, **details})
+
     checkpoint = Path(checkpoint_path).expanduser().resolve()
     report_path = checkpoint.with_suffix(checkpoint.suffix + ".json")
     if checkpoint.exists() or report_path.exists():
         raise TrainingError("Checkpoint/report already exists; choose a new checkpoint path")
     root = Path(dataset_dir).expanduser().resolve()
+    if checkpoint.is_relative_to(root):
+        raise TrainingError("Checkpoint output must be outside the input dataset directory")
+    progress("checking_dataset", status="started", dataset_path=str(root))
     try:
         manifest = load_dataset(root)
     except DatasetError as exc:
         raise TrainingError(str(exc)) from exc
     if manifest.get("generation_state", "complete") != "complete" or manifest.get("splits_provisional"):
         raise TrainingError("Finish dataset generation before training; streamed split assignments are provisional")
-    train, validation = _check_splits(manifest["samples"])
-    if options.mode == "supervised" and any("reference" not in s for s in manifest["samples"]):
-        raise TrainingError("Supervised training requires independently measured meter-depth references for every sample")
-    chosen = [s.get("training_target_choice", "teacher") if options.mode != "supervised" else "reference" for s in manifest["samples"]]
-    allowed = {"teacher", "registered_display_teacher", "anchored_teacher"} if options.mode == "distillation" else {"reference"} if options.mode == "supervised" else {"teacher", "registered_display_teacher", "anchored_teacher", "reference"}
-    if any(key not in allowed or key not in sample for sample, key in zip(manifest["samples"], chosen)):
-        raise TrainingError("Dataset has an unsupported training label choice")
-    teachers = {s[key].get("metadata", {}).get("checkpoint_sha256") for s, key in zip(manifest["samples"], chosen) if key != "reference"}
-    if options.mode != "supervised" and any(key != "reference" and (not isinstance(s[key].get("metadata", {}).get("checkpoint_sha256"), str) or not s[key]["metadata"]["checkpoint_sha256"]) for s, key in zip(manifest["samples"], chosen)):
-        raise TrainingError("Every distillation target must identify its teacher checkpoint")
-    if options.mode == "supervised": teachers.clear()
+    # Verify every original split before filtering. An incompatible label may
+    # not conceal a duplicate, burst, or scene crossing the held-out boundary.
+    _check_splits(manifest["samples"])
+    eligibility = training_target_eligibility(manifest, options.mode)
+    options = replace(options, mode=eligibility["mode"])
+    excluded = list(eligibility["excluded"])
+    progress_state.update(sample_count=eligibility["sample_count"], eligible_count=eligibility["eligible_count"],
+        excluded_count=eligibility["excluded_count"], train_count=eligibility["train_count"],
+        validation_count=eligibility["validation_count"])
+    if excluded and not options.skip_incompatible_targets:
+        raise TrainingError(f"{excluded[0]['sample_id']}: {excluded[0]['reason']}")
+    progress("filtering_targets", status="started", processed=0, total=len(manifest["samples"]))
+    for rejection in excluded:
+        progress("skipped_sample", status="finished", **rejection)
+    eligible = [sample for sample in manifest["samples"] if _target_exclusion(sample, options.mode) is None]
+    progress("filtering_targets", status="finished", processed=len(manifest["samples"]),
+        total=len(manifest["samples"]), eligible_count=len(eligible), excluded_count=len(excluded))
+    if not any(sample.get("split") == "train" for sample in eligible) or not any(sample.get("split") == "validation" for sample in eligible):
+        raise TrainingError("No usable training and held-out validation split remains after incompatible targets were skipped")
+    train, validation = _check_splits(eligible)
+    # Each reviewed teacher variant is a separate target on the same source
+    # grid. Splits keep the source together; mixed teachers need not share weights.
+    train_arrays = _SamplePool(root, train, options)
+    validation_arrays = _SamplePool(root, validation, options)
+    total_targets = len(train) + len(validation)
+    progress("preparing_targets", status="started", processed=0, total=total_targets)
+    excluded.extend(train_arrays.prepare("training", lambda event: progress("preparing_targets", **{**event, "total": total_targets}),
+        lambda rejection: progress("skipped_sample", status="finished", **rejection)))
+    excluded.extend(validation_arrays.prepare("validation", lambda event: progress("preparing_targets",
+        **{**event, "processed": len(train) + event["processed"], "total": total_targets}),
+        lambda rejection: progress("skipped_sample", status="finished", **rejection)))
+    progress("preparing_targets", status="finished", processed=total_targets, total=total_targets)
+    train, validation = train_arrays.samples, validation_arrays.samples
+    if not train or not validation:
+        raise TrainingError("No usable training and held-out validation split remains after targets without valid geometry/support were skipped")
+    _check_splits(train + validation)
+    usable_records = {id(sample) for sample in train + validation}
+    eligible = [sample for sample in eligible if id(sample) in usable_records]
+    progress_state.update(eligible_count=len(eligible), excluded_count=len(excluded),
+        train_count=len(train), validation_count=len(validation))
+    chosen = [_selected_target(sample, options.mode) for sample in eligible]
+    teachers = {s[key].get("metadata", {}).get("checkpoint_sha256") for s, key in zip(eligible, chosen) if key != "reference"}
     teachers.discard(None)
-    metric_anchors = {s[key].get("metadata", {}).get("metric_anchor_checkpoint_sha256") for s, key in zip(manifest["samples"], chosen) if key != "reference"}
-    intentional_mixture = bool(manifest.get("collection")) or len({s.get("teacher_id") for s in manifest["samples"] if s.get("teacher_id")}) > 1
+    metric_anchors = {s[key].get("metadata", {}).get("metric_anchor_checkpoint_sha256") for s, key in zip(eligible, chosen) if key != "reference"}
+    intentional_mixture = bool(manifest.get("collection")) or len({s.get("teacher_id") for s in eligible if s.get("teacher_id")}) > 1
     if options.mode == "distillation" and not intentional_mixture:
         if len(teachers) != 1:
             raise TrainingError("Distillation requires one consistent teacher checkpoint, or an explicitly assembled multi-teacher collection")
         if len(metric_anchors) != 1:
             raise TrainingError("Distillation requires one consistent explicit metric-anchor checkpoint, or an assembled collection")
-    if options.mode == "supervised": metric_anchors.clear()
-    # Each reviewed teacher variant is a separate target on the same source
-    # grid. Splits keep the source together; mixed teachers need not share weights.
-    train_arrays = _SamplePool(root, train, options)
-    validation_arrays = _SamplePool(root, validation, options)
-    train_arrays.prepare("training"); validation_arrays.prepare("validation")
+    if options.mode == "supervised":
+        teachers.clear()
+        metric_anchors.clear()
     print(f"RAFT experiment: {len(train)} training capture(s), {len(validation)} held-out capture(s)", file=sys.stderr, flush=True)
+    progress("model_setup", status="started")
     raft_options = RaftStereoOptions(root=options.raft_root, model=options.raft_model, model_member=options.raft_model_member, device=options.device, iterations=options.iterations)
     try:
         raft_root, original_model, member = resolve_raft_resources(raft_options)
@@ -311,29 +499,38 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
     if not trainable:
         raise TrainingError("Selected train_scope contains no trainable RAFT parameters")
     optimizer = torch.optim.AdamW(trainable, lr=options.learning_rate, weight_decay=1e-5, eps=1e-8)
+    progress("model_setup", status="finished", device=device)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=r"`torch\.cuda\.amp\.autocast.*", category=FutureWarning)
         warnings.filterwarnings("ignore", message=r"torch\.meshgrid:.*", category=UserWarning)
-        baseline = _evaluate(torch, model, device, InputPadder, validation_arrays, options)
+        progress("baseline_validation", status="started", processed=0, total=len(validation))
+        baseline = _evaluate(torch, model, device, InputPadder, validation_arrays, options,
+            progress_callback=lambda event: progress("baseline_validation", **event))
         print(f"Baseline held-out teacher flow error: {baseline['mean_absolute_flow_error_pixels']:.4f} px", file=sys.stderr, flush=True)
         best_metric = baseline["mean_absolute_flow_error_pixels"]
         best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-        best_epoch, history = 0, []
+        best_epoch, history, fallback_training_crops = 0, [], 0
         for epoch in range(1, options.epochs + 1):
+            progress_state.update(epoch=epoch, step=0)
             model.train()
             model.freeze_bn()
             losses = []
-            for _ in range(options.steps_per_epoch):
-                sample = train_arrays[int(rng.integers(len(train_arrays)))]
+            for step in range(1, options.steps_per_epoch + 1):
+                progress_state["step"] = step
+                progress("epoch_step", status="started")
+                sample_index = int(rng.integers(len(train_arrays)))
+                sample = train_arrays[sample_index]
                 h, w = sample["flow"].shape
                 for attempt in range(128):
                     y = int(rng.integers(max(0, h - options.patch_size) + 1))
                     x = int(rng.integers(max(0, w - options.patch_size) + 1))
                     patch = _patch(sample, y, x, options.patch_size)
-                    if patch[3].any():
+                    if (patch[3] & np.isfinite(patch[2]) & (np.abs(patch[2]) < 700)).any():
                         break
                 else:
-                    raise TrainingError("Cannot find valid in-crop correspondences; enlarge patch_size")
+                    y, x = train_arrays.crop_origins[sample_index]
+                    patch = _patch(sample, y, x, options.patch_size)
+                    fallback_training_crops += 1
                 lt, rt, ft, vt, padder = _tensors(torch, device, InputPadder, patch)
                 optimizer.zero_grad(set_to_none=True)
                 predictions = [padder.unpad(p) for p in model(lt, rt, iters=options.iterations, test_mode=False)]
@@ -344,7 +541,11 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
                 torch.nn.utils.clip_grad_norm_(trainable, 1.0)
                 optimizer.step()
                 losses.append(float(loss.detach().cpu()))
-            evaluation = _evaluate(torch, model, device, InputPadder, validation_arrays, options)
+                progress_state["completed_steps"] += 1
+                progress("epoch_step", status="finished", loss=losses[-1])
+            progress("epoch_validation", status="started", processed=0, total=len(validation))
+            evaluation = _evaluate(torch, model, device, InputPadder, validation_arrays, options,
+                progress_callback=lambda event: progress("epoch_validation", **event))
             history.append({"epoch": epoch, "training_loss": float(np.mean(losses)), "validation": evaluation})
             print(f"Epoch {epoch}/{options.epochs}: loss {float(np.mean(losses)):.4f}; held-out teacher flow error {evaluation['mean_absolute_flow_error_pixels']:.4f} px", file=sys.stderr, flush=True)
             if evaluation["mean_absolute_flow_error_pixels"] < best_metric:
@@ -352,7 +553,9 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
                 best_epoch = epoch
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         model.load_state_dict(best_state)
-        final = _evaluate(torch, model, device, InputPadder, validation_arrays, options)
+        progress("final_validation", status="started", processed=0, total=len(validation), best_epoch=best_epoch)
+        final = _evaluate(torch, model, device, InputPadder, validation_arrays, options,
+            progress_callback=lambda event: progress("final_validation", **event, best_epoch=best_epoch))
     mode_notes = (["Experimental supervised RAFT training against user-declared measured references.",
         "Reference measurement accuracy and camera registration require independent verification."] if options.mode == "supervised" else
         ["Experimental mixed RAFT training uses measured references and model pseudo-labels, with separate sample provenance.",
@@ -362,7 +565,7 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
     notes = [*mode_notes,
         "Results retain spatial_left coordinates. The display image has separate camera/framing.",
         "Trained weights are never selected automatically. Validate independent geometry before trusting displacement."]
-    if len(manifest.get("group_ids", [])) < 10:
+    if len({sample["group_id"] for sample in eligible}) < 10:
         notes.append("Fewer than ten independent groups: pipeline smoke experiment, not a validated iPhone-specific model")
     if not manifest.get("explicit_scene_groups"):
         notes.append("Scene groups were not fully supplied; undetected related captures may leak across splits")
@@ -374,16 +577,22 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
         "dataset_manifest_sha256": sha256_file(root / "dataset.json"), "teacher_checkpoint_sha256": sorted(teachers),
         "metric_anchor_checkpoint_sha256": sorted(value for value in metric_anchors if value is not None),
         "label_provenance": [{"sample_id": s["id"], "target_choice": key, "label_kind": s[key].get("label_kind"),
-            "target_array_sha256": s[key]["target"]["array_sha256"], "source_sha256": s["source_sha256"]} for s, key in zip(manifest["samples"], chosen)],
+            "target_array_sha256": s[key]["target"]["array_sha256"], "source_sha256": s["source_sha256"]} for s, key in zip(eligible, chosen)],
         "original_raft_checkpoint_sha256": hashlib.sha256(checkpoint_bytes).hexdigest(), "raft_configuration": vars(configuration),
         "trainable_parameter_count": sum(p.numel() for p in trainable),
         "train_sample_ids": [s["id"] for s in train], "validation_sample_ids": [s["id"] for s in validation],
+        "sample_count": len(manifest["samples"]), "eligible_sample_ids": [sample["id"] for sample in eligible],
+        "eligible_count": len(eligible), "excluded_count": len(excluded), "excluded_samples": excluded,
+        "train_count": len(train), "validation_count": len(validation),
         "train_group_ids": sorted({s["group_id"] for s in train}), "validation_group_ids": sorted({s["group_id"] for s in validation}),
         "sample_preprocessing": train_arrays.preprocessing() + validation_arrays.preprocessing(),
         "input_preprocessing": "Native stereo crops without resizing; upstream RAFT transforms new float32 RGB model tensors from 0..255 to -1..1",
         "target_preprocessing": "Metric depth converted to signed flow; invalid/occluded/out-of-crop labels masked; stored targets untouched",
-        "baseline_validation": baseline, "best_epoch": best_epoch, "validation": final, "history": history, "warnings": notes}
+        "baseline_validation": baseline, "best_epoch": best_epoch, "validation": final, "history": history,
+        "total_steps": progress_state["completed_steps"], "epochs_completed": options.epochs,
+        "fallback_training_crops": fallback_training_crops, "warnings": notes}
     payload = {"state_dict": best_state, "ipde_configuration": vars(configuration), "ipde_training": report}
+    progress("writing_checkpoint", status="started", checkpoint_path=str(checkpoint), best_epoch=best_epoch)
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary_name = tempfile.mkstemp(prefix=f".{checkpoint.name}-", dir=checkpoint.parent)
     os.close(handle)
@@ -406,6 +615,8 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
             torch.mps.empty_cache()
         elif device == "cuda":
             torch.cuda.empty_cache()
+    progress("completed", status="finished", checkpoint_path=str(checkpoint), best_epoch=best_epoch,
+        mean_absolute_flow_error_pixels=final["mean_absolute_flow_error_pixels"])
     return report
 
 

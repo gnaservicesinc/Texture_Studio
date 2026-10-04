@@ -50,7 +50,11 @@ reconstruction. Duplicate aliases for an identical target are hidden from the
 view selector. Units and display ranges explain why some normalized views can
 look alike despite different scientific values.
 
-After review, **Training Set** accepts many datasets. Choose a dedicated
+RAFT Studio opens **Train model & compare**. Select an existing dataset and
+click **Start model training** to run epochs and save weights; a single dataset
+does not need a preparation copy.
+
+The optional **Prepare training set** step accepts many datasets. Choose a dedicated
 validation dataset, seeded random selection across all datasets, or equal random
 counts of independent groups per dataset. Group preservation/override enables
 A/B experiments; exact duplicates, teacher variants and known bursts always stay
@@ -61,11 +65,15 @@ With a single available dataset, **Use for training** starts checked. The
 message above **Create training set & continue** explains missing selections,
 name conflicts, unsaved review exclusions, or an active task. Save a reviewed
 copy after excluding samples, then select that copy for the training set.
-Creating a set verifies and losslessly
-copies the selected arrays, which can take several minutes for large datasets.
+Creating a set verifies the selected arrays and reuses their existing storage.
+On supported macOS filesystems it creates independent copy-on-write clones;
+otherwise it uses immutable hard links on the same filesystem. It does not
+recompress or make another full array copy. Verification can still take several
+minutes for large datasets.
 The button reads **Creating training set…** during this work; the progress
-message reports copying and final verification. Completion selects the saved
-set and opens the training step.
+message reports reused arrays and final verification. Completion selects the saved
+set and opens the model training step. Preparing a set assigns validation splits;
+**Start model training** runs the optimizer and writes a checkpoint.
 
 Studio windows fit within the screen's usable area. Scroll to reach controls
 on smaller displays; review captions have their own space beneath the images.
@@ -75,6 +83,15 @@ on smaller displays; review captions have their own space beneath the images.
 New GUI datasets use lossless NPZ (ZIP deflate of an NPY plane) with exact
 round-trip checks. Identical arrays are stored once even when several records or
 teacher variants use them. Raw arrays are never normalized or gamma corrected.
+Prepared training sets retain the original NPY/NPZ files byte-for-byte through
+shared storage. Their array paths stay inside the new set, so removing the source
+directory does not break the set. Hard-linked payloads must remain immutable;
+Studio's array writers publish new files rather than editing existing ones.
+The storage column reports reused arrays and newly added metadata. Sources and
+prepared sets must be on the same filesystem; train a linked dataset directly
+when its files are on another volume. The CLI's explicit
+`compose-datasets --storage-mode copy` creates a portable compressed copy when
+requested. Existing older copies are left in place.
 **Compact dataset** creates a new verified compressed copy of an older dataset;
 it preserves split assignments and leaves the original available. Using both
 copies consumes additional storage until you remove the original yourself.
@@ -170,8 +187,10 @@ enable. It adds another model inference and requires DepthPro's local weights
 and source. Its scale can be inaccurate because DepthPro is also an estimate;
 agreement between two models is not a distance measurement. A fit with too
 little depth variation or poor agreement is rejected. Review the actual
-training target and exclude samples whose anchor was rejected or whose
-geometry looks wrong. Anchoring cannot repair hallucinated objects or surfaces.
+training target for geometry that looks wrong. Training automatically skips
+targets whose anchor was rejected, without changing their relative values or
+substituting another stored teacher. Anchoring cannot repair hallucinated objects
+or surfaces.
 
 **Input size** controls the teacher's processing resolution, not the stored raw
 photo quality. V2 uses it for the shortest side; DA3 uses it for the longest
@@ -263,11 +282,25 @@ turn an estimated label into independently measured depth.
 ## Train and export
 
 Select a dataset from the library, choose the original RAFT checkpoint and
-source folder, and use **Train RAFT**. Update-block training is the initial
+source folder, and use **Start model training**. Update-block training is the initial
 setting; full-model fine-tuning is optional. Native crops preserve pixel units
 instead of downsizing disparity labels. Each epoch is evaluated on held-out
 groups, and the best checkpoint is retained, including the original baseline
 if every candidate becomes worse.
+
+Training reads dataset files without modifying them. Targets without an accepted
+meter scale or usable stereo correspondence support are automatically excluded
+from the run. The run report records their sample IDs and reasons, plus the
+actual training and validation samples. Usable samples retain their original
+splits. Dataset integrity and split leakage checks still apply, and training
+needs usable samples in both splits. Checkpoints and reports are written outside
+the input dataset, normally in the workspace's `runs` folder.
+
+The status shows dataset checking, target preparation, model setup, baseline
+validation, the current epoch and step, held-out validation crops, and checkpoint
+writing. The update counter advances after each optimizer step; setup and
+validation do not count as model updates. Completion identifies the saved
+checkpoint and best epoch.
 
 The training controls have these meanings:
 
