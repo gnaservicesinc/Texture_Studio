@@ -8,15 +8,19 @@ training and validation are separated. Preserve verified scene groups when
 measuring generalization to new scenes.
 
 Select any dataset in the left sidebar and open **Photos and depth**. Selecting a
-row chooses the dataset you are viewing; the checkboxes on **Training split**
-choose datasets to combine. **Dataset actions** contains inspection, storage,
+row chooses the dataset you are viewing. On **Training split**, select one or more
+rows and choose **Use for training**, **Use for validation**, or **Do not use**.
+The **Use** column displays each dataset's role; highlighting a row and assigning
+its role are separate actions. **Dataset actions** contains inspection, storage,
 archive, removal and link actions.
 
 Photos are grouped with their teacher targets underneath. Select several photo
 rows and use **Remove selected** or **Restore selected**; select a teacher row
-to remove just that target. Removed entries remain visible with a strike-through
-until you save. **Set split…** moves the selected entries and their entire known
-photo/teacher/burst/scene component to training or validation, including related
+to remove just that target. The **Status** column shows **Included**, **Removed**,
+or **Some removed** when a photo retains only some teacher targets. Removed
+entries remain visible with a strike-through until you save. **Set split…** moves
+the selected entries and their entire known photo/teacher/burst/scene component
+to training or validation, including related
 entries outside the current filter. Conflicting assignments are rejected.
 
 Enter an unused name in **Save version as**, then choose **Save changes as new
@@ -34,12 +38,16 @@ set a common split for that capture component before saving again.
 
 Train an existing dataset directly from **Train model & compare** when its current
 split is suitable. To combine datasets or choose new validation groups, select
-datasets in Dataset Studio's **Training split** and create a collection. Set
+datasets in Dataset Studio's **Training split**, choose **Use for training**,
+and create a collection. A single available dataset starts with the **Training**
+role. Choose **Use for validation** to hold out a whole dataset and switch to
+the dedicated validation strategy. If you switch back to an automatic strategy,
+change each existing **Validation** role to **Training** or **Not used** before
+creating the set. **Do not use** sets its role to **Not used**. Set
 **Validation size** to the desired percentage; the default is 20%. The percentage
 applies to independent capture components, so teacher-entry counts can differ.
 **Advanced split options** exposes group preservation and the repeatable seed.
-Preparation reuses
-the original array storage without a full payload copy. Original dataset files
+Preparation reuses the original array storage without a full payload copy. Original dataset files
 remain unchanged. Every teacher variant of a photo stays on the same side of the
 training/validation boundary. Identical source files, identical left RGB planes,
 and explicit burst identifiers are protected even when supplied groups are
@@ -72,7 +80,9 @@ and training-set selector. Inspection and training read the original location.
 Review, composition, and compacting produce new datasets inside the current
 workspace, leaving linked source files untouched. A missing or moved directory
 appears as a library warning. Archive applies only to datasets owned by the
-current workspace. Dataset Studio owns all dataset actions; Trainer's dataset
+current workspace. In **Manage links…**, select links and choose **Remove selected
+links** to stage their removal; **Save** applies it. The original dataset files
+remain in place. Dataset Studio owns all dataset actions; Trainer's dataset
 library is read-only and links back to the manager for review or preparation.
 
 ```sh

@@ -29,6 +29,9 @@ QJsonObject dataset(const QString &path) {
 
 void trainingSetReadiness(TrainerWindow &window, const QString &workspace) {
     window.workspace_->setText(workspace);
+    // Test preparation on its own page so unrelated photo-preview failures from
+    // deliberately nonexistent fixture datasets cannot overwrite task results.
+    window.tabs_->setCurrentIndex(2);
     require(window.datasetMode_ && window.tabs_->isTabVisible(2), "Dataset Studio did not expose training-set preparation");
     require(!window.compose_->isEnabled(), "empty library enabled composition");
     const QString first = QDir(workspace).filePath("datasets/imported");
@@ -36,25 +39,25 @@ void trainingSetReadiness(TrainerWindow &window, const QString &workspace) {
     const auto single = QJsonObject{{"datasets", QJsonArray{imported}}};
     window.populateLibrary(single);
     auto *source = window.collectionSources_->topLevelItem(0);
-    require(source->checkState(0) == Qt::Checked && window.compose_->isEnabled(), "one imported dataset was not immediately usable");
+    require(TrainerWindow::collectionRole(source) == "train" && window.compose_->isEnabled(), "one imported dataset was not immediately usable");
     require(!window.train_->isEnabled(), "Dataset Studio enabled a local model training action");
     require(window.trainingDataset_->text().contains("3 usable targets") && window.trainingDataset_->text().contains("1 unusable target"), "direct training did not explain which targets will be skipped");
     window.reviewedDataset_ = first;
     auto *reviewPhoto = new QTreeWidgetItem(window.reviewSamples_, {"review fixture"});
-    auto *reviewEntry = new QTreeWidgetItem(reviewPhoto, {"Teacher"}); reviewEntry->setData(0, Qt::UserRole, QJsonObject{{"id", "excluded"}, {"split", "train"}}); reviewEntry->setCheckState(0, Qt::Unchecked);
+    auto *reviewEntry = new QTreeWidgetItem(reviewPhoto, {"Teacher"}); reviewEntry->setData(0, Qt::UserRole, QJsonObject{{"id", "excluded"}, {"split", "train"}}); TrainerWindow::setReviewItemIncluded(reviewEntry, false);
     window.updateReviewCount();
     require(!window.compose_->isEnabled() && window.collectionStatus_->text().contains("Save reviewed copy"), "composition ignored unsaved review exclusions");
     window.compose_->clicked();
     require(!window.busy_ && window.process_->state() == QProcess::NotRunning, "direct composition signal bypassed unsaved exclusion guard");
-    reviewEntry->setCheckState(0, Qt::Checked);
+    TrainerWindow::setReviewItemIncluded(reviewEntry, true); window.updateReviewCount();
     require(window.compose_->isEnabled(), "restoring excluded entries did not restore composition readiness");
     { QSignalBlocker blocker(window.reviewSamples_); window.reviewSamples_->clear(); } window.reviewedDataset_.clear(); window.updateReviewCount();
-    source->setCheckState(0, Qt::Unchecked);
-    require(!window.compose_->isEnabled() && window.collectionStatus_->text().contains("Tick a dataset"), "missing selection was not explained");
+    window.setCollectionRole(source, "unused");
+    require(!window.compose_->isEnabled() && window.collectionStatus_->text().contains("Use for training"), "missing selection was not explained");
     window.populateLibrary(single);
     source = window.collectionSources_->topLevelItem(0);
-    require(source->checkState(0) == Qt::Unchecked, "refresh overwrote an intentional unchecked selection");
-    source->setCheckState(0, Qt::Checked);
+    require(TrainerWindow::collectionRole(source) == "unused", "refresh overwrote an intentionally unused dataset");
+    window.setCollectionRole(source, "train");
     window.collectionName_->setText("bad/name");
     require(!window.compose_->isEnabled(), "invalid output name enabled composition");
     window.collectionName_->setText("test-training-set");
@@ -63,11 +66,11 @@ void trainingSetReadiness(TrainerWindow &window, const QString &workspace) {
     const QString second = QDir(workspace).filePath("datasets/validation");
     window.populateLibrary({{"datasets", QJsonArray{dataset(first), dataset(second)}}});
     auto *validation = window.collectionSources_->topLevelItem(1);
-    validation->setCheckState(1, Qt::Checked);
+    window.setCollectionRole(validation, "validation");
     require(window.compose_->isEnabled(), "training and explicit validation selection stayed disabled");
-    validation->setCheckState(0, Qt::Checked);
-    require(validation->checkState(1) == Qt::Unchecked && !window.compose_->isEnabled(), "a source was allowed in both roles");
-    validation->setCheckState(1, Qt::Checked);
+    window.setCollectionRole(validation, "train");
+    require(TrainerWindow::collectionRole(validation) == "train" && !window.compose_->isEnabled(), "a source was allowed in both roles");
+    window.setCollectionRole(validation, "validation");
     window.job_ = "Create training set"; window.setBusy(true);
     require(!window.compose_->isEnabled() && !window.collectionSources_->isEnabled() && window.cancel_->isEnabled(), "running composition allowed a second job or changed inputs");
     require(window.compose_->text() == "Creating training set…" && window.collectionStatus_->text().contains("several minutes"), "running composition did not explain the disabled button");
@@ -81,8 +84,12 @@ void trainingSetReadiness(TrainerWindow &window, const QString &workspace) {
     require(window.collectionStatus_->text().contains("fixture failure"), "composition failure reason was hidden from the training-set step");
     window.job_ = "Create training set"; window.setBusy(true); window.cancelled_ = true;
     window.processFinished(9, QProcess::CrashExit); window.cancelled_ = false;
-    require(window.compose_->isEnabled() && window.collectionSources_->topLevelItem(0)->checkState(0) == Qt::Checked, "cancelled composition lost selection or stayed disabled");
+    require(window.compose_->isEnabled() && TrainerWindow::collectionRole(window.collectionSources_->topLevelItem(0)) == "train", "cancelled composition lost selection or stayed disabled");
     window.splitMode_->setCurrentIndex(window.splitMode_->findData("global-random"));
+    require(!window.compose_->isEnabled() && TrainerWindow::collectionRole(window.collectionSources_->topLevelItem(1)) == "validation",
+            "changing to automatic validation silently included a held-out dataset");
+    window.setCollectionRole(window.collectionSources_->topLevelItem(1), "unused");
+    require(window.compose_->isEnabled(), "removing the explicit validation role did not restore automatic composition");
     const QString output = QDir(workspace).filePath("datasets/test-training-set");
     window.job_ = "Create training set"; window.continueToTrainer_ = true; window.stdout_ = QJsonDocument(QJsonObject{{"dataset_path", output}}).toJson(); window.setBusy(true);
     window.processFinished(0, QProcess::NormalExit);
@@ -95,7 +102,8 @@ void trainingSetReadiness(TrainerWindow &window, const QString &workspace) {
     window.startJob("Inspect dataset", {"inspect-dataset", QDir(workspace).filePath("missing")});
     require(window.busy_, "real backend failure fixture did not start");
     require(await([&] { return !window.busy_; }), "backend failure left the interface busy");
-    require(window.compose_->isEnabled() && window.statusBar()->currentMessage().contains("failed"), "backend failure did not re-enable composition");
+    require(window.compose_->isEnabled(), "backend failure did not re-enable composition");
+    require(window.statusBar()->currentMessage().contains("failed"), "backend failure did not explain its result");
     window.job_ = "Failed launch"; window.setBusy(true); window.process_->setProgram("/missing/ipde-python-fixture"); window.process_->start();
     require(await([&] { return !window.busy_; }), "failed process launch left the interface busy");
     require(window.compose_->isEnabled() && window.statusBar()->currentMessage().contains("failed to start"), "failed launch did not re-enable composition with an explanation");
@@ -131,7 +139,7 @@ void failedGenerationStreaming(TrainerWindow &window, const QString &workspace) 
         window.requestedReviewPath_ = temporaryDataset; window.previewKind_ = "review"; window.previewProcess_->setArguments({"review-dataset", temporaryDataset});
         window.pendingPreviewArgs_ = {"preview-sample", temporaryDataset};
         auto *photo = new QTreeWidgetItem(window.reviewSamples_, {"partial photo"});
-        auto *entry = new QTreeWidgetItem(photo, {"partial teacher"}); entry->setData(0, Qt::UserRole, QJsonObject{{"id", "partial"}, {"split", "train"}}); entry->setCheckState(0, Qt::Checked);
+        auto *entry = new QTreeWidgetItem(photo, {"partial teacher"}); entry->setData(0, Qt::UserRole, QJsonObject{{"id", "partial"}, {"split", "train"}}); TrainerWindow::setReviewItemIncluded(entry, true);
         window.streamingTimer_->start(); window.setBusy(true);
     };
     auto verify = [&] {

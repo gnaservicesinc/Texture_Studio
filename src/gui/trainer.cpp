@@ -1,6 +1,5 @@
 #include <QApplication>
 #include <QComboBox>
-#include <QCheckBox>
 #include <QDateTime>
 #include <QDoubleSpinBox>
 #include <QDesktopServices>
@@ -414,7 +413,7 @@ public:
                 connect(menu, &QMenu::aboutToShow, action, [button, action] { action->setEnabled(button->isEnabled()); });
             }
             more->setMenu(menu); datasetLayout->addWidget(more);
-            auto *hint = new QLabel("Select any dataset to open its photos.\nChecks in Training split choose which datasets to combine.", datasetBox); hint->setWordWrap(true); datasetLayout->addWidget(hint);
+            auto *hint = new QLabel("Select any dataset to open its photos.\nIn Training split, select a row and choose its use with the buttons.", datasetBox); hint->setWordWrap(true); datasetLayout->addWidget(hint);
         }
 
         auto *runBox = new QGroupBox("Trained models", library);
@@ -665,6 +664,60 @@ private:
         }
     }
 
+    static QPushButton *binaryButton(const QString &caption, QWidget *parent) {
+        auto *button = new QPushButton(caption + ": Off", parent); button->setCheckable(true);
+        button->setAccessibleName(caption); button->setProperty("toggleLabel", caption);
+        connect(button, &QPushButton::toggled, button, [button, caption](bool enabled) {
+            button->setText(caption + (enabled ? ": On" : ": Off"));
+        });
+        return button;
+    }
+
+    static void disableItemCheckboxes(QTreeWidgetItem *item) {
+        item->setFlags(item->flags() & ~(Qt::ItemIsUserCheckable | Qt::ItemIsAutoTristate | Qt::ItemIsUserTristate));
+        for (int column = 0; column < item->columnCount(); ++column) item->setData(column, Qt::CheckStateRole, QVariant());
+    }
+
+    static bool reviewIncluded(QTreeWidgetItem *item) {
+        if (item->childCount()) {
+            for (int i=0; i<item->childCount(); ++i) if (reviewIncluded(item->child(i))) return true;
+            return false;
+        }
+        const auto included = item->data(0, Qt::UserRole + 2);
+        return !included.isValid() || included.toBool();
+    }
+
+    static void setReviewItemIncluded(QTreeWidgetItem *item, bool include) {
+        disableItemCheckboxes(item);
+        if (item->childCount()) { for (int i=0; i<item->childCount(); ++i) setReviewItemIncluded(item->child(i), include); }
+        else item->setData(0, Qt::UserRole + 2, include);
+        item->setText(5, include ? "Included" : "Removed");
+    }
+
+    static QString collectionRole(QTreeWidgetItem *item) {
+        const QString role = item->data(0, Qt::UserRole + 2).toString();
+        return role == "train" || role == "validation" ? role : "unused";
+    }
+
+    void setCollectionRole(QTreeWidgetItem *item, const QString &role) {
+        if (busy_ || !item || !QStringList{"unused", "train", "validation"}.contains(role)) return;
+        {
+            QSignalBlocker blocker(collectionSources_); disableItemCheckboxes(item);
+            item->setData(0, Qt::UserRole + 2, role);
+            item->setText(1, role == "train" ? "Training" : role == "validation" ? "Validation" : "Not used");
+        }
+        collectionSources_->setCurrentItem(item, 0, QItemSelectionModel::NoUpdate);
+        if (role == "validation" && splitMode_) splitMode_->setCurrentIndex(splitMode_->findData("explicit"));
+        updateCollectionReadiness();
+    }
+
+    void setSelectedCollectionRole(const QString &role) {
+        if (busy_) return;
+        const auto selection = collectionSources_->selectedItems();
+        for (auto *item : selection) setCollectionRole(item, role);
+        if (!selection.isEmpty()) statusBar()->showMessage(QString("%1 dataset(s) assigned to %2.").arg(selection.size()).arg(role == "train" ? "training" : role == "validation" ? "validation" : "not used"));
+    }
+
     static QString selectedPath(QTreeWidget *tree) {
         return tree->currentItem() ? tree->currentItem()->data(0, Qt::UserRole).toString() : QString();
     }
@@ -729,7 +782,7 @@ private:
         goal_->addItem("Depth estimation — prioritize distance", "depth-estimation");
         goal_->addItem("Portrait effects / masking — embedded depth and mattes", "photo-effects");
         goal_->addItem("Manual — expose every setting", "manual");
-        advanced_ = new QCheckBox("Show advanced settings", tab);
+        advanced_ = binaryButton("Advanced settings", tab);
         goalHelp_ = new QLabel(tab); goalHelp_->setWordWrap(true); root->addWidget(goalHelp_);
         auto *row = new QHBoxLayout;
         datasetName_ = new QLineEdit("dataset-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"), tab);
@@ -738,19 +791,19 @@ private:
         row->addWidget(add); row->addWidget(scan); row->addWidget(remove); root->addLayout(row);
         auto *categoryRow = new QHBoxLayout; category_ = new QLineEdit(tab); category_->setPlaceholderText("Rooms, landscapes, macro, people…");
         categoryRow->addWidget(new QLabel("Subject / dataset category", tab)); categoryRow->addWidget(category_, 1);
-        useGroups_ = new QCheckBox("Use photo groups", tab); categoryRow->addWidget(useGroups_); root->addLayout(categoryRow);
+        useGroups_ = binaryButton("Use photo groups", tab); categoryRow->addWidget(useGroups_); root->addLayout(categoryRow);
         sources_ = new QTreeWidget(tab); sources_->setHeaderLabels({"Spatial HEIC", "Optional group — double-click to edit", "Camera", "Captured"});
         sources_->setObjectName("datasetSources");
         sources_->setMinimumHeight(100); sources_->setMaximumHeight(110);
         sources_->setSelectionMode(QAbstractItemView::ExtendedSelection); sources_->setRootIsDecorated(false);
         sources_->header()->setSectionResizeMode(0, QHeaderView::Stretch); sources_->header()->setSectionResizeMode(1, QHeaderView::Stretch);
         sources_->setItemDelegate(new GroupDelegate(sources_)); root->addWidget(sources_, 1);
-        verifiedScenes_ = new QCheckBox("My groups separate independent scenes", tab);
-        verifiedScenes_->setToolTip("This is your declaration, not an automatic scene check. It labels the validation as scene-based. The same group labels keep related photos in one split whether checked or unchecked.");
+        verifiedScenes_ = binaryButton("Independent scene groups", tab);
+        verifiedScenes_->setToolTip("This is your declaration, not an automatic scene check. It labels the validation as scene-based. The same group labels keep related photos in one split whether enabled or disabled.");
         root->addWidget(verifiedScenes_); verifiedScenes_->setVisible(false);
-        auto *sceneHelp = new QLabel("Give repeat shots of the same room, subject, or setup the same group name. Check this only after grouping every related photo together and confirming the other groups show different scenes. This keeps validation from benefiting from scenes seen during training. If unsure, leave it unchecked; different filenames alone are not evidence.", tab);
+        auto *sceneHelp = new QLabel("Give repeat shots of the same room, subject, or setup the same group name. Enable this only after grouping every related photo together and confirming the other groups show different scenes. This keeps validation from benefiting from scenes seen during training. If unsure, leave it off; different filenames alone are not evidence.", tab);
         sceneHelp->setWordWrap(true); root->addWidget(sceneHelp); sceneHelp->hide();
-        connect(useGroups_, &QCheckBox::toggled, this, [this, sceneHelp](bool grouped) { sources_->setColumnHidden(1, !grouped); verifiedScenes_->setVisible(grouped); sceneHelp->setVisible(grouped); });
+        connect(useGroups_, &QPushButton::toggled, this, [this, sceneHelp](bool grouped) { sources_->setColumnHidden(1, !grouped); verifiedScenes_->setVisible(grouped); sceneHelp->setVisible(grouped); });
         sources_->setColumnHidden(1, true);
         connect(add, &QPushButton::clicked, this, [this] {
             const auto files = QFileDialog::getOpenFileNames(this, "Add spatial HEIC photos", settings_.value("photo_folder").toString(), "HEIC / HEIF photos (*.heic *.HEIC *.heif *.HEIF *.hif *.HIF)");
@@ -764,7 +817,7 @@ private:
         connect(remove, &QPushButton::clicked, this, [this] { qDeleteAll(sources_->selectedItems()); });
         auto *teachers = new QHBoxLayout; teachers->addWidget(new QLabel("Generate teacher entries", tab));
         for (const auto &choice : QList<QPair<QString, QString>>{{"DepthPro", "depthpro"}, {"Depth Anything V2", "depth-anything-v2"}, {"Depth Anything 3", "depth-anything-3"}}) {
-            auto *check = new QCheckBox(choice.first, tab); check->setProperty("model", choice.second); check->setChecked(choice.second == "depthpro");
+            auto *check = binaryButton(choice.first, tab); check->setProperty("model", choice.second); check->setChecked(choice.second == "depthpro");
             teacherChecks_.append(check); teachers->addWidget(check);
         }
         teachers->addStretch(); root->addLayout(teachers);
@@ -782,7 +835,7 @@ private:
         teacherDevice_ = deviceBox(processing); inputSize_ = spin(processing, 14, 4096, 1036); inputSize_->setSingleStep(14);
         processingLayout->addWidget(teacherDevice_); processingLayout->addWidget(new QLabel("Input size", processing)); processingLayout->addWidget(inputSize_);
         right->addRow("Inference device", processing);
-        anchor_ = new QCheckBox("Estimate meters with a second model (DepthPro)", tab);
+        anchor_ = binaryButton("Estimate meters with DepthPro", tab);
         anchor_->setChecked(true);
         anchor_->setToolTip("Uses the separately installed Apple DepthPro model to estimate metric scale. Detail remains from the selected teacher. This adds inference and does not create measured ground truth.");
         left->addRow("Depth scale", anchor_);
@@ -797,17 +850,17 @@ private:
             modelPaths_.insert(model, modelEdit); modelSources_.insert(model, sourceEdit);
         }
         advancedLayout->addLayout(additionalForm);
-        includeDisplayTeacher_ = new QCheckBox("Also generate teachers on the separate full display camera (uses much more storage)", datasetAdvanced_);
+        includeDisplayTeacher_ = binaryButton("Full display camera teachers", datasetAdvanced_);
         includeDisplayTeacher_->setChecked(false); advancedLayout->addWidget(includeDisplayTeacher_);
         scaleHelp_ = new QLabel(tab); scaleHelp_->setWordWrap(true); advancedLayout->addWidget(scaleHelp_);
         auto *sizeHelp = new QLabel("Input size is the model's processing resolution, not the saved depth precision. A larger size costs time and memory and may still produce incorrect geometry. Auto device selects available hardware; MPS uses Apple GPU, CPU is slower, and CUDA requires an NVIDIA GPU.", tab);
         sizeHelp->setWordWrap(true); advancedLayout->addWidget(sizeHelp); root->addWidget(datasetAdvanced_);
         connect(teacher_, &QComboBox::currentIndexChanged, this, [this] { teacherDefaults(); });
-        connect(anchor_, &QCheckBox::toggled, this, [this] { updateScaleHelp(); });
+        connect(anchor_, &QPushButton::toggled, this, [this] { updateScaleHelp(); });
         teacher_->setCurrentIndex(qMax(0, teacher_->findData(settings_.value("teacher_model", "depthpro"))));
         teacherDefaults();
         connect(goal_, &QComboBox::currentIndexChanged, this, [this] { applyGoal(); });
-        connect(advanced_, &QCheckBox::toggled, this, [this](bool visible) { datasetAdvanced_->setVisible(visible); if (trainingAdvanced_) trainingAdvanced_->setVisible(visible); });
+        connect(advanced_, &QPushButton::toggled, this, [this](bool visible) { datasetAdvanced_->setVisible(visible); if (trainingAdvanced_) trainingAdvanced_->setVisible(visible); });
         const QString configuredGoal = projectSettings_ ? projectSettings_->value("goal", "effect/map").toString() : settings_.value("goal", "effect/map").toString();
         goal_->setCurrentIndex(qMax(0, goal_->findData(configuredGoal))); applyGoal();
         generate_ = new QPushButton("Generate & review dataset", tab); root->addWidget(generate_);
@@ -876,13 +929,14 @@ private:
 
         auto *body = new QSplitter(Qt::Horizontal, tab);
         reviewSamples_ = new QTreeWidget(body);
-        reviewSamples_->setHeaderLabels({"Include / photo / teacher", "Split", "Group", "Camera", "Captured"});
+        reviewSamples_->setHeaderLabels({"Photo / teacher", "Split", "Group", "Camera", "Captured", "Status"});
         reviewSamples_->setRootIsDecorated(true); reviewSamples_->setAlternatingRowColors(true);
         reviewSamples_->setSelectionMode(QAbstractItemView::ExtendedSelection); reviewSamples_->setObjectName("datasetPhotos");
         reviewSamples_->header()->setStretchLastSection(false);
         reviewSamples_->header()->setSectionResizeMode(QHeaderView::Interactive);
         reviewSamples_->setColumnWidth(0, 170); reviewSamples_->setColumnWidth(1, 90); reviewSamples_->setColumnWidth(2, 90); reviewSamples_->setColumnWidth(3, 130); reviewSamples_->setColumnWidth(4, 155);
-        if (datasetMode_) { reviewSamples_->setColumnHidden(3, true); reviewSamples_->setColumnHidden(4, true); }
+        if (datasetMode_) { for (int column : {2, 3, 4}) reviewSamples_->setColumnHidden(column, true); }
+        reviewSamples_->setColumnWidth(5, 100);
         auto *previewScroll = new QScrollArea(body); previewScroll->setObjectName("reviewPreviewScroll");
         previewScroll->setWidgetResizable(true); previewScroll->setFrameShape(QFrame::NoFrame);
         auto *preview = new QWidget; preview->setObjectName("reviewPreviewContent");
@@ -891,7 +945,7 @@ private:
         auto *labelRow = new QHBoxLayout; labelRow->addWidget(new QLabel("Depth to view", preview));
         reviewLabel_ = new QComboBox(preview); reviewLabel_->setMinimumWidth(0); labelRow->addWidget(reviewLabel_, 1);
         previewRoot->addLayout(labelRow);
-        compareTeachers_ = new QCheckBox("Compare teachers for this photo", preview); compareTeachers_->setChecked(true);
+        compareTeachers_ = binaryButton("Compare teachers", preview); compareTeachers_->setChecked(true);
         previewRoot->addWidget(compareTeachers_);
         auto *viewRow = new QHBoxLayout; viewRow->addWidget(new QLabel("Visual inspection", preview));
         visualView_ = new QComboBox(preview); visualView_->addItem("Depth map", "depth"); visualView_->addItem("50% overlay on photo", "overlay"); visualView_->addItem("Lit surface — drag to rotate", "surface"); visualView_->addItem("Teacher / baseline disagreement", "difference");
@@ -931,7 +985,7 @@ private:
         reviewCamera_ = new QComboBox(tab); reviewCamera_->addItem("All cameras"); filterRow->addWidget(reviewFilter_, 1); filterRow->addWidget(reviewCamera_); root->addLayout(filterRow);
         auto *navigation = new QHBoxLayout;
         auto *previous = new QPushButton("Previous", tab); auto *next = new QPushButton("Next", tab);
-        auto *exclude = new QPushButton("Remove and next", tab);
+        auto *exclude = new QPushButton("Remove and next", tab); exclude->setObjectName("removePhotoAndNext"); editActions_ << exclude;
         auto *toTraining = new QPushButton("Move to training", tab); auto *toValidation = new QPushButton("Move to validation", tab);
         auto *undo = new QPushButton("Undo changes", tab);
         toTraining->hide(); toValidation->hide();
@@ -955,20 +1009,22 @@ private:
         connect(reviewSamples_, &QTreeWidget::itemSelectionChanged, this, [this] { updateReviewCount(); });
         connect(reviewedName_, &QLineEdit::textChanged, this, [this] { updateReviewCount(); });
         connect(reviewLabel_, &QComboBox::currentIndexChanged, this, [this] { previewSelectedSample(); });
-        connect(compareTeachers_, &QCheckBox::toggled, this, [this] { previewSelectedSample(); });
+        connect(compareTeachers_, &QPushButton::toggled, this, [this] { previewSelectedSample(); });
         connect(visualView_, &QComboBox::currentIndexChanged, this, [this] { updateVisualView(); });
         connect(reviewFilter_, &QLineEdit::textChanged, this, [this] { filterReview(); });
         connect(reviewCamera_, &QComboBox::currentIndexChanged, this, [this] { filterReview(); });
         connect(previous, &QPushButton::clicked, this, [this] { advanceReview(-1); });
         connect(next, &QPushButton::clicked, this, [this] { advanceReview(1); });
         connect(exclude, &QPushButton::clicked, this, [this] {
+            if (busy_ || reviewGenerating_ || reviewEntries().isEmpty() || (!requestedReviewPath_.isEmpty() && requestedReviewPath_ != reviewedDataset_)) return;
             if (auto *item = reviewSamples_->currentItem()) {
                 if (item->childCount()) {
-                    const int index = reviewSamples_->indexOfTopLevelItem(item); item->setCheckState(0, Qt::Unchecked);
+                    const int index = reviewSamples_->indexOfTopLevelItem(item); setReviewItemIncluded(item, false);
                     for (int nextIndex = index + 1; nextIndex < reviewSamples_->topLevelItemCount(); ++nextIndex) {
                         auto *nextPhoto = reviewSamples_->topLevelItem(nextIndex); if (!nextPhoto->isHidden()) { reviewSamples_->setCurrentItem(nextPhoto); break; }
                     }
-                } else { item->setCheckState(0, Qt::Unchecked); advanceReview(1); }
+                } else { setReviewItemIncluded(item, false); advanceReview(1); }
+                updateReviewCount();
             }
         });
         connect(saveReviewed_, &QPushButton::clicked, this, [this] { saveReviewedDataset(); });
@@ -1022,13 +1078,13 @@ private:
     }
 
     void populateReview(const QJsonObject &result) {
-        QMap<QString, Qt::CheckState> previousChecks;
+        QMap<QString, bool> previousInclusion;
         QString selectedId;
         if (auto *item = selectedReviewEntry()) selectedId = item->data(0, Qt::UserRole).toJsonObject().value("id").toString();
         const QString nextDataset = result.value("dataset_path").toString(requestedReviewPath_);
         if (!reviewedDataset_.isEmpty() && !reviewEntries().isEmpty()) rememberReviewDraft();
         if (nextDataset == reviewedDataset_) {
-            for (auto *item : reviewEntries()) previousChecks.insert(item->data(0, Qt::UserRole).toJsonObject().value("id").toString(), item->checkState(0));
+            for (auto *item : reviewEntries()) previousInclusion.insert(item->data(0, Qt::UserRole).toJsonObject().value("id").toString(), reviewIncluded(item));
         } else selectedId.clear();
         const QJsonObject draft = reviewDrafts_.value(nextDataset); const auto savedKeep = draft.value("keep").toArray(), savedKnown = draft.value("known").toArray(); const auto savedSplits = draft.value("all_splits").toObject(draft.value("splits").toObject());
         reviewedDataset_ = nextDataset;
@@ -1050,11 +1106,11 @@ private:
                 const QString sourceId = sample.value("source_id").toString(path); QTreeWidgetItem *photo = photos.value(sourceId);
                 if (!photo) {
                     photo = new QTreeWidgetItem(reviewSamples_, {QFileInfo(path).fileName(), sample.value("split").toString(), group, camera, metadata.value("captured_at").toString()});
-                    photo->setFlags(photo->flags() | Qt::ItemIsAutoTristate); photo->setCheckState(0, Qt::Checked); photo->setToolTip(0, path); photos.insert(sourceId, photo); photo->setExpanded(true);
+                    disableItemCheckboxes(photo); photo->setToolTip(0, path); photos.insert(sourceId, photo); photo->setExpanded(true);
                     if (!camera.isEmpty() && !cameras.contains(camera)) cameras << camera;
                 }
                 auto *item = new QTreeWidgetItem(photo, {sample.value("teacher_id").toString("Teacher"), sample.value("split").toString(), group});
-                item->setData(0, Qt::UserRole, sample); item->setToolTip(0, path); item->setCheckState(0, draft.contains("keep") ? (!savedKnown.contains(id) || savedKeep.contains(id) ? Qt::Checked : Qt::Unchecked) : previousChecks.value(id, Qt::Checked));
+                item->setData(0, Qt::UserRole, sample); item->setToolTip(0, path); setReviewItemIncluded(item, draft.contains("keep") ? (!savedKnown.contains(id) || savedKeep.contains(id)) : previousInclusion.value(id, true));
                 if (sample.value("id").toString() == selectedId) selected = item;
                 QStringList warnings; for (const auto &warning : sample.value("warnings").toArray()) warnings << warning.toString();
                 item->setToolTip(1, warnings.join('\n')); item->setToolTip(2, sample.value("group_id").toString());
@@ -1197,8 +1253,8 @@ private:
         QJsonArray keep; QJsonObject splits;
         for (auto *item : reviewEntries()) {
             const auto sample = item->data(0, Qt::UserRole).toJsonObject(); const QString id = sample.value("id").toString();
-            if (item->checkState(0) == Qt::Checked) keep.append(id);
-            if (item->checkState(0) == Qt::Checked && (sample.value("split_chosen").toBool() || sample.value("split") != sample.value("original_split")) && sample.contains("original_split")) splits.insert(id, sample.value("split"));
+            if (reviewIncluded(item)) keep.append(id);
+            if (reviewIncluded(item) && (sample.value("split_chosen").toBool() || sample.value("split") != sample.value("original_split")) && sample.contains("original_split")) splits.insert(id, sample.value("split"));
         }
         return {{"keep", keep}, {"splits", splits}};
     }
@@ -1214,7 +1270,7 @@ private:
 
     void setReviewIncluded(bool include) {
         if (busy_ || reviewGenerating_ || reviewEntries().isEmpty()) return;
-        { QSignalBlocker blocker(reviewSamples_); for (auto *item : selectedReviewEntries()) item->setCheckState(0, include ? Qt::Checked : Qt::Unchecked); }
+        { QSignalBlocker blocker(reviewSamples_); for (auto *item : selectedReviewEntries()) setReviewItemIncluded(item, include); }
         updateReviewCount();
     }
 
@@ -1245,14 +1301,16 @@ private:
         int kept = 0, train = 0, validation = 0, photos = 0, changed = 0;
         const auto entries = reviewEntries();
         for (auto *item : entries) {
-            const bool included = item->checkState(0) == Qt::Checked;
+            const bool included = reviewIncluded(item); item->setText(5, included ? "Included" : "Removed");
             QFont font = item->font(0); font.setStrikeOut(!included); item->setFont(0, font);
             if (included) { ++kept; train += item->text(1) == "train"; validation += item->text(1) == "validation"; }
             const auto sample = item->data(0, Qt::UserRole).toJsonObject();
             changed += !included || (sample.contains("original_split") && (sample.value("split_chosen").toBool() || sample.value("split") != sample.value("original_split")));
         }
         for (int i=0; i<reviewSamples_->topLevelItemCount(); ++i) {
-            auto *photo = reviewSamples_->topLevelItem(i); const bool included = photo->checkState(0) != Qt::Unchecked;
+            auto *photo = reviewSamples_->topLevelItem(i); const bool included = reviewIncluded(photo); int includedTargets = 0;
+            for (int j=0; j<photo->childCount(); ++j) includedTargets += reviewIncluded(photo->child(j));
+            photo->setText(5, !includedTargets ? "Removed" : includedTargets == photo->childCount() ? "Included" : "Some removed");
             photos += included; QFont font = photo->font(0); font.setStrikeOut(!included); photo->setFont(0, font);
         }
         QString text = entries.isEmpty() ? "Choose a dataset to view its photos." : QString("%1 photos · %2 targets included · %3 train / %4 validation%5").arg(photos).arg(kept).arg(train).arg(validation).arg(changed ? " · Unsaved changes" : " · No changes");
@@ -1321,13 +1379,19 @@ private:
         auto *tab = new QWidget; auto *root = new QVBoxLayout(tab);
         auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(tab);
         auto *intro = new QLabel("Use this page to create an automatic training/validation split or combine datasets. For individual photo assignments, use Set split in Photos and depth and save a new version. To use that existing split, open the selected dataset in Trainer.", tab); intro->setWordWrap(true); root->addWidget(intro);
-        collectionSources_ = new QTreeWidget(tab); collectionSources_->setHeaderLabels({"Include dataset", "Hold out whole dataset", "Category", "Depth targets"});
-        collectionSources_->setRootIsDecorated(false); collectionSources_->header()->setSectionResizeMode(0, QHeaderView::Stretch); collectionSources_->setMinimumHeight(140); root->addWidget(collectionSources_, 1);
-        connect(collectionSources_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int column) {
-            if (column < 2 && item->checkState(column) == Qt::Checked) { QSignalBlocker blocker(collectionSources_); item->setCheckState(1-column, Qt::Unchecked); }
-            if (column < 2) collectionSources_->setCurrentItem(item);
-            updateCollectionReadiness();
-        });
+        collectionSources_ = new QTreeWidget(tab); collectionSources_->setHeaderLabels({"Dataset", "Use", "Category", "Depth targets"});
+        collectionSources_->setObjectName("collectionDatasets"); collectionSources_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        collectionSources_->setRootIsDecorated(false); collectionSources_->header()->setSectionResizeMode(0, QHeaderView::Stretch); collectionSources_->setColumnWidth(1, 130); collectionSources_->setMinimumHeight(140); root->addWidget(collectionSources_, 1);
+        auto *roleActions = new QHBoxLayout;
+        useDatasetForTraining_ = new QPushButton("Use for training", tab); useDatasetForValidation_ = new QPushButton("Use for validation", tab); skipDataset_ = new QPushButton("Do not use", tab);
+        useDatasetForTraining_->setObjectName("useDatasetForTraining"); useDatasetForValidation_->setObjectName("useDatasetForValidation"); skipDataset_->setObjectName("skipDataset");
+        useDatasetForValidation_->setToolTip("Hold out every photo in the selected datasets. This chooses the designated validation datasets strategy.");
+        for (auto *button : {useDatasetForTraining_, useDatasetForValidation_, skipDataset_}) roleActions->addWidget(button);
+        roleActions->addStretch(); root->addLayout(roleActions);
+        connect(useDatasetForTraining_, &QPushButton::clicked, this, [this] { setSelectedCollectionRole("train"); });
+        connect(useDatasetForValidation_, &QPushButton::clicked, this, [this] { setSelectedCollectionRole("validation"); });
+        connect(skipDataset_, &QPushButton::clicked, this, [this] { setSelectedCollectionRole("unused"); });
+        connect(collectionSources_, &QTreeWidget::itemSelectionChanged, this, [this] { updateCollectionReadiness(); });
         auto *form = new QFormLayout;
         collectionForm_ = form;
         collectionName_ = new QLineEdit("training-set-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"), tab); form->addRow("Training set name", collectionName_);
@@ -1344,9 +1408,9 @@ private:
         splitHelp_ = new QLabel(tab); splitHelp_->setWordWrap(true); root->addWidget(splitHelp_);
         auto updateSplit = [this] {
             const QString mode = splitMode_->currentData().toString(); validationFraction_->setEnabled(mode != "explicit"); validationCount_->setEnabled(mode == "equal-per-dataset");
-            collectionSources_->setColumnHidden(1, mode != "explicit");
+            collectionSources_->setColumnHidden(1, false);
             collectionForm_->setRowVisible(validationFraction_, mode != "explicit"); collectionForm_->setRowVisible(validationCount_, mode == "equal-per-dataset");
-            splitHelp_->setText(mode == "explicit" ? "Tick dedicated validation datasets in the second column. They are held out entirely; overlapping source photos and groups are rejected." : mode == "equal-per-dataset" ? "Each dataset contributes the same count of randomly chosen independent photo groups. Zero uses an automatic count based on the smallest dataset. Related captures and all teachers remain together." : "Validation groups are drawn randomly from the combined selected datasets. Larger datasets usually contribute more validation photos. The seed repeats the same selection.");
+            splitHelp_->setText(mode == "explicit" ? "Select the validation dataset rows and click Use for validation. They are held out entirely; overlapping source photos and groups are rejected." : mode == "equal-per-dataset" ? "Each dataset contributes the same count of randomly chosen independent photo groups. Zero uses an automatic count based on the smallest dataset. Related captures and all teachers remain together." : "Validation groups are drawn randomly from the combined selected datasets. Larger datasets usually contribute more validation photos. The seed repeats the same selection.");
         };
         connect(splitMode_, &QComboBox::currentIndexChanged, this, [this, updateSplit] { updateSplit(); updateCollectionReadiness(); }); updateSplit();
         collectionStatus_ = new QLabel(tab); collectionStatus_->setWordWrap(true); root->addWidget(collectionStatus_);
@@ -1359,10 +1423,10 @@ private:
             updateCollectionReadiness(); if (!compose_->isEnabled()) return;
             const QString name = collectionName_->text().trimmed(); if (!validName(name)) { QMessageBox::information(this, "Training set name", "Use a folder name without separators."); return; }
             QStringList inputs, validation;
-            for (int i=0; i<collectionSources_->topLevelItemCount(); ++i) { auto *item = collectionSources_->topLevelItem(i); if (item->checkState(0) == Qt::Checked) inputs << item->data(0, Qt::UserRole).toString(); if (item->checkState(1) == Qt::Checked) validation << item->data(0, Qt::UserRole).toString(); }
-            if (inputs.isEmpty()) { QMessageBox::information(this, "Select datasets", "Tick one or more datasets for training."); return; }
+            for (int i=0; i<collectionSources_->topLevelItemCount(); ++i) { auto *item = collectionSources_->topLevelItem(i); if (collectionRole(item) == "train") inputs << item->data(0, Qt::UserRole).toString(); if (collectionRole(item) == "validation") validation << item->data(0, Qt::UserRole).toString(); }
+            if (inputs.isEmpty()) { QMessageBox::information(this, "Select datasets", "Select one or more dataset rows and click Use for training."); return; }
             const QString mode = splitMode_->currentData().toString();
-            if (mode == "explicit" && validation.isEmpty()) { QMessageBox::information(this, "Select validation", "Tick a dedicated validation dataset in the second column."); return; }
+            if (mode == "explicit" && validation.isEmpty()) { QMessageBox::information(this, "Select validation", "Select a dedicated validation dataset and click Use for validation."); return; }
             QStringList args{"compose-datasets"}; args << inputs << "--output-dir" << QDir(workspace_->text()).filePath("datasets/" + name) << "--split-mode" << mode << "--validation-fraction" << QString::number(validationFraction_->value() / 100.0) << "--seed" << QString::number(splitSeed_->value()) << "--grouping" << groupingPolicy_->currentData().toString();
             if (mode == "explicit") for (const QString &path : validation) args << "--validation-dataset" << path;
             if (mode == "equal-per-dataset" && validationCount_->value()) args << "--validation-count-per-dataset" << QString::number(validationCount_->value());
@@ -1532,9 +1596,9 @@ private:
         if (dataset.isEmpty()) { QMessageBox::information(this, "Choose dataset", "Select a dataset from the library above."); return; }
         if (dataset == reviewedDataset_) {
             for (auto *item : reviewEntries()) {
-                if (item->checkState(0) == Qt::Unchecked) {
+                if (!reviewIncluded(item)) {
                     tabs_->setCurrentIndex(1);
-                    QMessageBox::information(this, "Save your exclusions", "Unchecking photos changes this review. Click Save reviewed copy to create the dataset with those photos excluded, then train the saved copy selected in the library.");
+                    QMessageBox::information(this, "Save your exclusions", "Removing photos changes this review. Click Save changes as new version to save those exclusions, then train the saved version selected in the library.");
                     return;
                 }
             }
@@ -1690,7 +1754,7 @@ private:
         if (path == reviewedDataset_ && !reviewEntries().isEmpty()) {
             for (auto *item : reviewEntries()) {
                 const auto sample = item->data(0, Qt::UserRole).toJsonObject();
-                if (item->checkState(0) == Qt::Unchecked || (sample.contains("original_split") && (sample.value("split_chosen").toBool() || sample.value("split") != sample.value("original_split")))) return true;
+                if (!reviewIncluded(item) || (sample.contains("original_split") && (sample.value("split_chosen").toBool() || sample.value("split") != sample.value("original_split")))) return true;
             }
         } else if (reviewDrafts_.contains(path)) {
             const auto draft = reviewDrafts_.value(path);
@@ -1723,21 +1787,24 @@ private:
         int training = 0, validation = 0, entries = 0; bool unsavedExclusions = false;
         for (int i = 0; i < collectionSources_->topLevelItemCount(); ++i) {
             auto *item = collectionSources_->topLevelItem(i);
-            if (item->checkState(0) == Qt::Checked) { ++training; entries += item->text(3).toInt(); }
-            if (item->checkState(1) == Qt::Checked) ++validation;
-            if (item->checkState(0) == Qt::Checked || (splitMode_->currentData().toString() == "explicit" && item->checkState(1) == Qt::Checked))
+            if (collectionRole(item) == "train") { ++training; entries += item->text(3).toInt(); }
+            if (collectionRole(item) == "validation") ++validation;
+            if (collectionRole(item) == "train" || (splitMode_->currentData().toString() == "explicit" && collectionRole(item) == "validation"))
                 unsavedExclusions |= hasUnsavedReviewExclusions(item->data(0, Qt::UserRole).toString());
         }
         QString reason;
         if (!datasetMode_) reason = "Open Dataset Studio to prepare or manage training datasets.";
         else if (busy_) reason = job_ == "Create training set" ? "Preparing the training set using existing array storage. Checking full-quality arrays may take several minutes. Use Cancel current task to stop." : job_ + " is running. Finish or cancel it before creating a training set.";
         else if (!collectionSources_->topLevelItemCount()) reason = "Import or generate a dataset first; it will appear here and can be used for training.";
-        else if (!training) reason = "Tick a dataset in Include dataset. One dataset is enough; validation photos are held out automatically.";
+        else if (!training) reason = "Select a dataset row and click Use for training. One dataset is enough; validation photos are held out automatically.";
         else if (!entries) reason = "The selected training datasets have no teacher entries. Finish generating or import a complete dataset first.";
         else if (unsavedExclusions) reason = "This dataset has unsaved photo or split edits. Save reviewed copy using Save changes as new version in Photos and depth, then select the saved version here.";
         else if (!validName(collectionName_->text().trimmed())) reason = "Enter a training set name without folder separators.";
         else if (QFileInfo::exists(QDir(workspace_->text()).filePath("datasets/" + collectionName_->text().trimmed()))) reason = "A dataset with this name already exists. Enter a new training set name.";
-        else if (splitMode_->currentData().toString() == "explicit" && !validation) reason = "Tick a separate dataset in Hold out whole dataset, or choose random validation to hold out photos from your training dataset.";
+        else if (splitMode_->currentData().toString() == "explicit" && !validation) reason = "Select a separate dataset and click Use for validation, or choose random validation to hold out photos from your training dataset.";
+        if (reason.isEmpty() && splitMode_->currentData().toString() != "explicit" && validation) reason = "A dataset is assigned as validation. Choose designated validation datasets, or change that dataset to Training or Not used.";
+        const bool canAssign = datasetMode_ && !busy_ && !collectionSources_->selectedItems().isEmpty();
+        for (auto *button : {useDatasetForTraining_, useDatasetForValidation_, skipDataset_}) if (button) button->setEnabled(canAssign);
         compose_->setEnabled(reason.isEmpty());
         compose_->setText(busy_ && job_ == "Create training set" ? "Creating training set…" : "Create training set and continue");
         const QString ready = QString("Ready: %1 training dataset(s), %2 teacher entries. %3 The set needs at least two independent photo groups.").arg(training).arg(entries).arg(splitMode_->currentData().toString() == "explicit" ? QString("%1 validation dataset(s) will be held out.").arg(validation) : "Validation photos will be held out automatically.");
@@ -1864,8 +1931,8 @@ private:
 
     void populateLibrary(const QJsonObject &result) {
         const QString oldDataset = !pendingTrainingPath_.isEmpty() ? pendingTrainingPath_ : pendingReview_.isEmpty() ? selectedPath(datasets_) : pendingReview_, oldRun = selectedPath(runs_);
-        QMap<QString, QPair<Qt::CheckState, Qt::CheckState>> collectionChecks;
-        for (int i=0; i<collectionSources_->topLevelItemCount(); ++i) { auto *item = collectionSources_->topLevelItem(i); collectionChecks.insert(item->data(0, Qt::UserRole).toString(), {item->checkState(0), item->checkState(1)}); }
+        QMap<QString, QString> collectionRoles;
+        for (int i=0; i<collectionSources_->topLevelItemCount(); ++i) { auto *item = collectionSources_->topLevelItem(i); collectionRoles.insert(item->data(0, Qt::UserRole).toString(), collectionRole(item)); }
         QSignalBlocker datasetBlocker(datasets_); datasets_->clear(); runs_->clear(); QSignalBlocker collectionBlocker(collectionSources_); collectionSources_->clear();
         for (const QJsonValue &value : result.value("datasets").toArray()) {
             const auto obj = value.toObject(); const QString path = obj.value("path").toString();
@@ -1886,7 +1953,8 @@ private:
             if (path == oldDataset) datasets_->setCurrentItem(item);
             auto *collection = new QTreeWidgetItem(collectionSources_, {obj.value("name").toString(QFileInfo(path).fileName()), "", obj.value("category").toString(), QString::number(obj.value("sample_count").toInt())});
             collection->setData(0, Qt::UserRole, path); collection->setToolTip(0, location);
-            const auto checks = collectionChecks.value(path, {Qt::Unchecked, Qt::Unchecked}); collection->setCheckState(0, checks.first); collection->setCheckState(1, checks.second);
+            disableItemCheckboxes(collection); const QString role = collectionRoles.value(path, "unused");
+            collection->setData(0, Qt::UserRole + 2, role); collection->setText(1, role == "train" ? "Training" : role == "validation" ? "Validation" : "Not used");
         }
         for (const QJsonValue &value : result.value("runs").toArray()) {
             const auto obj = value.toObject(); const QString path = obj.value("path").toString();
@@ -1902,7 +1970,7 @@ private:
         if (!runs_->currentItem() && runs_->topLevelItemCount()) runs_->setCurrentItem(runs_->topLevelItem(0));
         if (collectionSources_->topLevelItemCount() == 1) {
             auto *item = collectionSources_->topLevelItem(0);
-            if (!collectionChecks.contains(item->data(0, Qt::UserRole).toString())) item->setCheckState(0, Qt::Checked);
+            if (!collectionRoles.contains(item->data(0, Qt::UserRole).toString())) { item->setData(0, Qt::UserRole + 2, "train"); item->setText(1, "Training"); }
         }
         syncDatasetSelection(datasets_, collectionSources_);
         datasetBlocker.unblock(); collectionBlocker.unblock(); updateCollectionReadiness(); updateTrainingSelection(); updateCleanupActions();
@@ -1911,14 +1979,14 @@ private:
 
     void importProjectDatasets() {
         if (!datasetMode_) { openApp("datasets", "prepare"); return; }
-        QDialog dialog(this); dialog.setWindowTitle("Link datasets from another project"); dialog.resize(640, 430); auto *layout = new QVBoxLayout(&dialog);
+        QDialog dialog(this); dialog.setObjectName("linkProjectDatasetsDialog"); dialog.setWindowTitle("Link datasets from another project"); dialog.resize(640, 430); auto *layout = new QVBoxLayout(&dialog);
         auto *hint = new QLabel("Choose a source project, then select datasets to reference in this project. Their files stay in the source location.", &dialog); hint->setWordWrap(true); layout->addWidget(hint);
         auto *row = new QHBoxLayout; auto *source = new QComboBox(&dialog); source->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); source->setMinimumContentsLength(20); row->addWidget(source, 1); auto *browse = new QPushButton("Other project…", &dialog); row->addWidget(browse); layout->addLayout(row);
-        auto *datasets = new QListWidget(&dialog); layout->addWidget(datasets, 1); auto *notice = new QLabel(&dialog); notice->setWordWrap(true); layout->addWidget(notice);
+        auto *datasets = new QListWidget(&dialog); datasets->setObjectName("linkProjectDatasets"); datasets->setSelectionMode(QAbstractItemView::ExtendedSelection); layout->addWidget(datasets, 1); auto *notice = new QLabel(&dialog); notice->setWordWrap(true); layout->addWidget(notice);
         auto populate = [&] {
             datasets->clear(); for (const QString &path : projectDatasets(source->currentData().toString())) {
-                auto *item = new QListWidgetItem(QFileInfo(path).fileName(), datasets); item->setToolTip(path); item->setData(Qt::UserRole, path); item->setFlags(item->flags() | Qt::ItemIsUserCheckable); item->setCheckState(Qt::Checked);
-                if (readJson(QDir(path).filePath("dataset.json")).value("schema").toString() != "ipde-depth-dataset-v1") { item->setText(item->text() + " (unavailable)"); item->setCheckState(Qt::Unchecked); item->setFlags(item->flags() & ~Qt::ItemIsEnabled); }
+                auto *item = new QListWidgetItem(QFileInfo(path).fileName(), datasets); item->setToolTip(path); item->setData(Qt::UserRole, path); item->setFlags(item->flags() & ~Qt::ItemIsUserCheckable); item->setSelected(true);
+                if (readJson(QDir(path).filePath("dataset.json")).value("schema").toString() != "ipde-depth-dataset-v1") { item->setText(item->text() + " (unavailable)"); item->setSelected(false); item->setFlags(item->flags() & ~Qt::ItemIsEnabled); }
             }
             notice->setText(datasets->count() ? "Linked datasets are available in this project's Dataset Manager and Trainer." : "This project does not contain any datasets yet.");
         };
@@ -1934,7 +2002,7 @@ private:
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog); buttons->button(QDialogButtonBox::Ok)->setText("Link selected datasets"); layout->addWidget(buttons);
         connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
-            QStringList paths; for (int i=0; i<datasets->count(); ++i) if (datasets->item(i)->checkState() == Qt::Checked) paths << datasets->item(i)->data(Qt::UserRole).toString();
+            QStringList paths; for (int i=0; i<datasets->count(); ++i) if (datasets->item(i)->isSelected()) paths << datasets->item(i)->data(Qt::UserRole).toString();
             if (paths.isEmpty()) { notice->setText("Select at least one available dataset."); return; }
             addDatasetLinks(paths); dialog.accept();
         });
@@ -1956,14 +2024,16 @@ private:
     void editDatasetLinks() {
         if (!datasetMode_) { openApp("datasets", "prepare"); return; }
         const QString project = projectRoot_; if (project.isEmpty() || !projectSettings_) return;
-        QDialog dialog(this); dialog.setWindowTitle("Dataset links"); dialog.resize(650, 330); auto *layout = new QVBoxLayout(&dialog);
-        auto *hint = new QLabel("Uncheck a link to remove it from this project. The original dataset files remain in place.", &dialog); hint->setWordWrap(true); layout->addWidget(hint);
-        auto *list = new QListWidget(&dialog); layout->addWidget(list, 1);
-        for (const QString &path : linkedDatasets(project)) { auto *item = new QListWidgetItem(path, list); item->setData(Qt::UserRole, path); item->setCheckState(Qt::Checked); }
+        QDialog dialog(this); dialog.setObjectName("datasetLinksDialog"); dialog.setWindowTitle("Dataset links"); dialog.resize(650, 330); auto *layout = new QVBoxLayout(&dialog);
+        auto *hint = new QLabel("Select links and click Remove selected links, then Save. The original dataset files remain in place.", &dialog); hint->setWordWrap(true); layout->addWidget(hint);
+        auto *list = new QListWidget(&dialog); list->setObjectName("datasetLinks"); list->setSelectionMode(QAbstractItemView::ExtendedSelection); layout->addWidget(list, 1);
+        for (const QString &path : linkedDatasets(project)) { auto *item = new QListWidgetItem(path, list); item->setData(Qt::UserRole, path); item->setFlags(item->flags() & ~Qt::ItemIsUserCheckable); }
+        auto *remove = new QPushButton("Remove selected links", &dialog); layout->addWidget(remove);
+        connect(remove, &QPushButton::clicked, &dialog, [list] { qDeleteAll(list->selectedItems()); });
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Save, &dialog); layout->addWidget(buttons);
         connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
-            QStringList links; for (int i=0; i<list->count(); ++i) if (list->item(i)->checkState() == Qt::Checked) links << list->item(i)->data(Qt::UserRole).toString();
+            QStringList links; for (int i=0; i<list->count(); ++i) links << list->item(i)->data(Qt::UserRole).toString();
             QSettings settings(QDir(project).filePath("project.ini"), QSettings::IniFormat); settings.setValue("dataset_links", links); settings.sync(); refreshLibrary(); dialog.accept();
         }); dialog.exec();
     }
@@ -1994,14 +2064,15 @@ private:
     DepthPreview *rgbPreview_ = nullptr, *depthPreview_ = nullptr;
     QList<DepthPreview *> depthPreviews_;
     QSplitter *library_ = nullptr;
-    QCheckBox *verifiedScenes_ = nullptr, *anchor_ = nullptr, *advanced_ = nullptr, *useGroups_ = nullptr, *compareTeachers_ = nullptr, *includeDisplayTeacher_ = nullptr;
-    QList<QCheckBox *> teacherChecks_;
+    QPushButton *verifiedScenes_ = nullptr, *anchor_ = nullptr, *advanced_ = nullptr, *useGroups_ = nullptr, *compareTeachers_ = nullptr, *includeDisplayTeacher_ = nullptr;
+    QList<QPushButton *> teacherChecks_;
     QGroupBox *datasetAdvanced_ = nullptr, *trainingAdvanced_ = nullptr;
     QSpinBox *inputSize_ = nullptr, *epochs_ = nullptr, *steps_ = nullptr, *patch_ = nullptr, *iterations_ = nullptr;
     QSpinBox *splitSeed_ = nullptr, *validationCount_ = nullptr;
     QDoubleSpinBox *validationFraction_ = nullptr; QFormLayout *collectionForm_ = nullptr;
     QTabWidget *tabs_ = nullptr; QPlainTextEdit *log_ = nullptr; QProgressBar *progress_ = nullptr;
     QPushButton *chooseWorkspace_ = nullptr, *refresh_ = nullptr, *generate_ = nullptr, *train_ = nullptr, *cancel_ = nullptr, *export_ = nullptr;
+    QPushButton *useDatasetForTraining_ = nullptr, *useDatasetForValidation_ = nullptr, *skipDataset_ = nullptr;
     QPushButton *saveReviewed_ = nullptr, *compose_ = nullptr, *importHf_ = nullptr, *compareBaseline_ = nullptr;
     QPushButton *cleanupDataset_ = nullptr, *cleanupRun_ = nullptr;
     QProcess *process_ = nullptr; QByteArray stdout_; QString job_, exportDestination_;

@@ -26,7 +26,7 @@ together during validation. Metadata columns and search expose phone model,
 capture date/time and source filenames.
 
 Dataset Studio keeps the dataset library in a left sidebar. Select any row and
-open **Photos and depth**; checks on **Training split** are separate
+open **Photos and depth**; role assignments on **Training split** are separate
 choices for combining datasets. **Dataset actions** holds inspection, storage,
 archive, removal and linking commands. Each dataset keeps its own membership,
 split and version-name draft while you switch rows during the session.
@@ -41,9 +41,10 @@ project's workspace or generated dataset folder. Validated photos appear in the
 list as the scan runs; cancelling keeps the photos already found. Scanning and
 manual addition share the same duplicate handling.
 
-Select one to three teachers. Each teacher creates an independently reviewable
-entry for a photo, sharing its raw data and validation split. Uncheck a poor
-teacher result without dropping the photo's other results. Generation publishes
+Use the teacher buttons to turn one to three teachers **On**. Each teacher creates
+an independently reviewable entry for a photo, sharing its raw data and validation
+split. Select a poor teacher result and choose **Remove selected** without dropping
+the photo's other results. Generation publishes
 completed entries as it runs; review and preview jobs use a separate background
 process. Interim split assignments remain provisional and cannot be trained,
 composed or curated until generation finishes. A bad photo/result is recorded
@@ -76,8 +77,15 @@ independent capture components, rather than individual teacher entries.
 preservation. **Set split…** in **Photos and depth** instead controls individual
 capture assignments in a saved version. **Open selected dataset in Trainer**
 uses that dataset's existing split.
-With a single available dataset, **Include dataset** starts checked. The
-message above **Create training set and continue** explains missing selections,
+Select a dataset row and choose **Use for training** to include it. The **Use**
+column displays **Training**, **Validation**, or **Not used**. **Use for validation**
+holds out the entire selected dataset and switches to the dedicated validation
+strategy; **Do not use** removes it from the set. Selecting a row chooses the
+active dataset without changing its assigned role. With a single available dataset,
+its role starts as **Training**. Roles stay assigned when you refresh the library.
+Switching to an automatic validation strategy keeps existing **Validation** roles
+visible; assign those datasets to **Training** or **Not used** before creating
+the set. The message above **Create training set and continue** explains missing selections,
 name conflicts, unsaved photo/split edits, or an active task. Save the new version
 after editing, then select it for the training set.
 Creating a set verifies the selected arrays and reuses their existing storage.
@@ -177,19 +185,19 @@ session belong together, even if the camera moves. Keep repeat shots and
 variants together; each HEIC's left/right views already stay together. Use
 different group labels for scenes that really are independent.
 
-**My groups separate independent scenes** records your
+**Independent scene groups** records your
 confirmation that you have grouped the photos this way. It lets the report
 describe the held-out groups as scenes. The app does not automatically verify
-scene identity, and checking the box does not verify depth-map quality. Do not
-check it just because photos have different filenames or group labels.
+scene identity, and turning the option **On** does not verify depth-map quality.
+Do not enable it just because photos have different filenames or group labels.
 
 Grouping prevents **validation leakage**: if RAFT trains on one photo of a room
 and is tested on another very similar photo, its score may look good without
 showing that it works on a new scene. Metadata catches exact source/RGB
 duplicates and reported bursts, but cannot reliably recognize the same room or
-object. Leave the box unchecked when scene independence is uncertain; the
+object. Keep this option **Off** when scene independence is uncertain; the
 report then uses the default capture grouping. Supplied group labels still
-keep related captures in the same split when the box is unchecked.
+keep related captures in the same split when the option is **Off**.
 
 Choose the teacher and its local checkpoint/source directories:
 
@@ -260,10 +268,13 @@ to pan, and right-click or click outside to dismiss it. Hover for a synchronized
 Look for incorrect object boundaries, flattened or invented surfaces, holes,
 and inconsistent near/far order. Select multiple photo rows and choose
 **Remove selected** to exclude their targets from the next version;
-**Restore selected** includes them again. A teacher row's checkbox removes just
-that result while keeping other teachers for the same photo. **Remove & next**
+**Restore selected** includes them again. Select an individual teacher row and
+choose **Remove selected** to remove just that result while keeping other teachers
+for the same photo. **Remove and next**
 supports reviewing one photo or teacher target at a time. Removed rows remain
-visible with a strike-through. Removing a target excludes its complete training
+visible with a strike-through. The **Status** column reads **Included**,
+**Removed**, or **Some removed** when a photo retains only some teacher targets.
+Removing a target excludes its complete training
 sample, including both stereo views.
 
 Use **Set split…** to move selected entries to training or validation. The change
