@@ -7,10 +7,24 @@ display-oriented processing. The project has two parts:
 - a Python command-line extractor built on `pillow-heif >= 1.5.0`;
 - a native Qt 6 desktop GUI that runs the extractor with structured JSON I/O.
 
-[RAFT Studio](docs/raft-studio.md) is a separate Qt app for depth-teacher datasets,
-RAFT distillation, and verified checkpoint exports. Launch it with `make studio`.
-IPDE continues to use exported models through its existing RAFT model field;
-dataset and training controls are kept out of its GUI and CLI.
+[IPDE Studio](docs/raft-studio.md) is the project hub for the extractor, Dataset
+Manager and Trainer. Launch it with `make studio`, create/open a project, choose
+your purpose, then open its apps. Studio shares project settings and changes,
+prevents two instances of the same app on one project, and supports separate
+projects at the same time. GUI subapps require their Studio session; the Python
+command-line tools remain available for scripts.
+
+Dataset Manager supports categories, optional groups, recursive spatial discovery,
+1–3 depth teachers, per-photo/per-teacher curation, pixel-size review, overlays and
+rotatable lit surface previews. Trainer assembles multiple reviewed datasets with
+explicit or seeded validation choices and compares a project model with its
+baseline. [Dataset library and import details](docs/dataset-library.md).
+
+New GUI datasets use verified lossless compressed NumPy arrays and deduplicate
+identical arrays. Existing datasets can be compacted into new copies. Extra
+full-display teacher predictions are optional because their full-resolution depth
+and anchor planes can dominate storage. Scientific arrays retain their exact
+dtype and sample bits; display previews are separate temporary visualizations.
 
 ## Precision model
 

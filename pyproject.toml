@@ -23,6 +23,9 @@ dependencies = [
 ipde = "ipde.cli:main"
 raft-studio = "ipde.trainer_cli:main"
 
+[project.optional-dependencies]
+datasets = ["datasets>=4,<6"]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 

@@ -1,3 +1,4 @@
+#include "project_session.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -10,6 +11,8 @@
 #include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QGroupBox>
+#include <QSignalBlocker>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -100,6 +103,18 @@ public:
         subtitle->setWordWrap(true);
         root->addWidget(subtitle);
 
+        auto *goalRow = new QHBoxLayout;
+        goalRow->addWidget(new QLabel("Main purpose", central));
+        goal_ = new QComboBox(central);
+        goal_->addItem("Effect / displacement map", "effect/map");
+        goal_->addItem("Depth estimation", "depth-estimation");
+        goal_->addItem("Photo effects / masking", "photo-effects");
+        goal_->addItem("Manual", "manual");
+        goalRow->addWidget(goal_, 1);
+        advancedToggle_ = new QCheckBox("Advanced settings", central); goalRow->addWidget(advancedToggle_);
+        root->addLayout(goalRow);
+        goalHint_ = new QLabel(central); goalHint_->setWordWrap(true); root->addWidget(goalHint_);
+
         files_ = new QTreeWidget(central);
         files_->setColumnCount(4);
         files_->setHeaderLabels({QStringLiteral("Source / output — check only what you want"), QStringLiteral("Status / dimensions"), QStringLiteral("Source precision"), QStringLiteral("Export storage")});
@@ -165,13 +180,16 @@ public:
         options->addStretch();
         root->addLayout(options);
 
+        advanced_ = new QWidget(central);
+        auto *advancedLayout = new QVBoxLayout(advanced_); advancedLayout->setContentsMargins(0, 0, 0, 0);
+        root->addWidget(advanced_);
         auto *spatialOptions = new QHBoxLayout;
         spatialOptions->addWidget(new QLabel(QStringLiteral("Spatial Photo:"), central));
         spatialOptions->addWidget(colorMatching_);
         spatialOptions->addWidget(colorHero_);
         spatialOptions->addWidget(raftDevice_);
         spatialOptions->addStretch();
-        root->addLayout(spatialOptions);
+        advancedLayout->addLayout(spatialOptions);
 
         auto *classicalOptions = new QHBoxLayout;
         classicalOptions->addWidget(new QLabel(QStringLiteral("Classical matching:"), central));
@@ -184,20 +202,20 @@ public:
             "Disable to match original code values without this preprocessing."));
         classicalOptions->addWidget(stereoSharedDetail_);
         classicalOptions->addStretch();
-        root->addLayout(classicalOptions);
+        advancedLayout->addLayout(classicalOptions);
 
-        auto addPathRow = [this, root, central](const QString &label, const QString &key,
+        auto addPathRow = [this, advancedLayout, central](const QString &label, const QString &key,
                                                 bool directory) {
             auto *row = new QHBoxLayout;
             row->addWidget(new QLabel(label, central));
-            auto *edit = new QLineEdit(QSettings().value(key).toString(), central);
+            auto *edit = new QLineEdit(sharedValue(key).toString(), central);
             edit->setPlaceholderText(QStringLiteral("Automatic lookup (or choose a path)"));
             auto *choose = new QPushButton(QStringLiteral("Choose…"), central);
             row->addWidget(edit, 1);
             row->addWidget(choose);
-            root->addLayout(row);
-            connect(edit, &QLineEdit::textChanged, this, [key](const QString &text) {
-                QSettings().setValue(key, text);
+            advancedLayout->addLayout(row);
+            connect(edit, &QLineEdit::textChanged, this, [this, key](const QString &text) {
+                setSharedValue(key, text);
             });
             connect(choose, &QPushButton::clicked, this, [this, edit, directory] {
                 if (running_) return;
@@ -213,12 +231,12 @@ public:
         raftRoot_ = addPathRow(QStringLiteral("RAFT source folder:"), QStringLiteral("raft/root"), true);
         auto *memberRow = new QHBoxLayout;
         memberRow->addWidget(new QLabel(QStringLiteral("Model inside ZIP:"), central));
-        raftMember_ = new QLineEdit(QSettings().value(QStringLiteral("raft/member")).toString(), central);
+        raftMember_ = new QLineEdit(sharedValue(QStringLiteral("raft/member")).toString(), central);
         raftMember_->setPlaceholderText(QStringLiteral("raftstereo-middlebury.pth (only for ZIP models)"));
         memberRow->addWidget(raftMember_);
-        root->addLayout(memberRow);
-        connect(raftMember_, &QLineEdit::textChanged, this, [](const QString &text) {
-            QSettings().setValue(QStringLiteral("raft/member"), text);
+        advancedLayout->addLayout(memberRow);
+        connect(raftMember_, &QLineEdit::textChanged, this, [this](const QString &text) {
+            setSharedValue(QStringLiteral("raft/member"), text);
         });
         auto *help = new QLabel(QStringLiteral(
             "Check individual outputs, then Export checked. Or select one row and click Export this map. "
@@ -332,7 +350,27 @@ public:
             }
         });
 
+        connect(advancedToggle_, &QCheckBox::toggled, advanced_, &QWidget::setVisible);
+        connect(goal_, &QComboBox::currentIndexChanged, this, [this] {
+            setSharedValue("goal", goal_->currentData()); applyGoal();
+        });
+        reloadProjectSettings();
         updateButtons();
+    }
+
+    void reloadProjectSettings() {
+        if (running_) { reloadPending_ = true; return; }
+        reloadPending_ = false;
+        for (auto pair : {qMakePair(raftRoot_, QString("raft/root")), qMakePair(raftModel_, QString("raft/model")), qMakePair(raftMember_, QString("raft/member"))}) {
+            const QSignalBlocker block(pair.first); pair.first->setText(sharedValue(pair.second).toString());
+        }
+        const QSignalBlocker block(goal_);
+        const int index = goal_->findData(sharedValue("goal", "effect/map").toString()); const bool changed = goal_->currentIndex() != qMax(0, index);
+        goal_->setCurrentIndex(qMax(0, index)); if (changed || !settingsLoaded_) applyGoal(); settingsLoaded_ = true;
+        if (!IPDE::projectRoot().isEmpty()) {
+            if (output_->text().isEmpty()) output_->setText(QDir(IPDE::projectRoot()).filePath("exports"));
+            setWindowTitle("IPDE Extractor — " + QFileInfo(IPDE::projectRoot()).fileName());
+        }
     }
 
 protected:
@@ -355,6 +393,36 @@ protected:
     }
 
 private:
+    QVariant sharedValue(const QString &key, const QVariant &fallback = {}) const {
+        if (IPDE::projectRoot().isEmpty()) return QSettings().value(key, fallback);
+        return QSettings(QDir(IPDE::projectRoot()).filePath("project.ini"), QSettings::IniFormat).value(key, fallback);
+    }
+    void setSharedValue(const QString &key, const QVariant &value) {
+        if (IPDE::projectRoot().isEmpty()) { QSettings().setValue(key, value); return; }
+        QSettings settings(QDir(IPDE::projectRoot()).filePath("project.ini"), QSettings::IniFormat); settings.setValue(key, value); settings.sync();
+    }
+    void applyGoal() {
+        const QString goal = goal_->currentData().toString();
+        advancedToggle_->setChecked(goal == "manual"); advanced_->setVisible(advancedToggle_->isChecked());
+        if (goal == "effect/map") goalHint_->setText("Suggested output: RAFT displacement. This estimates detailed stereo geometry; compare models before adopting a project model.");
+        else if (goal == "depth-estimation") goalHint_->setText("Suggested output: calibrated RAFT meter depth plus its support mask. Unknown or unsupported values need review.");
+        else if (goal == "photo-effects") goalHint_->setText("Suggested outputs: embedded Apple depth and mattes from portrait photos. Original depth values are preserved.");
+        else goalHint_->setText("Choose individual products and override any inference settings.");
+        if (goal != "manual" && !running_) {
+            const QSignalBlocker blocker(files_);
+            for (int i = 0; i < files_->topLevelItemCount(); ++i) for (int j = 0; j < files_->topLevelItem(i)->childCount(); ++j) {
+                auto *child = files_->topLevelItem(i)->child(j);
+                child->setCheckState(0, suggestedProduct(child->data(0, Qt::UserRole + 1).toString(), child->text(0).toLower()) ? Qt::Checked : Qt::Unchecked);
+            }
+        }
+    }
+    bool suggestedProduct(const QString &id, const QString &kind) const {
+        const QString goal = goal_->currentData().toString();
+        if (goal == "effect/map") return id == "raft-displacement";
+        if (goal == "depth-estimation") return id == "raft-depth" || id == "raft-support";
+        if (goal == "photo-effects") return id.startsWith("raw:") && (kind.contains("depth") || kind.contains("matte"));
+        return false;
+    }
     void addFiles(const QStringList &paths) {
         if (running_) return;
         bool added = false;
@@ -439,6 +507,7 @@ private:
     void startNext() {
         if (queue_.isEmpty()) {
             running_ = false;
+            if (reloadPending_) reloadProjectSettings();
             updateButtons();
             statusBar()->showMessage(cancelled_ ? QStringLiteral("Cancelled") : QStringLiteral("Finished"), 5000);
             return;
@@ -501,6 +570,7 @@ private:
                     root->setToolTip(1, message);
                 }
             } else if (root) {
+                const bool firstInspection = root->childCount() == 0;
                 QSet<QString> checked;
                 const QString currentProduct = files_->currentItem()
                     ? files_->currentItem()->data(0, Qt::UserRole + 1).toString() : QString();
@@ -539,7 +609,7 @@ private:
                     for (int column = 0; column < 4; ++column) child->setToolTip(column, description);
                     child->setData(0, Qt::UserRole + 1, id);
                     child->setFlags(child->flags() | Qt::ItemIsUserCheckable);
-                    child->setCheckState(0, checked.contains(id) ? Qt::Checked : Qt::Unchecked);
+                    child->setCheckState(0, (checked.contains(id) || (firstInspection && suggestedProduct(id, product.value("name").toString().toLower()))) ? Qt::Checked : Qt::Unchecked);
                     if (id == currentProduct) files_->setCurrentItem(child);
                 }
                 for (const auto &warning : object.value(QStringLiteral("warnings")).toArray())
@@ -604,6 +674,11 @@ private:
         overwrite_->setEnabled(!running_);
     }
 
+    QWidget *advanced_ = nullptr;
+    QCheckBox *advancedToggle_ = nullptr;
+    QComboBox *goal_ = nullptr;
+    QLabel *goalHint_ = nullptr;
+    bool reloadPending_ = false, settingsLoaded_ = false;
     QTreeWidget *files_ = nullptr;
     QLineEdit *output_ = nullptr;
     QLineEdit *raftModel_ = nullptr;
@@ -643,7 +718,10 @@ int main(int argc, char *argv[]) {
     QApplication application(argc, argv);
     application.setApplicationName(QStringLiteral("IPDE"));
     application.setOrganizationName(QStringLiteral("OpenAI"));
+    IPDE::ProjectSession session("extractor", &application);
+    if (!session.start()) return 2;
     MainWindow window;
+    session.onChanged = [&window] { window.reloadProjectSettings(); };
     window.show();
     if (application.arguments().contains(QStringLiteral("--smoke-test"))) {
         QTimer::singleShot(300, &application, &QCoreApplication::quit);

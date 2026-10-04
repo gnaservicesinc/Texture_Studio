@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(Qt6 6.8 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Widgets Network)
 qt_standard_project_setup()
 
 set(IPDE_PYTHON_EXECUTABLE
@@ -16,7 +16,17 @@ qt_add_executable(ipde_gui MACOSX_BUNDLE
     src/gui/main.cpp
 )
 qt_add_executable(raft_studio MACOSX_BUNDLE src/gui/trainer.cpp)
-target_link_libraries(raft_studio PRIVATE Qt6::Widgets)
+qt_add_executable(ipde_studio MACOSX_BUNDLE src/gui/studio.cpp)
+target_link_libraries(ipde_studio PRIVATE Qt6::Widgets Qt6::Network)
+target_compile_options(ipde_studio PRIVATE -Wall -Wextra -Wpedantic)
+set_target_properties(ipde_studio PROPERTIES
+    OUTPUT_NAME "IPDE Studio"
+    MACOSX_BUNDLE_BUNDLE_NAME "IPDE Studio"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "org.ipde.studio"
+    MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+)
+target_link_libraries(raft_studio PRIVATE Qt6::Widgets Qt6::Network)
 target_compile_options(raft_studio PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_definitions(raft_studio PRIVATE
     RAFT_STUDIO_SOURCE_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/raft_studio.py"
@@ -44,7 +54,7 @@ set(IPDE_PYTHON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/spatial.py"
 )
 
-target_link_libraries(ipde_gui PRIVATE Qt6::Widgets)
+target_link_libraries(ipde_gui PRIVATE Qt6::Widgets Qt6::Network)
 target_compile_options(ipde_gui PRIVATE -Wall -Wextra -Wpedantic)
 
 if(APPLE)
@@ -63,6 +73,8 @@ if(APPLE)
         target_link_libraries(ipde_gui PRIVATE "${IPDE_MACOS_SDK}/usr/lib/libc++.tbd")
         target_link_options(raft_studio PRIVATE -nostdlib++)
         target_link_libraries(raft_studio PRIVATE "${IPDE_MACOS_SDK}/usr/lib/libc++.tbd")
+        target_link_options(ipde_studio PRIVATE -nostdlib++)
+        target_link_libraries(ipde_studio PRIVATE "${IPDE_MACOS_SDK}/usr/lib/libc++.tbd")
     endif()
 endif()
 target_compile_definitions(ipde_gui PRIVATE
@@ -75,8 +87,14 @@ list(REMOVE_ITEM RAFT_STUDIO_PYTHON_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/ipde_ex
 list(APPEND RAFT_STUDIO_PYTHON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/trainer_cli.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/dataset.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/dataset_review.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/training.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/pseudo_calibration.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/array_storage.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/dataset_collection.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/spatial_scan.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/model_comparison.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/huggingface_datasets.py"
 )
 set_property(TARGET raft_studio APPEND PROPERTY LINK_DEPENDS
     "${RAFT_STUDIO_PYTHON_SOURCES}" "${CMAKE_CURRENT_SOURCE_DIR}/raft_studio.py")
@@ -117,6 +135,18 @@ if(APPLE)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/registration.py" "${resource_root}/src/ipde/registration.py"
         COMMENT "Embedding the Python extraction engine in IPDE.app"
+    )
+endif()
+
+if(APPLE)
+    add_dependencies(ipde_studio ipde_gui raft_studio)
+    set(studio_apps "$<TARGET_BUNDLE_DIR:ipde_studio>/Contents/Applications")
+    add_custom_target(ipde_studio_bundle ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${studio_apps}"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:ipde_gui>" "${studio_apps}/IPDE.app"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:raft_studio>" "${studio_apps}/RAFT Studio.app"
+        DEPENDS ipde_studio ipde_gui raft_studio
+        COMMENT "Packing IPDE subapps into IPDE Studio"
     )
 endif()
 

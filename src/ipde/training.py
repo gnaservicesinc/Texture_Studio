@@ -10,13 +10,15 @@ import shutil
 import sys
 import tempfile
 import warnings
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
 from .dataset import DatasetError, load_dataset, teacher_depth_to_flow
+from .array_storage import read_array
 from .formats import sha256_array, sha256_file
 from .spatial import (
     RaftStereoError, RaftStereoOptions, _checkpoint_bytes, _model_configuration,
@@ -44,6 +46,7 @@ class TrainingOptions:
     iterations: int = 4
     train_scope: str = "update"
     require_photometric_support: bool = False
+    cache_samples: int = 2
 
 
 def _check_splits(samples: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -101,18 +104,20 @@ def _load_sample(root: Path, sample: dict[str, Any], options: TrainingOptions) -
         raise TrainingError("A RIGHT display teacher requires explicit camera reprojection; it cannot supervise the LEFT pair directly")
     if label["units"] != "meters":
         raise TrainingError("RAFT pseudo-labels require meters; relative outputs need an explicit accepted metric-anchor estimate or independently measured calibration")
-    left = np.load(root / sample["rgb"]["path"], mmap_mode="r", allow_pickle=False)
-    raw_right = np.load(root / sample["right_rgb"]["path"], mmap_mode="r", allow_pickle=False)
-    depth = np.load(root / label["target"]["path"], mmap_mode="r", allow_pickle=False)
+    left = read_array(root / sample["rgb"]["path"])
+    raw_right = read_array(root / sample["right_rgb"]["path"])
+    depth = read_array(root / label["target"]["path"])
     if left.dtype != np.uint8 or raw_right.dtype != np.uint8 or left.shape != raw_right.shape or left.ndim != 3 or left.shape[2] != 3:
         raise TrainingError("Pretrained RAFT requires matching native uint8 RGB views; higher-bit raw arrays remain untouched")
     try:
         flow, valid, geometry = teacher_depth_to_flow(depth, sample["calibration"])
     except DatasetError as exc:
         raise TrainingError(str(exc)) from exc
+    if label_key == "reference":
+        geometry = {**geometry, "label_kind": "user_declared_measured_reference", "precision_note": "Reference accuracy and calibration require independent verification"}
     right, right_valid, registration = register_stereo_rows(left, raw_right)
     valid &= correspondence_validity(flow, right_valid)
-    recorded_valid = np.load(root / label["valid_mask"]["path"], mmap_mode="r", allow_pickle=False)
+    recorded_valid = read_array(root / label["valid_mask"]["path"])
     if recorded_valid.shape != valid.shape or recorded_valid.dtype != np.bool_:
         raise TrainingError("Dataset target validity mask has the wrong shape or dtype")
     valid &= recorded_valid
@@ -129,8 +134,39 @@ def _load_sample(root: Path, sample: dict[str, Any], options: TrainingOptions) -
         "right_inference_sha256": sha256_array(right), "right_registration": registration,
         "accepted_teacher_pixels": int(valid.sum()), "photometrically_supported_teacher_pixels": int(photometric.sum()),
         "photometric_filter_required": options.require_photometric_support, "photometric_support": evidence,
-        "visibility_note": "Teacher-derived z-buffer visibility is estimated, not independently measured",
+        "visibility_note": "Reference-derived visibility depends on the supplied measurement and calibration" if label_key == "reference" else "Teacher-derived z-buffer visibility is estimated, not independently measured",
     }}
+
+
+class _SamplePool(Sequence):
+    """Keep only a bounded number of decoded training targets in memory."""
+    def __init__(self, root: Path, samples: list[dict[str, Any]], options: TrainingOptions):
+        self.root, self.samples, self.options = root, samples, options
+        self.cache: OrderedDict[int, dict[str, Any]] = OrderedDict()
+        self.details: dict[int, dict[str, Any]] = {}
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        if index < 0: index += len(self.samples)
+        if not 0 <= index < len(self.samples): raise IndexError(index)
+        if index not in self.cache:
+            value = _load_sample(self.root, self.samples[index], self.options)
+            self.details[index] = value["details"]
+            self.cache[index] = value
+            while len(self.cache) > self.options.cache_samples:
+                self.cache.popitem(last=False)
+        self.cache.move_to_end(index)
+        return self.cache[index]
+
+    def prepare(self, role: str):
+        for index in range(len(self)):
+            self[index]
+            print(f"Preparing {role} target {index + 1}/{len(self)}", file=sys.stderr, flush=True)
+
+    def preprocessing(self):
+        return [self.details[index] for index in sorted(self.details)]
 
 
 def _patch(sample: Mapping[str, Any], y: int, x: int, size: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -158,7 +194,7 @@ def _tensors(torch: Any, device: str, padder_class: Any, patch: Any) -> tuple[An
     return lt, rt, ft, vt, padder
 
 
-def _evaluate(torch: Any, model: Any, device: str, padder_class: Any, samples: list[dict[str, Any]], options: TrainingOptions) -> dict[str, Any]:
+def _evaluate(torch: Any, model: Any, device: str, padder_class: Any, samples: Sequence[dict[str, Any]], options: TrainingOptions) -> dict[str, Any]:
     errors, patches = [], []
     model.eval()
     with torch.inference_mode():
@@ -182,16 +218,18 @@ def _evaluate(torch: Any, model: Any, device: str, padder_class: Any, samples: l
     return {"mean_absolute_flow_error_pixels": float(values.mean()), "within_one_pixel_fraction": float(np.mean(values < 1)),
         "within_three_pixels_fraction": float(np.mean(values < 3)), "evaluated_pixels_including_overlapping_patches": int(values.size),
         "scope": "Fixed native-resolution stereo crops; overlapping pixels may count more than once", "patches": patches,
-        "reference": "teacher-derived flow pseudo-label agreement" if options.mode == "distillation" else "user-supplied measured meter-depth references"}
+        "reference": "teacher-derived flow pseudo-label agreement" if options.mode == "distillation" else "user-supplied measured meter-depth references" if options.mode == "supervised" else "mixed measured-reference and teacher pseudo-label agreement"}
 
 
 def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options: TrainingOptions | None = None) -> dict[str, Any]:
     """Fine-tune real RAFT weights locally and save the best held-out checkpoint."""
     options = options or TrainingOptions()
-    if options.mode not in {"distillation", "supervised"} or options.train_scope not in {"update", "full"}:
-        raise TrainingError("Use distillation/supervised mode and update/full train_scope")
+    if options.mode not in {"distillation", "supervised", "mixed"} or options.train_scope not in {"update", "full"}:
+        raise TrainingError("Use distillation/supervised/mixed mode and update/full train_scope")
     if min(options.epochs, options.steps_per_epoch) < 1 or options.patch_size < 64 or options.patch_size % 32:
         raise TrainingError("Epochs/steps must be positive; native patch_size must be a multiple of 32 and at least 64")
+    if not isinstance(options.cache_samples, int) or isinstance(options.cache_samples, bool) or not 1 <= options.cache_samples <= 64:
+        raise TrainingError("cache_samples must be an integer from 1 to 64")
     if not 1 <= options.iterations <= 256 or not math.isfinite(options.learning_rate) or options.learning_rate <= 0:
         raise TrainingError("RAFT iterations must be 1..256 and learning_rate finite and positive")
     checkpoint = Path(checkpoint_path).expanduser().resolve()
@@ -203,20 +241,33 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
         manifest = load_dataset(root)
     except DatasetError as exc:
         raise TrainingError(str(exc)) from exc
+    if manifest.get("generation_state", "complete") != "complete" or manifest.get("splits_provisional"):
+        raise TrainingError("Finish dataset generation before training; streamed split assignments are provisional")
     train, validation = _check_splits(manifest["samples"])
     if options.mode == "supervised" and any("reference" not in s for s in manifest["samples"]):
         raise TrainingError("Supervised training requires independently measured meter-depth references for every sample")
-    chosen = [s.get("training_target_choice", "teacher") if options.mode == "distillation" else "teacher" for s in manifest["samples"]]
-    if any(key not in {"teacher", "registered_display_teacher", "anchored_teacher"} or key not in sample for sample, key in zip(manifest["samples"], chosen)):
-        raise TrainingError("Dataset has an unsupported distillation label choice")
-    teachers = {s[key]["metadata"]["checkpoint_sha256"] for s, key in zip(manifest["samples"], chosen)}
-    metric_anchors = {s[key]["metadata"].get("metric_anchor_checkpoint_sha256") for s, key in zip(manifest["samples"], chosen)}
-    if options.mode == "distillation" and len(teachers) != 1:
-        raise TrainingError("Distillation requires one consistent teacher checkpoint")
-    if options.mode == "distillation" and len(metric_anchors) != 1:
-        raise TrainingError("Distillation requires one consistent explicit metric-anchor checkpoint")
-    train_arrays = [_load_sample(root, s, options) for s in train]
-    validation_arrays = [_load_sample(root, s, options) for s in validation]
+    chosen = [s.get("training_target_choice", "teacher") if options.mode != "supervised" else "reference" for s in manifest["samples"]]
+    allowed = {"teacher", "registered_display_teacher", "anchored_teacher"} if options.mode == "distillation" else {"reference"} if options.mode == "supervised" else {"teacher", "registered_display_teacher", "anchored_teacher", "reference"}
+    if any(key not in allowed or key not in sample for sample, key in zip(manifest["samples"], chosen)):
+        raise TrainingError("Dataset has an unsupported training label choice")
+    teachers = {s[key].get("metadata", {}).get("checkpoint_sha256") for s, key in zip(manifest["samples"], chosen) if key != "reference"}
+    if options.mode != "supervised" and any(key != "reference" and (not isinstance(s[key].get("metadata", {}).get("checkpoint_sha256"), str) or not s[key]["metadata"]["checkpoint_sha256"]) for s, key in zip(manifest["samples"], chosen)):
+        raise TrainingError("Every distillation target must identify its teacher checkpoint")
+    if options.mode == "supervised": teachers.clear()
+    teachers.discard(None)
+    metric_anchors = {s[key].get("metadata", {}).get("metric_anchor_checkpoint_sha256") for s, key in zip(manifest["samples"], chosen) if key != "reference"}
+    intentional_mixture = bool(manifest.get("collection")) or len({s.get("teacher_id") for s in manifest["samples"] if s.get("teacher_id")}) > 1
+    if options.mode == "distillation" and not intentional_mixture:
+        if len(teachers) != 1:
+            raise TrainingError("Distillation requires one consistent teacher checkpoint, or an explicitly assembled multi-teacher collection")
+        if len(metric_anchors) != 1:
+            raise TrainingError("Distillation requires one consistent explicit metric-anchor checkpoint, or an assembled collection")
+    if options.mode == "supervised": metric_anchors.clear()
+    # Each reviewed teacher variant is a separate target on the same source
+    # grid. Splits keep the source together; mixed teachers need not share weights.
+    train_arrays = _SamplePool(root, train, options)
+    validation_arrays = _SamplePool(root, validation, options)
+    train_arrays.prepare("training"); validation_arrays.prepare("validation")
     print(f"RAFT experiment: {len(train)} training capture(s), {len(validation)} held-out capture(s)", file=sys.stderr, flush=True)
     raft_options = RaftStereoOptions(root=options.raft_root, model=options.raft_model, model_member=options.raft_model_member, device=options.device, iterations=options.iterations)
     try:
@@ -302,8 +353,13 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
                 best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         model.load_state_dict(best_state)
         final = _evaluate(torch, model, device, InputPadder, validation_arrays, options)
-    notes = ["Experimental RAFT teacher distillation; targets are pseudo-labels, not measured ground truth.",
-        "Teacher agreement does not prove improved accuracy or eliminate teacher hallucinations.",
+    mode_notes = (["Experimental supervised RAFT training against user-declared measured references.",
+        "Reference measurement accuracy and camera registration require independent verification."] if options.mode == "supervised" else
+        ["Experimental mixed RAFT training uses measured references and model pseudo-labels, with separate sample provenance.",
+         "Pseudo-label agreement does not establish absolute accuracy; verify reference accuracy independently."] if options.mode == "mixed" else
+        ["Experimental RAFT teacher distillation; targets are pseudo-labels, not measured ground truth.",
+         "Teacher agreement does not prove improved accuracy or eliminate teacher hallucinations."])
+    notes = [*mode_notes,
         "Results retain spatial_left coordinates. The display image has separate camera/framing.",
         "Trained weights are never selected automatically. Validate independent geometry before trusting displacement."]
     if len(manifest.get("group_ids", [])) < 10:
@@ -317,11 +373,13 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
         "options": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(options).items()},
         "dataset_manifest_sha256": sha256_file(root / "dataset.json"), "teacher_checkpoint_sha256": sorted(teachers),
         "metric_anchor_checkpoint_sha256": sorted(value for value in metric_anchors if value is not None),
+        "label_provenance": [{"sample_id": s["id"], "target_choice": key, "label_kind": s[key].get("label_kind"),
+            "target_array_sha256": s[key]["target"]["array_sha256"], "source_sha256": s["source_sha256"]} for s, key in zip(manifest["samples"], chosen)],
         "original_raft_checkpoint_sha256": hashlib.sha256(checkpoint_bytes).hexdigest(), "raft_configuration": vars(configuration),
         "trainable_parameter_count": sum(p.numel() for p in trainable),
         "train_sample_ids": [s["id"] for s in train], "validation_sample_ids": [s["id"] for s in validation],
         "train_group_ids": sorted({s["group_id"] for s in train}), "validation_group_ids": sorted({s["group_id"] for s in validation}),
-        "sample_preprocessing": [s["details"] for s in train_arrays + validation_arrays],
+        "sample_preprocessing": train_arrays.preprocessing() + validation_arrays.preprocessing(),
         "input_preprocessing": "Native stereo crops without resizing; upstream RAFT transforms new float32 RGB model tensors from 0..255 to -1..1",
         "target_preprocessing": "Metric depth converted to signed flow; invalid/occluded/out-of-crop labels masked; stored targets untouched",
         "baseline_validation": baseline, "best_epoch": best_epoch, "validation": final, "history": history, "warnings": notes}

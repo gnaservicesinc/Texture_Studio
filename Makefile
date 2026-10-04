@@ -23,7 +23,7 @@ gui: build
 	open "$(CURDIR)/$(BUILD_DIR)/IPDE.app"
 
 studio: build
-	open "$(CURDIR)/$(BUILD_DIR)/RAFT Studio.app"
+	open "$(CURDIR)/$(BUILD_DIR)/IPDE Studio.app"
 
 test:
 	PYTHONPATH=$(CURDIR)/src $(PYTHON) -m unittest discover -s tests -v

@@ -25,11 +25,68 @@ def _parser() -> argparse.ArgumentParser:
     workspace.add_argument("workspace", type=Path)
     inspect = commands.add_parser("inspect-dataset", help="verify a dataset's arrays and provenance")
     inspect.add_argument("dataset", type=Path)
+    review = commands.add_parser("review-dataset", help="list samples and depth labels for visual review")
+    review.add_argument("dataset", type=Path)
+    preview = commands.add_parser("preview-sample", help="render disposable RGB/depth previews without changing dataset arrays")
+    preview.add_argument("dataset", type=Path)
+    preview.add_argument("--sample", required=True)
+    preview.add_argument("--label", choices=("training", "teacher", "anchored_teacher", "metric_anchor",
+        "display_teacher", "registered_display_teacher", "anchored_display_teacher", "display_metric_anchor", "reference"), default="training")
+    preview.add_argument("--output-dir", required=True, type=Path)
+    preview.add_argument("--max-dimension", type=int, default=1600, help="0 preserves full pixel size in display copies")
+    comparison = commands.add_parser("compare-samples", help="compare two or three teacher variants of one photo")
+    comparison.add_argument("dataset", type=Path)
+    comparison.add_argument("--sample", action="append", required=True)
+    comparison.add_argument("--output-dir", required=True, type=Path)
+    comparison.add_argument("--max-dimension", type=int, default=0)
+    models = commands.add_parser("compare-models", help="visual A/B of baseline and project RAFT on one spatial photo")
+    models.add_argument("source", type=Path)
+    models.add_argument("--baseline-model", type=Path, required=True)
+    models.add_argument("--candidate-model", type=Path, required=True)
+    models.add_argument("--raft-root", type=Path)
+    models.add_argument("--device", default="auto", choices=("auto", "mps", "cuda", "cpu"))
+    models.add_argument("--iterations", type=int, default=32)
+    models.add_argument("--output-dir", type=Path, required=True)
+    scan = commands.add_parser("scan-spatial", help="recursively find valid calibrated spatial photos without following links")
+    scan.add_argument("directory", type=Path)
+    scan.add_argument("--no-recursive", action="store_true")
+    compose = commands.add_parser("compose-datasets", help="assemble reviewed datasets into a new training set")
+    compose.add_argument("datasets", nargs="+", type=Path)
+    compose.add_argument("--output-dir", required=True, type=Path)
+    compose.add_argument("--validation-dataset", action="append", type=Path, default=[])
+    compose.add_argument("--split-mode", choices=("global-random", "equal-per-dataset", "explicit"), default="global-random")
+    compose.add_argument("--validation-fraction", type=float, default=.2)
+    compose.add_argument("--seed", type=int, default=0)
+    compose.add_argument("--grouping", choices=("preserve", "ignore"), default="preserve")
+    compose.add_argument("--validation-count-per-dataset", type=int)
+    compact = commands.add_parser("compact-dataset", help="write a verified lossless compressed, deduplicated dataset copy")
+    compact.add_argument("dataset", type=Path)
+    compact.add_argument("--output-dir", required=True, type=Path)
+    hf = commands.add_parser("import-hf", help="import mapped lossless stereo arrays through the optional datasets backend")
+    hf.add_argument("dataset")
+    hf.add_argument("--output-dir", type=Path, required=True)
+    hf.add_argument("--mapping-json", type=Path, required=True)
+    hf.add_argument("--config")
+    hf.add_argument("--split", default="train")
+    hf.add_argument("--revision")
+    hf.add_argument("--asset-dir", type=Path)
+    hf.add_argument("--data-files", help="local/Hub JSON or Parquet files for a datasets builder")
+    curate = commands.add_parser("curate-dataset", help="copy kept samples into a new lossless dataset, preserving original splits")
+    curate.add_argument("dataset", type=Path)
+    curate.add_argument("--keep", action="append", required=True, help="sample ID to retain; repeat for each kept sample")
+    curate.add_argument("--output-dir", required=True, type=Path)
     dataset = commands.add_parser("dataset", help="generate a lossless teacher-target dataset")
     dataset.add_argument("sources", type=Path, nargs="+")
     dataset.add_argument("--output-dir", required=True, type=Path)
     dataset.add_argument("--groups", type=Path, help="JSON mapping absolute source paths to scene IDs")
-    dataset.add_argument("--grouping", choices=("capture", "scene"), default="capture", help="use scene only when groups are verified independent scenes")
+    dataset.add_argument("--grouping", choices=("none", "capture", "scene"), default="capture", help="use scene only when groups are verified independent scenes")
+    dataset.add_argument("--name", default="")
+    dataset.add_argument("--category", default="")
+    dataset.add_argument("--teachers-json", type=Path, help="array of 1-3 model configs; each produces a separately reviewed entry")
+    dataset.add_argument("--include-display-teacher", action="store_true", help="also infer the separate display-camera grid (large storage cost)")
+    dataset.add_argument("--uncompressed", action="store_true", help="store NPY instead of lossless NPZ")
+    dataset.add_argument("--validation-fraction", type=float, default=.2)
+    dataset.add_argument("--seed", type=int, default=0)
     dataset.add_argument("--metric-anchor", choices=("depthpro",), help="explicitly anchor a relative teacher's scale to a separate DepthPro estimate")
     dataset.add_argument("--anchor-model-path", type=Path)
     dataset.add_argument("--anchor-source-dir", type=Path)
@@ -42,6 +99,7 @@ def _parser() -> argparse.ArgumentParser:
     _model_arguments(teacher)
     train = commands.add_parser("train", help="fine-tune a real RAFT checkpoint on teacher-generated flow targets")
     train.add_argument("dataset", type=Path)
+    train.add_argument("--mode", choices=("auto", "distillation", "supervised", "mixed"), default="distillation")
     train.add_argument("--checkpoint", required=True, type=Path)
     train.add_argument("--raft-root", type=Path)
     train.add_argument("--raft-model", type=Path)
@@ -73,7 +131,11 @@ def workspace_report(workspace: Path) -> dict:
                 raise ValueError("unsupported dataset schema")
             samples = data.get("samples", [])
             result["datasets"].append({"path": str(path.parent), "name": path.parent.name,
-                "sample_count": len(samples), "teacher": samples[0].get("teacher", {}).get("metadata", {}).get("model_id", "") if samples else "",
+                "sample_count": len(samples), "source_count": len({s.get("source_sha256", s.get("id")) for s in samples}),
+                "training_mode": "supervised" if samples and all(s.get("training_target_choice") == "reference" for s in samples) else "mixed" if any(s.get("training_target_choice") == "reference" for s in samples) else "distillation",
+                "category": data.get("category", ""), "generation_state": data.get("generation_state", "complete"),
+                "storage_bytes": sum(p.stat().st_size for p in path.parent.rglob("*") if p.is_file() and not p.is_symlink()),
+                "teacher": ", ".join(sorted({s.get("teacher", {}).get("metadata", {}).get("model_id", "") for s in samples} - {""})),
                 "train_count": sum(s.get("split") == "train" for s in samples),
                 "validation_count": sum(s.get("split") == "validation" for s in samples)})
         except (OSError, ValueError, TypeError, AttributeError) as exc:
@@ -98,6 +160,30 @@ def _config(args):
                               device=args.device, input_size=args.input_size)
 
 
+def _progress(event):
+    print("IPDE_EVENT " + json.dumps(event, allow_nan=False), file=sys.stderr, flush=True)
+
+
+def _teacher_configs(args):
+    if not args.teachers_json:
+        return [_config(args)], []
+    from .learned_depth import LearnedDepthConfig
+    entries = json.loads(args.teachers_json.read_text())
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 3:
+        raise ValueError("teachers JSON must be an array of one to three model configurations")
+    configs, ids = [], []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict) or entry.get("model") not in {"depthpro", "depth-anything-v2", "depth-anything-3"}:
+            raise ValueError("Each teacher must specify a supported model")
+        if set(entry) - {"id", "model", "model_path", "source_dir", "device", "input_size"}:
+            raise ValueError("Unknown teacher configuration field")
+        configs.append(LearnedDepthConfig(model=entry["model"], model_path=Path(entry["model_path"]) if entry.get("model_path") else None,
+            source_dir=Path(entry["source_dir"]) if entry.get("source_dir") else None, device=entry.get("device", args.device),
+            input_size=int(entry.get("input_size", args.input_size))))
+        ids.append(str(entry.get("id", f"teacher-{index + 1}")))
+    return configs, ids
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -108,16 +194,51 @@ def main(argv: Sequence[str] | None = None) -> int:
             elif args.command == "inspect-dataset":
                 from .dataset import load_dataset
                 report = load_dataset(args.dataset)
+            elif args.command == "review-dataset":
+                from .dataset_review import review_dataset
+                report = review_dataset(args.dataset)
+            elif args.command == "preview-sample":
+                from .dataset_review import preview_sample
+                report = preview_sample(args.dataset, args.sample, args.label, args.output_dir, max_dimension=args.max_dimension)
+            elif args.command == "compare-samples":
+                from .dataset_review import compare_samples
+                report = compare_samples(args.dataset, args.sample, args.output_dir, max_dimension=args.max_dimension)
+            elif args.command == "compare-models":
+                from .model_comparison import compare_models
+                report = compare_models(args.source, args.output_dir, baseline_model=args.baseline_model,
+                    candidate_model=args.candidate_model, raft_root=args.raft_root, device=args.device, iterations=args.iterations)
+            elif args.command == "scan-spatial":
+                from .spatial_scan import scan_spatial_directory
+                report = scan_spatial_directory(args.directory, recursive=not args.no_recursive, progress_callback=_progress)
+            elif args.command == "compose-datasets":
+                from .dataset_collection import CollectionOptions, compose_datasets
+                report = compose_datasets(args.datasets, args.output_dir, CollectionOptions(split_mode=args.split_mode,
+                    validation_fraction=args.validation_fraction, split_seed=args.seed, grouping=args.grouping,
+                    validation_count_per_dataset=args.validation_count_per_dataset), validation_datasets=args.validation_dataset, progress_callback=_progress)
+            elif args.command == "compact-dataset":
+                from .dataset_collection import compress_dataset
+                report = compress_dataset(args.dataset, args.output_dir, progress_callback=_progress)
+            elif args.command == "import-hf":
+                from .huggingface_datasets import import_huggingface_dataset
+                report = import_huggingface_dataset(args.dataset, args.output_dir, json.loads(args.mapping_json.read_text()),
+                    config=args.config, split=args.split, revision=args.revision, asset_dir=args.asset_dir, data_files=args.data_files)
+            elif args.command == "curate-dataset":
+                from .dataset_review import curate_dataset
+                report = curate_dataset(args.dataset, args.keep, args.output_dir)
             elif args.command == "dataset":
                 from .dataset import DatasetOptions, build_dataset
                 from .learned_depth import LearnedDepthConfig
                 groups = json.loads(args.groups.read_text()) if args.groups else None
                 if groups is not None and (not isinstance(groups, dict) or any(not isinstance(v, str) for v in groups.values())):
                     raise ValueError("scene groups must be a JSON object mapping source paths to scene ID strings")
+                teacher_configs, teacher_ids = _teacher_configs(args)
                 report = build_dataset(args.sources, args.output_dir,
-                    DatasetOptions(teacher=_config(args), group_ids=groups, include_display_teacher=True, grouping_semantics=args.grouping,
+                    DatasetOptions(teacher=teacher_configs[0], additional_teachers=tuple(teacher_configs[1:]), teacher_ids=tuple(teacher_ids),
+                        group_ids=groups, include_display_teacher=args.include_display_teacher, grouping_semantics=args.grouping,
+                        name=args.name, category=args.category, compress_arrays=not args.uncompressed, require_apple_camera=True,
+                        validation_fraction=args.validation_fraction, split_seed=args.seed,
                         metric_anchor=LearnedDepthConfig(model="depthpro", model_path=args.anchor_model_path,
-                            source_dir=args.anchor_source_dir, device=args.device) if args.metric_anchor else None))
+                            source_dir=args.anchor_source_dir, device=args.device) if args.metric_anchor else None), progress_callback=_progress)
                 report = {"dataset_path": str(args.output_dir.expanduser().resolve()), **report}
             elif args.command == "teacher":
                 from .extractor import ExtractOptions, extract_file
@@ -133,8 +254,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )) for source in args.sources]}
             elif args.command == "train":
                 from .training import TrainingOptions, train_dataset
+                mode = args.mode
+                if mode == "auto":
+                    from .dataset import load_dataset
+                    manifest = load_dataset(args.dataset, verify=False)
+                    choices = {s.get("training_target_choice", "teacher") for s in manifest["samples"]}
+                    mode = "supervised" if choices == {"reference"} else "mixed" if "reference" in choices else "distillation"
                 report = train_dataset(args.dataset, args.checkpoint, TrainingOptions(
-                    epochs=args.epochs, steps_per_epoch=args.steps, patch_size=args.patch_size,
+                    epochs=args.epochs, steps_per_epoch=args.steps, patch_size=args.patch_size, mode=mode,
                     iterations=args.iterations, train_scope=args.scope, device=args.device,
                     raft_root=args.raft_root, raft_model=args.raft_model, raft_model_member=args.raft_model_member,
                     require_photometric_support=args.photometric_support,

@@ -10,18 +10,20 @@ import base64
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 import numpy as np
 
 from .extractor import _asset_record, _jsonable, discover_file
 from .formats import sha256_array, sha256_file, verify_npy, write_npy
+from .array_storage import read_array
 
 if TYPE_CHECKING:
     from .learned_depth import LearnedDepthConfig, LearnedDepthResult
@@ -42,6 +44,13 @@ class DatasetOptions:
     prefer_registered_display_teacher: bool = True
     grouping_semantics: str = "capture"
     metric_anchor: LearnedDepthConfig | None = None
+    additional_teachers: tuple[LearnedDepthConfig, ...] = ()
+    teacher_ids: tuple[str, ...] = ()
+    skip_bad_photos: bool = True
+    name: str | None = None
+    category: str | None = None
+    require_apple_camera: bool = False
+    compress_arrays: bool = False
 
 
 def teacher_depth_to_flow(depth: np.ndarray, calibration: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
@@ -167,7 +176,8 @@ def assign_grouped_splits(samples: list[dict[str, Any]], fraction: float, seed: 
         components.setdefault(root(i), []).append(i)
     groups: list[str] = []
     for indices in components.values():
-        hashes = sorted(samples[i]["source_sha256"] for i in indices)
+        # Adding/removing teacher variants must never change a photo's group.
+        hashes = sorted({samples[i]["source_sha256"] for i in indices})
         group = hashlib.sha256("\n".join(hashes).encode()).hexdigest()[:24]
         groups.append(group)
         for i in indices:
@@ -189,14 +199,20 @@ def build_dataset(
     display_teacher_results: Mapping[str, LearnedDepthResult] | None = None,
     metric_anchor_results: Mapping[str, LearnedDepthResult] | None = None,
     display_metric_anchor_results: Mapping[str, LearnedDepthResult] | None = None,
+    teacher_results_by_id: Mapping[str, Mapping[str, LearnedDepthResult]] | None = None,
+    display_teacher_results_by_id: Mapping[str, Mapping[str, LearnedDepthResult]] | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Build a new dataset atomically from explicitly selected spatial HEICs.
+    """Build a new dataset with atomic, progressively readable snapshots.
 
     All discovered auxiliary/sample arrays retain their original dtype and
     bytes. The left and right views retain their original grids/calibration.
     Only the teacher's documented inference preprocessing modifies model input.
     Optional measured references must be positive depth in meters, stored as an
     HxW float NPY on the exact left-view grid. They are never implicitly resized.
+    Completed samples are readable from the staging directory reported through
+    progress_callback. Its dataset.json is generation-owned: curation must use
+    a separate reviewed copy until dataset_complete reports the final path.
     """
     destination = Path(output_dir).expanduser().resolve()
     inputs = [Path(source).expanduser().resolve() for source in sources]
@@ -204,12 +220,20 @@ def build_dataset(
         raise DatasetError("Select at least one original spatial HEIC photo")
     if destination.exists():
         raise DatasetError(f"Dataset destination already exists: {destination}; select a new directory")
-    if any(source.suffix.lower() not in {".heic", ".heif", ".hif"} for source in inputs):
-        raise DatasetError("Dataset inputs must be original HEIC/HEIF files, not depth previews")
     if len(set(inputs)) != len(inputs):
         raise DatasetError("A source path was selected more than once")
-    if options.grouping_semantics not in {"capture", "scene"}:
-        raise DatasetError("grouping_semantics must be capture or scene")
+    if options.grouping_semantics not in {"capture", "scene", "none"}:
+        raise DatasetError("grouping_semantics must be capture, scene or none")
+    teachers = (options.teacher, *options.additional_teachers)
+    if len(teachers) > 3:
+        raise DatasetError("Choose one, two or three teachers")
+    if options.teacher_ids and len(options.teacher_ids) != len(teachers):
+        raise DatasetError("teacher_ids must contain one unique ID per selected teacher")
+    teacher_ids = list(options.teacher_ids) or [
+        f"{getattr(config, 'model', 'teacher')}-{index + 1}" for index, config in enumerate(teachers)
+    ]
+    if len(set(teacher_ids)) != len(teacher_ids) or any(not isinstance(value, str) or not value.strip() for value in teacher_ids):
+        raise DatasetError("Teacher IDs must be unique nonempty strings")
     # Fail before inference for malformed splitting options.
     assign_grouped_splits([], options.validation_fraction, options.split_seed)
     normalized_groups = {
@@ -226,15 +250,43 @@ def build_dataset(
     display_teacher_results = {str(Path(key).expanduser().resolve()): value for key, value in (display_teacher_results or {}).items()}
     metric_anchor_results = {str(Path(key).expanduser().resolve()): value for key, value in (metric_anchor_results or {}).items()}
     display_metric_anchor_results = {str(Path(key).expanduser().resolve()): value for key, value in (display_metric_anchor_results or {}).items()}
+    teacher_results_by_id = {teacher_id: {str(Path(key).expanduser().resolve()): value for key, value in values.items()}
+                             for teacher_id, values in (teacher_results_by_id or {}).items()}
+    display_teacher_results_by_id = {teacher_id: {str(Path(key).expanduser().resolve()): value for key, value in values.items()}
+                                     for teacher_id, values in (display_teacher_results_by_id or {}).items()}
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination.parent))
     predictors: dict[str, Any] = {}
+    array_sizes: dict[str, tuple[int, int]] = {}
+    stored_arrays: dict[tuple[str, tuple[int, ...], str], dict[str, Any]] = {}
 
-    def predict(array: np.ndarray, *, anchor: bool = False, **kwargs: Any) -> LearnedDepthResult:
-        name = "metric_anchor" if anchor else "teacher"
+    def dataset_array_record(root: Path, path: Path, value: np.ndarray) -> dict[str, Any]:
+        from .array_storage import array_record
+        identity = (value.dtype.str, value.shape, sha256_array(value))
+        if identity in stored_arrays:
+            # Byte-identical source copies, duplicate HEIF views and repeated
+            # teacher planes share one immutable lossless file.
+            return dict(stored_arrays[identity])
+        record = array_record(root, path, value, compressed=options.compress_arrays)
+        array_sizes[record["path"]] = ((root / record["path"]).stat().st_size, value.nbytes)
+        stored_arrays[identity] = record
+        return record
+
+    def discard(folder: Path) -> None:
+        shutil.rmtree(folder, ignore_errors=True)
+        prefix = folder.relative_to(temporary).as_posix() + "/"
+        for name in list(array_sizes):
+            if name.startswith(prefix):
+                del array_sizes[name]
+        for identity, record in list(stored_arrays.items()):
+            if record["path"].startswith(prefix):
+                del stored_arrays[identity]
+
+    def predict(array: np.ndarray, *, anchor: bool = False, teacher_index: int = 0, **kwargs: Any) -> LearnedDepthResult:
+        name = "metric_anchor" if anchor else teacher_ids[teacher_index]
         if name not in predictors:
             from .learned_depth import LearnedDepthPredictor
-            predictors[name] = LearnedDepthPredictor(options.metric_anchor if anchor else options.teacher)
+            predictors[name] = LearnedDepthPredictor(options.metric_anchor if anchor else teachers[teacher_index])
         return predictors[name](array, **kwargs)
 
     def anchored_label(
@@ -258,8 +310,8 @@ def build_dataset(
         prefix = "display-" if display else ""
         anchor_record = {
             "label_kind": "metric_model_anchor_pseudo_label", "units": "meters", "metadata": _jsonable(anchor_prediction.metadata),
-            "target": _array_record(temporary, folder / f"{prefix}metric-anchor.npy", anchor_depth),
-            "native_target": _array_record(temporary, folder / f"{prefix}metric-anchor-native.npy", anchor_native),
+            "target": dataset_array_record(temporary, folder / f"{prefix}metric-anchor.npy", anchor_depth),
+            "native_target": dataset_array_record(temporary, folder / f"{prefix}metric-anchor-native.npy", anchor_native),
         }
         from .pseudo_calibration import PseudoCalibrationError, anchor_relative_depth
         try:
@@ -271,8 +323,8 @@ def build_dataset(
             "metric_anchor_checkpoint_sha256": anchor_prediction.metadata["checkpoint_sha256"], "pseudo_calibration": calibration}
         anchored_record = {
             "label_kind": "model_anchored_pseudo_depth", "units": "meters", "metadata": anchored_metadata,
-            "target": _array_record(temporary, folder / f"{prefix}anchored-teacher.npy", anchored),
-            "valid_mask": _array_record(temporary, folder / f"{prefix}anchored-valid.npy", accepted),
+            "target": dataset_array_record(temporary, folder / f"{prefix}anchored-teacher.npy", anchored),
+            "valid_mask": dataset_array_record(temporary, folder / f"{prefix}anchored-valid.npy", accepted),
             "calibration": calibration,
         }
         return anchor_record, anchored_record, calibration
@@ -284,216 +336,306 @@ def build_dataset(
         "Known duplicates and reported burst identifiers stay in one split. Supply group_ids "
         "for related captures of the same scene: scene identity cannot be reliably inferred from HEIC metadata.",
     ]
-    try:
-        for index, source in enumerate(inputs):
-            print(f"Dataset photo {index + 1}/{len(inputs)}: {source.name}", file=sys.stderr, flush=True)
-            discovery = discover_file(source)
-            spatial = discovery.spatial_photo
-            if spatial is None:
-                raise DatasetError(f"{source.name} has no calibrated Apple spatial stereo pair")
-            views = {
-                asset.semantic_name: asset
-                for asset in discovery.assets
-                if asset.kind == "spatial_view"
-            }
-            if "spatial_left" not in views or "spatial_right" not in views:
-                raise DatasetError(f"{source.name} lacks decoded left/right spatial views")
-            left, right = views["spatial_left"], views["spatial_right"]
-            if left.array.shape[:2] != right.array.shape[:2]:
-                raise DatasetError("Left/right views must have exactly matching grids")
-            sample_id = f"{index:05d}-{discovery.source_sha256[:16]}"
-            folder = temporary / sample_id
-            folder.mkdir()
-            raw: list[dict[str, Any]] = []
-            for ordinal, asset in enumerate(discovery.assets):
-                record = _asset_record(asset)
-                record["storage"] = _array_record(temporary, folder / f"raw-{ordinal:03d}.npy", asset.array)
-                record["metadata_blocks"] = _jsonable(asset.metadata_blocks)
-                raw.append(record)
-            left_index = next(i for i, asset in enumerate(discovery.assets) if asset is left)
-            right_index = next(i for i, asset in enumerate(discovery.assets) if asset is right)
-            prediction = _lookup(teacher_results, source)
-            if prediction is None:
-                print("  Running selected teacher on the calibrated LEFT view", file=sys.stderr, flush=True)
-                prediction = predict(
-                    left.array,
-                    focal_pixels=spatial["left_camera"]["focal_length_x_pixels"],
-                    reference_label="spatial_left",
-                )
-            target = np.asarray(prediction.source_depth)
-            native = np.asarray(prediction.native_depth)
-            if target.shape != left.array.shape[:2] or target.dtype != np.float32:
-                raise DatasetError("Teacher output must be float32 on the exact left-view HxW grid")
-            if native.ndim != 2 or native.dtype != np.float32:
-                raise DatasetError("Teacher native output must be a float32 HxW plane")
-            metadata = dict(prediction.metadata)
-            if metadata.get("input_rgb_sha256") != sha256_array(left.array):
-                raise DatasetError("Teacher RGB provenance does not match the extracted left view")
-            units = metadata.get("units")
-            if units not in {"meters", "relative_inverse_depth", "relative_depth"}:
-                raise DatasetError(f"Unknown teacher output units: {units!r}")
-            if not isinstance(metadata.get("checkpoint_sha256"), str) or not metadata["checkpoint_sha256"]:
-                raise DatasetError("Teacher metadata must identify the checkpoint SHA-256")
-            valid = np.isfinite(target) & (target > 0)
-            if not valid.any():
-                raise DatasetError(f"{source.name}: teacher returned no finite positive depth values")
-            sample: dict[str, Any] = {
-                "id": sample_id,
-                "source_path": str(source),
-                "source_sha256": discovery.source_sha256,
-                "source_bytes": discovery.source_size,
-                "requested_group": normalized_groups.get(str(source)),
-                "burst_ids": sorted(_burst_ids(discovery.top_level_images)),
-                "rgb": {**raw[left_index]["storage"], "source_bit_depth": left.source_bit_depth},
-                "right_rgb": {**raw[right_index]["storage"], "source_bit_depth": right.source_bit_depth},
-                "coordinate_reference": "spatial_left: exact decoded sample coordinates, no EXIF rotation",
-                "calibration": _jsonable(spatial),
-                "top_level_images": _jsonable(discovery.top_level_images),
-                "raw_assets": raw,
-                "teacher": {
-                    "label_kind": "pseudo_label",
-                    "units": units,
-                    "metadata": _jsonable(metadata),
-                    "target": _array_record(temporary, folder / "teacher.npy", target),
-                    "native_target": _array_record(temporary, folder / "teacher-native.npy", native),
-                    "valid_mask": _array_record(temporary, folder / "teacher-valid.npy", valid),
-                    "valid_pixel_count": int(valid.sum()),
-                },
-            }
-            anchor_record, anchored_record, pseudo_calibration = anchored_label(
-                source, left.array, prediction, folder, display=False,
-                focal_pixels=spatial["left_camera"]["focal_length_x_pixels"],
-            )
-            if anchor_record is not None:
-                sample["metric_anchor"] = anchor_record
-                sample["pseudo_calibration"] = pseudo_calibration
-            if anchored_record is not None:
-                sample["anchored_teacher"] = anchored_record
-                sample["training_target_choice"] = "anchored_teacher"
-            training_target = target if units == "meters" else np.load(temporary / anchored_record["target"]["path"], allow_pickle=False) if anchored_record else None
-            if training_target is not None and spatial.get("raft_stereo_ready"):
-                flow, flow_valid, flow_details = teacher_depth_to_flow(training_target, spatial)
-                sample["raft_target"] = {
-                    "source_label": "anchored_teacher" if anchored_record else "teacher",
-                    "target": _array_record(temporary, folder / "raft-teacher-flow.npy", flow),
-                    "valid_mask": _array_record(temporary, folder / "raft-teacher-valid.npy", flow_valid),
-                    "metadata": flow_details,
-                }
-            display_indices = [i for i, asset in enumerate(discovery.assets) if asset.kind == "display_view"]
-            if display_indices:
-                display_index = display_indices[0]
-                display = discovery.assets[display_index]
-                sample["display_rgb"] = {**raw[display_index]["storage"], "source_bit_depth": display.source_bit_depth}
-                sample["display_note"] = "Separate display camera/framing; never resized onto the left/right stereo grid"
-                display_prediction = _lookup(display_teacher_results, source)
-                if display_prediction is None and options.include_display_teacher:
-                    print("  Running selected teacher on the full display image", file=sys.stderr, flush=True)
-                    display_prediction = predict(display.array, reference_label="display")
-                if display_prediction is not None:
-                    display_target = np.asarray(display_prediction.source_depth)
-                    if display_target.shape != display.array.shape[:2] or display_target.dtype != np.float32:
-                        raise DatasetError("Display teacher must use the exact display grid")
-                    if display_prediction.metadata.get("input_rgb_sha256") != sha256_array(display.array):
-                        raise DatasetError("Display teacher provenance does not match the display image")
-                    display_metadata = display_prediction.metadata
-                    if display_metadata.get("units") not in {"meters", "relative_inverse_depth", "relative_depth"}:
-                        raise DatasetError("Display teacher has unsupported units")
-                    if not isinstance(display_metadata.get("checkpoint_sha256"), str) or not display_metadata["checkpoint_sha256"]:
-                        raise DatasetError("Display teacher must identify its checkpoint SHA-256")
-                    if np.asarray(display_prediction.native_depth).ndim != 2 or np.asarray(display_prediction.native_depth).dtype != np.float32:
-                        raise DatasetError("Display teacher native output must be a float32 HxW plane")
-                    if not (np.isfinite(display_target) & (display_target > 0)).any():
-                        raise DatasetError("Display teacher returned no finite positive target values")
-                    sample["display_teacher"] = {
-                        "label_kind": "pseudo_label",
-                        "units": display_prediction.metadata["units"],
-                        "metadata": _jsonable(display_prediction.metadata),
-                        "target": _array_record(temporary, folder / "display-teacher.npy", display_target),
-                        "native_target": _array_record(temporary, folder / "display-teacher-native.npy", display_prediction.native_depth),
-                        "coordinate_reference": "display; separate from RAFT's spatial_left reference",
-                    }
-                    display_anchor, anchored_display, display_calibration = anchored_label(
-                        source, display.array, display_prediction, folder, display=True, focal_pixels=None,
-                    )
-                    if display_anchor is not None:
-                        sample["display_metric_anchor"] = display_anchor
-                        sample["display_pseudo_calibration"] = display_calibration
-                    if anchored_display is not None:
-                        sample["anchored_display_teacher"] = anchored_display
-                    display_training_target = display_target if display_metadata["units"] == "meters" else np.load(temporary / anchored_display["target"]["path"], allow_pickle=False) if anchored_display else None
-                    from .registration import estimate_display_registration, register_display_depth
-                    registration = estimate_display_registration(discovery)
-                    print(f"  Display registration: {registration.get('reason')}", file=sys.stderr, flush=True)
-                    sample["display_registration"] = _jsonable(registration)
-                    if registration.get("accepted") and display_training_target is not None:
-                        registered, registered_valid = register_display_depth(display_training_target, discovery, registration)
-                        sample["registered_display_teacher"] = {
-                            "label_kind": "registered_display_teacher_pseudo_label",
-                            "units": "meters",
-                            "target": _array_record(temporary, folder / "registered-display-teacher.npy", registered),
-                            "valid_mask": _array_record(temporary, folder / "registered-display-valid.npy", registered_valid),
-                            "reference_role": registration["reference_role"],
-                            "metadata": anchored_display["metadata"] if anchored_display else _jsonable(display_prediction.metadata),
-                            "registration": _jsonable(registration),
-                            "precision_note": "Approximate same-camera depth transport only inside independently validated registration cells",
-                        }
-                    use_display = (options.prefer_registered_display_teacher and registration.get("accepted")
-                                   and registration.get("reference_role") == "left" and display_training_target is not None)
-                    sample["training_target_choice"] = "registered_display_teacher" if use_display else "anchored_teacher" if anchored_record else "teacher"
-                    sample["training_target_choice_note"] = (
-                        "Use registered display teacher only where its empirical LEFT-camera registration is supported; holes stay excluded"
-                        if use_display else "Use separate LEFT-grid supervision; display registration/metric anchoring is unavailable, rejected, or belongs to the RIGHT camera")
-            if getattr(prediction, "confidence", None) is not None:
-                confidence = np.asarray(prediction.confidence)
-                sample["teacher"]["confidence"] = _array_record(temporary, folder / "teacher-confidence.npy", confidence)
-                sample["teacher"]["confidence_note"] = "Model confidence is not a measured error bound"
-            reference_path = _lookup(references, source)
-            if reference_path is not None:
-                try:
-                    reference = np.load(reference_path, allow_pickle=False)
-                except (ValueError, OSError) as exc:
-                    raise DatasetError(f"Cannot read measured reference NPY: {reference_path}: {exc}") from exc
-                if reference.shape != target.shape or reference.dtype.kind != "f":
-                    raise DatasetError("Measured reference must be a floating-point meter-depth NPY on the exact left grid")
-                reference_valid = np.isfinite(reference) & (reference > 0)
-                if not reference_valid.any():
-                    raise DatasetError("Measured reference contains no finite positive meter-depth samples")
-                sample["reference"] = {
-                    "label_kind": "user_supplied_measured_reference",
-                    "units": "meters",
-                    "source_path": str(reference_path),
-                    "source_sha256": sha256_file(reference_path),
-                    "target": _array_record(temporary, folder / "reference.npy", reference),
-                    "valid_mask": _array_record(temporary, folder / "reference-valid.npy", reference_valid),
-                    "accuracy_note": "User must verify measurement accuracy and left-camera registration independently",
-                }
-            samples.append(sample)
-            print(f"  Preserved {len(raw)} raw arrays and teacher targets", file=sys.stderr, flush=True)
+    skipped: list[dict[str, Any]] = []
+    event_sequence = 0
+
+    def emit(event: str, **details: Any) -> None:
+        nonlocal event_sequence
+        event_sequence += 1
+        payload = {"event": event, "sequence": event_sequence, **details}
+        journal_root = temporary if temporary.exists() else destination
+        with (journal_root / "events.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload, allow_nan=False) + "\n")
+            stream.flush()
+        if progress_callback is not None:
+            progress_callback(payload)
+
+    def snapshot(state: str, processed_sources: int) -> dict[str, Any]:
         groups = assign_grouped_splits(samples, options.validation_fraction, options.split_seed)
+        current_warnings = list(warnings)
         if len(groups) < 2:
-            warnings.append("Only one independent group is present; training requires another held-out scene/group")
+            current_warnings.append("Only one independent group is present; training requires another held-out scene/group")
         manifest = {
             "schema": "ipde-depth-dataset-v1",
-            "precision_policy": "Raw samples/auxiliaries preserved bit-for-bit in NPY; no normalization, gamma, or resampling",
+            "name": options.name or destination.name,
+            "category": options.category,
+            "precision_policy": "Raw samples/auxiliaries preserved bit-for-bit in NPY/NPZ; no normalization, gamma, or resampling",
+            "array_storage": "npz_deflate" if options.compress_arrays else "npy",
+            "generation_state": state,
+            "generation_output_dir": str(destination),
+            "splits_provisional": state != "complete",
             "split_seed": options.split_seed,
             "validation_fraction": options.validation_fraction,
             "group_ids": groups,
-            "explicit_scene_groups": options.grouping_semantics == "scene" and all(sample["requested_group"] for sample in samples),
+            "explicit_scene_groups": options.grouping_semantics == "scene" and bool(samples) and all(sample["requested_group"] for sample in samples),
             "grouping_semantics": options.grouping_semantics,
-            "warnings": warnings,
+            "teachers": [{"id": teacher_id, "model": getattr(config, "model", None)} for teacher_id, config in zip(teacher_ids, teachers)],
+            "warnings": current_warnings,
+            "skipped_sources": list(skipped),
             "samples": samples,
             "summary": {
-                "samples": len(samples),
-                "groups": len(groups),
+                "samples": len(samples), "source_photos": len({sample["source_sha256"] for sample in samples}),
+                "groups": len(groups), "processed_sources": processed_sources, "total_sources": len(inputs),
+                "skipped_entries": len(skipped),
+                "array_storage_bytes": sum(size[0] for size in array_sizes.values()),
+                "array_sample_bytes": sum(size[1] for size in array_sizes.values()),
                 "train_samples": sum(sample["split"] == "train" for sample in samples),
                 "validation_samples": sum(sample["split"] == "validation" for sample in samples),
             },
         }
-        (temporary / "dataset.json").write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+        manifest_path = temporary / "dataset.json"
+        staging = temporary / ".dataset.json-writing"
+        with staging.open("w", encoding="utf-8") as stream:
+            stream.write(json.dumps(manifest, indent=2, allow_nan=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        staging.replace(manifest_path)
+        return manifest
+
+    def skip(source: Path, error: Exception, *, teacher_id: str | None = None) -> None:
+        if not options.skip_bad_photos:
+            raise error
+        record = {"source_path": str(source), "teacher_id": teacher_id, "reason": str(error), "error_type": type(error).__name__}
+        skipped.append(record)
+        print(f"  Skipped {source.name}: {error}", file=sys.stderr, flush=True)
+        emit("photo_skipped", dataset_dir=str(temporary), **record)
+
+    def make_sample(source: Path, discovery: Any, index: int, teacher_index: int, raw: list[dict[str, Any]],
+                    left: Any, right: Any, left_index: int, right_index: int, source_id: str,
+                    photo_metadata: dict[str, Any], folder: Path) -> dict[str, Any]:
+        spatial = discovery.spatial_photo
+        teacher_id = teacher_ids[teacher_index]
+        sample_id = source_id if len(teachers) == 1 else f"{source_id}-teacher-{teacher_index + 1}"
+        prediction = _lookup(teacher_results_by_id.get(teacher_id), source)
+        if prediction is None and teacher_index == 0:
+            prediction = _lookup(teacher_results, source)
+        if prediction is None:
+            print("  Running selected teacher on the calibrated LEFT view", file=sys.stderr, flush=True)
+            prediction = predict(
+                left.array, teacher_index=teacher_index,
+                focal_pixels=spatial["left_camera"]["focal_length_x_pixels"],
+                reference_label="spatial_left",
+            )
+        target = np.asarray(prediction.source_depth)
+        native = np.asarray(prediction.native_depth)
+        if target.shape != left.array.shape[:2] or target.dtype != np.float32:
+            raise DatasetError("Teacher output must be float32 on the exact left-view HxW grid")
+        if native.ndim != 2 or native.dtype != np.float32:
+            raise DatasetError("Teacher native output must be a float32 HxW plane")
+        metadata = dict(prediction.metadata)
+        if metadata.get("input_rgb_sha256") != sha256_array(left.array):
+            raise DatasetError("Teacher RGB provenance does not match the extracted left view")
+        units = metadata.get("units")
+        if units not in {"meters", "relative_inverse_depth", "relative_depth"}:
+            raise DatasetError(f"Unknown teacher output units: {units!r}")
+        if not isinstance(metadata.get("checkpoint_sha256"), str) or not metadata["checkpoint_sha256"]:
+            raise DatasetError("Teacher metadata must identify the checkpoint SHA-256")
+        valid = np.isfinite(target) & (target > 0)
+        if not valid.any():
+            raise DatasetError(f"{source.name}: teacher returned no finite positive depth values")
+        sample: dict[str, Any] = {
+            "id": sample_id,
+            "source_id": source_id,
+            "source_photo_id": source_id,
+            "teacher_id": teacher_id,
+            "teacher_model": getattr(teachers[teacher_index], "model", metadata.get("model_id")),
+            "photo_metadata": photo_metadata,
+            "source_path": str(source),
+            "source_sha256": discovery.source_sha256,
+            "source_bytes": discovery.source_size,
+            "requested_group": normalized_groups.get(str(source)) if options.grouping_semantics != "none" else None,
+            "burst_ids": sorted(_burst_ids(discovery.top_level_images)),
+            "rgb": {**raw[left_index]["storage"], "source_bit_depth": left.source_bit_depth},
+            "right_rgb": {**raw[right_index]["storage"], "source_bit_depth": right.source_bit_depth},
+            "coordinate_reference": "spatial_left: exact decoded sample coordinates, no EXIF rotation",
+            "calibration": _jsonable(spatial),
+            "top_level_images": _jsonable(discovery.top_level_images),
+            "raw_assets": raw,
+            "teacher": {
+                "label_kind": "pseudo_label",
+                "units": units,
+                "metadata": _jsonable(metadata),
+                "target": dataset_array_record(temporary, folder / "teacher.npy", target),
+                "native_target": dataset_array_record(temporary, folder / "teacher-native.npy", native),
+                "valid_mask": dataset_array_record(temporary, folder / "teacher-valid.npy", valid),
+                "valid_pixel_count": int(valid.sum()),
+            },
+        }
+        anchor_record, anchored_record, pseudo_calibration = anchored_label(
+            source, left.array, prediction, folder, display=False,
+            focal_pixels=spatial["left_camera"]["focal_length_x_pixels"],
+        )
+        if anchor_record is not None:
+            sample["metric_anchor"] = anchor_record
+            sample["pseudo_calibration"] = pseudo_calibration
+        if anchored_record is not None:
+            sample["anchored_teacher"] = anchored_record
+            sample["training_target_choice"] = "anchored_teacher"
+        training_target = target if units == "meters" else read_array(temporary / anchored_record["target"]["path"]) if anchored_record else None
+        if training_target is not None and spatial.get("raft_stereo_ready"):
+            flow, flow_valid, flow_details = teacher_depth_to_flow(training_target, spatial)
+            sample["raft_target"] = {
+                "source_label": "anchored_teacher" if anchored_record else "teacher",
+                "target": dataset_array_record(temporary, folder / "raft-teacher-flow.npy", flow),
+                "valid_mask": dataset_array_record(temporary, folder / "raft-teacher-valid.npy", flow_valid),
+                "metadata": flow_details,
+            }
+        display_indices = [i for i, asset in enumerate(discovery.assets) if asset.kind == "display_view"]
+        if display_indices:
+            display_index = display_indices[0]
+            display = discovery.assets[display_index]
+            sample["display_rgb"] = {**raw[display_index]["storage"], "source_bit_depth": display.source_bit_depth}
+            sample["display_note"] = "Separate display camera/framing; never resized onto the left/right stereo grid"
+            display_prediction = _lookup(display_teacher_results_by_id.get(teacher_id), source)
+            if display_prediction is None and teacher_index == 0:
+                display_prediction = _lookup(display_teacher_results, source)
+            if display_prediction is None and options.include_display_teacher:
+                print("  Running selected teacher on the full display image", file=sys.stderr, flush=True)
+                display_prediction = predict(display.array, teacher_index=teacher_index, reference_label="display")
+            if display_prediction is not None:
+                display_target = np.asarray(display_prediction.source_depth)
+                if display_target.shape != display.array.shape[:2] or display_target.dtype != np.float32:
+                    raise DatasetError("Display teacher must use the exact display grid")
+                if display_prediction.metadata.get("input_rgb_sha256") != sha256_array(display.array):
+                    raise DatasetError("Display teacher provenance does not match the display image")
+                display_metadata = display_prediction.metadata
+                if display_metadata.get("units") not in {"meters", "relative_inverse_depth", "relative_depth"}:
+                    raise DatasetError("Display teacher has unsupported units")
+                if not isinstance(display_metadata.get("checkpoint_sha256"), str) or not display_metadata["checkpoint_sha256"]:
+                    raise DatasetError("Display teacher must identify its checkpoint SHA-256")
+                if np.asarray(display_prediction.native_depth).ndim != 2 or np.asarray(display_prediction.native_depth).dtype != np.float32:
+                    raise DatasetError("Display teacher native output must be a float32 HxW plane")
+                if not (np.isfinite(display_target) & (display_target > 0)).any():
+                    raise DatasetError("Display teacher returned no finite positive target values")
+                sample["display_teacher"] = {
+                    "label_kind": "pseudo_label",
+                    "units": display_prediction.metadata["units"],
+                    "metadata": _jsonable(display_prediction.metadata),
+                    "target": dataset_array_record(temporary, folder / "display-teacher.npy", display_target),
+                    "native_target": dataset_array_record(temporary, folder / "display-teacher-native.npy", display_prediction.native_depth),
+                    "coordinate_reference": "display; separate from RAFT's spatial_left reference",
+                }
+                display_anchor, anchored_display, display_calibration = anchored_label(
+                    source, display.array, display_prediction, folder, display=True, focal_pixels=None,
+                )
+                if display_anchor is not None:
+                    sample["display_metric_anchor"] = display_anchor
+                    sample["display_pseudo_calibration"] = display_calibration
+                if anchored_display is not None:
+                    sample["anchored_display_teacher"] = anchored_display
+                display_training_target = display_target if display_metadata["units"] == "meters" else read_array(temporary / anchored_display["target"]["path"]) if anchored_display else None
+                from .registration import estimate_display_registration, register_display_depth
+                registration = estimate_display_registration(discovery)
+                print(f"  Display registration: {registration.get('reason')}", file=sys.stderr, flush=True)
+                sample["display_registration"] = _jsonable(registration)
+                if registration.get("accepted") and display_training_target is not None:
+                    registered, registered_valid = register_display_depth(display_training_target, discovery, registration)
+                    sample["registered_display_teacher"] = {
+                        "label_kind": "registered_display_teacher_pseudo_label",
+                        "units": "meters",
+                        "target": dataset_array_record(temporary, folder / "registered-display-teacher.npy", registered),
+                        "valid_mask": dataset_array_record(temporary, folder / "registered-display-valid.npy", registered_valid),
+                        "reference_role": registration["reference_role"],
+                        "metadata": anchored_display["metadata"] if anchored_display else _jsonable(display_prediction.metadata),
+                        "registration": _jsonable(registration),
+                        "precision_note": "Approximate same-camera depth transport only inside independently validated registration cells",
+                    }
+                use_display = (options.prefer_registered_display_teacher and registration.get("accepted")
+                               and registration.get("reference_role") == "left" and display_training_target is not None)
+                sample["training_target_choice"] = "registered_display_teacher" if use_display else "anchored_teacher" if anchored_record else "teacher"
+                sample["training_target_choice_note"] = (
+                    "Use registered display teacher only where its empirical LEFT-camera registration is supported; holes stay excluded"
+                    if use_display else "Use separate LEFT-grid supervision; display registration/metric anchoring is unavailable, rejected, or belongs to the RIGHT camera")
+        if getattr(prediction, "confidence", None) is not None:
+            confidence = np.asarray(prediction.confidence)
+            sample["teacher"]["confidence"] = dataset_array_record(temporary, folder / "teacher-confidence.npy", confidence)
+            sample["teacher"]["confidence_note"] = "Model confidence is not a measured error bound"
+        reference_path = _lookup(references, source)
+        if reference_path is not None:
+            try:
+                reference = np.load(reference_path, allow_pickle=False)
+            except (ValueError, OSError) as exc:
+                raise DatasetError(f"Cannot read measured reference NPY: {reference_path}: {exc}") from exc
+            if reference.shape != target.shape or reference.dtype.kind != "f":
+                raise DatasetError("Measured reference must be a floating-point meter-depth NPY on the exact left grid")
+            reference_valid = np.isfinite(reference) & (reference > 0)
+            if not reference_valid.any():
+                raise DatasetError("Measured reference contains no finite positive meter-depth samples")
+            sample["reference"] = {
+                "label_kind": "user_supplied_measured_reference",
+                "units": "meters",
+                "source_path": str(reference_path),
+                "source_sha256": sha256_file(reference_path),
+                "target": dataset_array_record(temporary, folder / "reference.npy", reference),
+                "valid_mask": dataset_array_record(temporary, folder / "reference-valid.npy", reference_valid),
+                "accuracy_note": "User must verify measurement accuracy and left-camera registration independently",
+            }
+        print(f"  Preserved {len(raw)} raw arrays and teacher targets", file=sys.stderr, flush=True)
+        return sample
+
+    try:
+        snapshot("generating", 0)
+        emit("dataset_started", dataset_dir=str(temporary), output_dir=str(destination), total_sources=len(inputs))
+        for index, source in enumerate(inputs):
+            print(f"Dataset photo {index + 1}/{len(inputs)}: {source.name}", file=sys.stderr, flush=True)
+            try:
+                if source.suffix.lower() not in {".heic", ".heif", ".hif"}:
+                    raise DatasetError("Dataset inputs must be original HEIC/HEIF files, not depth previews")
+                discovery = discover_file(source)
+                from .spatial_scan import validate_spatial_discovery
+                photo_metadata = validate_spatial_discovery(discovery, require_apple_camera=options.require_apple_camera)
+            except Exception as exc:
+                skip(source, exc)
+                snapshot("generating", index + 1)
+                continue
+            views = {asset.semantic_name: asset for asset in discovery.assets if asset.kind == "spatial_view"}
+            left, right = views["spatial_left"], views["spatial_right"]
+            source_id = f"{index:05d}-{discovery.source_sha256[:16]}"
+            photo_folder = temporary / source_id
+            photo_folder.mkdir()
+            raw: list[dict[str, Any]] = []
+            # Store immutable source arrays once, shared by all teacher variants.
+            # Storage failures are fatal, rather than silently excluding a photo.
+            for ordinal, asset in enumerate(discovery.assets):
+                record = _asset_record(asset)
+                record["storage"] = dataset_array_record(temporary, photo_folder / f"raw-{ordinal:03d}.npy", asset.array)
+                record["metadata_blocks"] = _jsonable(asset.metadata_blocks)
+                raw.append(record)
+            left_index = next(i for i, asset in enumerate(discovery.assets) if asset is left)
+            right_index = next(i for i, asset in enumerate(discovery.assets) if asset is right)
+            count_before = len(samples)
+            for teacher_index, teacher_id in enumerate(teacher_ids):
+                folder = photo_folder / f"teacher-{teacher_index + 1}"
+                folder.mkdir()
+                try:
+                    sample = make_sample(source, discovery, index, teacher_index, raw, left, right,
+                                         left_index, right_index, source_id, photo_metadata, folder)
+                except OSError:
+                    # ENOSPC/permissions/output failures are not invalid-photo errors.
+                    raise
+                except Exception as exc:
+                    discard(folder)
+                    skip(source, exc, teacher_id=teacher_id)
+                    continue
+                samples.append(sample)
+                manifest = snapshot("generating", index + (teacher_index + 1 == len(teachers)))
+                emit("sample_ready", dataset_dir=str(temporary), sample_id=sample["id"], source_id=source_id,
+                     source_photo_id=source_id, teacher_id=teacher_id, summary=manifest["summary"])
+            if len(samples) == count_before:
+                discard(photo_folder)
+            snapshot("generating", index + 1)
+        if not samples:
+            reasons = "; ".join(record["reason"] for record in skipped[:5])
+            raise DatasetError(f"No usable calibrated spatial photos/teacher labels remain. {reasons}")
+        manifest = snapshot("complete", len(inputs))
         # Never replace an existing user dataset, including one created while inference ran.
         if destination.exists():
             raise DatasetError(f"Dataset destination appeared during inference: {destination}")
-        temporary.rename(destination)
+        # Use the same race-safe publisher as reviewed copies, avoiding a
+        # second implementation of the platform-specific exclusive rename.
+        from .dataset_review import _publish_new_directory
+        _publish_new_directory(temporary, destination)
+        emit("dataset_complete", dataset_dir=str(destination), output_dir=str(destination), summary=manifest["summary"])
         return manifest
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
@@ -536,7 +678,7 @@ def load_dataset(directory: Path | str, *, verify: bool = True) -> dict[str, Any
             if not path.is_relative_to(root):
                 raise DatasetError("Dataset array path escapes the dataset directory")
             try:
-                array = np.load(path, mmap_mode="r", allow_pickle=False)
+                array = read_array(path, mmap_mode="r")
                 if list(array.shape) != record["shape"] or array.dtype.str != record["dtype"]:
                     raise DatasetError(f"Dataset array shape/dtype mismatch: {record['path']}")
                 if verify and (sha256_file(path) != record["file_sha256"] or sha256_array(array) != record["array_sha256"]):
