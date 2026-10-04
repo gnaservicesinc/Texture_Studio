@@ -34,6 +34,41 @@ override, and resulting per-dataset counts are recorded in the new manifest.
 Category labels never establish independence. Ignoring scene groups is useful
 for controlled comparisons but cannot detect unknown related captures.
 
+Studio can link a dataset directory, or link datasets from another project.
+The link stores its existing path in `project.ini`; it does not duplicate large
+arrays. Dataset Manager and Trainer show linked datasets in the same library
+and training-set selector. Inspection and training read the original location.
+Review, composition, and compacting produce new datasets inside the current
+workspace, leaving linked source files untouched. A missing or moved directory
+appears as a library warning. Archive applies only to datasets owned by the
+current workspace.
+
+```sh
+raft-studio workspace ./workspace --linked-dataset /path/to/existing-dataset
+```
+
+## What dataset checks cover
+
+These checks help prevent ordinary mistakes, omissions, corrupted files,
+incorrect units, and known training/validation overlap. Hashes identify bytes
+and detectable changes; they do not establish who captured an image, whether
+labels are truthful, or whether a dataset was intentionally poisoned.
+The workflow does not certify an externally obtained dataset as trustworthy.
+
+Before using external material, review its source, license/copyright permission,
+consent, intended use, inappropriate content, and possible poisoning separately.
+A content classifier cannot grant rights or establish consent, and an unknown
+scene relationship can still produce misleading validation scores.
+
+The disabled [external-review hook template](dataset-review-policy.example.json)
+sets out a future local review interface. Copy it into your project notes to
+record the policy you intend to apply. It is a planning template: Studio does
+not execute it, download guard models, or treat its presence as an approval.
+Any later integration should keep findings separate from precision-preserved
+arrays, record source/model/report hashes and versions, make image uploads
+explicit, expose uncertain results to a person, and require human rights/consent
+review. Review reports should remain valid only for the source bytes they name.
+
 The command-line equivalents are:
 
 ```sh

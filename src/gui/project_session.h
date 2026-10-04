@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -10,6 +11,8 @@
 #include <QLockFile>
 #include <QMessageBox>
 #include <QObject>
+#include <QPointer>
+#include <QTimer>
 #include <functional>
 #include <memory>
 
@@ -30,8 +33,38 @@ inline QString serverName(const QString &project) {
 class ProjectSession : public QObject {
 public:
     ProjectSession(QString role, QObject *parent) : QObject(parent), role_(std::move(role)), socket_(this) {}
-    bool start() {
-        if (QCoreApplication::arguments().contains("--smoke-test")) return true;
+    ~ProjectSession() override { shutdown(); }
+
+    // Bind a handler to the window which owns its captured state. A session can
+    // outlive that window, including when the event loop returns during exit.
+    void setChangedHandler(QObject *context, std::function<void()> callback) {
+        changed_ = {context, std::move(callback)};
+    }
+    void setDisconnectedHandler(QObject *context, std::function<void()> callback) {
+        disconnected_ = {context, std::move(callback)};
+    }
+    void shutdown() {
+        if (stopping_) return;
+        stopping_ = true;
+        changed_ = {}; disconnected_ = {};
+        // QLocalSocket::~QLocalSocket can synchronously emit disconnected.
+        // Disconnect before any member or the captured window is destroyed.
+        socket_.disconnect(this);
+        socket_.blockSignals(true);
+        socket_.abort();
+        buffer_.clear();
+    }
+    QString errorString() const { return error_; }
+
+    bool start(bool showErrors = true) {
+        if (stopping_) return false;
+        if (started_) return true;
+        if (QCoreApplication::arguments().contains("--smoke-test") && projectRoot().isEmpty()) return true;
+        const auto fail = [this, showErrors](const QString &message) {
+            error_ = message; shutdown();
+            if (showErrors) QMessageBox::information(nullptr, "IPDE Studio", message);
+            return false;
+        };
         const QString project = projectRoot();
         const QString token = qEnvironmentVariable("IPDE_STUDIO_TOKEN");
         if (project.isEmpty() || token.isEmpty()) return fail("Open this app from IPDE Studio and choose a project.");
@@ -43,33 +76,61 @@ public:
         if (!socket_.waitForConnected(1500)) return fail("The IPDE Studio project hub is unavailable. Reopen the project in Studio.");
         socket_.write(QJsonDocument(QJsonObject{{"command", "register"}, {"token", token}, {"role", role_},
             {"pid", QCoreApplication::applicationPid()}}).toJson(QJsonDocument::Compact) + '\n');
-        if (!socket_.waitForReadyRead(1500)) return fail("Studio did not accept this project session.");
-        const auto response = QJsonDocument::fromJson(socket_.readLine()).object();
+        QElapsedTimer handshake; handshake.start();
+        while (!socket_.canReadLine()) {
+            const int remaining = 1500 - int(handshake.elapsed());
+            if (remaining <= 0 || !socket_.waitForReadyRead(remaining))
+                return fail("Studio did not accept this project session.");
+        }
+        QJsonParseError parseError;
+        const auto responseDocument = QJsonDocument::fromJson(socket_.readLine(), &parseError);
+        if (parseError.error != QJsonParseError::NoError || !responseDocument.isObject())
+            return fail("Studio returned an invalid project session response.");
+        const auto response = responseDocument.object();
         if (!response.value("accepted").toBool()) return fail(response.value("error").toString("Studio rejected this session."));
-        connect(&socket_, &QLocalSocket::readyRead, this, [this] {
+        const auto readEvents = [this] {
+            if (stopping_) return;
             buffer_ += socket_.readAll();
+            const QPointer<ProjectSession> guard(this);
             while (buffer_.contains('\n')) {
                 const int end = buffer_.indexOf('\n');
                 const auto event = QJsonDocument::fromJson(buffer_.left(end)).object();
                 buffer_.remove(0, end + 1);
-                if (event.value("event") == "project_changed" && onChanged) onChanged();
+                if (event.value("event") == "project_changed") queue(changed_);
+                if (!guard || stopping_) return;
             }
-        });
+        };
+        connect(&socket_, &QLocalSocket::readyRead, this, readEvents);
         connect(&socket_, &QLocalSocket::disconnected, this, [this] {
-            if (onDisconnected) onDisconnected();
+            if (!stopping_) queue(disconnected_);
         });
+        started_ = true;
+        // The hub can append a project event to its registration response.
+        // Its readyRead signal may already have fired during the handshake.
+        if (socket_.bytesAvailable()) QTimer::singleShot(0, this, readEvents);
         return true;
     }
-    std::function<void()> onChanged;
-    std::function<void()> onDisconnected;
 private:
-    bool fail(const QString &message) {
-        QMessageBox::information(nullptr, "IPDE Studio", message);
-        return false;
+    struct Handler {
+        QPointer<QObject> context;
+        std::function<void()> callback;
+    };
+    void queue(const Handler &handler) {
+        // Run UI work after Qt finishes emitting the socket signal. A handler
+        // can then close the session without deleting a socket mid-notification.
+        const auto callback = handler.callback;
+        const QPointer<ProjectSession> guard(this);
+        const QPointer<QObject> context = handler.context;
+        if (context && callback) QTimer::singleShot(0, context, [guard, context, callback] {
+            if (guard && !guard->stopping_ && context) callback();
+        });
     }
     QString role_;
     QLocalSocket socket_;
     QByteArray buffer_;
     std::unique_ptr<QLockFile> lock_;
+    Handler changed_, disconnected_;
+    QString error_;
+    bool started_ = false, stopping_ = false;
 };
 } // namespace IPDE

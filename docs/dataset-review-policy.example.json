@@ -1,0 +1,20 @@
+{
+  "schema": "ipde-external-review-policy-draft-v1",
+  "enabled": false,
+  "scope": "Advisory review of externally obtained datasets; no adversarial safety certification",
+  "checks": {
+    "poisoning_or_label_anomalies": {"enabled": false, "local_command": [], "model_revision": null},
+    "inappropriate_content": {"enabled": false, "local_command": [], "model_revision": null},
+    "copyright_and_license": {"enabled": false, "requires_human_review": true},
+    "consent_and_intended_use": {"enabled": false, "requires_human_review": true}
+  },
+  "future_report_contract": {
+    "source_manifest_sha256": "Required before a report applies to a dataset",
+    "per_sample_source_sha256": "Required before a finding applies to an image",
+    "reviewer_and_tool_revision": "Required; keep automated and human decisions distinct",
+    "decisions": ["not_reviewed", "needs_review", "accepted_for_stated_use", "excluded"],
+    "output": "Separate JSON report; never modify depth arrays or existing source files",
+    "unknown_results": "Remain visible and unresolved; do not silently mark them accepted",
+    "network_access": "Off by default; require an explicit choice before image upload"
+  }
+}

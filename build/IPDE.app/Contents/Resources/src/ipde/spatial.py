@@ -41,6 +41,7 @@ class DisplacementMappingError(RuntimeError):
 class StereoMatchingOptions:
     maximum_disparity: int | None = None
     block_size: int = 5
+    noise_sigma_pixels: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -58,12 +59,15 @@ class RaftStereoResult:
     height_disparity_pixels: np.ndarray
     depth_meters: np.ndarray
     details: dict[str, Any]
+    # Validation is evidence about an estimate, not a replacement sample value.
+    support_mask: np.ndarray | None = None
 
 
 @dataclass
 class StereoMatchingResult:
     height_disparity_pixels: np.ndarray
     details: dict[str, Any]
+    support_mask: np.ndarray | None = None
 
 
 @dataclass
@@ -360,6 +364,36 @@ def _model_configuration(checkpoint_name: str) -> SimpleNamespace:
                 "slow_fast_gru": True,
             }
         )
+    return SimpleNamespace(**values)
+
+
+def checkpoint_model_configuration(checkpoint: Any, checkpoint_name: str) -> SimpleNamespace:
+    """Restore explicit IPDE RAFT architecture metadata independent of filename.
+
+    Upstream raw checkpoints retain the established filename-based presets.
+    IPDE-trained weights carry a bounded, strict whitelist of model fields so
+    renaming a realtime/instance-normalized checkpoint cannot change its model.
+    """
+    fallback = _model_configuration(checkpoint_name)
+    if not isinstance(checkpoint, Mapping) or "ipde_configuration" not in checkpoint:
+        return fallback
+    values = checkpoint["ipde_configuration"]
+    if not isinstance(values, Mapping) or set(values) != set(vars(fallback)):
+        raise RaftStereoError("trained RAFT checkpoint has incomplete or unknown architecture fields")
+    values = dict(values)
+    for name in ("shared_backbone", "slow_fast_gru", "mixed_precision"):
+        if type(values[name]) is not bool:
+            raise RaftStereoError(f"trained RAFT architecture field {name} must be boolean")
+    if values["mixed_precision"]:
+        raise RaftStereoError("trained RAFT checkpoint must use portable float32 inference")
+    hidden = values["hidden_dims"]
+    if not isinstance(hidden, list) or len(hidden) != 3 or any(type(item) is not int or not 32 <= item <= 512 for item in hidden):
+        raise RaftStereoError("trained RAFT hidden_dims must contain three bounded integer dimensions")
+    for name, allowed in {"corr_levels": range(1, 9), "corr_radius": range(1, 9), "n_downsample": (2, 3), "n_gru_layers": (1, 2, 3)}.items():
+        if type(values[name]) is not int or values[name] not in allowed:
+            raise RaftStereoError(f"trained RAFT architecture field {name} is unsupported")
+    if values["corr_implementation"] not in {"alt", "reg"} or values["context_norm"] not in {"batch", "instance", "group", "none"}:
+        raise RaftStereoError("trained RAFT checkpoint has unsupported correlation/normalization settings")
     return SimpleNamespace(**values)
 
 
@@ -806,12 +840,14 @@ def correspondence_validity(signed_flow: np.ndarray, right_valid: np.ndarray) ->
 
 def stereo_photometric_support(
     left: np.ndarray, right: np.ndarray, disparity: np.ndarray,
+    noise_sigma_pixels: float = 1.0,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Reject unsupported classical matches without changing accepted disparities.
+    """Assess local evidence separately from the regularized stereo estimate.
 
     Bidirectional SGBM can agree on a false match in flat patches or along a
-    single edge (the aperture problem). Require local contrast in two directions
-    in both views and a positive, exposure-independent patch correlation.
+    horizontal edge (the aperture problem). For rectified stereo, only horizontal
+    translation is unknown: a vertical edge DOES constrain it. Requiring a 2-D
+    corner incorrectly discards these correspondences.
     """
     import cv2
 
@@ -819,29 +855,99 @@ def stereo_photometric_support(
     right_gray = cv2.cvtColor(right, cv2.COLOR_RGB2GRAY).astype(np.float32)
     yy, xx = np.indices(disparity.shape, dtype=np.float32)
     xr = xx - np.where(np.isfinite(disparity), disparity, 0)
-    warped = cv2.remap(right_gray, xr, yy, cv2.INTER_LINEAR)
-    # Float64 moments avoid catastrophic cancellation on nearly flat uint8 data.
-    a, b = left_gray.astype(np.float64), warped.astype(np.float64)
     def mean(value: np.ndarray) -> np.ndarray:
         return cv2.boxFilter(value, -1, (9, 9), normalize=True)
-    ma, mb = mean(a), mean(b)
-    va = np.maximum(0, mean(a * a) - ma * ma)
-    vb = np.maximum(0, mean(b * b) - mb * mb)
-    covariance = mean(a * b) - ma * mb
-    correlation = covariance / np.sqrt(np.maximum(va * vb, 1e-12))
-    left_texture = cv2.cornerMinEigenVal(left_gray, 9, 3)
-    right_texture = cv2.remap(cv2.cornerMinEigenVal(right_gray, 9, 3), xr, yy, cv2.INTER_LINEAR)
-    supported = ((correlation >= .8) & (left_texture >= 1.0) & (right_texture >= 1.0)
-                 & np.isfinite(disparity) & (xr >= 4) & (xr <= disparity.shape[1] - 5))
-    supported[:4] = False
-    supported[-4:] = False
-    supported[:, :4] = False
-    supported[:, -4:] = False
+    def horizontal_information(gray: np.ndarray) -> np.ndarray:
+        # Sobel / 8 gives the central horizontal derivative in code values/pixel.
+        dx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3, scale=1.0 / 8.0)
+        return mean(dx * dx)
+
+    def at_scale(sigma: float) -> np.ndarray:
+        a, b = left_gray, right_gray
+        radius = int(math.ceil(3 * sigma))
+        if radius:
+            kernel = (2 * radius + 1, 2 * radius + 1)
+            a = cv2.GaussianBlur(a, kernel, sigma, borderType=cv2.BORDER_REFLECT_101)
+            b = cv2.GaussianBlur(b, kernel, sigma, borderType=cv2.BORDER_REFLECT_101)
+        # Float64 moments avoid cancellation on nearly flat uint8 code values.
+        aw = a.astype(np.float64)
+        bw = cv2.remap(b, xr, yy, cv2.INTER_LINEAR).astype(np.float64)
+        ma, mb = mean(aw), mean(bw)
+        va = np.maximum(0, mean(aw * aw) - ma * ma)
+        vb = np.maximum(0, mean(bw * bw) - mb * mb)
+        correlation = (mean(aw * bw) - ma * mb) / np.sqrt(np.maximum(va * vb, 1e-12))
+        left_texture = horizontal_information(a)
+        # Measure texture in the source, not in the disparity-warped image:
+        # flow discontinuities must not manufacture texture evidence.
+        right_texture = cv2.remap(horizontal_information(b), xr, yy, cv2.INTER_LINEAR)
+        margin = 4 + radius
+        valid = ((correlation >= .8) & (left_texture >= 1.0) & (right_texture >= 1.0)
+                 & np.isfinite(disparity) & (xr >= margin) & (xr <= disparity.shape[1] - 1 - margin))
+        valid[:margin] = False
+        valid[-margin:] = False
+        valid[:, :margin] = False
+        valid[:, -margin:] = False
+        return valid
+
+    native = at_scale(0.0)
+    shared = at_scale(noise_sigma_pixels) if noise_sigma_pixels > 0 else native
+    supported = native | shared
     return supported, {
-        "method": "9x9 normalized patch correlation and two-direction structure tensor",
-        "minimum_correlation": .8, "minimum_structure_eigenvalue_code_squared": 1.0,
-        "policy": "unsupported estimates become NaN; accepted disparities are never smoothed or rescaled",
+        "method": "native/shared-detail 9x9 normalized patch correlation and horizontal gradient energy",
+        "minimum_correlation": .8, "minimum_mean_squared_horizontal_gradient": 1.0,
+        "gradient_units": "code values per pixel; Sobel scale 1/8",
+        "shared_detail_sigma_pixels": noise_sigma_pixels,
+        "native_scale_supported_count": int(np.count_nonzero(native)),
+        "additional_shared_scale_supported_count": int(np.count_nonzero(shared & ~native)),
+        "scale_policy": "either scale may support a match; both require observable horizontal structure in both views",
+        "policy": "local evidence for a separate support mask; absence of texture does not erase a regularized estimate",
     }
+
+
+def _stereo_local_contrast(image: np.ndarray) -> np.ndarray:
+    """Build a radiometric-offset-resistant SGBM cost image, never a raw asset.
+
+    The two physical cameras can have different exposures and local tone curves.
+    Their absolute RGB codes are therefore not a correspondence invariant. Remove
+    a 31x31 per-channel local mean on inference copies before comparing structure.
+    Use a fixed code offset, not a per-image min/max stretch or contrast gain.
+    """
+    import cv2
+
+    values = image.astype(np.float32)
+    local_mean = cv2.boxFilter(values, -1, (31, 31), normalize=True,
+                               borderType=cv2.BORDER_REFLECT_101)
+    return np.clip(np.rint(values - local_mean + np.float32(128)), 0, 255).astype(np.uint8)
+
+
+def _sgbm_correspondences(
+    left: np.ndarray, right: np.ndarray, parameters: Mapping[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute both directions without OpenCV's maximum-search-width crop.
+
+    SGBM does not search the first maxDisparity columns even where the actual
+    disparity is much smaller. Add the same computational margin to both inputs
+    so original pixels are searched, then remove it from the output. This does
+    not shift relative coordinates or change disparity units. Padding is NEVER
+    accepted as image evidence: callers check bounds and reverse agreement in
+    the original unpadded arrays, with separate local photometric support.
+    """
+    import cv2
+
+    pad = int(parameters["numDisparities"])
+    matcher = cv2.StereoSGBM.create(**parameters)
+
+    def compute(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        ap = cv2.copyMakeBorder(a, 0, 0, pad, 0, cv2.BORDER_REPLICATE)
+        bp = cv2.copyMakeBorder(b, 0, 0, pad, 0, cv2.BORDER_REPLICATE)
+        fixed = np.asarray(matcher.compute(ap, bp))
+        if fixed.dtype != np.dtype("int16") or fixed.shape != ap.shape[:2]:
+            raise StereoMatchingError("OpenCV StereoSGBM returned an unexpected disparity dtype or shape")
+        return np.ascontiguousarray(fixed[:, pad:])
+
+    forward = compute(left, right)
+    reverse = compute(np.ascontiguousarray(right[:, ::-1]), np.ascontiguousarray(left[:, ::-1]))[:, ::-1]
+    return forward, np.ascontiguousarray(reverse)
 
 
 def reverse_correspondence_support(forward: np.ndarray, reverse: np.ndarray) -> np.ndarray:
@@ -900,6 +1006,12 @@ def run_stereo_matching(
     ):
         raise StereoMatchingError("StereoSGBM block size must be an odd integer in [3, 21]")
     num_disparities = _stereo_search_range(left_array.shape[1], settings.maximum_disparity)
+    try:
+        sigma = float(settings.noise_sigma_pixels)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise StereoMatchingError("StereoSGBM noise sigma must be finite and in [0, 3] pixels") from exc
+    if isinstance(settings.noise_sigma_pixels, bool) or not math.isfinite(sigma) or not 0 <= sigma <= 3:
+        raise StereoMatchingError("StereoSGBM noise sigma must be finite and in [0, 3] pixels")
 
     try:
         import cv2  # type: ignore[import-not-found]
@@ -909,6 +1021,18 @@ def run_stereo_matching(
         ) from exc
 
     right_array, right_valid, registration = register_stereo_rows(left_array, right_array)
+
+    # Compare structure observable in both cameras. A mild, symmetric low-pass
+    # reduces mismatched sharpening/sensor noise without borrowing color detail
+    # as depth. The raw views, output grid, and disparity units are unchanged.
+    matching_left, matching_right = left_array, right_array
+    radius = int(math.ceil(3 * sigma))
+    if radius:
+        kernel = (2 * radius + 1, 2 * radius + 1)
+        matching_left = cv2.GaussianBlur(left_array, kernel, sigma, borderType=cv2.BORDER_REFLECT_101)
+        matching_right = cv2.GaussianBlur(right_array, kernel, sigma, borderType=cv2.BORDER_REFLECT_101)
+    matching_left = _stereo_local_contrast(matching_left)
+    matching_right = _stereo_local_contrast(matching_right)
 
     channels = int(left_array.shape[2])
     block_area = settings.block_size * settings.block_size
@@ -926,12 +1050,7 @@ def run_stereo_matching(
         "mode": cv2.STEREO_SGBM_MODE_SGBM_3WAY,
     }
     try:
-        matcher = cv2.StereoSGBM.create(**parameters)
-        fixed_disparity = np.asarray(matcher.compute(left_array, right_array))
-        # OpenCV's disp12 check reuses the forward cost; independently match
-        # the reverse pair as well. Flipping keeps the same positive search range.
-        reverse_fixed = matcher.compute(np.ascontiguousarray(right_array[:, ::-1]),
-                                        np.ascontiguousarray(left_array[:, ::-1]))[:, ::-1]
+        fixed_disparity, reverse_fixed = _sgbm_correspondences(matching_left, matching_right, parameters)
     except Exception as exc:
         raise StereoMatchingError(
             "OpenCV StereoSGBM failed at full "
@@ -967,14 +1086,21 @@ def run_stereo_matching(
         disparity + principal_point_delta, dtype=np.float32
     )
     in_bounds = correspondence_validity(-disparity, right_valid)
-    photometric, support_details = stereo_photometric_support(left_array, right_array, disparity)
-    accepted = valid & (height > 0) & in_bounds & consistent & photometric
-    # Consistency rejection can split formerly connected false matches into
-    # islands. Filter *after* that rejection, retaining accepted codes exactly.
+    photometric, support_details = stereo_photometric_support(left_array, right_array, disparity, sigma)
+    accepted = valid & (height > 0) & in_bounds & consistent
+    # SGBM aggregates evidence along paths, so an estimate need not have strong
+    # texture in its own 9x9 patch. Masking by local texture first destroys smooth
+    # interiors and then makes the component filter discard their disconnected
+    # remnants. Filter geometric components before computing local support.
     checked_fixed = np.where(accepted, fixed_disparity, invalid_fixed_value).astype(np.int16)
     cv2.filterSpeckles(checked_fixed, int(invalid_fixed_value), 200, 32)
-    supported = checked_fixed > invalid_fixed_value
-    height[~supported] = np.float32(np.nan)
+    estimated = checked_fixed > invalid_fixed_value
+    height[~estimated] = np.float32(np.nan)
+    # Keep the conservative product available without cutting holes in the
+    # estimate, preview, or displacement. Neither path fills missing samples.
+    support_fixed = np.where(estimated & photometric, fixed_disparity, invalid_fixed_value).astype(np.int16)
+    cv2.filterSpeckles(support_fixed, int(invalid_fixed_value), 200, 32)
+    supported = support_fixed > invalid_fixed_value
     finite = np.isfinite(height)
     valid_count = int(np.count_nonzero(finite))
     details = {
@@ -990,6 +1116,32 @@ def run_stereo_matching(
         "gamma_correction": False,
         "normalization": False,
         "vertical_registration": registration,
+        "matching_prefilter": {
+            "method": "Gaussian on inference copies" if radius else "disabled",
+            "sigma_pixels": sigma, "kernel_size": 2 * radius + 1,
+            "border_mode": "BORDER_REFLECT_101", "input_and_output_dtype": "uint8",
+            "rounding": "OpenCV uint8 convolution rounding",
+            "raw_assets_modified": False, "reference_view": "left",
+            "output_depth_filtering": False,
+        },
+        "matching_cost_transform": {
+            "method": "per-channel local mean subtraction on inference copies",
+            "kernel_size": 31, "border_mode": "BORDER_REFLECT_101",
+            "formula": "uint8(clip(rint(float32(rgb) - local_mean_31x31 + 128), 0, 255))",
+            "purpose": "reduce camera exposure and local brightness offsets in correspondence costs",
+            "raw_assets_modified": False, "per_image_range_scaling": False,
+            "output_depth_filtering": False,
+        },
+        "computational_border": {
+            "left_padding_pixels_per_direction": num_disparities,
+            "mode": "BORDER_REPLICATE", "output_padding_removed": True,
+            "purpose": "avoid SGBM full-search-width exclusion of real edge pixels",
+            "acceptance_coordinates": "original unpadded views; padded correspondences are rejected",
+        },
+        "input_left_sha256": _array_sha256(left_array),
+        "input_right_sha256": _array_sha256(right_array),
+        "matching_left_sha256": _array_sha256(matching_left),
+        "matching_right_sha256": _array_sha256(matching_right),
         "photometric_support": support_details,
         "photometrically_unsupported_pixel_count": int(np.count_nonzero(valid & ~photometric)),
         "out_of_view_pixel_count": int(np.count_nonzero(~in_bounds)),
@@ -997,9 +1149,22 @@ def run_stereo_matching(
         "inconsistent_pixel_count": int(np.count_nonzero(valid & ~consistent)),
         "post_consistency_speckle_filter": {
             "maximum_component_pixels": 200, "neighbor_disparity_difference_pixels": 2,
-            "rejected_pixel_count": int(np.count_nonzero(accepted & ~supported)),
+            "rejected_pixel_count": int(np.count_nonzero(accepted & ~estimated)),
             "policy": "reject small disconnected disparity components as NaN; never smooth or fill",
         },
+        "depth_and_disparity_filtered_by_support": False,
+        "support_pixel_count": int(np.count_nonzero(supported)),
+        "support_pixel_fraction": float(np.mean(supported)),
+        "support_component_rejected_pixel_count": int(np.count_nonzero(estimated & photometric & ~supported)),
+        "support_semantics": (
+            "1 = geometrically checked estimate with local photometric/texture support; "
+            "0 = unsupported or missing, not zero depth or a confidence probability."
+        ),
+        "geometry_policy": (
+            "Retain positive, in-view, reverse-consistent SGBM estimates in connected components. "
+            "Local texture/correlation evidence is exported separately; supported depth applies that mask. "
+            "Smooth interiors rely on SGBM regularization and are not independently verified measurements."
+        ),
         "parameters": {
             **parameters,
             "mode": "STEREO_SGBM_MODE_SGBM_3WAY",
@@ -1025,7 +1190,7 @@ def run_stereo_matching(
             "This is an inferred correspondence result, not measured source depth."
         ),
     }
-    return StereoMatchingResult(height, details)
+    return StereoMatchingResult(height, details, supported)
 
 
 def derive_raft_height_and_depth(
@@ -1104,12 +1269,13 @@ def run_raft_stereo(
     device = _select_device(torch, options.device)
     configuration = _model_configuration(checkpoint_name)
     try:
-        model = RAFTStereo(configuration)
         state = torch.load(
             io.BytesIO(checkpoint_bytes),
             map_location="cpu",
             weights_only=True,
         )
+        configuration = checkpoint_model_configuration(state, checkpoint_name)
+        model = RAFTStereo(configuration)
         if isinstance(state, Mapping) and "state_dict" in state:
             state = state["state_dict"]
         if not isinstance(state, Mapping):
@@ -1201,8 +1367,11 @@ def run_raft_stereo(
     in_bounds = correspondence_validity(signed_flow, right_valid)
     consistent = reverse_correspondence_support(signed_flow, reverse_signed_flow)
     accepted = in_bounds & consistent & (height_disparity > 0)
-    height_disparity[~accepted] = np.float32(np.nan)
-    depth_meters[~accepted] = np.float32(np.nan)
+    # Keep the model estimate intact. Occlusions and an independently inferred
+    # reverse field cannot prove a forward prediction wrong. Baking this binary
+    # heuristic into depth created NaN outlines, which downstream displacement
+    # tools commonly interpreted as zero-depth trenches. Export support separately
+    # and offer a deliberately masked product for conservative reconstruction.
     principal_point_delta = np.float32(spatial["principal_point_delta_x_pixels"])
     focal_length = np.float32(spatial["focal_length_pixels_for_depth"])
     baseline = np.float32(spatial["baseline_meters"])
@@ -1231,6 +1400,17 @@ def run_raft_stereo(
         "left_right_consistency": "independent mirrored reverse inference; both neighbors within 1 pixel",
         "inconsistent_pixel_count": int(np.count_nonzero(in_bounds & ~consistent)),
         "raw_signed_flow_filtered": False,
+        "depth_and_disparity_filtered_by_support": False,
+        "support_pixel_count": int(np.count_nonzero(accepted)),
+        "support_pixel_fraction": float(np.mean(accepted)),
+        "support_semantics": (
+            "1 = positive disparity, in-view correspondence and reverse agreement; "
+            "0 = unsupported or occluded estimate, not zero depth. This is a heuristic, not a probability."
+        ),
+        "geometry_policy": (
+            "Dense forward estimate retained, including unverified predictions in occluded regions. "
+            "Use the separate support mask or supported-depth product for conservative reconstruction."
+        ),
         "input_left_sha256": _array_sha256(left_array),
         "input_right_sha256": _array_sha256(right_array),
         "model_internal_downsample_factor": 2 ** configuration.n_downsample,
@@ -1256,7 +1436,7 @@ def run_raft_stereo(
             "RAFT-Stereo is an inferred estimate, not a measured or mathematically exact source depth map."
         ),
     }
-    return RaftStereoResult(signed_flow, height_disparity, depth_meters, details)
+    return RaftStereoResult(signed_flow, height_disparity, depth_meters, details, accepted)
 
 
 def _git_head_if_available(root: Path) -> str | None:

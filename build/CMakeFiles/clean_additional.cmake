@@ -3,8 +3,29 @@ cmake_minimum_required(VERSION 3.16)
 
 if("${CONFIG}" STREQUAL "" OR "${CONFIG}" STREQUAL "")
   file(REMOVE_RECURSE
+  "CMakeFiles/dataset_studio_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/dataset_studio_autogen.dir/ParseCache.txt"
   "CMakeFiles/ipde_gui_autogen.dir/AutogenUsed.txt"
   "CMakeFiles/ipde_gui_autogen.dir/ParseCache.txt"
+  "CMakeFiles/ipde_icon_builder_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/ipde_icon_builder_autogen.dir/ParseCache.txt"
+  "CMakeFiles/ipde_studio_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/ipde_studio_autogen.dir/ParseCache.txt"
+  "CMakeFiles/photo_studio_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/photo_studio_autogen.dir/ParseCache.txt"
+  "CMakeFiles/project_session_regression_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/project_session_regression_autogen.dir/ParseCache.txt"
+  "CMakeFiles/raft_studio_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/raft_studio_autogen.dir/ParseCache.txt"
+  "CMakeFiles/raw_studio_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/raw_studio_autogen.dir/ParseCache.txt"
+  "dataset_studio_autogen"
   "ipde_gui_autogen"
+  "ipde_icon_builder_autogen"
+  "ipde_studio_autogen"
+  "photo_studio_autogen"
+  "project_session_regression_autogen"
+  "raft_studio_autogen"
+  "raw_studio_autogen"
   )
 endif()

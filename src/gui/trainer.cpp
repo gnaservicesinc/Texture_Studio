@@ -51,6 +51,11 @@
 #include <algorithm>
 
 #include "project_session.h"
+#include "studio_icons.h"
+
+#ifndef IPDE_DATASET_STUDIO
+#define IPDE_DATASET_STUDIO 0
+#endif
 
 #ifndef IPDE_TRAINER_SCRIPT
 #ifdef RAFT_STUDIO_SOURCE_SCRIPT
@@ -196,15 +201,17 @@ public:
     TrainerWindow() : settings_("IPDE", "RAFTStudio") {
         const auto arguments = QCoreApplication::arguments();
         const int modeArgument = arguments.indexOf("--mode");
-        datasetMode_ = modeArgument >= 0 && arguments.value(modeArgument + 1) == "datasets";
+        datasetMode_ = modeArgument >= 0 ? arguments.value(modeArgument + 1) == "datasets" : bool(IPDE_DATASET_STUDIO);
         projectRoot_ = IPDE::projectRoot();
         if (!projectRoot_.isEmpty()) projectSettings_ = std::make_unique<QSettings>(QDir(projectRoot_).filePath("project.ini"), QSettings::IniFormat);
-        setWindowTitle(datasetMode_ ? "IPDE Dataset Manager" : "IPDE Trainer");
+        setWindowTitle(datasetMode_ ? "Dataset Studio" : "RAFT Studio");
+        if (projectSettings_) setWindowTitle(windowTitle() + " — "
+            + projectSettings_->value("name", QFileInfo(projectRoot_).fileName()).toString());
         resize(1280, 900);
         auto *central = new QWidget(this);
         auto *root = new QVBoxLayout(central);
         root->setContentsMargins(18, 16, 18, 16);
-        auto *title = new QLabel(datasetMode_ ? "Dataset Manager" : "Trainer", central);
+        auto *title = new QLabel(datasetMode_ ? "Dataset Studio" : "RAFT Studio", central);
         QFont font = title->font(); font.setPointSize(font.pointSize() + 7); font.setBold(true); title->setFont(font);
         root->addWidget(title);
         auto *purpose = new QLabel(datasetMode_ ? "Organize photo collections, compare teachers, and keep the predictions that suit your project." : "Combine curated datasets, select validation, train, and compare the result with your original model.", central);
@@ -242,6 +249,7 @@ public:
         auto *showDataset = new QPushButton("Show files", datasetBox);
         auto *archive = new QPushButton("Archive selected", datasetBox);
         auto *compact = new QPushButton("Compact copy…", datasetBox);
+        review->setIcon(IPDE::appIcon("datasets")); inspect->setIcon(IPDE::appIcon("datasets"));
         datasetButtons->addWidget(review); datasetButtons->addWidget(inspect); datasetButtons->addWidget(showDataset); datasetButtons->addWidget(compact); datasetButtons->addWidget(archive); datasetButtons->addStretch();
         datasetLayout->addLayout(datasetButtons);
         auto *runBox = new QGroupBox("Trained models", library);
@@ -254,7 +262,10 @@ public:
         auto *runButtons = new QHBoxLayout;
         export_ = new QPushButton("Export selected model…", runBox);
         auto *showRun = new QPushButton("Show files", runBox);
-        runButtons->addWidget(export_); runButtons->addWidget(showRun); runButtons->addStretch();
+        auto *useModel = new QPushButton("Use selected model in project", runBox);
+        useModel->setVisible(bool(projectSettings_));
+        useModel->setToolTip("Select a trained model after comparing its depth on independent photos. Extraction uses this model until you choose another.");
+        runButtons->addWidget(export_); runButtons->addWidget(useModel); runButtons->addWidget(showRun); runButtons->addStretch();
         runLayout->addLayout(runButtons);
         library->addWidget(datasetBox); library->addWidget(runBox);
         root->addWidget(library, 2);
@@ -275,6 +286,14 @@ public:
             const QString path = selectedPath(runs_); if (!path.isEmpty()) showFolder(QFileInfo(path).absolutePath());
         });
         connect(export_, &QPushButton::clicked, this, [this] { exportModel(); });
+        connect(useModel, &QPushButton::clicked, this, [this] {
+            const QString checkpoint = selectedPath(runs_);
+            if (checkpoint.isEmpty() || !projectSettings_) return;
+            raftModel_->setText(checkpoint);
+            projectSettings_->setValue("raft/member", "");
+            saveSharedModelSettings();
+            statusBar()->showMessage("Project model selected. Compare on independent photos before relying on its depth.", 8000);
+        });
 
         tabs_ = new QTabWidget(central);
         buildDatasetTab(); buildReviewTab(); buildCollectionTab(); buildTrainingTab();
@@ -283,8 +302,12 @@ public:
         if (datasetMode_) { tabs_->setTabVisible(2, false); tabs_->setTabVisible(4, false); runBox->hide(); }
         else { tabs_->setTabVisible(0, false); tabs_->setCurrentIndex(2); }
         root->addWidget(tabs_, 3);
+        generate_->setIcon(IPDE::appIcon("datasets")); train_->setIcon(IPDE::appIcon("trainer"));
+        export_->setIcon(IPDE::appIcon("trainer"));
         auto *notice = new QLabel("Teacher depth is an estimate, not measured ground truth. Capture groups are held out by default; scene validation requires correctly grouped independent scenes.", central);
-        notice->setWordWrap(true); root->addWidget(notice);
+        notice->setWordWrap(true);
+        notice->setToolTip("Dataset checks help catch accidental omissions, altered files, and validation overlap. They do not detect intentional poisoning or establish permission, copyright, or content suitability for externally obtained data.");
+        root->addWidget(notice);
         log_ = new QPlainTextEdit(central); log_->setReadOnly(true); log_->setMaximumBlockCount(1500);
         log_->setMaximumHeight(90); log_->setPlaceholderText("Progress and results appear here."); root->addWidget(log_);
         auto *progressRow = new QHBoxLayout;
@@ -337,17 +360,24 @@ public:
     }
 
     ~TrainerWindow() override {
+        streamingTimer_->stop(); streamingTimer_->disconnect(this);
+        process_->disconnect(this); previewProcess_->disconnect(this);
         settings_.setValue("workspace", workspace_->text());
         settings_.setValue("teacher_model", teacher_->currentData());
         settings_.setValue("raft_root", raftRoot_->text()); settings_.setValue("raft_model", raftModel_->text());
-        if (process_->state() != QProcess::NotRunning) process_->kill();
-        if (previewProcess_->state() != QProcess::NotRunning) previewProcess_->kill();
+        for (auto *process : {process_, previewProcess_}) {
+            if (process->state() != QProcess::NotRunning) {
+                process->kill(); process->waitForFinished(1500);
+            }
+        }
     }
 
     bool taskRunning() const { return process_->state() != QProcess::NotRunning || previewProcess_->state() != QProcess::NotRunning; }
     void projectChanged() {
         if (projectSettings_) {
             projectSettings_->sync(); const QString goal = projectSettings_->value("goal", "effect/map").toString();
+            setWindowTitle((datasetMode_ ? "Dataset Studio — " : "RAFT Studio — ")
+                + projectSettings_->value("name", QFileInfo(projectRoot_).fileName()).toString());
             if (goal_->currentData().toString() != goal) { QSignalBlocker blocker(goal_); goal_->setCurrentIndex(qMax(0, goal_->findData(goal))); applyGoal(false); }
             if (!raftRoot_->hasFocus()) raftRoot_->setText(projectSettings_->value("raft/root", "/opt/ipde/RAFT-Stereo").toString());
             if (!raftModel_->hasFocus()) raftModel_->setText(projectSettings_->value("raft/model", "/opt/ipde/models/raftstereo-middlebury.pth").toString());
@@ -495,7 +525,7 @@ private:
             const QString preferred = goal == "effect/map" ? "depth-anything-3" : "depthpro";
             teacher_->setCurrentIndex(teacher_->findData(preferred));
             for (auto *check : teacherChecks_) check->setChecked(check->property("model").toString() == preferred);
-            goalHelp_->setText(goal == "effect/map" ? "Detail preset: Depth Anything 3 with DepthPro scale, native-resolution labels, and conservative RAFT fine-tuning. Compare teachers and the original RAFT model to decide which preserves useful detail." : goal == "depth-estimation" ? "Distance preset: DepthPro estimates meters directly. Independent photo groups stay together during validation; model estimates still require visual checking." : "Portrait preset: use Studio’s Extractor for embedded depth, portrait mattes, and gain maps. Portraits do not have the calibrated stereo pair required for RAFT datasets; the scanner skips them.");
+            goalHelp_->setText(goal == "effect/map" ? "Detail preset: Depth Anything 3 with DepthPro scale, native-resolution labels, and conservative RAFT fine-tuning. Compare teachers and the original RAFT model to decide which preserves useful detail." : goal == "depth-estimation" ? "Distance preset: DepthPro estimates meters directly. Independent photo groups stay together during validation; model estimates still require visual checking." : "Portrait preset: use Photo Studio for embedded depth and composited portrait mattes. Portraits do not have the calibrated stereo pair required for RAFT datasets; the scanner skips them.");
         }
         if (trainingAdvanced_) trainingAdvanced_->setVisible(advanced_->isChecked());
     }
@@ -962,7 +992,13 @@ private:
     void refreshLibrary() {
         if (process_ && process_->state() != QProcess::NotRunning) return;
         settings_.setValue("workspace", workspace_->text());
-        startJob("Refresh library", {"workspace", workspace_->text()});
+        QStringList arguments{"workspace", workspace_->text()};
+        if (projectSettings_) {
+            projectSettings_->sync();
+            for (const QString &path : projectSettings_->value("dataset_links").toStringList())
+                arguments << "--linked-dataset" << path;
+        }
+        startJob("Refresh library", arguments);
     }
 
     void archiveDataset() {
@@ -1043,7 +1079,10 @@ private:
             refreshAfter_ = false; return;
         }
         const QJsonObject result = doc.object();
-        if (job_ == "Refresh library") populateLibrary(result);
+        if (job_ == "Refresh library") {
+            populateLibrary(result);
+            for (const auto &warning : result.value("warnings").toArray()) log_->appendPlainText(warning.toString());
+        }
         else if (job_ == "Review dataset") populateReview(result);
         else if (job_ == "Preview depth") populatePreview(result);
         else if (job_ == "Scan spatial photos") {
@@ -1091,10 +1130,13 @@ private:
             if (teacher.isEmpty() && obj.value("teacher").isObject()) teacher = obj.value("teacher").toObject().value("model").toString();
             auto *item = new QTreeWidgetItem(datasets_, {obj.value("name").toString(QFileInfo(path).fileName()), QString::number(obj.value("sample_count").toInt()),
                 QString("%1 / %2").arg(obj.value("train_count").toInt()).arg(obj.value("validation_count").toInt()), teacher, obj.value("category").toString(), QString::number(obj.value("storage_bytes").toDouble() / (1024*1024), 'f', 1) + " MiB"});
-            item->setData(0, Qt::UserRole, path); item->setToolTip(0, path);
+            const bool linked = obj.value("linked").toBool();
+            const QString location = path + (linked ? "\nLinked from another location; source files stay there. Reviewed copies are saved in this project." : QString());
+            item->setData(0, Qt::UserRole, path); item->setToolTip(0, location);
+            if (linked) item->setText(0, item->text(0) + " ↗");
             if (path == oldDataset) datasets_->setCurrentItem(item);
             auto *collection = new QTreeWidgetItem(collectionSources_, {obj.value("name").toString(QFileInfo(path).fileName()), "", obj.value("category").toString(), QString::number(obj.value("sample_count").toInt())});
-            collection->setData(0, Qt::UserRole, path); collection->setToolTip(0, path);
+            collection->setData(0, Qt::UserRole, path); collection->setToolTip(0, location);
             const auto checks = collectionChecks.value(path, {Qt::Unchecked, Qt::Unchecked}); collection->setCheckState(0, checks.first); collection->setCheckState(1, checks.second);
         }
         for (const QJsonValue &value : result.value("runs").toArray()) {
@@ -1154,18 +1196,22 @@ private:
 
 int main(int argc, char **argv) {
     QApplication application(argc, argv);
-    application.setApplicationName("IPDE Dataset Manager and Trainer"); application.setOrganizationName("IPDE");
     const QStringList args = application.arguments(); const int mode = args.indexOf("--mode");
-    IPDE::ProjectSession session(mode >= 0 && args.value(mode + 1) == "datasets" ? "datasets" : "trainer", &application);
+    const bool datasetMode = mode >= 0 ? args.value(mode + 1) == "datasets" : bool(IPDE_DATASET_STUDIO);
+    application.setApplicationName(datasetMode ? "Dataset Studio" : "RAFT Studio"); application.setOrganizationName("IPDE");
+    IPDE::ProjectSession session(datasetMode ? "datasets" : "trainer", &application);
     if (!session.start()) return 2;
     TrainerWindow window; window.show();
-    session.onChanged = [&window] { QTimer::singleShot(0, &window, [&window] { window.projectChanged(); }); };
-    session.onDisconnected = [&window] { window.statusBar()->showMessage("Studio disconnected; this project remains locked until this window closes."); };
+    const auto icon = IPDE::appIcon(datasetMode ? "datasets" : "trainer");
+    application.setWindowIcon(icon); window.setWindowIcon(icon);
+    session.setChangedHandler(&window, [&window] { QTimer::singleShot(0, &window, [&window] { window.projectChanged(); }); });
+    session.setDisconnectedHandler(&window, [&window] { window.statusBar()->showMessage("Studio disconnected; this project remains locked until this window closes."); });
+    QObject::connect(&application, &QCoreApplication::aboutToQuit, &session, [&session] { session.shutdown(); });
     if (args.contains("--smoke-test") && !args.contains("--screenshot")) QTimer::singleShot(100, &application, &QCoreApplication::quit);
     const int screenshot = args.indexOf("--screenshot");
     if (screenshot >= 0 && screenshot + 1 < args.size()) {
         auto *capture = new QTimer(&application); capture->setInterval(1000);
-        QObject::connect(capture, &QTimer::timeout, &application, [&application, &window, args, screenshot] {
+        QObject::connect(capture, &QTimer::timeout, &window, [&application, &window, args, screenshot] {
             if (window.taskRunning()) return;
             const bool saved = window.grab().save(args.at(screenshot + 1));
             application.exit(saved ? 0 : 2);

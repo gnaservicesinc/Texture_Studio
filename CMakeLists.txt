@@ -16,7 +16,32 @@ qt_add_executable(ipde_gui MACOSX_BUNDLE
     src/gui/main.cpp
 )
 qt_add_executable(raft_studio MACOSX_BUNDLE src/gui/trainer.cpp)
+qt_add_executable(dataset_studio MACOSX_BUNDLE src/gui/trainer.cpp)
+target_link_libraries(dataset_studio PRIVATE Qt6::Widgets Qt6::Network)
+target_compile_options(dataset_studio PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_definitions(dataset_studio PRIVATE IPDE_DATASET_STUDIO=1
+    RAFT_STUDIO_SOURCE_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/raft_studio.py"
+    IPDE_PYTHON_EXECUTABLE="${IPDE_PYTHON_EXECUTABLE}")
+set_target_properties(dataset_studio PROPERTIES OUTPUT_NAME "Dataset Studio"
+    MACOSX_BUNDLE_BUNDLE_NAME "Dataset Studio" MACOSX_BUNDLE_GUI_IDENTIFIER "org.ipde.dataset-studio"
+    MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}" MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
 qt_add_executable(ipde_studio MACOSX_BUNDLE src/gui/studio.cpp)
+qt_add_executable(photo_studio MACOSX_BUNDLE src/gui/media.cpp)
+qt_add_executable(raw_studio MACOSX_BUNDLE src/gui/media.cpp)
+target_compile_definitions(photo_studio PRIVATE PHOTO_STUDIO=1)
+foreach(media_target IN ITEMS photo_studio raw_studio)
+    target_link_libraries(${media_target} PRIVATE Qt6::Widgets Qt6::Network)
+    target_compile_options(${media_target} PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_definitions(${media_target} PRIVATE
+        MEDIA_STUDIO_SOURCE_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/media_studio.py"
+        IPDE_PYTHON_EXECUTABLE="${IPDE_PYTHON_EXECUTABLE}")
+endforeach()
+set_target_properties(photo_studio PROPERTIES OUTPUT_NAME "Photo Studio"
+    MACOSX_BUNDLE_BUNDLE_NAME "Photo Studio" MACOSX_BUNDLE_GUI_IDENTIFIER "org.ipde.photo-studio"
+    MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}" MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
+set_target_properties(raw_studio PROPERTIES OUTPUT_NAME "Raw Studio"
+    MACOSX_BUNDLE_BUNDLE_NAME "Raw Studio" MACOSX_BUNDLE_GUI_IDENTIFIER "org.ipde.raw-studio"
+    MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}" MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
 target_link_libraries(ipde_studio PRIVATE Qt6::Widgets Qt6::Network)
 target_compile_options(ipde_studio PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(ipde_studio PROPERTIES
@@ -75,6 +100,10 @@ if(APPLE)
         target_link_libraries(raft_studio PRIVATE "${IPDE_MACOS_SDK}/usr/lib/libc++.tbd")
         target_link_options(ipde_studio PRIVATE -nostdlib++)
         target_link_libraries(ipde_studio PRIVATE "${IPDE_MACOS_SDK}/usr/lib/libc++.tbd")
+        foreach(media_target IN ITEMS photo_studio raw_studio dataset_studio)
+            target_link_options(${media_target} PRIVATE -nostdlib++)
+            target_link_libraries(${media_target} PRIVATE "${IPDE_MACOS_SDK}/usr/lib/libc++.tbd")
+        endforeach()
     endif()
 endif()
 target_compile_definitions(ipde_gui PRIVATE
@@ -97,6 +126,8 @@ list(APPEND RAFT_STUDIO_PYTHON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/huggingface_datasets.py"
 )
 set_property(TARGET raft_studio APPEND PROPERTY LINK_DEPENDS
+    "${RAFT_STUDIO_PYTHON_SOURCES}" "${CMAKE_CURRENT_SOURCE_DIR}/raft_studio.py")
+set_property(TARGET dataset_studio APPEND PROPERTY LINK_DEPENDS
     "${RAFT_STUDIO_PYTHON_SOURCES}" "${CMAKE_CURRENT_SOURCE_DIR}/raft_studio.py")
 
 set_target_properties(ipde_gui PROPERTIES
@@ -139,24 +170,102 @@ if(APPLE)
 endif()
 
 if(APPLE)
-    add_dependencies(ipde_studio ipde_gui raft_studio)
+    add_dependencies(ipde_studio ipde_gui raft_studio dataset_studio photo_studio raw_studio)
     set(studio_apps "$<TARGET_BUNDLE_DIR:ipde_studio>/Contents/Applications")
     add_custom_target(ipde_studio_bundle ALL
         COMMAND ${CMAKE_COMMAND} -E make_directory "${studio_apps}"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:ipde_gui>" "${studio_apps}/IPDE.app"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:raft_studio>" "${studio_apps}/RAFT Studio.app"
-        DEPENDS ipde_studio ipde_gui raft_studio
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:dataset_studio>" "${studio_apps}/Dataset Studio.app"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:photo_studio>" "${studio_apps}/Photo Studio.app"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:raw_studio>" "${studio_apps}/Raw Studio.app"
+        DEPENDS ipde_studio ipde_gui raft_studio dataset_studio photo_studio raw_studio
         COMMENT "Packing IPDE subapps into IPDE Studio"
     )
 endif()
 
+set(MEDIA_STUDIO_PYTHON_SOURCES ${RAFT_STUDIO_PYTHON_SOURCES}
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/photo_workflow.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/raw_workflow.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/heif_privacy.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/media_cli.py")
+foreach(media_target IN ITEMS photo_studio raw_studio)
+    set_property(TARGET ${media_target} APPEND PROPERTY LINK_DEPENDS
+        "${MEDIA_STUDIO_PYTHON_SOURCES}" "${CMAKE_CURRENT_SOURCE_DIR}/media_studio.py")
+    if(APPLE)
+        set(media_resources "$<TARGET_BUNDLE_DIR:${media_target}>/Contents/Resources")
+        add_custom_command(TARGET ${media_target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E remove_directory "${media_resources}/src/ipde"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${media_resources}/src/ipde"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/media_studio.py" "${media_resources}/media_studio.py"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${MEDIA_STUDIO_PYTHON_SOURCES} "${media_resources}/src/ipde"
+            COMMENT "Embedding precision photo and RAW workflows")
+    endif()
+endforeach()
+
 if(APPLE)
-    set(trainer_resources "$<TARGET_BUNDLE_DIR:raft_studio>/Contents/Resources")
-    add_custom_command(TARGET raft_studio POST_BUILD
+    # Draw the same vector symbols for Qt controls and the native macOS bundles.
+    qt_add_executable(ipde_icon_builder src/gui/icon_builder.cpp)
+    target_link_libraries(ipde_icon_builder PRIVATE Qt6::Widgets)
+    if(IPDE_XCRUN_RESULT EQUAL 0)
+        target_link_options(ipde_icon_builder PRIVATE -nostdlib++)
+        target_link_libraries(ipde_icon_builder PRIVATE "${IPDE_MACOS_SDK}/usr/lib/libc++.tbd")
+    endif()
+    set(icon_dir "${CMAKE_CURRENT_BINARY_DIR}/generated-icons")
+    set(icon_outputs)
+    foreach(role IN ITEMS studio extractor datasets trainer photo raw)
+        list(APPEND icon_outputs "${icon_dir}/${role}.icns")
+    endforeach()
+    add_custom_command(OUTPUT ${icon_outputs}
+        COMMAND ${CMAKE_COMMAND} -E env QT_QPA_PLATFORM=offscreen "$<TARGET_FILE:ipde_icon_builder>" "${icon_dir}"
+        DEPENDS ipde_icon_builder src/gui/studio_icons.h COMMENT "Creating the IPDE icon family")
+    add_custom_target(ipde_icon_assets DEPENDS ${icon_outputs})
+    foreach(pair IN ITEMS "ipde_gui:extractor" "raft_studio:trainer" "dataset_studio:datasets" "ipde_studio:studio" "photo_studio:photo" "raw_studio:raw")
+        string(REPLACE ":" ";" parts "${pair}")
+        list(GET parts 0 app_target)
+        list(GET parts 1 role)
+        set(icon_file "${icon_dir}/${role}.icns")
+        set_source_files_properties("${icon_file}" PROPERTIES GENERATED TRUE MACOSX_PACKAGE_LOCATION Resources)
+        target_sources(${app_target} PRIVATE "${icon_file}")
+        set_target_properties(${app_target} PROPERTIES MACOSX_BUNDLE_ICON_FILE "${role}.icns")
+        add_dependencies(${app_target} ipde_icon_assets)
+    endforeach()
+
+    set(media_bridge "${CMAKE_CURRENT_BINARY_DIR}/media-bridge")
+    add_custom_command(OUTPUT "${media_bridge}"
+        COMMAND xcrun swiftc "${CMAKE_CURRENT_SOURCE_DIR}/native/media_bridge.swift" -o "${media_bridge}"
+            -framework Foundation -framework ImageIO -framework Vision -framework CoreImage -framework CoreGraphics
+        DEPENDS native/media_bridge.swift COMMENT "Compiling native HEIC and RAW support")
+    add_custom_target(ipde_media_bridge DEPENDS "${media_bridge}")
+    foreach(media_target IN ITEMS photo_studio raw_studio)
+        add_dependencies(${media_target} ipde_media_bridge)
+        set_source_files_properties("${media_bridge}" PROPERTIES GENERATED TRUE MACOSX_PACKAGE_LOCATION Resources)
+        target_sources(${media_target} PRIVATE "${media_bridge}")
+    endforeach()
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    qt_add_executable(project_session_regression "${CMAKE_CURRENT_SOURCE_DIR}/verification/project_session_regression.cpp")
+    target_include_directories(project_session_regression PRIVATE src/gui)
+    target_link_libraries(project_session_regression PRIVATE Qt6::Widgets Qt6::Network)
+    if(APPLE AND IPDE_XCRUN_RESULT EQUAL 0)
+        target_link_options(project_session_regression PRIVATE -nostdlib++)
+        target_link_libraries(project_session_regression PRIVATE "${IPDE_MACOS_SDK}/usr/lib/libc++.tbd")
+    endif()
+    add_test(NAME project_session_lifetime COMMAND project_session_regression)
+    set_tests_properties(project_session_lifetime PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
+
+if(APPLE)
+    foreach(trainer_target IN ITEMS raft_studio dataset_studio)
+    set(trainer_resources "$<TARGET_BUNDLE_DIR:${trainer_target}>/Contents/Resources")
+    add_custom_command(TARGET ${trainer_target} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E remove_directory "${trainer_resources}/src/ipde"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${trainer_resources}/src/ipde"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/raft_studio.py" "${trainer_resources}/raft_studio.py"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAFT_STUDIO_PYTHON_SOURCES} "${trainer_resources}/src/ipde"
         COMMENT "Embedding the separate RAFT Studio workflow"
     )
+    endforeach()
 endif()

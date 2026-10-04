@@ -5,3 +5,6 @@ OpenEXR>=3.4.4
 opt_einsum>=3.3
 scipy>=1.10
 torch>=2.0
+tifffile>=2025.1
+rawpy>=0.25
+imagecodecs>=2025.1

@@ -1,4 +1,5 @@
 #include "project_session.h"
+#include "studio_icons.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -355,7 +356,20 @@ public:
             setSharedValue("goal", goal_->currentData()); applyGoal();
         });
         reloadProjectSettings();
+        inspect_->setIcon(IPDE::appIcon("extractor"));
+        extract_->setIcon(IPDE::appIcon("extractor"));
+        exportOne_->setIcon(IPDE::appIcon("extractor"));
         updateButtons();
+    }
+
+    ~MainWindow() override {
+        // Child QProcess teardown can emit finished while our members and
+        // widgets are already being destroyed. Stop its UI callbacks first.
+        process_->disconnect(this);
+        if (process_->state() != QProcess::NotRunning) {
+            process_->kill();
+            process_->waitForFinished(1500);
+        }
     }
 
     void reloadProjectSettings() {
@@ -369,7 +383,7 @@ public:
         goal_->setCurrentIndex(qMax(0, index)); if (changed || !settingsLoaded_) applyGoal(); settingsLoaded_ = true;
         if (!IPDE::projectRoot().isEmpty()) {
             if (output_->text().isEmpty()) output_->setText(QDir(IPDE::projectRoot()).filePath("exports"));
-            setWindowTitle("IPDE Extractor — " + QFileInfo(IPDE::projectRoot()).fileName());
+            setWindowTitle("IPDE Extractor — " + sharedValue("name", QFileInfo(IPDE::projectRoot()).fileName()).toString());
         }
     }
 
@@ -721,7 +735,10 @@ int main(int argc, char *argv[]) {
     IPDE::ProjectSession session("extractor", &application);
     if (!session.start()) return 2;
     MainWindow window;
-    session.onChanged = [&window] { window.reloadProjectSettings(); };
+    application.setWindowIcon(IPDE::appIcon("extractor"));
+    window.setWindowIcon(IPDE::appIcon("extractor"));
+    session.setChangedHandler(&window, [&window] { window.reloadProjectSettings(); });
+    QObject::connect(&application, &QCoreApplication::aboutToQuit, &session, [&session] { session.shutdown(); });
     window.show();
     if (application.arguments().contains(QStringLiteral("--smoke-test"))) {
         QTimer::singleShot(300, &application, &QCoreApplication::quit);

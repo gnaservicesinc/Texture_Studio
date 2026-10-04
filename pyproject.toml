@@ -22,9 +22,12 @@ dependencies = [
 [project.scripts]
 ipde = "ipde.cli:main"
 raft-studio = "ipde.trainer_cli:main"
+media-studio = "ipde.media_cli:main"
 
 [project.optional-dependencies]
 datasets = ["datasets>=4,<6"]
+photo = ["tifffile>=2025.1"]
+raw = ["rawpy>=0.25", "tifffile>=2025.1", "imagecodecs>=2025.1"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -23,6 +23,8 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     workspace = commands.add_parser("workspace", help="list datasets and training runs")
     workspace.add_argument("workspace", type=Path)
+    workspace.add_argument("--linked-dataset", type=Path, action="append", default=[],
+                           help="include an existing dataset directory by reference without copying files")
     inspect = commands.add_parser("inspect-dataset", help="verify a dataset's arrays and provenance")
     inspect.add_argument("dataset", type=Path)
     review = commands.add_parser("review-dataset", help="list samples and depth labels for visual review")
@@ -117,20 +119,30 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def workspace_report(workspace: Path) -> dict:
+def workspace_report(workspace: Path, linked_datasets: Sequence[Path] = ()) -> dict:
     root = workspace.expanduser().resolve()
     if root.exists() and not root.is_dir():
         raise ValueError("workspace path is not a directory")
     result = {"workspace": str(root), "datasets": [], "runs": [], "warnings": []}
     # Read only small manifests. Full array verification belongs to inspection
     # and the training preflight, rather than every GUI refresh.
-    for path in sorted((root / "datasets").glob("*/dataset.json")):
+    local_manifests = sorted((root / "datasets").glob("*/dataset.json"))
+    candidates = [(path, False) for path in local_manifests]
+    candidates.extend((path.expanduser() / "dataset.json", True) for path in linked_datasets)
+    seen: set[Path] = set()
+    for path, linked in candidates:
         try:
+            directory = path.parent.resolve()
+            if directory in seen:
+                continue
+            seen.add(directory)
+            if not directory.is_dir():
+                raise ValueError("linked dataset directory is unavailable")
             data = json.loads(path.read_text())
             if data.get("schema") != "ipde-depth-dataset-v1":
                 raise ValueError("unsupported dataset schema")
             samples = data.get("samples", [])
-            result["datasets"].append({"path": str(path.parent), "name": path.parent.name,
+            result["datasets"].append({"path": str(directory), "name": data.get("name") or directory.name, "linked": linked,
                 "sample_count": len(samples), "source_count": len({s.get("source_sha256", s.get("id")) for s in samples}),
                 "training_mode": "supervised" if samples and all(s.get("training_target_choice") == "reference" for s in samples) else "mixed" if any(s.get("training_target_choice") == "reference" for s in samples) else "distillation",
                 "category": data.get("category", ""), "generation_state": data.get("generation_state", "complete"),
@@ -138,8 +150,8 @@ def workspace_report(workspace: Path) -> dict:
                 "teacher": ", ".join(sorted({s.get("teacher", {}).get("metadata", {}).get("model_id", "") for s in samples} - {""})),
                 "train_count": sum(s.get("split") == "train" for s in samples),
                 "validation_count": sum(s.get("split") == "validation" for s in samples)})
-        except (OSError, ValueError, TypeError, AttributeError) as exc:
-            result["warnings"].append(f"{path.name}: {exc}")
+        except (OSError, ValueError, TypeError, AttributeError, RuntimeError) as exc:
+            result["warnings"].append(f"{path}: {exc}")
     for path in sorted((root / "runs").rglob("*.pth.json")):
         try:
             data = json.loads(path.read_text())
@@ -190,7 +202,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Third-party model imports/loggers must not corrupt the GUI JSON protocol.
         with redirect_stdout(sys.stderr):
             if args.command == "workspace":
-                report = workspace_report(args.workspace)
+                report = workspace_report(args.workspace, args.linked_dataset)
             elif args.command == "inspect-dataset":
                 from .dataset import load_dataset
                 report = load_dataset(args.dataset)

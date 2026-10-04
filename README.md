@@ -7,12 +7,26 @@ display-oriented processing. The project has two parts:
 - a Python command-line extractor built on `pillow-heif >= 1.5.0`;
 - a native Qt 6 desktop GUI that runs the extractor with structured JSON I/O.
 
-[IPDE Studio](docs/raft-studio.md) is the project hub for the extractor, Dataset
-Manager and Trainer. Launch it with `make studio`, create/open a project, choose
+[IPDE Studio](docs/studio-projects.md) is the project hub for the extractor, Dataset
+Studio, RAFT Studio, Photo Studio and Raw Studio. Launch it with `make studio`, create/open a project, choose
 your purpose, then open its apps. Studio shares project settings and changes,
 prevents two instances of the same app on one project, and supports separate
 projects at the same time. GUI subapps require their Studio session; the Python
 command-line tools remain available for scripts.
+
+Project creation collects a name, location and main purpose together and starts
+in Documents. The purpose remains editable. Studio presents the next useful step,
+project counts and alerts, and offers a macOS menu bar menu for project switching
+and app launches. Existing datasets can be linked from another project without
+copying their arrays.
+
+Photo Studio provides selected-plane exports, registered derived depth upscaling,
+editable person-matte composites and region isolation, local teacher/RAFT depth,
+clipboard/file exports and verified HEIC sharing/repair. Raw Studio captures original
+RAW files and available exact sensor/linear-RAW rasters, retains camera calibration,
+and exports separate developed RGB, cropped depth estimates and Apple Vision
+person masks. Both apps preserve source arrays and keep viewing copies separate.
+[Photo/Raw precision, workflows and HEIC limitations](docs/photo-raw-studios.md).
 
 Dataset Manager supports categories, optional groups, recursive spatial discovery,
 1–3 depth teachers, per-photo/per-teacher curation, pixel-size review, overlays and
