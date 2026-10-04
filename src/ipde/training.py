@@ -91,6 +91,10 @@ def training_target_eligibility(manifest: Mapping[str, Any], mode: str = "auto")
     samples = manifest.get("samples", [])
     if not isinstance(samples, list) or any(not isinstance(sample, Mapping) for sample in samples):
         raise TrainingError("Dataset samples must be a list of sample records")
+    if any("excluded" in sample and not isinstance(sample["excluded"], bool) for sample in samples):
+        raise TrainingError("Dataset excluded membership must be boolean")
+    removed_count = sum(sample.get("excluded", False) for sample in samples)
+    samples = [sample for sample in samples if not sample.get("excluded", False)]
     if mode == "auto":
         choices = {choice for sample in samples if isinstance(choice := sample.get("training_target_choice", "teacher"), str)}
         mode = "supervised" if choices == {"reference"} else "mixed" if "reference" in choices else "distillation"
@@ -101,12 +105,27 @@ def training_target_eligibility(manifest: Mapping[str, Any], mode: str = "auto")
             eligible.append(sample)
         else:
             excluded.append(rejection)
-    return {"mode": mode, "sample_count": len(samples), "eligible_count": len(eligible),
+    train_count = sum(sample.get("split") == "train" for sample in eligible)
+    validation_count = sum(sample.get("split") == "validation" for sample in eligible)
+    trainable = bool(train_count and validation_count) and manifest.get("generation_state", "complete") == "complete" and not manifest.get("splits_provisional", False)
+    reason = ""
+    if manifest.get("generation_state", "complete") != "complete" or manifest.get("splits_provisional", False):
+        reason = "Finish dataset generation before training"
+    elif not samples:
+        reason = "No photos are included; restore or add photos before training"
+    elif not eligible:
+        reason = "No usable meter-scale training targets are included; review the depth targets or generate them with a metric teacher"
+    elif not train_count:
+        reason = "No training targets are included; reduce the validation percentage or move an independent photo group to training"
+    elif not validation_count:
+        reason = "No validation targets are included; increase the validation percentage or set aside an independent photo group"
+    return {"mode": mode, "sample_count": len(samples), "removed_count": removed_count, "eligible_count": len(eligible),
         "excluded_count": len(excluded), "train_count": sum(sample.get("split") == "train" for sample in eligible),
-        "validation_count": sum(sample.get("split") == "validation" for sample in eligible), "excluded": excluded}
+        "validation_count": validation_count, "excluded": excluded, "trainable": trainable, "reason": reason}
 
 
 def _check_splits(samples: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    samples = [sample for sample in samples if not sample.get("excluded", False)]
     train = [s for s in samples if s.get("split") == "train"]
     validation = [s for s in samples if s.get("split") == "validation"]
     if not train or not validation or len(train) + len(validation) != len(samples):
@@ -421,7 +440,8 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
         raise TrainingError("Checkpoint output must be outside the input dataset directory")
     progress("checking_dataset", status="started", dataset_path=str(root))
     try:
-        manifest = load_dataset(root, workers=worker_count)
+        from .dataset_review import _read_manifest_snapshot
+        _, manifest, manifest_digest = _read_manifest_snapshot(root, validate_files=False)
     except DatasetError as exc:
         raise TrainingError(str(exc)) from exc
     if manifest.get("generation_state", "complete") != "complete" or manifest.get("splits_provisional"):
@@ -437,12 +457,17 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
         validation_count=eligibility["validation_count"])
     if excluded and not options.skip_incompatible_targets:
         raise TrainingError(f"{excluded[0]['sample_id']}: {excluded[0]['reason']}")
-    progress("filtering_targets", status="started", processed=0, total=len(manifest["samples"]))
+    try:
+        load_dataset(root, include_excluded=False, workers=worker_count, snapshot=manifest)
+    except DatasetError as exc:
+        raise TrainingError(str(exc)) from exc
+    included = [sample for sample in manifest["samples"] if not sample.get("excluded", False)]
+    progress("filtering_targets", status="started", processed=0, total=len(included))
     for rejection in excluded:
         progress("skipped_sample", status="finished", **rejection)
-    eligible = [sample for sample in manifest["samples"] if _target_exclusion(sample, options.mode) is None]
-    progress("filtering_targets", status="finished", processed=len(manifest["samples"]),
-        total=len(manifest["samples"]), eligible_count=len(eligible), excluded_count=len(excluded))
+    eligible = [sample for sample in included if _target_exclusion(sample, options.mode) is None]
+    progress("filtering_targets", status="finished", processed=len(included),
+        total=len(included), eligible_count=len(eligible), excluded_count=len(excluded))
     if not any(sample.get("split") == "train" for sample in eligible) or not any(sample.get("split") == "validation" for sample in eligible):
         raise TrainingError("No usable training and held-out validation split remains after incompatible targets were skipped")
     train, validation = _check_splits(eligible)
@@ -599,14 +624,15 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
         "device": device, "torch_version": str(torch.__version__),
         "file_workers": worker_count,
         "options": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(options).items()},
-        "dataset_manifest_sha256": sha256_file(root / "dataset.json"), "teacher_checkpoint_sha256": sorted(teachers),
+        "dataset_manifest_sha256": manifest_digest, "dataset_edit_revision": manifest.get("edit_revision", 0),
+        "teacher_checkpoint_sha256": sorted(teachers),
         "metric_anchor_checkpoint_sha256": sorted(value for value in metric_anchors if value is not None),
         "label_provenance": [{"sample_id": s["id"], "target_choice": key, "label_kind": s[key].get("label_kind"),
             "target_array_sha256": s[key]["target"]["array_sha256"], "source_sha256": s["source_sha256"]} for s, key in zip(eligible, chosen)],
         "original_raft_checkpoint_sha256": hashlib.sha256(checkpoint_bytes).hexdigest(), "raft_configuration": vars(configuration),
         "trainable_parameter_count": sum(p.numel() for p in trainable),
         "train_sample_ids": [s["id"] for s in train], "validation_sample_ids": [s["id"] for s in validation],
-        "sample_count": len(manifest["samples"]), "eligible_sample_ids": [sample["id"] for sample in eligible],
+        "sample_count": len(included), "removed_count": eligibility["removed_count"], "eligible_sample_ids": [sample["id"] for sample in eligible],
         "eligible_count": len(eligible), "excluded_count": len(excluded), "excluded_samples": excluded,
         "train_count": len(train), "validation_count": len(validation),
         "train_group_ids": sorted({s["group_id"] for s in train}), "validation_group_ids": sorted({s["group_id"] for s in validation}),

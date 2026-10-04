@@ -45,6 +45,30 @@ def backend_smoke(app_root: Path, project: Path) -> None:
     review = invoke("Dataset Studio", ["review-dataset", str(edited)])
     if len(review["samples"]) != 2 or not all(s.get("management_group_id") for s in review["samples"]):
         raise RuntimeError("Embedded editor/review omitted membership edits or split component IDs")
+    payloads = {file: file.read_bytes() for file in source.rglob("*")
+                if file.is_file() and file.suffix in {".npy", ".npz"}}
+    source_hash = hashlib.sha256((source / "dataset.json").read_bytes()).hexdigest()
+    edits_file.write_text(json.dumps({"keep": [s["id"] for s in source_samples[1:]],
+                                      "validation_fraction": 1.0, "seed": 42}))
+    update_arguments = ["update-dataset", str(source), "--edits-json", str(edits_file),
+                        "--expected-manifest-sha256", source_hash, "--operation-id", "packaged-smoke-remove"]
+    updated = invoke("Dataset Studio", update_arguments)
+    replayed = invoke("Dataset Studio", update_arguments)
+    if (not replayed["already_applied"] or replayed["manifest_sha256"] != updated["manifest_sha256"]
+            or replayed["edit_revision"] != updated["edit_revision"]):
+        raise RuntimeError("Embedded editor failed to acknowledge an already committed save without rewriting it")
+    restored_review = invoke("Dataset Studio", ["review-dataset", str(source)])
+    if (Path(updated["dataset_path"]) != source or updated["summary"]["train_samples"] != 0
+            or updated["training_eligibility"]["trainable"]
+            or len(restored_review["samples"]) != len(source_samples)
+            or restored_review["samples"][0]["included"]):
+        raise RuntimeError("Embedded in-place editor lost membership or ignored 100 percent validation")
+    edits_file.write_text(json.dumps({"keep": [s["id"] for s in source_samples],
+                                      "validation_fraction": .05, "seed": 42}))
+    invoke("Dataset Studio", ["update-dataset", str(source), "--edits-json", str(edits_file),
+                               "--expected-manifest-sha256", updated["manifest_sha256"]])
+    if any(file.read_bytes() != content for file, content in payloads.items()):
+        raise RuntimeError("Embedded metadata editor rewrote scientific array bytes")
     report = invoke("RAFT Studio", ["workspace", str(workspace)])
     if len(report["datasets"]) != 3 or report["warnings"]:
         raise RuntimeError("Embedded Trainer did not recognize the prepared fixture")
@@ -55,7 +79,7 @@ def backend_smoke(app_root: Path, project: Path) -> None:
     archived = invoke("Dataset Studio", ["archive-dataset", str(source), "--workspace", str(workspace)])
     if source.exists() or not Path(archived["archived_dataset"]).is_dir():
         raise RuntimeError("Embedded archive did not preserve the source fixture")
-    print("Packaged dataset/trainer backends: threaded verification/composition, lossless membership/split editing, review, workspace, confirmed cleanup and locked archive passed")
+    print("Packaged dataset/trainer backends: in-place membership/restore, committed-save recovery and 5/100 percent splits, unchanged array bytes, composition, review, workspace, cleanup and archive passed")
 
 
 def main() -> None:

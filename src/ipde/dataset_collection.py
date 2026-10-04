@@ -258,9 +258,9 @@ def compose_datasets(
             progress_callback({"phase": "verifying_dataset", "dataset_path": str(root), "role": role,
                                "processed": source_index, "total": len(inputs)})
         initial_hash = sha256_file(root / "dataset.json")
-        _, manifest = _read_manifest(root)
+        _, manifest = _read_manifest(root, validate_files=False)
         _require_complete(manifest)
-        if load_dataset(root, verify=True, workers=worker_count) != manifest or sha256_file(root / "dataset.json") != initial_hash:
+        if load_dataset(root, verify=True, include_excluded=False, workers=worker_count) != manifest or sha256_file(root / "dataset.json") != initial_hash:
             raise DatasetError("Source dataset manifest changed before composition")
         dataset_id = hashlib.sha256((str(root) + ":" + initial_hash).encode()).hexdigest()
         sources[dataset_id] = root
@@ -270,8 +270,12 @@ def compose_datasets(
             category = None
         source_reports.append({"dataset_id": dataset_id, "dataset_path": str(root), "source_manifest_sha256": initial_hash,
                                "name": manifest.get("name") or root.name,
-                               "role": role, "category_label": category, "source_samples": len(manifest["samples"])})
+                               "role": role, "category_label": category,
+                               "source_samples": sum(not sample.get("excluded", False) for sample in manifest["samples"]),
+                               "excluded_source_samples": sum(sample.get("excluded", False) for sample in manifest["samples"])})
         for source_sample in manifest["samples"]:
+            if source_sample.get("excluded", False):
+                continue
             sample = copy.deepcopy(source_sample)
             lineage = (manifest.get("curation") or {}).get("source_dataset_path")
             prior = source_sample.get("collection_provenance") or {}

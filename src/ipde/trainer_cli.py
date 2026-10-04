@@ -19,7 +19,7 @@ def _edit_cancellation():
         return
     previous = signal.getsignal(signal.SIGTERM)
     def cancelled(signum, frame):
-        raise RuntimeError("Dataset editing cancelled; source datasets remain unchanged")
+        raise RuntimeError("Dataset editing cancelled. Reload the dataset to see any completed update")
     signal.signal(signal.SIGTERM, cancelled)
     try:
         yield
@@ -102,6 +102,14 @@ def _parser() -> argparse.ArgumentParser:
     edit.add_argument("--edits-json", required=True, type=Path, help="object with keep base sample IDs and splits mapping IDs to train/validation")
     edit.add_argument("--add-dataset", action="append", type=Path, default=[], help="add every image/teacher entry from another prepared dataset")
     edit.add_argument("--output-dir", required=True, type=Path)
+    update = commands.add_parser("update-dataset", help="apply photo membership and split edits immediately to the existing dataset manifest")
+    update.add_argument("dataset", type=Path)
+    update.add_argument("--edits-json", required=True, type=Path,
+                        help="object containing keep IDs, splits, validation_fraction/seed or queued pending_photos")
+    update.add_argument("--add-dataset", action="append", type=Path, default=[],
+                        help="attach new prepared entries using hard links without scanning existing arrays")
+    update.add_argument("--expected-manifest-sha256", help="reject stale edits instead of overwriting concurrent changes")
+    update.add_argument("--operation-id", help="persist a unique save ID so an identical committed request can be recovered safely")
     dataset = commands.add_parser("dataset", help="generate a lossless teacher-target dataset")
     dataset.add_argument("sources", type=Path, nargs="+")
     dataset.add_argument("--output-dir", required=True, type=Path)
@@ -165,7 +173,9 @@ def workspace_report(workspace: Path, linked_datasets: Sequence[Path] = ()) -> d
     # Read only small manifests. Full array verification belongs to inspection
     # and the training preflight, rather than every GUI refresh.
     local_manifests = sorted((root / "datasets").glob("*/dataset.json"))
-    candidates = [(path, False) for path in local_manifests]
+    # Added-photo inference stages into a hidden internal dataset; it becomes
+    # membership in the selected dataset rather than another library entry.
+    candidates = [(path, False) for path in local_manifests if not path.parent.name.startswith(".added-")]
     candidates.extend((path.expanduser() / "dataset.json", True) for path in linked_datasets)
     seen: set[Path] = set()
     for path, linked in candidates:
@@ -179,7 +189,7 @@ def workspace_report(workspace: Path, linked_datasets: Sequence[Path] = ()) -> d
             data = json.loads(path.read_text())
             if data.get("schema") != "ipde-depth-dataset-v1":
                 raise ValueError("unsupported dataset schema")
-            samples = data.get("samples", [])
+            samples = [sample for sample in data.get("samples", []) if not sample.get("excluded", False)]
             collection = data.get("collection") or {}
             storage = {key: collection[key] for key in ("storage_mode", "storage_format", "storage_methods",
                        "array_storage_bytes", "reused_array_storage_bytes", "added_array_storage_bytes", "added_storage_bytes") if key in collection}
@@ -187,11 +197,21 @@ def workspace_report(workspace: Path, linked_datasets: Sequence[Path] = ()) -> d
             # provenance must not describe them as shared storage.
             if data.get("curation") or data.get("storage_compaction"):
                 storage = {}
+            # Generation/composition records cached byte counts. A refresh must
+            # not walk every scientific file after each membership edit.
+            stored_bytes = (data.get("summary") or {}).get("array_storage_bytes")
+            if not data.get("dataset_update") and data.get("storage_compaction"):
+                stored_bytes = data["storage_compaction"].get("array_bytes_after")
+            elif stored_bytes is None and not data.get("curation"):
+                stored_bytes = collection.get("array_storage_bytes")
+            storage_known = isinstance(stored_bytes, int) and not isinstance(stored_bytes, bool) and stored_bytes >= 0
             result["datasets"].append({"path": str(directory), "name": data.get("name") or directory.name, "linked": linked,
                 "sample_count": len(samples), "source_count": len({s.get("source_sha256", s.get("id")) for s in samples}),
+                "excluded_count": sum(sample.get("excluded", False) for sample in data.get("samples", [])),
                 "training_mode": "supervised" if samples and all(s.get("training_target_choice") == "reference" for s in samples) else "mixed" if any(s.get("training_target_choice") == "reference" for s in samples) else "distillation",
                 "category": data.get("category", ""), "generation_state": data.get("generation_state", "complete"),
-                "storage_bytes": sum(p.stat().st_size for p in path.parent.rglob("*") if p.is_file() and not p.is_symlink()),
+                "storage_bytes": stored_bytes + path.stat().st_size if storage_known else None,
+                "storage_bytes_known": storage_known,
                 "storage": storage, "training_eligibility": training_target_eligibility(data),
                 "teacher": ", ".join(sorted({s.get("teacher", {}).get("metadata", {}).get("model_id", "") for s in samples} - {""})),
                 "train_count": sum(s.get("split") == "train" for s in samples),
@@ -248,7 +268,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Third-party model imports/loggers must not corrupt the GUI JSON protocol.
         with redirect_stdout(sys.stderr), ExitStack() as locks:
             from .resource_lock import resource_lock
-            if args.command == "edit-dataset":
+            if args.command in {"edit-dataset", "update-dataset"}:
                 locks.enter_context(_edit_cancellation())
             if args.command in {"inspect-dataset", "review-dataset", "preview-sample", "compare-samples", "compose-datasets", "compact-dataset", "curate-dataset", "edit-dataset", "train"}:
                 inputs = [*args.datasets, *args.validation_dataset] if args.command == "compose-datasets" else [args.dataset, *args.add_dataset] if args.command == "edit-dataset" else [args.dataset]
@@ -300,6 +320,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 from .dataset_edit import edit_dataset
                 report = edit_dataset(args.dataset, json.loads(args.edits_json.read_text(encoding="utf-8")), args.output_dir,
                                       add_datasets=args.add_dataset, progress_callback=_progress, workers=args.workers)
+            elif args.command == "update-dataset":
+                from .dataset_edit import apply_dataset_edits
+                report = apply_dataset_edits(args.dataset, json.loads(args.edits_json.read_text(encoding="utf-8")),
+                                             add_datasets=args.add_dataset,
+                                             expected_manifest_sha256=args.expected_manifest_sha256,
+                                             operation_id=args.operation_id)
             elif args.command == "dataset":
                 from .dataset import DatasetOptions, build_dataset
                 from .learned_depth import LearnedDepthConfig

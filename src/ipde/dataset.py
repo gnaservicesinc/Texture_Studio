@@ -7,6 +7,7 @@ it a measured reference or restore any detail absent from the model output.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import math
@@ -689,48 +690,93 @@ def build_dataset(
         raise
 
 
-def load_dataset(directory: Path | str, *, verify: bool = True, workers: int | None = None) -> dict[str, Any]:
-    """Load and verify a dataset, excluding pickle arrays and escaping paths."""
-    root = Path(directory).expanduser().resolve()
-    try:
-        manifest = json.loads((root / "dataset.json").read_text(encoding="utf-8"))
-    except (ValueError, OSError) as exc:
-        raise DatasetError(f"Cannot read dataset manifest: {exc}") from exc
-    if manifest.get("schema") != "ipde-depth-dataset-v1" or not manifest.get("samples"):
-        raise DatasetError("Not a supported, nonempty IPDE depth dataset")
+def _sample_scientific_records(sample: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Require complete records before recursive discovery can omit a plane."""
+    from .dataset_review import _ARRAY_FIELDS, _array_records
+
+    identity = sample.get("id", "")
+
+    def require_record(value: Any, field: str) -> None:
+        if not isinstance(value, dict) or not _ARRAY_FIELDS.issubset(value):
+            raise DatasetError(f"Sample {identity} has an incomplete scientific array record: {field}")
+
+    for key in ("rgb", "right_rgb"):
+        require_record(sample.get(key), key)
+    raw_assets = sample.get("raw_assets")
+    if not isinstance(raw_assets, list):
+        raise DatasetError(f"Sample {identity} has malformed raw assets")
+    for index, asset in enumerate(raw_assets):
+        require_record(asset.get("storage") if isinstance(asset, dict) else None, f"raw_assets[{index}].storage")
+    label_fields = {
+        "teacher": ("target", "native_target", "valid_mask"),
+        "raft_target": ("target", "valid_mask"),
+        "display_teacher": ("target", "native_target"),
+        "registered_display_teacher": ("target", "valid_mask"),
+        "metric_anchor": ("target", "native_target"),
+        "display_metric_anchor": ("target", "native_target"),
+        "anchored_teacher": ("target", "valid_mask"),
+        "anchored_display_teacher": ("target", "valid_mask"),
+        "reference": ("target", "valid_mask"),
+    }
+    for key, required in label_fields.items():
+        if key != "teacher" and key not in sample:
+            continue
+        label = sample.get(key)
+        if not isinstance(label, dict):
+            raise DatasetError(f"Sample {identity} has malformed {key} depth label")
+        for field in required:
+            require_record(label.get(field), f"{key}.{field}")
+        if "confidence" in label:
+            require_record(label["confidence"], f"{key}.confidence")
+    if "display_rgb" in sample:
+        require_record(sample["display_rgb"], "display_rgb")
+
+    def check_partial(value: Any, field: str) -> None:
+        if isinstance(value, dict):
+            present = _ARRAY_FIELDS.intersection(value)
+            path = value.get("path")
+            if len(present) >= 3 or (isinstance(path, str) and Path(path).suffix.lower() in {".npy", ".npz"}):
+                require_record(value, field)
+            else:
+                for key, child in value.items():
+                    check_partial(child, f"{field}.{key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                check_partial(child, f"{field}[{index}]")
+
+    check_partial(sample, "sample")
+    return list(_array_records(sample))
+
+
+def load_dataset(directory: Path | str, *, verify: bool = True, workers: int | None = None,
+                 metadata_only: bool = False, include_excluded: bool = True,
+                 snapshot: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Load a snapshot and optionally verify the arrays that will be consumed.
+
+    Metadata-only reads never open scientific arrays. Excluded records remain
+    in the returned snapshot for restoration; consumers may skip their files.
+    """
+    from .dataset_review import _array_path, _read_manifest, _validate_manifest_metadata
+    if snapshot is None:
+        root, manifest = _read_manifest(directory, validate_files=False)
+    else:
+        root = Path(directory).expanduser().resolve()
+        manifest = copy.deepcopy(dict(snapshot))
+        _validate_manifest_metadata(root, manifest, validate_files=False)
     try:
         worker_count = resolve_workers(workers)
     except ValueError as exc:
         raise DatasetError(str(exc)) from exc
+    records_by_sample = [(sample, _sample_scientific_records(sample)) for sample in manifest["samples"]]
+    if metadata_only:
+        return manifest
     # A raw asset, teacher/native plane and several teacher variants can all
     # reference one immutable file. Read it once, but reject conflicting
     # metadata instead of allowing deduplication to hide an invalid record.
     unique: dict[Path, dict[str, Any]] = {}
-    for sample in manifest["samples"]:
-        records = [sample["rgb"], sample["right_rgb"]]
-        records.extend(asset["storage"] for asset in sample["raw_assets"])
-        records.extend(sample["teacher"][key] for key in ("target", "native_target", "valid_mask"))
-        if "confidence" in sample["teacher"]:
-            records.append(sample["teacher"]["confidence"])
-        if "raft_target" in sample:
-            records.extend(sample["raft_target"][key] for key in ("target", "valid_mask"))
-        if "display_rgb" in sample:
-            records.append(sample["display_rgb"])
-        if "display_teacher" in sample:
-            records.extend(sample["display_teacher"][key] for key in ("target", "native_target"))
-        if "registered_display_teacher" in sample:
-            records.extend(sample["registered_display_teacher"][key] for key in ("target", "valid_mask"))
-        for key in ("metric_anchor", "display_metric_anchor"):
-            if key in sample:
-                records.extend(sample[key][name] for name in ("target", "native_target"))
-        for key in ("anchored_teacher", "anchored_display_teacher"):
-            if key in sample:
-                records.extend(sample[key][name] for name in ("target", "valid_mask"))
-        if "reference" in sample:
-            records.extend(sample["reference"][key] for key in ("target", "valid_mask"))
-        # Include optional/future scientific array products as well.
-        from .dataset_review import _array_records, _array_path
-        records.extend(_array_records(sample))
+    for sample, records in records_by_sample:
+        if not include_excluded and sample.get("excluded", False):
+            continue
         for record in records:
             path = _array_path(root, record)
             if path in unique and any(unique[path][key] != record[key]

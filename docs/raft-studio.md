@@ -28,8 +28,9 @@ capture date/time and source filenames.
 Dataset Studio keeps the dataset library in a left sidebar. Select any row and
 open **Photos and depth**; role assignments on **Training split** are separate
 choices for combining datasets. **Dataset actions** holds inspection, storage,
-archive, removal and linking commands. Each dataset keeps its own membership,
-split and version-name draft while you switch rows during the session.
+archive, removal and linking commands. Membership and split changes save to the
+selected dataset automatically. Durable pending drafts survive switching rows
+and reopening Studio; save failures keep them available for retry.
 
 **Scan spatial directory** recurses without following links. Nonspatial photos,
 portraits without calibrated stereo, malformed containers and inconsistent views
@@ -71,12 +72,15 @@ A/B experiments; exact duplicates, teacher variants and known bursts always stay
 together. External validation overlapping training sources is rejected. Use
 **Compare selected model with baseline** on a spatial photo to inspect the
 original and trained RAFT results with the same grid and meter contrast.
-For an automatic split, set **Validation size** (20% by default). It counts
+For an automatic split, set **Validation size** from 0% to 100% (20% by default). It counts
 independent capture components, rather than individual teacher entries.
 **Advanced split options** exposes the repeatable seed and authored-group
 preservation. **Set split…** in **Photos and depth** instead controls individual
-capture assignments in a saved version. **Open selected dataset in Trainer**
-uses that dataset's existing split.
+capture assignments directly in the selected dataset. **Apply split and open
+selected dataset in Trainer** saves the selected automatic validation percentage to that dataset
+before opening it. At 100%, every included component is validation; Trainer
+reports that no training examples remain.
+At 0%, no validation examples remain and training also requires a different split.
 Select a dataset row and choose **Use for training** to include it. The **Use**
 column displays **Training**, **Validation**, or **Not used**. **Use for validation**
 holds out the entire selected dataset and switches to the dedicated validation
@@ -86,8 +90,8 @@ its role starts as **Training**. Roles stay assigned when you refresh the librar
 Switching to an automatic validation strategy keeps existing **Validation** roles
 visible; assign those datasets to **Training** or **Not used** before creating
 the set. The message above **Create training set and continue** explains missing selections,
-name conflicts, unsaved photo/split edits, or an active task. Save the new version
-after editing, then select it for the training set.
+name conflicts, pending photo/split saves, or an active task. Wait for edits to
+finish saving before creating a combined training set.
 Creating a set verifies the selected arrays and reuses their existing storage.
 On supported macOS filesystems it creates independent copy-on-write clones;
 otherwise it uses immutable hard links on the same filesystem. It does not
@@ -267,7 +271,7 @@ to pan, and right-click or click outside to dismiss it. Hover for a synchronized
 1:1 magnifier.
 Look for incorrect object boundaries, flattened or invented surfaces, holes,
 and inconsistent near/far order. Select multiple photo rows and choose
-**Remove selected** to exclude their targets from the next version;
+**Remove selected** to exclude their targets from the selected dataset;
 **Restore selected** includes them again. Select an individual teacher row and
 choose **Remove selected** to remove just that result while keeping other teachers
 for the same photo. **Remove and next**
@@ -280,13 +284,15 @@ sample, including both stereo views.
 Use **Set split…** to move selected entries to training or validation. The change
 also moves their entire known duplicate/photo/teacher/burst/scene component,
 including related rows outside a filter. The totals show included targets and
-unsaved changes immediately. Use **Undo changes** to restore this dataset's
-original membership and splits.
+save state immediately. Changes save automatically without copying or decoding
+existing arrays. Removed rows remain restorable when you reopen the dataset.
 
-**Add photos…** stages new spatial HEICs in the generation page. Generate their
-depth targets to join them and your current edits into a new saved version.
-**Add from dataset…** includes every photo and teacher target from another
-prepared dataset and saves the version using existing array storage, without
+**Add photos…** saves the new spatial HEIC paths in the selected dataset before
+opening generation. The pending photo list survives reopening, so you can resume
+generation from **Photos and depth**. Generate their depth targets to add them to
+the selected dataset; existing photos and teacher results are not regenerated.
+**Add from dataset…** includes active photos and teacher targets from another
+prepared dataset using existing array storage, without
 running inference. Any conflict between existing split assignments for the same
 capture must be resolved by assigning its component one common split.
 
@@ -307,16 +313,16 @@ preview is a visualization only: the original float arrays, masks, and raw
 RGB/auxiliary data are untouched. A visually plausible map still needs
 independent accuracy checks for displacement work.
 
-Enter an unused folder name in **Save version as** and choose **Save changes as
-new version**. The new dataset contains included entries and the selected split
-assignments. It reuses exact original NPY/NPZ files without changing their values
-or rerunning existing teachers; base sample IDs and provenance are retained.
-Original datasets remain available. Train from the saved version in the library;
-unsaved photo or split edits must be saved before preparation or training can
-use them. Keep usable independent groups in both splits. If validation becomes
+Membership and split edits atomically update the selected dataset's manifest.
+Original NPY/NPZ values and files stay unchanged, and existing teachers are not
+rerun. The save status shows when changes are pending, saving, or saved. A
+durable per-dataset draft preserves unfinished changes after a save failure or
+reopening. Closing while a save is unfinished requires an explicit choice, and
+opening Trainer waits for the current edits and chosen split to save.
+Keep usable independent groups in both splits. If validation becomes
 empty, set aside a suitable independent capture group using **Set split…**, or
 use **Training split** to create a new automatic split. See
-[dataset library](dataset-library.md) for the `edit-dataset` CLI and edit JSON.
+[dataset library](dataset-library.md) for the `update-dataset` CLI and edit JSON.
 
 ## Display image and stereo alignment
 

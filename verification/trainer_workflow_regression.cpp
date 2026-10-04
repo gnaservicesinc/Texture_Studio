@@ -46,7 +46,7 @@ void trainingSetReadiness(TrainerWindow &window, const QString &workspace) {
     auto *reviewPhoto = new QTreeWidgetItem(window.reviewSamples_, {"review fixture"});
     auto *reviewEntry = new QTreeWidgetItem(reviewPhoto, {"Teacher"}); reviewEntry->setData(0, Qt::UserRole, QJsonObject{{"id", "excluded"}, {"split", "train"}}); TrainerWindow::setReviewItemIncluded(reviewEntry, false);
     window.updateReviewCount();
-    require(!window.compose_->isEnabled() && window.collectionStatus_->text().contains("Save reviewed copy"), "composition ignored unsaved review exclusions");
+    require(!window.compose_->isEnabled() && window.collectionStatus_->text().contains("saving", Qt::CaseInsensitive), "composition ignored pending review exclusions");
     window.compose_->clicked();
     require(!window.busy_ && window.process_->state() == QProcess::NotRunning, "direct composition signal bypassed unsaved exclusion guard");
     TrainerWindow::setReviewItemIncluded(reviewEntry, true); window.updateReviewCount();
@@ -274,7 +274,7 @@ int main(int argc, char **argv) {
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, temporary.path());
     try {
-        TrainerWindow window(true), trainer(false);
+        TrainerWindow window(true), trainer(false); window.autosavePaused_ = true; trainer.autosavePaused_ = true;
         const QString workspace = QDir(temporary.path()).filePath("workspace"); QDir().mkpath(workspace);
         trainingSetReadiness(window, workspace);
         streamedFolderImport(window, workspace);

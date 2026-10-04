@@ -1,0 +1,28 @@
+[
+  {
+    "dataset": "iphone-da3-20261004-045241",
+    "samples": 171,
+    "milliseconds": {
+      "remove_photo": 408.21,
+      "restore_photo": 396.44,
+      "validation_5_percent": 396.97,
+      "validation_100_percent": 409.06,
+      "cli_with_python_startup": 522.01
+    },
+    "operation_recovery_enabled": true,
+    "payload_files_present": 0
+  },
+  {
+    "dataset": "iphone_dpro",
+    "samples": 196,
+    "milliseconds": {
+      "remove_photo": 239.44,
+      "restore_photo": 231.2,
+      "validation_5_percent": 245.65,
+      "validation_100_percent": 233.06,
+      "cli_with_python_startup": 367.32
+    },
+    "operation_recovery_enabled": true,
+    "payload_files_present": 0
+  }
+]

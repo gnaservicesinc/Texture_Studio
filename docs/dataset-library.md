@@ -18,21 +18,25 @@ Photos are grouped with their teacher targets underneath. Select several photo
 rows and use **Remove selected** or **Restore selected**; select a teacher row
 to remove just that target. The **Status** column shows **Included**, **Removed**,
 or **Some removed** when a photo retains only some teacher targets. Removed
-entries remain visible with a strike-through until you save. **Set split…** moves
+entries remain visible with a strike-through and can be restored after reopening.
+**Set split…** moves
 the selected entries and their entire known photo/teacher/burst/scene component
 to training or validation, including related
 entries outside the current filter. Conflicting assignments are rejected.
 
-Enter an unused name in **Save version as**, then choose **Save changes as new
-version**. Membership and split drafts stay separate for each dataset when you
-switch sidebar rows during the session. **Undo changes** restores the selected
-dataset's original membership and splits. A saved version becomes a new library
-dataset; the source remains unchanged.
+Membership and split changes save automatically to the selected dataset. These
+updates replace only its manifest; existing image and depth arrays remain
+byte-for-byte unchanged. Each dataset keeps a durable pending-edit draft while
+you switch rows or reopen Studio. A failed save keeps the draft for retry. The
+save status distinguishes pending edits, saving, and saved changes; closing with
+unfinished edits asks what to do instead of silently discarding them.
 
-**Add photos…** opens generation for new spatial photos. Generate their depth
-targets, and Studio joins them with the current edits in the named new version.
-**Add from dataset…** adds all photos and teacher targets from another prepared
-dataset and saves a new version using its existing array files, without inference.
+**Add photos…** immediately registers the chosen spatial photos in the selected
+dataset and opens generation for their depth targets. The registered photo list
+survives reopening even when generation has not finished; resume its pending
+targets from **Photos and depth**. Existing photos and targets are not regenerated.
+**Add from dataset…** adds included photos and teacher targets from another prepared
+dataset using its existing array files, without inference.
 If imported captures disagree with an existing training/validation assignment,
 set a common split for that capture component before saving again.
 
@@ -44,8 +48,17 @@ role. Choose **Use for validation** to hold out a whole dataset and switch to
 the dedicated validation strategy. If you switch back to an automatic strategy,
 change each existing **Validation** role to **Training** or **Not used** before
 creating the set. **Do not use** sets its role to **Not used**. Set
-**Validation size** to the desired percentage; the default is 20%. The percentage
+**Validation size** to the desired percentage from 0% to 100%; the default is
+20%. Percentage and seed changes save automatically to the selected dataset and
+restore when you reopen it. The saved automatic setting also applies when you
+remove, restore, or add photos. **Set split…** switches to individual assignments
+and preserves those choices during later membership edits.
+**Apply split and open selected dataset in Trainer** applies that automatic split to the
+selected dataset and waits for it to save before opening Trainer. The percentage
 applies to independent capture components, so teacher-entry counts can differ.
+At 100%, all included groups are validation and no training groups remain;
+Trainer reports that training needs a nonempty training split. At 0%, no groups
+are held out and Trainer reports that validation examples are required.
 **Advanced split options** exposes group preservation and the repeatable seed.
 Preparation reuses the original array storage without a full payload copy. Original dataset files
 remain unchanged. Every teacher variant of a photo stays on the same side of the
@@ -77,8 +90,9 @@ Dataset Studio can link a dataset directory, or link datasets from another proje
 The link stores its existing path in `project.ini`; it does not duplicate large
 arrays. Dataset Manager and Trainer show linked datasets in the same library
 and training-set selector. Inspection and training read the original location.
-Review, composition, and compacting produce new datasets inside the current
-workspace, leaving linked source files untouched. A missing or moved directory
+Photo membership and split changes update a linked dataset at its original
+location as well. Composition and compacting produce new datasets inside the
+current workspace. A missing or moved directory
 appears as a library warning. Archive applies only to datasets owned by the
 current workspace. In **Manage links…**, select links and choose **Remove selected
 links** to stage their removal; **Save** applies it. The original dataset files
@@ -113,9 +127,11 @@ review. Review reports should remain valid only for the source bytes they name.
 
 The command-line equivalents are:
 
-Save an edit description as `edits.json`. `keep` lists base sample IDs to retain
-(omitting it keeps all); `splits` overrides selected sample assignments and moves
-each linked component together. Added datasets contribute all their entries.
+Save an edit description as `edits.json`. For an in-place update, `keep` lists
+included sample IDs; omitted IDs remain available as excluded entries for later
+restoration. Omitting `keep` preserves current membership. `splits` overrides
+selected sample assignments and moves each linked component together. Optional
+`validation_fraction` and `seed` apply an automatic split to included components.
 
 ```json
 {
@@ -125,15 +141,27 @@ each linked component together. Added datasets contribute all their entries.
 ```
 
 ```sh
+raft-studio update-dataset selected-dataset --edits-json edits.json
+raft-studio update-dataset selected-dataset --edits-json edits.json --add-dataset more-photos
+```
+
+These commands atomically replace the selected manifest. They preserve existing
+array files and sample IDs; additions retain their source identity and reuse
+existing array storage on the same filesystem. Repeating an addition does not
+duplicate its entries. `--expected-manifest-sha256 HASH` rejects changes made
+since the dataset was loaded. A running training job uses its captured manifest;
+later edits apply to subsequent runs. Conflicting assignments for related captures require one common
+split.
+
+For an explicit separate copy, the existing command remains available:
+
+```sh
 raft-studio edit-dataset original-dataset --edits-json edits.json --add-dataset more-photos --output-dir edited-version --workers 4
 ```
 
-The destination must be new and outside every source dataset. Base sample IDs
-remain stable; added IDs are namespaced with their original IDs in provenance.
-Without an explicit choice, contradictory existing splits for duplicate or
-related captures cause an actionable error. Every source and the completed
-output is verified before atomic publication. Editing preserves each original
-NPY/NPZ file's bytes and hashes and requires storage on the same filesystem.
+Its destination must be new and outside every source dataset. It verifies source
+arrays and the completed output before publication and preserves each original
+NPY/NPZ file's bytes and hashes. Shared storage requires the same filesystem.
 
 For automatic collections:
 

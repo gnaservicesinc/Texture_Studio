@@ -395,11 +395,11 @@ class TrainingProgressTests(unittest.TestCase):
 
     def test_checking_stage_precedes_expensive_verification_and_failure_never_completes(self):
         events = []
-        def fail_loading(_directory, *, workers=None):
+        def fail_loading(_directory, *, validate_files=True):
             self.assertEqual(events[0]["stage"], "checking_dataset")
             self.assertEqual(events[0]["completed_steps"], 0)
             raise TrainingError("invalid dataset")
-        with patch("ipde.training.load_dataset", side_effect=fail_loading):
+        with patch("ipde.dataset_review._read_manifest_snapshot", side_effect=fail_loading):
             with self.assertRaisesRegex(TrainingError, "invalid dataset"):
                 train_dataset("unused-dataset", "unused-checkpoint.pth", progress_callback=events.append)
         self.assertEqual(len(events), 1)

@@ -9,7 +9,9 @@ from __future__ import annotations
 import copy
 import ctypes
 import errno
+import hashlib
 import json
+import math
 import os
 import shutil
 import sys
@@ -54,11 +56,16 @@ def _array_records(value: Any) -> Iterator[dict[str, Any]]:
             yield from _array_records(child)
 
 
-def _array_path(root: Path, record: dict[str, Any]) -> Path:
+def _array_path(root: Path, record: dict[str, Any], *, validate_file: bool = True) -> Path:
     name = record.get("path")
     if not isinstance(name, str) or not name or Path(name).is_absolute() or ".." in Path(name).parts:
         raise DatasetError("Dataset array path escapes the dataset directory or is not relative")
-    path = (root / name).resolve()
+    path = root / name
+    if path.suffix.lower() not in {".npy", ".npz"}:
+        raise DatasetError("Dataset array path is not an NPY/NPZ array")
+    if not validate_file:
+        return path
+    path = path.resolve()
     if not path.is_relative_to(root) or path == root or path.suffix.lower() not in {".npy", ".npz"}:
         raise DatasetError("Dataset array path escapes the dataset directory or is not an NPY/NPZ array")
     if not path.is_file():
@@ -78,18 +85,34 @@ def _label(sample: dict[str, Any], key: str) -> tuple[str, dict[str, Any]]:
     return resolved, label
 
 
-def _read_manifest(directory: Path | str) -> tuple[Path, dict[str, Any]]:
-    """Read small metadata and check boundaries; defer array hashes to preview."""
+def _read_manifest_snapshot(directory: Path | str, *, validate_files: bool = True) -> tuple[Path, dict[str, Any], str]:
+    """Read one manifest snapshot; optional file checks never decode payloads."""
     root = Path(directory).expanduser().resolve()
     manifest_path = root / "dataset.json"
     if not manifest_path.resolve().is_relative_to(root):
         raise DatasetError("Dataset manifest path escapes the dataset directory")
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        serialized = manifest_path.read_bytes()
+        manifest = json.loads(serialized)
     except (OSError, ValueError) as exc:
         raise DatasetError(f"Cannot read dataset manifest: {exc}") from exc
+    _validate_manifest_metadata(root, manifest, validate_files=validate_files)
+    return root, manifest, hashlib.sha256(serialized).hexdigest()
+
+
+def _validate_manifest_metadata(root: Path, manifest: Any, *, validate_files: bool = True) -> None:
+    """Validate a captured snapshot without rereading its mutable manifest."""
     if not isinstance(manifest, dict) or manifest.get("schema") != "ipde-depth-dataset-v1":
         raise DatasetError("Not a supported IPDE depth dataset")
+    pending = manifest.get("pending_photos", [])
+    if not isinstance(pending, list) or any(not isinstance(item, str) or not item or not Path(item).is_absolute() for item in pending) or len(pending) != len(set(pending)):
+        raise DatasetError("Pending photos must be unique absolute source paths")
+    revision = manifest.get("edit_revision", 0)
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+        raise DatasetError("Dataset edit revision must be a nonnegative integer")
+    fraction = manifest.get("validation_fraction")
+    if fraction is not None and (not isinstance(fraction, (float, int)) or isinstance(fraction, bool) or not math.isfinite(fraction) or not 0 <= fraction <= 1):
+        raise DatasetError("Validation fraction must be between zero and one, inclusive")
     samples = manifest.get("samples")
     if not isinstance(samples, list) or not samples:
         raise DatasetError("Dataset must contain at least one sample")
@@ -101,11 +124,13 @@ def _read_manifest(directory: Path | str) -> tuple[Path, dict[str, Any]]:
         if sample["id"] in ids:
             raise DatasetError(f"Duplicate dataset sample ID: {sample['id']}")
         ids.add(sample["id"])
+        if "excluded" in sample and not isinstance(sample["excluded"], bool):
+            raise DatasetError(f"Sample {sample['id']} has malformed excluded membership")
         group, split = sample.get("group_id"), sample.get("split")
         if not isinstance(group, str) or not group or split not in {"train", "validation"}:
             raise DatasetError(f"Sample {sample['id']} has invalid group/split metadata")
         if group in splits and splits[group] != split:
-            raise DatasetError("An independent group crosses the training/validation split")
+            raise DatasetError("Training/validation leakage: an independent group crosses the split")
         splits[group] = split
         if not isinstance(sample.get("source_path"), str):
             raise DatasetError(f"Sample {sample['id']} has no source path")
@@ -118,11 +143,16 @@ def _read_manifest(directory: Path | str) -> tuple[Path, dict[str, Any]]:
             if key != "training" and key in sample:
                 _label(sample, key)
         for record in _array_records(sample):
-            _array_path(root, record)
+            _array_path(root, record, validate_file=validate_files)
+
+
+def _read_manifest(directory: Path | str, *, validate_files: bool = True) -> tuple[Path, dict[str, Any]]:
+    root, manifest, _ = _read_manifest_snapshot(directory, validate_files=validate_files)
     return root, manifest
 
 
 def _summary(samples: Sequence[dict[str, Any]]) -> dict[str, int]:
+    samples = [sample for sample in samples if not sample.get("excluded", False)]
     return {
         "samples": len(samples), "groups": len({sample["group_id"] for sample in samples}),
         "train_samples": sum(sample["split"] == "train" for sample in samples),
@@ -134,9 +164,9 @@ def _warnings(manifest: dict[str, Any]) -> list[str]:
     warnings = [str(value) for value in manifest.get("warnings", [])]
     summary = _summary(manifest["samples"])
     if summary["groups"] < 2:
-        warnings.append("Only one independent group remains; add a separate held-out scene before training.")
+        warnings.append("Fewer than two independent photo groups are included; restore or add a separate group before training.")
     if not summary["train_samples"] or not summary["validation_samples"]:
-        warnings.append("Both training and validation samples are required; curation preserves the original split assignments.")
+        warnings.append("Training requires both training and validation samples; change the validation percentage or restore an independent photo group.")
     return list(dict.fromkeys(warnings))
 
 
@@ -152,8 +182,9 @@ def _registration_summary(sample: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def review_dataset(directory: Path | str) -> dict[str, Any]:
-    root, manifest = _read_manifest(directory)
+    root, manifest, digest = _read_manifest_snapshot(directory, validate_files=False)
     from .dataset_edit import review_split_components
+    from .training import training_target_eligibility
     management_groups = review_split_components(root, manifest)
     samples = []
     for sample in manifest["samples"]:
@@ -189,6 +220,7 @@ def review_dataset(directory: Path | str) -> dict[str, Any]:
             warnings.append("Stereo calibration is not ready for RAFT training.")
         samples.append({
             "id": sample["id"], "source_path": sample["source_path"], "split": sample["split"],
+            "excluded": sample.get("excluded", False), "included": not sample.get("excluded", False),
             "group_id": sample["group_id"], "requested_group": sample.get("requested_group"),
             "management_group_id": management_groups[sample["id"]],
             "training_target_choice": chosen, "labels": labels, "warnings": warnings,
@@ -200,6 +232,11 @@ def review_dataset(directory: Path | str) -> dict[str, Any]:
                 and (chosen != "registered_display_teacher" or training_label.get("reference_role") == "left"),
         })
     return {"dataset_path": str(root), "samples": samples, "summary": _summary(manifest["samples"]), "warnings": _warnings(manifest),
+            "excluded_samples": sum(sample.get("excluded", False) for sample in manifest["samples"]),
+            "manifest_sha256": digest, "edit_revision": manifest.get("edit_revision", 0),
+            "pending_photos": manifest.get("pending_photos", []),
+            "validation_fraction": manifest.get("validation_fraction"),
+            "training_eligibility": training_target_eligibility(manifest),
             "generation_state": manifest.get("generation_state", "complete"), "splits_provisional": bool(manifest.get("splits_provisional", False))}
 
 
@@ -243,7 +280,7 @@ def preview_sample(
         raise DatasetError(f"Unknown preview label: {label}")
     if not isinstance(max_dimension, int) or isinstance(max_dimension, bool) or max_dimension < 0:
         raise DatasetError("Preview maximum dimension must be a nonnegative integer; zero means full resolution")
-    root, manifest = _read_manifest(directory)
+    root, manifest = _read_manifest(directory, validate_files=False)
     sample = next((sample for sample in manifest["samples"] if sample["id"] == sample_id), None)
     if sample is None:
         raise DatasetError(f"Unknown dataset sample ID: {sample_id}")
@@ -335,7 +372,7 @@ def compare_samples(
     """Compare teacher variants for one photo on a shared native stereo grid."""
     if not 2 <= len(sample_ids) <= 3 or len(set(sample_ids)) != len(sample_ids):
         raise DatasetError("Select two or three distinct teacher entries for comparison")
-    root, manifest = _read_manifest(directory)
+    root, manifest = _read_manifest(directory, validate_files=False)
     by_id = {sample["id"]: sample for sample in manifest["samples"]}
     if any(identifier not in by_id for identifier in sample_ids):
         raise DatasetError("Unknown sample in teacher comparison")
@@ -434,7 +471,7 @@ def curate_dataset(directory: Path | str, keep_ids: Sequence[str], output_dir: P
         worker_count = resolve_workers(workers)
     except ValueError as exc:
         raise DatasetError(str(exc)) from exc
-    root, manifest = _read_manifest(directory)
+    root, manifest = _read_manifest(directory, validate_files=False)
     if manifest.get("generation_state") == "generating" or manifest.get("splits_provisional"):
         raise DatasetError("Wait for dataset generation to finish before saving a reviewed copy; current split assignments are provisional")
     destination = Path(output_dir).expanduser().resolve()
