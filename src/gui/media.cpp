@@ -1,5 +1,6 @@
 #include "project_session.h"
 #include "studio_icons.h"
+#include "window_layout.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
@@ -65,6 +66,8 @@ public:
         setStyleSheet("background:#172435;color:#c9d4e1;border-radius:10px;padding:12px;");
         setText("Import a photograph to inspect its available data.");
     }
+    QSize sizeHint() const override { return QSize(520, 320); }
+    QSize minimumSizeHint() const override { return QSize(320, 270); }
     void load(const QString &path) { image_ = QPixmap(path); if (image_.isNull()) reset("Preview could not be loaded."); else refresh(); }
     void reset(const QString &message) { image_ = QPixmap(); clear(); setText(message); }
 protected:
@@ -77,7 +80,7 @@ private:
 class MediaWindow final : public QMainWindow {
 public:
     MediaWindow() {
-        setWindowTitle(appName()); setWindowIcon(IPDE::appIcon(role())); resize(1100, 860); setAcceptDrops(true);
+        setWindowTitle(appName()); setWindowIcon(IPDE::appIcon(role())); setAcceptDrops(true);
         previews_ = std::make_unique<QTemporaryDir>();
         auto *central = new QWidget(this); auto *layout = new QVBoxLayout(central); layout->setContentsMargins(24, 20, 24, 20); layout->setSpacing(12);
         auto *heading = new QHBoxLayout;
@@ -157,7 +160,8 @@ public:
             connect(saveHeic_, &QPushButton::clicked, this, [this] { rewriteHeic(); });
             connect(privacy_, &QCheckBox::toggled, this, [this] { updateEnabled(); });
         }
-        log_ = new QPlainTextEdit(central); log_->setReadOnly(true); log_->setMaximumHeight(90); log_->setMaximumBlockCount(150); layout->addWidget(log_); setCentralWidget(central);
+        log_ = new QPlainTextEdit(central); log_->setReadOnly(true); log_->setMaximumHeight(90); log_->setMaximumBlockCount(150); layout->addWidget(log_);
+        IPDE::setScrollableCentralWidget(this, central, QSize(1100, 860));
         process_ = new QProcess(this);
         connect(process_, &QProcess::readyReadStandardOutput, this, [this] { stdout_ += process_->readAllStandardOutput(); });
         connect(process_, &QProcess::readyReadStandardError, this, [this] { stderr_ += process_->readAllStandardError(); });

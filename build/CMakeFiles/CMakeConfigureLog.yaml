@@ -1930,8 +1930,8 @@ events:
     checks:
       - "Detecting CXX compiler ABI info"
     directories:
-      source: "/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-vfEqA0"
-      binary: "/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-vfEqA0"
+      source: "/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-ll3pSP"
+      binary: "/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-ll3pSP"
     cmakeVariables:
       CMAKE_CXX_FLAGS: ""
       CMAKE_CXX_FLAGS_DEBUG: "-g"
@@ -1945,17 +1945,17 @@ events:
       variable: "CMAKE_CXX_ABI_COMPILED"
       cached: false
       stdout: |
-        Change Dir: '/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-vfEqA0'
+        Change Dir: '/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-ll3pSP'
         
-        Run Build Command(s): /Library/Frameworks/Python.framework/Versions/3.14/bin/ninja -v cmTC_7aaaf
-        [1/2] /usr/bin/c++   -arch arm64   -v -Wl,-v -MD -MT CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o -MF CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o.d -o CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o -c /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp
+        Run Build Command(s): /Library/Frameworks/Python.framework/Versions/3.14/bin/ninja -v cmTC_43475
+        [1/2] /usr/bin/c++   -arch arm64   -v -Wl,-v -MD -MT CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o -MF CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o.d -o CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o -c /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp
         Apple clang version 21.0.0 (clang-2100.3.34.2)
         Target: arm64-apple-darwin27.2.0
         Thread model: posix
         InstalledDir: /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin
         clang++: warning: -Wl,-v: 'linker' input unused [-Wunused-command-line-argument]
         ignoring nonexistent directory "/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/../include/c++/v1"
-         "/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang" -cc1 -triple arm64-apple-macosx27.2.0 -Wundef-prefix=TARGET_OS_ -Wdeprecated-objc-isa-usage -Werror=deprecated-objc-isa-usage -Werror=implicit-function-declaration -emit-obj -disable-free -clear-ast-before-backend -disable-llvm-verifier -discard-value-names -main-file-name CMakeCXXCompilerABI.cpp -mrelocation-model pic -pic-level 2 -mframe-pointer=non-leaf -fno-strict-return -ffp-contract=on -fno-rounding-math -funwind-tables=1 -fobjc-msgsend-selector-stubs -fno-sized-deallocation -target-sdk-version=27.2 -fdepfile-entry=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/SDKSettings.json -fvisibility-inlines-hidden-static-local-var -fno-modulemap-allow-subdirectory-search -fdefine-target-os-macros -fno-assume-unique-vtables -fno-modulemap-allow-subdirectory-search -enable-tlsdesc -target-cpu apple-m1 -target-feature +v8.5a -target-feature +aes -target-feature +altnzcv -target-feature +ccdp -target-feature +ccpp -target-feature +complxnum -target-feature +crc -target-feature +dotprod -target-feature +flagm -target-feature +fp-armv8 -target-feature +fp16fml -target-feature +fptoint -target-feature +fullfp16 -target-feature +jsconv -target-feature +lse -target-feature +neon -target-feature +pauth -target-feature +perfmon -target-feature +predres -target-feature +ras -target-feature +rcpc -target-feature +rdm -target-feature +sb -target-feature +sha2 -target-feature +sha3 -target-feature +specrestrict -target-feature +ssbs -target-abi darwinpcs -debugger-tuning=lldb -fdebug-compilation-dir=/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-vfEqA0 -target-linker-version 1166.2 -v -fcoverage-compilation-dir=/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-vfEqA0 -resource-dir /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21 -dependency-file CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o.d -skip-unused-modulemap-deps -MT CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o -sys-header-deps -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -I/usr/local/include -internal-isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1 -internal-isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/local/include -internal-isystem /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include -internal-externc-isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include -internal-externc-isystem /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/include -internal-iframework /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks -internal-iframework /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/SubFrameworks -internal-iframework /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/Library/Frameworks -Wno-elaborated-enum-base -fdeprecated-macro -ferror-limit 19 -stack-protector 1 -fstack-check -mdarwin-stkchk-strong-link -fblocks -fencode-extended-block-signature -fregister-global-dtors-with-atexit -fgnuc-version=4.2.1 -fskip-odr-check-in-gmf -fcxx-exceptions -fexceptions -fmax-type-align=16 -fcommon -clang-vendor-feature=+disableNonDependentMemberExprInCurrentInstantiation -fno-odr-hash-protocols -clang-vendor-feature=+enableAggressiveVLAFolding -clang-vendor-feature=+revert09abecef7bbf -clang-vendor-feature=+thisNoAlignAttr -clang-vendor-feature=+thisNoNullAttr -clang-vendor-feature=+disableAtImportPrivateFrameworkInImplementationError -Wno-error=allocator-wrappers -fdwarf2-cfi-asm -o CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o -x c++ /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp
+         "/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang" -cc1 -triple arm64-apple-macosx27.2.0 -Wundef-prefix=TARGET_OS_ -Wdeprecated-objc-isa-usage -Werror=deprecated-objc-isa-usage -Werror=implicit-function-declaration -emit-obj -disable-free -clear-ast-before-backend -disable-llvm-verifier -discard-value-names -main-file-name CMakeCXXCompilerABI.cpp -mrelocation-model pic -pic-level 2 -mframe-pointer=non-leaf -fno-strict-return -ffp-contract=on -fno-rounding-math -funwind-tables=1 -fobjc-msgsend-selector-stubs -fno-sized-deallocation -target-sdk-version=27.2 -fdepfile-entry=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/SDKSettings.json -fvisibility-inlines-hidden-static-local-var -fno-modulemap-allow-subdirectory-search -fdefine-target-os-macros -fno-assume-unique-vtables -fno-modulemap-allow-subdirectory-search -enable-tlsdesc -target-cpu apple-m1 -target-feature +v8.5a -target-feature +aes -target-feature +altnzcv -target-feature +ccdp -target-feature +ccpp -target-feature +complxnum -target-feature +crc -target-feature +dotprod -target-feature +flagm -target-feature +fp-armv8 -target-feature +fp16fml -target-feature +fptoint -target-feature +fullfp16 -target-feature +jsconv -target-feature +lse -target-feature +neon -target-feature +pauth -target-feature +perfmon -target-feature +predres -target-feature +ras -target-feature +rcpc -target-feature +rdm -target-feature +sb -target-feature +sha2 -target-feature +sha3 -target-feature +specrestrict -target-feature +ssbs -target-abi darwinpcs -debugger-tuning=lldb -fdebug-compilation-dir=/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-ll3pSP -target-linker-version 1166.2 -v -fcoverage-compilation-dir=/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-ll3pSP -resource-dir /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21 -dependency-file CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o.d -skip-unused-modulemap-deps -MT CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o -sys-header-deps -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -I/usr/local/include -internal-isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1 -internal-isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/local/include -internal-isystem /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include -internal-externc-isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include -internal-externc-isystem /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/include -internal-iframework /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks -internal-iframework /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/SubFrameworks -internal-iframework /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/Library/Frameworks -Wno-elaborated-enum-base -fdeprecated-macro -ferror-limit 19 -stack-protector 1 -fstack-check -mdarwin-stkchk-strong-link -fblocks -fencode-extended-block-signature -fregister-global-dtors-with-atexit -fgnuc-version=4.2.1 -fskip-odr-check-in-gmf -fcxx-exceptions -fexceptions -fmax-type-align=16 -fcommon -clang-vendor-feature=+disableNonDependentMemberExprInCurrentInstantiation -fno-odr-hash-protocols -clang-vendor-feature=+enableAggressiveVLAFolding -clang-vendor-feature=+revert09abecef7bbf -clang-vendor-feature=+thisNoAlignAttr -clang-vendor-feature=+thisNoNullAttr -clang-vendor-feature=+disableAtImportPrivateFrameworkInImplementationError -Wno-error=allocator-wrappers -fdwarf2-cfi-asm -o CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o -x c++ /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp
         clang -cc1 version 21.0.0 (clang-2100.3.34.2) default target arm64-apple-darwin27.2.0
         ignoring nonexistent directory "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/local/include"
         ignoring nonexistent directory "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/Library/Frameworks"
@@ -1969,12 +1969,12 @@ events:
          /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks (framework directory)
          /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/SubFrameworks (framework directory)
         End of search list.
-        [2/2] : && /usr/bin/c++ -arch arm64 -v -Wl,-v CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o -o cmTC_7aaaf   && :
+        [2/2] : && /usr/bin/c++ -arch arm64 -v -Wl,-v CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o -o cmTC_43475   && :
         Apple clang version 21.0.0 (clang-2100.3.34.2)
         Target: arm64-apple-darwin27.2.0
         Thread model: posix
         InstalledDir: /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin
-         "/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld" -demangle -lto_library /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/libLTO.dylib -dynamic -arch arm64 -platform_version macos 27.2.0 27.2 -syslibroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -mllvm -enable-linkonceodr-outlining -o cmTC_7aaaf -L/usr/local/lib -v CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o -lc++ -lSystem /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/lib/darwin/libclang_rt.osx.a
+         "/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld" -demangle -lto_library /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/libLTO.dylib -dynamic -arch arm64 -platform_version macos 27.2.0 27.2 -syslibroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -mllvm -enable-linkonceodr-outlining -o cmTC_43475 -L/usr/local/lib -v CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o -lc++ -lSystem /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/lib/darwin/libclang_rt.osx.a
         @(#)PROGRAM:ld PROJECT:ld-27105
         BUILD 05:40:23 Sep 17 2026
         configured to support archs: armv6 armv7 armv7s arm64 arm64e arm64_32 i386 x86_64 x86_64h armv6m armv7k armv7m armv7em armv8m.main armv8.1m.main
@@ -2031,17 +2031,17 @@ events:
       Parsed CXX implicit link information:
         link line regex: [^( *|.*[/\\])(ld[0-9]*(|\\.[a-rt-z][a-z]*|\\.s[a-np-z][a-z]*|\\.so[a-z]+)|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
         linker tool regex: [^[ 	]*(->|"|[0-9]+>[ 	-]*Build:[ 	0-9]+ ms[ 	]*)?[ 	]*(([^"]*[/\\])?(ld[0-9]*(|\\.[a-rt-z][a-z]*|\\.s[a-np-z][a-z]*|\\.so[a-z]+)))("|,| |$)]
-        ignore line: [Change Dir: '/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-vfEqA0']
+        ignore line: [Change Dir: '/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-ll3pSP']
         ignore line: []
-        ignore line: [Run Build Command(s): /Library/Frameworks/Python.framework/Versions/3.14/bin/ninja -v cmTC_7aaaf]
-        ignore line: [[1/2] /usr/bin/c++   -arch arm64   -v -Wl -v -MD -MT CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o -MF CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o.d -o CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o -c /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp]
+        ignore line: [Run Build Command(s): /Library/Frameworks/Python.framework/Versions/3.14/bin/ninja -v cmTC_43475]
+        ignore line: [[1/2] /usr/bin/c++   -arch arm64   -v -Wl -v -MD -MT CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o -MF CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o.d -o CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o -c /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp]
         ignore line: [Apple clang version 21.0.0 (clang-2100.3.34.2)]
         ignore line: [Target: arm64-apple-darwin27.2.0]
         ignore line: [Thread model: posix]
         ignore line: [InstalledDir: /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin]
         ignore line: [clang++: warning: -Wl -v: 'linker' input unused [-Wunused-command-line-argument]]
         ignore line: [ignoring nonexistent directory "/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/../include/c++/v1"]
-        ignore line: [ "/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang" -cc1 -triple arm64-apple-macosx27.2.0 -Wundef-prefix=TARGET_OS_ -Wdeprecated-objc-isa-usage -Werror=deprecated-objc-isa-usage -Werror=implicit-function-declaration -emit-obj -disable-free -clear-ast-before-backend -disable-llvm-verifier -discard-value-names -main-file-name CMakeCXXCompilerABI.cpp -mrelocation-model pic -pic-level 2 -mframe-pointer=non-leaf -fno-strict-return -ffp-contract=on -fno-rounding-math -funwind-tables=1 -fobjc-msgsend-selector-stubs -fno-sized-deallocation -target-sdk-version=27.2 -fdepfile-entry=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/SDKSettings.json -fvisibility-inlines-hidden-static-local-var -fno-modulemap-allow-subdirectory-search -fdefine-target-os-macros -fno-assume-unique-vtables -fno-modulemap-allow-subdirectory-search -enable-tlsdesc -target-cpu apple-m1 -target-feature +v8.5a -target-feature +aes -target-feature +altnzcv -target-feature +ccdp -target-feature +ccpp -target-feature +complxnum -target-feature +crc -target-feature +dotprod -target-feature +flagm -target-feature +fp-armv8 -target-feature +fp16fml -target-feature +fptoint -target-feature +fullfp16 -target-feature +jsconv -target-feature +lse -target-feature +neon -target-feature +pauth -target-feature +perfmon -target-feature +predres -target-feature +ras -target-feature +rcpc -target-feature +rdm -target-feature +sb -target-feature +sha2 -target-feature +sha3 -target-feature +specrestrict -target-feature +ssbs -target-abi darwinpcs -debugger-tuning=lldb -fdebug-compilation-dir=/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-vfEqA0 -target-linker-version 1166.2 -v -fcoverage-compilation-dir=/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-vfEqA0 -resource-dir /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21 -dependency-file CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o.d -skip-unused-modulemap-deps -MT CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o -sys-header-deps -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -I/usr/local/include -internal-isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1 -internal-isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/local/include -internal-isystem /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include -internal-externc-isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include -internal-externc-isystem /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/include -internal-iframework /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks -internal-iframework /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/SubFrameworks -internal-iframework /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/Library/Frameworks -Wno-elaborated-enum-base -fdeprecated-macro -ferror-limit 19 -stack-protector 1 -fstack-check -mdarwin-stkchk-strong-link -fblocks -fencode-extended-block-signature -fregister-global-dtors-with-atexit -fgnuc-version=4.2.1 -fskip-odr-check-in-gmf -fcxx-exceptions -fexceptions -fmax-type-align=16 -fcommon -clang-vendor-feature=+disableNonDependentMemberExprInCurrentInstantiation -fno-odr-hash-protocols -clang-vendor-feature=+enableAggressiveVLAFolding -clang-vendor-feature=+revert09abecef7bbf -clang-vendor-feature=+thisNoAlignAttr -clang-vendor-feature=+thisNoNullAttr -clang-vendor-feature=+disableAtImportPrivateFrameworkInImplementationError -Wno-error=allocator-wrappers -fdwarf2-cfi-asm -o CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o -x c++ /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp]
+        ignore line: [ "/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang" -cc1 -triple arm64-apple-macosx27.2.0 -Wundef-prefix=TARGET_OS_ -Wdeprecated-objc-isa-usage -Werror=deprecated-objc-isa-usage -Werror=implicit-function-declaration -emit-obj -disable-free -clear-ast-before-backend -disable-llvm-verifier -discard-value-names -main-file-name CMakeCXXCompilerABI.cpp -mrelocation-model pic -pic-level 2 -mframe-pointer=non-leaf -fno-strict-return -ffp-contract=on -fno-rounding-math -funwind-tables=1 -fobjc-msgsend-selector-stubs -fno-sized-deallocation -target-sdk-version=27.2 -fdepfile-entry=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/SDKSettings.json -fvisibility-inlines-hidden-static-local-var -fno-modulemap-allow-subdirectory-search -fdefine-target-os-macros -fno-assume-unique-vtables -fno-modulemap-allow-subdirectory-search -enable-tlsdesc -target-cpu apple-m1 -target-feature +v8.5a -target-feature +aes -target-feature +altnzcv -target-feature +ccdp -target-feature +ccpp -target-feature +complxnum -target-feature +crc -target-feature +dotprod -target-feature +flagm -target-feature +fp-armv8 -target-feature +fp16fml -target-feature +fptoint -target-feature +fullfp16 -target-feature +jsconv -target-feature +lse -target-feature +neon -target-feature +pauth -target-feature +perfmon -target-feature +predres -target-feature +ras -target-feature +rcpc -target-feature +rdm -target-feature +sb -target-feature +sha2 -target-feature +sha3 -target-feature +specrestrict -target-feature +ssbs -target-abi darwinpcs -debugger-tuning=lldb -fdebug-compilation-dir=/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-ll3pSP -target-linker-version 1166.2 -v -fcoverage-compilation-dir=/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-ll3pSP -resource-dir /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21 -dependency-file CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o.d -skip-unused-modulemap-deps -MT CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o -sys-header-deps -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -I/usr/local/include -internal-isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c++/v1 -internal-isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/local/include -internal-isystem /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/include -internal-externc-isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include -internal-externc-isystem /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/include -internal-iframework /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks -internal-iframework /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/SubFrameworks -internal-iframework /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/Library/Frameworks -Wno-elaborated-enum-base -fdeprecated-macro -ferror-limit 19 -stack-protector 1 -fstack-check -mdarwin-stkchk-strong-link -fblocks -fencode-extended-block-signature -fregister-global-dtors-with-atexit -fgnuc-version=4.2.1 -fskip-odr-check-in-gmf -fcxx-exceptions -fexceptions -fmax-type-align=16 -fcommon -clang-vendor-feature=+disableNonDependentMemberExprInCurrentInstantiation -fno-odr-hash-protocols -clang-vendor-feature=+enableAggressiveVLAFolding -clang-vendor-feature=+revert09abecef7bbf -clang-vendor-feature=+thisNoAlignAttr -clang-vendor-feature=+thisNoNullAttr -clang-vendor-feature=+disableAtImportPrivateFrameworkInImplementationError -Wno-error=allocator-wrappers -fdwarf2-cfi-asm -o CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o -x c++ /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp]
         ignore line: [clang -cc1 version 21.0.0 (clang-2100.3.34.2) default target arm64-apple-darwin27.2.0]
         ignore line: [ignoring nonexistent directory "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/local/include"]
         ignore line: [ignoring nonexistent directory "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/Library/Frameworks"]
@@ -2055,13 +2055,13 @@ events:
         ignore line: [ /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks (framework directory)]
         ignore line: [ /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/SubFrameworks (framework directory)]
         ignore line: [End of search list.]
-        ignore line: [[2/2] : && /usr/bin/c++ -arch arm64 -v -Wl -v CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o -o cmTC_7aaaf   && :]
+        ignore line: [[2/2] : && /usr/bin/c++ -arch arm64 -v -Wl -v CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o -o cmTC_43475   && :]
         ignore line: [Apple clang version 21.0.0 (clang-2100.3.34.2)]
         ignore line: [Target: arm64-apple-darwin27.2.0]
         ignore line: [Thread model: posix]
         ignore line: [InstalledDir: /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin]
-        link line: [ "/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld" -demangle -lto_library /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/libLTO.dylib -dynamic -arch arm64 -platform_version macos 27.2.0 27.2 -syslibroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -mllvm -enable-linkonceodr-outlining -o cmTC_7aaaf -L/usr/local/lib -v CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o -lc++ -lSystem /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/lib/darwin/libclang_rt.osx.a] ==> linker [/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld]
-        link line: [ "/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld" -demangle -lto_library /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/libLTO.dylib -dynamic -arch arm64 -platform_version macos 27.2.0 27.2 -syslibroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -mllvm -enable-linkonceodr-outlining -o cmTC_7aaaf -L/usr/local/lib -v CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o -lc++ -lSystem /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/lib/darwin/libclang_rt.osx.a]
+        link line: [ "/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld" -demangle -lto_library /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/libLTO.dylib -dynamic -arch arm64 -platform_version macos 27.2.0 27.2 -syslibroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -mllvm -enable-linkonceodr-outlining -o cmTC_43475 -L/usr/local/lib -v CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o -lc++ -lSystem /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/lib/darwin/libclang_rt.osx.a] ==> linker [/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld]
+        link line: [ "/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld" -demangle -lto_library /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/libLTO.dylib -dynamic -arch arm64 -platform_version macos 27.2.0 27.2 -syslibroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -mllvm -enable-linkonceodr-outlining -o cmTC_43475 -L/usr/local/lib -v CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o -lc++ -lSystem /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/lib/darwin/libclang_rt.osx.a]
           arg [/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld] ==> ignore
           arg [-demangle] ==> ignore
           arg [-lto_library] ==> ignore, skip following value
@@ -2078,10 +2078,10 @@ events:
           arg [-mllvm] ==> ignore
           arg [-enable-linkonceodr-outlining] ==> ignore
           arg [-o] ==> ignore
-          arg [cmTC_7aaaf] ==> ignore
+          arg [cmTC_43475] ==> ignore
           arg [-L/usr/local/lib] ==> dir [/usr/local/lib]
           arg [-v] ==> ignore
-          arg [CMakeFiles/cmTC_7aaaf.dir/CMakeCXXCompilerABI.cpp.o] ==> ignore
+          arg [CMakeFiles/cmTC_43475.dir/CMakeCXXCompilerABI.cpp.o] ==> ignore
           arg [-lc++] ==> lib [c++]
           arg [-lSystem] ==> lib [System]
           arg [/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/lib/darwin/libclang_rt.osx.a] ==> lib [/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/21/lib/darwin/libclang_rt.osx.a]
@@ -2131,8 +2131,8 @@ events:
     checks:
       - "Performing Test CMAKE_HAVE_LIBC_PTHREAD"
     directories:
-      source: "/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-cWdH8x"
-      binary: "/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-cWdH8x"
+      source: "/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-aG6fmR"
+      binary: "/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-aG6fmR"
     cmakeVariables:
       CMAKE_CXX_FLAGS: ""
       CMAKE_CXX_FLAGS_DEBUG: "-g"
@@ -2146,11 +2146,11 @@ events:
       variable: "CMAKE_HAVE_LIBC_PTHREAD"
       cached: true
       stdout: |
-        Change Dir: '/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-cWdH8x'
+        Change Dir: '/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-aG6fmR'
         
-        Run Build Command(s): /Library/Frameworks/Python.framework/Versions/3.14/bin/ninja -v cmTC_17842
-        [1/2] /usr/bin/c++ -DCMAKE_HAVE_LIBC_PTHREAD  -std=c++20 -arch arm64 -MD -MT CMakeFiles/cmTC_17842.dir/src.cxx.o -MF CMakeFiles/cmTC_17842.dir/src.cxx.o.d -o CMakeFiles/cmTC_17842.dir/src.cxx.o -c /opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-cWdH8x/src.cxx
-        [2/2] : && /usr/bin/c++ -arch arm64  CMakeFiles/cmTC_17842.dir/src.cxx.o -o cmTC_17842   && :
+        Run Build Command(s): /Library/Frameworks/Python.framework/Versions/3.14/bin/ninja -v cmTC_b8f7c
+        [1/2] /usr/bin/c++ -DCMAKE_HAVE_LIBC_PTHREAD  -std=c++20 -arch arm64 -MD -MT CMakeFiles/cmTC_b8f7c.dir/src.cxx.o -MF CMakeFiles/cmTC_b8f7c.dir/src.cxx.o.d -o CMakeFiles/cmTC_b8f7c.dir/src.cxx.o -c /opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-aG6fmR/src.cxx
+        [2/2] : && /usr/bin/c++ -arch arm64  CMakeFiles/cmTC_b8f7c.dir/src.cxx.o -o cmTC_b8f7c   && :
         
       exitCode: 0
   -
@@ -6251,8 +6251,8 @@ events:
     checks:
       - "Performing Test HAVE_STDATOMIC"
     directories:
-      source: "/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-9qaKBN"
-      binary: "/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-9qaKBN"
+      source: "/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-KXaTyZ"
+      binary: "/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-KXaTyZ"
     cmakeVariables:
       CMAKE_CXX_FLAGS: ""
       CMAKE_CXX_FLAGS_DEBUG: "-g"
@@ -6266,11 +6266,11 @@ events:
       variable: "HAVE_STDATOMIC"
       cached: true
       stdout: |
-        Change Dir: '/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-9qaKBN'
+        Change Dir: '/opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-KXaTyZ'
         
-        Run Build Command(s): /Library/Frameworks/Python.framework/Versions/3.14/bin/ninja -v cmTC_24080
-        [1/2] /usr/bin/c++ -DHAVE_STDATOMIC  -std=c++20 -arch arm64 -MD -MT CMakeFiles/cmTC_24080.dir/src.cxx.o -MF CMakeFiles/cmTC_24080.dir/src.cxx.o.d -o CMakeFiles/cmTC_24080.dir/src.cxx.o -c /opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-9qaKBN/src.cxx
-        [2/2] : && /usr/bin/c++ -arch arm64  CMakeFiles/cmTC_24080.dir/src.cxx.o -o cmTC_24080   && :
+        Run Build Command(s): /Library/Frameworks/Python.framework/Versions/3.14/bin/ninja -v cmTC_5b6e4
+        [1/2] /usr/bin/c++ -DHAVE_STDATOMIC  -std=c++20 -arch arm64 -MD -MT CMakeFiles/cmTC_5b6e4.dir/src.cxx.o -MF CMakeFiles/cmTC_5b6e4.dir/src.cxx.o.d -o CMakeFiles/cmTC_5b6e4.dir/src.cxx.o -c /opt/ipde/ipde/build/CMakeFiles/CMakeScratch/TryCompile-KXaTyZ/src.cxx
+        [2/2] : && /usr/bin/c++ -arch arm64  CMakeFiles/cmTC_5b6e4.dir/src.cxx.o -o cmTC_5b6e4   && :
         
       exitCode: 0
   -
@@ -9709,15 +9709,11 @@ events:
         - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6"
         - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/3rdparty/extra-cmake-modules/find-modules"
         - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/3rdparty/kwin"
-...
-
----
-events:
   -
     kind: "find-v1"
     backtrace:
       - "/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/share/cmake-4.4/Modules/CTest.cmake:171 (find_program)"
-      - "CMakeLists.txt:234 (include)"
+      - "CMakeLists.txt:247 (include)"
     mode: "program"
     variable: "GITCOMMAND"
     description: "Path to a program."
@@ -9735,6 +9731,7 @@ events:
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/bin/"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/sbin/"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/"
+      - "/Users/andrewsmith/.deno/bin/"
       - "/Library/Frameworks/Python.framework/Versions/3.14/bin/"
       - "/Library/Frameworks/Python.framework/Versions/Current/bin/"
       - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin/"
@@ -9775,14 +9772,7 @@ events:
       - "/opt/Qt/Tools/sdktool/libexec/"
       - "/opt/repo/turbocrypt/zig-out/bin/"
       - "/opt/zig/"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/codex-path/"
-      - "/Users/andrewsmith/.codex/tmp/arg0/codex-arg0XHBVvO/"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override/"
-      - "/Users/andrewsmith/.deno/bin/"
       - "/Users/andrewsmith/.cargo/bin/"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback/"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/bin/"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/sbin/"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/"
@@ -9822,6 +9812,7 @@ events:
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/bin/git"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/sbin/git"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/git"
+      - "/Users/andrewsmith/.deno/bin/git"
       - "/Library/Frameworks/Python.framework/Versions/3.14/bin/git"
       - "/Library/Frameworks/Python.framework/Versions/Current/bin/git"
       - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin/git"
@@ -9832,6 +9823,7 @@ events:
       CMAKE_PREFIX_PATH:
         - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6"
       ENV{PATH}:
+        - "/Users/andrewsmith/.deno/bin"
         - "/Library/Frameworks/Python.framework/Versions/3.14/bin"
         - "/Library/Frameworks/Python.framework/Versions/Current/bin"
         - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin"
@@ -9873,16 +9865,7 @@ events:
         - "/opt/Qt/Tools/sdktool/libexec"
         - "/opt/repo/turbocrypt/zig-out/bin"
         - "/opt/zig"
-        - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/codex-path"
-        - "/Users/andrewsmith/.codex/tmp/arg0/codex-arg0XHBVvO"
-        - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override"
-        - "/Users/andrewsmith/.deno/bin"
-        - "/Library/Frameworks/Python.framework/Versions/3.14/bin"
-        - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin"
         - "/Users/andrewsmith/.cargo/bin"
-        - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback"
-        - "/Applications/Utilities/ChatGPT.app/Contents/Resources"
-        - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS"
       CMAKE_INSTALL_PREFIX: "/usr/local"
       CMAKE_SYSTEM_PREFIX_PATH:
         - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr"
@@ -9905,7 +9888,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/share/cmake-4.4/Modules/CTest.cmake:188 (find_program)"
-      - "CMakeLists.txt:234 (include)"
+      - "CMakeLists.txt:247 (include)"
     mode: "program"
     variable: "MEMORYCHECK_COMMAND"
     description: "Path to the memory checking command, used for memory error detection."
@@ -9928,6 +9911,7 @@ events:
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/bin/"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/sbin/"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/"
+      - "/Users/andrewsmith/.deno/bin/"
       - "/Library/Frameworks/Python.framework/Versions/3.14/bin/"
       - "/Library/Frameworks/Python.framework/Versions/Current/bin/"
       - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin/"
@@ -9968,14 +9952,7 @@ events:
       - "/opt/Qt/Tools/sdktool/libexec/"
       - "/opt/repo/turbocrypt/zig-out/bin/"
       - "/opt/zig/"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/codex-path/"
-      - "/Users/andrewsmith/.codex/tmp/arg0/codex-arg0XHBVvO/"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override/"
-      - "/Users/andrewsmith/.deno/bin/"
       - "/Users/andrewsmith/.cargo/bin/"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback/"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/bin/"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/sbin/"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/"
@@ -10015,6 +9992,7 @@ events:
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/bin/purify"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/sbin/purify"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/purify"
+      - "/Users/andrewsmith/.deno/bin/purify"
       - "/Library/Frameworks/Python.framework/Versions/3.14/bin/purify"
       - "/Library/Frameworks/Python.framework/Versions/Current/bin/purify"
       - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin/purify"
@@ -10055,14 +10033,7 @@ events:
       - "/opt/Qt/Tools/sdktool/libexec/purify"
       - "/opt/repo/turbocrypt/zig-out/bin/purify"
       - "/opt/zig/purify"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/codex-path/purify"
-      - "/Users/andrewsmith/.codex/tmp/arg0/codex-arg0XHBVvO/purify"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override/purify"
-      - "/Users/andrewsmith/.deno/bin/purify"
       - "/Users/andrewsmith/.cargo/bin/purify"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback/purify"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/purify"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/purify"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/bin/purify"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/sbin/purify"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/purify"
@@ -10101,6 +10072,7 @@ events:
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/bin/valgrind"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/sbin/valgrind"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/valgrind"
+      - "/Users/andrewsmith/.deno/bin/valgrind"
       - "/Library/Frameworks/Python.framework/Versions/3.14/bin/valgrind"
       - "/Library/Frameworks/Python.framework/Versions/Current/bin/valgrind"
       - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin/valgrind"
@@ -10141,14 +10113,7 @@ events:
       - "/opt/Qt/Tools/sdktool/libexec/valgrind"
       - "/opt/repo/turbocrypt/zig-out/bin/valgrind"
       - "/opt/zig/valgrind"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/codex-path/valgrind"
-      - "/Users/andrewsmith/.codex/tmp/arg0/codex-arg0XHBVvO/valgrind"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override/valgrind"
-      - "/Users/andrewsmith/.deno/bin/valgrind"
       - "/Users/andrewsmith/.cargo/bin/valgrind"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback/valgrind"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/valgrind"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/valgrind"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/bin/valgrind"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/sbin/valgrind"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/valgrind"
@@ -10187,6 +10152,7 @@ events:
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/bin/boundscheck"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/sbin/boundscheck"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/boundscheck"
+      - "/Users/andrewsmith/.deno/bin/boundscheck"
       - "/Library/Frameworks/Python.framework/Versions/3.14/bin/boundscheck"
       - "/Library/Frameworks/Python.framework/Versions/Current/bin/boundscheck"
       - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin/boundscheck"
@@ -10227,14 +10193,7 @@ events:
       - "/opt/Qt/Tools/sdktool/libexec/boundscheck"
       - "/opt/repo/turbocrypt/zig-out/bin/boundscheck"
       - "/opt/zig/boundscheck"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/codex-path/boundscheck"
-      - "/Users/andrewsmith/.codex/tmp/arg0/codex-arg0XHBVvO/boundscheck"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override/boundscheck"
-      - "/Users/andrewsmith/.deno/bin/boundscheck"
       - "/Users/andrewsmith/.cargo/bin/boundscheck"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback/boundscheck"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/boundscheck"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/boundscheck"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/bin/boundscheck"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/sbin/boundscheck"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/boundscheck"
@@ -10273,6 +10232,7 @@ events:
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/bin/drmemory"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/sbin/drmemory"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/drmemory"
+      - "/Users/andrewsmith/.deno/bin/drmemory"
       - "/Library/Frameworks/Python.framework/Versions/3.14/bin/drmemory"
       - "/Library/Frameworks/Python.framework/Versions/Current/bin/drmemory"
       - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin/drmemory"
@@ -10313,14 +10273,7 @@ events:
       - "/opt/Qt/Tools/sdktool/libexec/drmemory"
       - "/opt/repo/turbocrypt/zig-out/bin/drmemory"
       - "/opt/zig/drmemory"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/codex-path/drmemory"
-      - "/Users/andrewsmith/.codex/tmp/arg0/codex-arg0XHBVvO/drmemory"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override/drmemory"
-      - "/Users/andrewsmith/.deno/bin/drmemory"
       - "/Users/andrewsmith/.cargo/bin/drmemory"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback/drmemory"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/drmemory"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/drmemory"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/bin/drmemory"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/sbin/drmemory"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/drmemory"
@@ -10359,6 +10312,7 @@ events:
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/bin/cuda-memcheck"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/sbin/cuda-memcheck"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/cuda-memcheck"
+      - "/Users/andrewsmith/.deno/bin/cuda-memcheck"
       - "/Library/Frameworks/Python.framework/Versions/3.14/bin/cuda-memcheck"
       - "/Library/Frameworks/Python.framework/Versions/Current/bin/cuda-memcheck"
       - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin/cuda-memcheck"
@@ -10399,14 +10353,7 @@ events:
       - "/opt/Qt/Tools/sdktool/libexec/cuda-memcheck"
       - "/opt/repo/turbocrypt/zig-out/bin/cuda-memcheck"
       - "/opt/zig/cuda-memcheck"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/codex-path/cuda-memcheck"
-      - "/Users/andrewsmith/.codex/tmp/arg0/codex-arg0XHBVvO/cuda-memcheck"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override/cuda-memcheck"
-      - "/Users/andrewsmith/.deno/bin/cuda-memcheck"
       - "/Users/andrewsmith/.cargo/bin/cuda-memcheck"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback/cuda-memcheck"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/cuda-memcheck"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/cuda-memcheck"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/bin/cuda-memcheck"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/sbin/cuda-memcheck"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/cuda-memcheck"
@@ -10445,6 +10392,7 @@ events:
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/bin/compute-sanitizer"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/sbin/compute-sanitizer"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/compute-sanitizer"
+      - "/Users/andrewsmith/.deno/bin/compute-sanitizer"
       - "/Library/Frameworks/Python.framework/Versions/3.14/bin/compute-sanitizer"
       - "/Library/Frameworks/Python.framework/Versions/Current/bin/compute-sanitizer"
       - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin/compute-sanitizer"
@@ -10485,14 +10433,7 @@ events:
       - "/opt/Qt/Tools/sdktool/libexec/compute-sanitizer"
       - "/opt/repo/turbocrypt/zig-out/bin/compute-sanitizer"
       - "/opt/zig/compute-sanitizer"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/codex-path/compute-sanitizer"
-      - "/Users/andrewsmith/.codex/tmp/arg0/codex-arg0XHBVvO/compute-sanitizer"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override/compute-sanitizer"
-      - "/Users/andrewsmith/.deno/bin/compute-sanitizer"
       - "/Users/andrewsmith/.cargo/bin/compute-sanitizer"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback/compute-sanitizer"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/compute-sanitizer"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/compute-sanitizer"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/bin/compute-sanitizer"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/sbin/compute-sanitizer"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/compute-sanitizer"
@@ -10533,6 +10474,7 @@ events:
       CMAKE_PREFIX_PATH:
         - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6"
       ENV{PATH}:
+        - "/Users/andrewsmith/.deno/bin"
         - "/Library/Frameworks/Python.framework/Versions/3.14/bin"
         - "/Library/Frameworks/Python.framework/Versions/Current/bin"
         - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin"
@@ -10574,16 +10516,7 @@ events:
         - "/opt/Qt/Tools/sdktool/libexec"
         - "/opt/repo/turbocrypt/zig-out/bin"
         - "/opt/zig"
-        - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/codex-path"
-        - "/Users/andrewsmith/.codex/tmp/arg0/codex-arg0XHBVvO"
-        - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override"
-        - "/Users/andrewsmith/.deno/bin"
-        - "/Library/Frameworks/Python.framework/Versions/3.14/bin"
-        - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin"
         - "/Users/andrewsmith/.cargo/bin"
-        - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback"
-        - "/Applications/Utilities/ChatGPT.app/Contents/Resources"
-        - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS"
       CMAKE_INSTALL_PREFIX: "/usr/local"
       CMAKE_SYSTEM_PREFIX_PATH:
         - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr"
@@ -10606,7 +10539,7 @@ events:
     kind: "find-v1"
     backtrace:
       - "/Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/share/cmake-4.4/Modules/CTest.cmake:196 (find_program)"
-      - "CMakeLists.txt:234 (include)"
+      - "CMakeLists.txt:247 (include)"
     mode: "program"
     variable: "COVERAGE_COMMAND"
     description: "Path to the coverage program that CTest uses for performing coverage inspection"
@@ -10624,6 +10557,7 @@ events:
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/bin/"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/sbin/"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/"
+      - "/Users/andrewsmith/.deno/bin/"
       - "/Library/Frameworks/Python.framework/Versions/3.14/bin/"
       - "/Library/Frameworks/Python.framework/Versions/Current/bin/"
       - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin/"
@@ -10664,14 +10598,7 @@ events:
       - "/opt/Qt/Tools/sdktool/libexec/"
       - "/opt/repo/turbocrypt/zig-out/bin/"
       - "/opt/zig/"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/codex-path/"
-      - "/Users/andrewsmith/.codex/tmp/arg0/codex-arg0XHBVvO/"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override/"
-      - "/Users/andrewsmith/.deno/bin/"
       - "/Users/andrewsmith/.cargo/bin/"
-      - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback/"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/"
-      - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/bin/"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/sbin/"
       - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/"
@@ -10711,6 +10638,7 @@ events:
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/bin/gcov"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/sbin/gcov"
       - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6/gcov"
+      - "/Users/andrewsmith/.deno/bin/gcov"
       - "/Library/Frameworks/Python.framework/Versions/3.14/bin/gcov"
       - "/Library/Frameworks/Python.framework/Versions/Current/bin/gcov"
       - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin/gcov"
@@ -10721,6 +10649,7 @@ events:
       CMAKE_PREFIX_PATH:
         - "/opt/Qt/6.12.0/macos/lib/cmake/Qt6"
       ENV{PATH}:
+        - "/Users/andrewsmith/.deno/bin"
         - "/Library/Frameworks/Python.framework/Versions/3.14/bin"
         - "/Library/Frameworks/Python.framework/Versions/Current/bin"
         - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin"
@@ -10762,16 +10691,7 @@ events:
         - "/opt/Qt/Tools/sdktool/libexec"
         - "/opt/repo/turbocrypt/zig-out/bin"
         - "/opt/zig"
-        - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/codex-path"
-        - "/Users/andrewsmith/.codex/tmp/arg0/codex-arg0XHBVvO"
-        - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override"
-        - "/Users/andrewsmith/.deno/bin"
-        - "/Library/Frameworks/Python.framework/Versions/3.14/bin"
-        - "/Library/Java/JavaVirtualMachines/jdk-27.jdk/Contents/Home/bin"
         - "/Users/andrewsmith/.cargo/bin"
-        - "/Users/andrewsmith/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback"
-        - "/Applications/Utilities/ChatGPT.app/Contents/Resources"
-        - "/Applications/Utilities/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS"
       CMAKE_INSTALL_PREFIX: "/usr/local"
       CMAKE_SYSTEM_PREFIX_PATH:
         - "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr"

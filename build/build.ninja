@@ -613,6 +613,147 @@ build project_session_regression: CXX_EXECUTABLE_LINKER__project_session_regress
   TARGET_PDB = project_session_regression.dbg
   TARGET_SUPPORT_DIR = CMakeFiles/project_session_regression.dir
 
+# =============================================================================
+# Object build statements for EXECUTABLE target window_layout_regression
+
+
+#############################################
+# Order-only phony target for window_layout_regression
+
+build cmake_object_order_depends_target_window_layout_regression: phony || window_layout_regression_autogen window_layout_regression_autogen/mocs_compilation.cpp window_layout_regression_autogen/timestamp window_layout_regression_autogen_timestamp_deps
+
+build CMakeFiles/window_layout_regression.dir/window_layout_regression_autogen/mocs_compilation.cpp.o: CXX_COMPILER__window_layout_regression_unscanned_ /opt/ipde/ipde/build/window_layout_regression_autogen/mocs_compilation.cpp || cmake_object_order_depends_target_window_layout_regression
+  DEFINES = -DIPDE_PYTHON_EXECUTABLE=\"/opt/ipde/ipde/.venv/bin/python\" -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DRAFT_STUDIO_SOURCE_SCRIPT=\"/opt/ipde/ipde/raft_studio.py\"
+  DEP_FILE = CMakeFiles/window_layout_regression.dir/window_layout_regression_autogen/mocs_compilation.cpp.o.d
+  FLAGS = -std=c++20 -arch arm64 -idirafter /opt/Qt/6.12.0/macos/include
+  INCLUDES = -I/opt/ipde/ipde/build/window_layout_regression_autogen/include -I/opt/ipde/ipde/src/gui -isystem /opt/Qt/6.12.0/macos/include/QtCore -iframework /opt/Qt/6.12.0/macos/lib -isystem /opt/Qt/6.12.0/macos/mkspecs/macx-clang -isystem /opt/Qt/6.12.0/macos/include/QtWidgets -isystem /opt/Qt/6.12.0/macos/include/QtGui -isystem /opt/Qt/6.12.0/macos/include/QtNetwork
+  OBJECT_DIR = CMakeFiles/window_layout_regression.dir
+  OBJECT_FILE_DIR = CMakeFiles/window_layout_regression.dir/window_layout_regression_autogen
+  TARGET_SUPPORT_DIR = CMakeFiles/window_layout_regression.dir
+
+build CMakeFiles/window_layout_regression.dir/verification/window_layout_regression.cpp.o: CXX_COMPILER__window_layout_regression_unscanned_ /opt/ipde/ipde/verification/window_layout_regression.cpp || cmake_object_order_depends_target_window_layout_regression
+  DEFINES = -DIPDE_PYTHON_EXECUTABLE=\"/opt/ipde/ipde/.venv/bin/python\" -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DRAFT_STUDIO_SOURCE_SCRIPT=\"/opt/ipde/ipde/raft_studio.py\"
+  DEP_FILE = CMakeFiles/window_layout_regression.dir/verification/window_layout_regression.cpp.o.d
+  FLAGS = -std=c++20 -arch arm64 -idirafter /opt/Qt/6.12.0/macos/include
+  INCLUDES = -I/opt/ipde/ipde/build/window_layout_regression_autogen/include -I/opt/ipde/ipde/src/gui -isystem /opt/Qt/6.12.0/macos/include/QtCore -iframework /opt/Qt/6.12.0/macos/lib -isystem /opt/Qt/6.12.0/macos/mkspecs/macx-clang -isystem /opt/Qt/6.12.0/macos/include/QtWidgets -isystem /opt/Qt/6.12.0/macos/include/QtGui -isystem /opt/Qt/6.12.0/macos/include/QtNetwork
+  OBJECT_DIR = CMakeFiles/window_layout_regression.dir
+  OBJECT_FILE_DIR = CMakeFiles/window_layout_regression.dir/verification
+  TARGET_SUPPORT_DIR = CMakeFiles/window_layout_regression.dir
+
+
+# =============================================================================
+# Link build statements for EXECUTABLE target window_layout_regression
+
+
+#############################################
+# Link the executable window_layout_regression
+
+build window_layout_regression: CXX_EXECUTABLE_LINKER__window_layout_regression_ CMakeFiles/window_layout_regression.dir/window_layout_regression_autogen/mocs_compilation.cpp.o CMakeFiles/window_layout_regression.dir/verification/window_layout_regression.cpp.o | /opt/Qt/6.12.0/macos/lib/QtWidgets.framework/Versions/A/QtWidgets /opt/Qt/6.12.0/macos/lib/QtNetwork.framework/Versions/A/QtNetwork /Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.2.sdk/usr/lib/libc++.tbd /opt/Qt/6.12.0/macos/lib/QtGui.framework/Versions/A/QtGui /opt/Qt/6.12.0/macos/lib/QtCore.framework/Versions/A/QtCore || window_layout_regression_autogen window_layout_regression_autogen_timestamp_deps
+  FLAGS = -arch arm64
+  LINK_FLAGS = -Wl,-search_paths_first -Wl,-headerpad_max_install_names -nostdlib++
+  LINK_LIBRARIES = -Wl,-rpath,/opt/Qt/6.12.0/macos/lib  /opt/Qt/6.12.0/macos/lib/QtWidgets.framework/Versions/A/QtWidgets  /opt/Qt/6.12.0/macos/lib/QtNetwork.framework/Versions/A/QtNetwork  /Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.2.sdk/usr/lib/libc++.tbd  /opt/Qt/6.12.0/macos/lib/QtGui.framework/Versions/A/QtGui  -framework AppKit  -framework OpenGL  -framework ImageIO  -framework Metal  /opt/Qt/6.12.0/macos/lib/QtCore.framework/Versions/A/QtCore  -framework IOKit  -framework DiskArbitration  -framework UniformTypeIdentifiers
+  LINK_PATH = -F/opt/Qt/6.12.0/macos/lib
+  OBJECT_DIR = CMakeFiles/window_layout_regression.dir
+  POST_BUILD = :
+  PRE_LINK = :
+  TARGET_FILE = window_layout_regression
+  TARGET_PDB = window_layout_regression.dbg
+  TARGET_SUPPORT_DIR = CMakeFiles/window_layout_regression.dir
+
+# =============================================================================
+# Object build statements for EXECUTABLE target studio_preview_regression
+
+
+#############################################
+# Order-only phony target for studio_preview_regression
+
+build cmake_object_order_depends_target_studio_preview_regression: phony || studio_preview_regression_autogen studio_preview_regression_autogen/mocs_compilation.cpp studio_preview_regression_autogen/timestamp studio_preview_regression_autogen_timestamp_deps
+
+build CMakeFiles/studio_preview_regression.dir/studio_preview_regression_autogen/mocs_compilation.cpp.o: CXX_COMPILER__studio_preview_regression_unscanned_ /opt/ipde/ipde/build/studio_preview_regression_autogen/mocs_compilation.cpp || cmake_object_order_depends_target_studio_preview_regression
+  DEFINES = -DIPDE_PYTHON_EXECUTABLE=\"/opt/ipde/ipde/.venv/bin/python\" -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DRAFT_STUDIO_SOURCE_SCRIPT=\"/opt/ipde/ipde/raft_studio.py\"
+  DEP_FILE = CMakeFiles/studio_preview_regression.dir/studio_preview_regression_autogen/mocs_compilation.cpp.o.d
+  FLAGS = -std=c++20 -arch arm64 -idirafter /opt/Qt/6.12.0/macos/include
+  INCLUDES = -I/opt/ipde/ipde/build/studio_preview_regression_autogen/include -I/opt/ipde/ipde/src/gui -isystem /opt/Qt/6.12.0/macos/include/QtCore -iframework /opt/Qt/6.12.0/macos/lib -isystem /opt/Qt/6.12.0/macos/mkspecs/macx-clang -isystem /opt/Qt/6.12.0/macos/include/QtWidgets -isystem /opt/Qt/6.12.0/macos/include/QtGui -isystem /opt/Qt/6.12.0/macos/include/QtNetwork
+  OBJECT_DIR = CMakeFiles/studio_preview_regression.dir
+  OBJECT_FILE_DIR = CMakeFiles/studio_preview_regression.dir/studio_preview_regression_autogen
+  TARGET_SUPPORT_DIR = CMakeFiles/studio_preview_regression.dir
+
+build CMakeFiles/studio_preview_regression.dir/verification/studio_preview_regression.cpp.o: CXX_COMPILER__studio_preview_regression_unscanned_ /opt/ipde/ipde/verification/studio_preview_regression.cpp || cmake_object_order_depends_target_studio_preview_regression
+  DEFINES = -DIPDE_PYTHON_EXECUTABLE=\"/opt/ipde/ipde/.venv/bin/python\" -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DRAFT_STUDIO_SOURCE_SCRIPT=\"/opt/ipde/ipde/raft_studio.py\"
+  DEP_FILE = CMakeFiles/studio_preview_regression.dir/verification/studio_preview_regression.cpp.o.d
+  FLAGS = -std=c++20 -arch arm64 -idirafter /opt/Qt/6.12.0/macos/include
+  INCLUDES = -I/opt/ipde/ipde/build/studio_preview_regression_autogen/include -I/opt/ipde/ipde/src/gui -isystem /opt/Qt/6.12.0/macos/include/QtCore -iframework /opt/Qt/6.12.0/macos/lib -isystem /opt/Qt/6.12.0/macos/mkspecs/macx-clang -isystem /opt/Qt/6.12.0/macos/include/QtWidgets -isystem /opt/Qt/6.12.0/macos/include/QtGui -isystem /opt/Qt/6.12.0/macos/include/QtNetwork
+  OBJECT_DIR = CMakeFiles/studio_preview_regression.dir
+  OBJECT_FILE_DIR = CMakeFiles/studio_preview_regression.dir/verification
+  TARGET_SUPPORT_DIR = CMakeFiles/studio_preview_regression.dir
+
+
+# =============================================================================
+# Link build statements for EXECUTABLE target studio_preview_regression
+
+
+#############################################
+# Link the executable studio_preview_regression
+
+build studio_preview_regression: CXX_EXECUTABLE_LINKER__studio_preview_regression_ CMakeFiles/studio_preview_regression.dir/studio_preview_regression_autogen/mocs_compilation.cpp.o CMakeFiles/studio_preview_regression.dir/verification/studio_preview_regression.cpp.o | /opt/Qt/6.12.0/macos/lib/QtWidgets.framework/Versions/A/QtWidgets /opt/Qt/6.12.0/macos/lib/QtNetwork.framework/Versions/A/QtNetwork /Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.2.sdk/usr/lib/libc++.tbd /opt/Qt/6.12.0/macos/lib/QtGui.framework/Versions/A/QtGui /opt/Qt/6.12.0/macos/lib/QtCore.framework/Versions/A/QtCore || studio_preview_regression_autogen studio_preview_regression_autogen_timestamp_deps
+  FLAGS = -arch arm64
+  LINK_FLAGS = -Wl,-search_paths_first -Wl,-headerpad_max_install_names -nostdlib++
+  LINK_LIBRARIES = -Wl,-rpath,/opt/Qt/6.12.0/macos/lib  /opt/Qt/6.12.0/macos/lib/QtWidgets.framework/Versions/A/QtWidgets  /opt/Qt/6.12.0/macos/lib/QtNetwork.framework/Versions/A/QtNetwork  /Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.2.sdk/usr/lib/libc++.tbd  /opt/Qt/6.12.0/macos/lib/QtGui.framework/Versions/A/QtGui  -framework AppKit  -framework OpenGL  -framework ImageIO  -framework Metal  /opt/Qt/6.12.0/macos/lib/QtCore.framework/Versions/A/QtCore  -framework IOKit  -framework DiskArbitration  -framework UniformTypeIdentifiers
+  LINK_PATH = -F/opt/Qt/6.12.0/macos/lib
+  OBJECT_DIR = CMakeFiles/studio_preview_regression.dir
+  POST_BUILD = :
+  PRE_LINK = :
+  TARGET_FILE = studio_preview_regression
+  TARGET_PDB = studio_preview_regression.dbg
+  TARGET_SUPPORT_DIR = CMakeFiles/studio_preview_regression.dir
+
+# =============================================================================
+# Object build statements for EXECUTABLE target trainer_workflow_regression
+
+
+#############################################
+# Order-only phony target for trainer_workflow_regression
+
+build cmake_object_order_depends_target_trainer_workflow_regression: phony || trainer_workflow_regression_autogen trainer_workflow_regression_autogen/mocs_compilation.cpp trainer_workflow_regression_autogen/timestamp trainer_workflow_regression_autogen_timestamp_deps
+
+build CMakeFiles/trainer_workflow_regression.dir/trainer_workflow_regression_autogen/mocs_compilation.cpp.o: CXX_COMPILER__trainer_workflow_regression_unscanned_ /opt/ipde/ipde/build/trainer_workflow_regression_autogen/mocs_compilation.cpp || cmake_object_order_depends_target_trainer_workflow_regression
+  DEFINES = -DIPDE_PYTHON_EXECUTABLE=\"/opt/ipde/ipde/.venv/bin/python\" -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DRAFT_STUDIO_SOURCE_SCRIPT=\"/opt/ipde/ipde/raft_studio.py\"
+  DEP_FILE = CMakeFiles/trainer_workflow_regression.dir/trainer_workflow_regression_autogen/mocs_compilation.cpp.o.d
+  FLAGS = -std=c++20 -arch arm64 -idirafter /opt/Qt/6.12.0/macos/include
+  INCLUDES = -I/opt/ipde/ipde/build/trainer_workflow_regression_autogen/include -I/opt/ipde/ipde/src/gui -isystem /opt/Qt/6.12.0/macos/include/QtCore -iframework /opt/Qt/6.12.0/macos/lib -isystem /opt/Qt/6.12.0/macos/mkspecs/macx-clang -isystem /opt/Qt/6.12.0/macos/include/QtWidgets -isystem /opt/Qt/6.12.0/macos/include/QtGui -isystem /opt/Qt/6.12.0/macos/include/QtNetwork
+  OBJECT_DIR = CMakeFiles/trainer_workflow_regression.dir
+  OBJECT_FILE_DIR = CMakeFiles/trainer_workflow_regression.dir/trainer_workflow_regression_autogen
+  TARGET_SUPPORT_DIR = CMakeFiles/trainer_workflow_regression.dir
+
+build CMakeFiles/trainer_workflow_regression.dir/verification/trainer_workflow_regression.cpp.o: CXX_COMPILER__trainer_workflow_regression_unscanned_ /opt/ipde/ipde/verification/trainer_workflow_regression.cpp || cmake_object_order_depends_target_trainer_workflow_regression
+  DEFINES = -DIPDE_PYTHON_EXECUTABLE=\"/opt/ipde/ipde/.venv/bin/python\" -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DRAFT_STUDIO_SOURCE_SCRIPT=\"/opt/ipde/ipde/raft_studio.py\"
+  DEP_FILE = CMakeFiles/trainer_workflow_regression.dir/verification/trainer_workflow_regression.cpp.o.d
+  FLAGS = -std=c++20 -arch arm64 -idirafter /opt/Qt/6.12.0/macos/include
+  INCLUDES = -I/opt/ipde/ipde/build/trainer_workflow_regression_autogen/include -I/opt/ipde/ipde/src/gui -isystem /opt/Qt/6.12.0/macos/include/QtCore -iframework /opt/Qt/6.12.0/macos/lib -isystem /opt/Qt/6.12.0/macos/mkspecs/macx-clang -isystem /opt/Qt/6.12.0/macos/include/QtWidgets -isystem /opt/Qt/6.12.0/macos/include/QtGui -isystem /opt/Qt/6.12.0/macos/include/QtNetwork
+  OBJECT_DIR = CMakeFiles/trainer_workflow_regression.dir
+  OBJECT_FILE_DIR = CMakeFiles/trainer_workflow_regression.dir/verification
+  TARGET_SUPPORT_DIR = CMakeFiles/trainer_workflow_regression.dir
+
+
+# =============================================================================
+# Link build statements for EXECUTABLE target trainer_workflow_regression
+
+
+#############################################
+# Link the executable trainer_workflow_regression
+
+build trainer_workflow_regression: CXX_EXECUTABLE_LINKER__trainer_workflow_regression_ CMakeFiles/trainer_workflow_regression.dir/trainer_workflow_regression_autogen/mocs_compilation.cpp.o CMakeFiles/trainer_workflow_regression.dir/verification/trainer_workflow_regression.cpp.o | /opt/Qt/6.12.0/macos/lib/QtWidgets.framework/Versions/A/QtWidgets /opt/Qt/6.12.0/macos/lib/QtNetwork.framework/Versions/A/QtNetwork /Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.2.sdk/usr/lib/libc++.tbd /opt/Qt/6.12.0/macos/lib/QtGui.framework/Versions/A/QtGui /opt/Qt/6.12.0/macos/lib/QtCore.framework/Versions/A/QtCore || trainer_workflow_regression_autogen trainer_workflow_regression_autogen_timestamp_deps
+  FLAGS = -arch arm64
+  LINK_FLAGS = -Wl,-search_paths_first -Wl,-headerpad_max_install_names -nostdlib++
+  LINK_LIBRARIES = -Wl,-rpath,/opt/Qt/6.12.0/macos/lib  /opt/Qt/6.12.0/macos/lib/QtWidgets.framework/Versions/A/QtWidgets  /opt/Qt/6.12.0/macos/lib/QtNetwork.framework/Versions/A/QtNetwork  /Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.2.sdk/usr/lib/libc++.tbd  /opt/Qt/6.12.0/macos/lib/QtGui.framework/Versions/A/QtGui  -framework AppKit  -framework OpenGL  -framework ImageIO  -framework Metal  /opt/Qt/6.12.0/macos/lib/QtCore.framework/Versions/A/QtCore  -framework IOKit  -framework DiskArbitration  -framework UniformTypeIdentifiers
+  LINK_PATH = -F/opt/Qt/6.12.0/macos/lib
+  OBJECT_DIR = CMakeFiles/trainer_workflow_regression.dir
+  POST_BUILD = :
+  PRE_LINK = :
+  TARGET_FILE = trainer_workflow_regression
+  TARGET_PDB = trainer_workflow_regression.dbg
+  TARGET_SUPPORT_DIR = CMakeFiles/trainer_workflow_regression.dir
+
 
 #############################################
 # Utility command for test
@@ -744,6 +885,42 @@ build project_session_regression_autogen_timestamp_deps: phony
 # Utility command for project_session_regression_autogen
 
 build project_session_regression_autogen: phony CMakeFiles/project_session_regression_autogen project_session_regression_autogen/timestamp project_session_regression_autogen/mocs_compilation.cpp project_session_regression_autogen_timestamp_deps
+
+
+#############################################
+# Utility command for window_layout_regression_autogen_timestamp_deps
+
+build window_layout_regression_autogen_timestamp_deps: phony
+
+
+#############################################
+# Utility command for window_layout_regression_autogen
+
+build window_layout_regression_autogen: phony CMakeFiles/window_layout_regression_autogen window_layout_regression_autogen/timestamp window_layout_regression_autogen/mocs_compilation.cpp window_layout_regression_autogen_timestamp_deps
+
+
+#############################################
+# Utility command for studio_preview_regression_autogen_timestamp_deps
+
+build studio_preview_regression_autogen_timestamp_deps: phony
+
+
+#############################################
+# Utility command for studio_preview_regression_autogen
+
+build studio_preview_regression_autogen: phony CMakeFiles/studio_preview_regression_autogen studio_preview_regression_autogen/timestamp studio_preview_regression_autogen/mocs_compilation.cpp studio_preview_regression_autogen_timestamp_deps
+
+
+#############################################
+# Utility command for trainer_workflow_regression_autogen_timestamp_deps
+
+build trainer_workflow_regression_autogen_timestamp_deps: phony
+
+
+#############################################
+# Utility command for trainer_workflow_regression_autogen
+
+build trainer_workflow_regression_autogen: phony CMakeFiles/trainer_workflow_regression_autogen trainer_workflow_regression_autogen/timestamp trainer_workflow_regression_autogen/mocs_compilation.cpp trainer_workflow_regression_autogen_timestamp_deps
 
 
 #############################################
@@ -1097,6 +1274,39 @@ build project_session_regression_autogen/timestamp project_session_regression_au
 
 
 #############################################
+# Custom command for window_layout_regression_autogen/timestamp
+
+build window_layout_regression_autogen/timestamp window_layout_regression_autogen/mocs_compilation.cpp | ${cmake_ninja_workdir}window_layout_regression_autogen/timestamp ${cmake_ninja_workdir}window_layout_regression_autogen/mocs_compilation.cpp: CUSTOM_COMMAND /opt/Qt/6.12.0/macos/libexec/moc /opt/Qt/6.12.0/macos/libexec/uic || window_layout_regression_autogen_timestamp_deps
+  COMMAND = cd /opt/ipde/ipde/build && /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/bin/cmake -E cmake_autogen /opt/ipde/ipde/build/CMakeFiles/window_layout_regression_autogen.dir/AutogenInfo.json "" && /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/bin/cmake -E touch /opt/ipde/ipde/build/window_layout_regression_autogen/timestamp && /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/bin/cmake -E cmake_transform_depfile Ninja gccdepfile /opt/ipde/ipde /opt/ipde/ipde /opt/ipde/ipde/build /opt/ipde/ipde/build /opt/ipde/ipde/build/window_layout_regression_autogen/deps /opt/ipde/ipde/build/CMakeFiles/d/02a35e34630740bb39219c7b64f8bf2505d480788716cfc328a820180ae70123.d
+  DESC = Automatic MOC and UIC for target window_layout_regression
+  depfile = CMakeFiles/d/02a35e34630740bb39219c7b64f8bf2505d480788716cfc328a820180ae70123.d
+  deps = gcc
+  restat = 1
+
+
+#############################################
+# Custom command for studio_preview_regression_autogen/timestamp
+
+build studio_preview_regression_autogen/timestamp studio_preview_regression_autogen/mocs_compilation.cpp | ${cmake_ninja_workdir}studio_preview_regression_autogen/timestamp ${cmake_ninja_workdir}studio_preview_regression_autogen/mocs_compilation.cpp: CUSTOM_COMMAND /opt/Qt/6.12.0/macos/libexec/moc /opt/Qt/6.12.0/macos/libexec/uic || studio_preview_regression_autogen_timestamp_deps
+  COMMAND = cd /opt/ipde/ipde/build && /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/bin/cmake -E cmake_autogen /opt/ipde/ipde/build/CMakeFiles/studio_preview_regression_autogen.dir/AutogenInfo.json "" && /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/bin/cmake -E touch /opt/ipde/ipde/build/studio_preview_regression_autogen/timestamp && /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/bin/cmake -E cmake_transform_depfile Ninja gccdepfile /opt/ipde/ipde /opt/ipde/ipde /opt/ipde/ipde/build /opt/ipde/ipde/build /opt/ipde/ipde/build/studio_preview_regression_autogen/deps /opt/ipde/ipde/build/CMakeFiles/d/2c46004233ea8b4a997c601f9708f4a0f260431eb445c3ddb3e9996245c41af9.d
+  DESC = Automatic MOC and UIC for target studio_preview_regression
+  depfile = CMakeFiles/d/2c46004233ea8b4a997c601f9708f4a0f260431eb445c3ddb3e9996245c41af9.d
+  deps = gcc
+  restat = 1
+
+
+#############################################
+# Custom command for trainer_workflow_regression_autogen/timestamp
+
+build trainer_workflow_regression_autogen/timestamp trainer_workflow_regression_autogen/mocs_compilation.cpp | ${cmake_ninja_workdir}trainer_workflow_regression_autogen/timestamp ${cmake_ninja_workdir}trainer_workflow_regression_autogen/mocs_compilation.cpp: CUSTOM_COMMAND /opt/Qt/6.12.0/macos/libexec/moc /opt/Qt/6.12.0/macos/libexec/uic || trainer_workflow_regression_autogen_timestamp_deps
+  COMMAND = cd /opt/ipde/ipde/build && /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/bin/cmake -E cmake_autogen /opt/ipde/ipde/build/CMakeFiles/trainer_workflow_regression_autogen.dir/AutogenInfo.json "" && /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/bin/cmake -E touch /opt/ipde/ipde/build/trainer_workflow_regression_autogen/timestamp && /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/bin/cmake -E cmake_transform_depfile Ninja gccdepfile /opt/ipde/ipde /opt/ipde/ipde /opt/ipde/ipde/build /opt/ipde/ipde/build /opt/ipde/ipde/build/trainer_workflow_regression_autogen/deps /opt/ipde/ipde/build/CMakeFiles/d/af07293d43cdd59b9d9035427ebed2d13510efd49980f5aedb21a5c12b2395f2.d
+  DESC = Automatic MOC and UIC for target trainer_workflow_regression
+  depfile = CMakeFiles/d/af07293d43cdd59b9d9035427ebed2d13510efd49980f5aedb21a5c12b2395f2.d
+  deps = gcc
+  restat = 1
+
+
+#############################################
 # Phony custom command for CMakeFiles/ipde_gui_autogen
 
 build CMakeFiles/ipde_gui_autogen | ${cmake_ninja_workdir}CMakeFiles/ipde_gui_autogen: phony ipde_gui_autogen/timestamp || ipde_gui_autogen_timestamp_deps ipde_icon_assets ipde_icon_builder ipde_icon_builder_autogen ipde_icon_builder_autogen_timestamp_deps
@@ -1143,6 +1353,24 @@ build CMakeFiles/ipde_icon_builder_autogen | ${cmake_ninja_workdir}CMakeFiles/ip
 
 build CMakeFiles/project_session_regression_autogen | ${cmake_ninja_workdir}CMakeFiles/project_session_regression_autogen: phony project_session_regression_autogen/timestamp || project_session_regression_autogen_timestamp_deps
 
+
+#############################################
+# Phony custom command for CMakeFiles/window_layout_regression_autogen
+
+build CMakeFiles/window_layout_regression_autogen | ${cmake_ninja_workdir}CMakeFiles/window_layout_regression_autogen: phony window_layout_regression_autogen/timestamp || window_layout_regression_autogen_timestamp_deps
+
+
+#############################################
+# Phony custom command for CMakeFiles/studio_preview_regression_autogen
+
+build CMakeFiles/studio_preview_regression_autogen | ${cmake_ninja_workdir}CMakeFiles/studio_preview_regression_autogen: phony studio_preview_regression_autogen/timestamp || studio_preview_regression_autogen_timestamp_deps
+
+
+#############################################
+# Phony custom command for CMakeFiles/trainer_workflow_regression_autogen
+
+build CMakeFiles/trainer_workflow_regression_autogen | ${cmake_ninja_workdir}CMakeFiles/trainer_workflow_regression_autogen: phony trainer_workflow_regression_autogen/timestamp || trainer_workflow_regression_autogen_timestamp_deps
+
 # =============================================================================
 # Target aliases.
 
@@ -1178,7 +1406,7 @@ build raw_studio: phony Raw$ Studio.app/Contents/MacOS/Raw$ Studio
 #############################################
 # Folder: /opt/ipde/ipde/build
 
-build all: phony IPDE.app/Contents/MacOS/IPDE RAFT$ Studio.app/Contents/MacOS/RAFT$ Studio Dataset$ Studio.app/Contents/MacOS/Dataset$ Studio IPDE$ Studio.app/Contents/MacOS/IPDE$ Studio Photo$ Studio.app/Contents/MacOS/Photo$ Studio Raw$ Studio.app/Contents/MacOS/Raw$ Studio ipde_studio_bundle ipde_icon_builder project_session_regression
+build all: phony IPDE.app/Contents/MacOS/IPDE RAFT$ Studio.app/Contents/MacOS/RAFT$ Studio Dataset$ Studio.app/Contents/MacOS/Dataset$ Studio IPDE$ Studio.app/Contents/MacOS/IPDE$ Studio Photo$ Studio.app/Contents/MacOS/Photo$ Studio Raw$ Studio.app/Contents/MacOS/Raw$ Studio ipde_studio_bundle ipde_icon_builder project_session_regression window_layout_regression studio_preview_regression trainer_workflow_regression
 
 # =============================================================================
 # Built-in targets

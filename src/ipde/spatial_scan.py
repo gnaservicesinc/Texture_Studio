@@ -146,27 +146,35 @@ def scan_spatial_directory(
     accepted: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     pending = [root]
+    candidates = 0
+    visited_directories = 0
 
     def emit(event: dict[str, Any]) -> None:
         if progress_callback is not None:
             progress_callback(event)
 
+    emit({"event": "scan_started", "directory": str(root), "recursive": recursive})
     while pending:
         folder = pending.pop()
         try:
             with os.scandir(folder) as entries:
                 ordered = sorted(entries, key=lambda entry: entry.name.casefold())
         except OSError as exc:
+            if folder == root:
+                raise SpatialScanError(f"Could not read scan directory {root}: {exc}") from exc
             record = {"source_path": str(folder), "reason": str(exc), "kind": "directory_error"}
             skipped.append(record)
             emit({"event": "photo_skipped", **record})
             continue
+        visited_directories += 1
         subdirectories = []
         for entry in ordered:
             path = Path(entry.path)
             try:
                 if entry.is_symlink():
-                    skipped.append({"source_path": str(path), "reason": "Symbolic link excluded", "kind": "link"})
+                    record = {"source_path": str(path), "reason": "Symbolic link excluded", "kind": "link"}
+                    skipped.append(record)
+                    emit({"event": "photo_skipped", **record})
                     continue
                 if entry.is_dir(follow_symlinks=False):
                     if recursive:
@@ -174,6 +182,9 @@ def scan_spatial_directory(
                     continue
                 if not entry.is_file(follow_symlinks=False) or path.suffix.lower() not in {".heic", ".heif", ".hif"}:
                     continue
+                candidates += 1
+                emit({"event": "scan_photo_started", "source_path": str(path),
+                      "candidate_count": candidates, "accepted_count": len(accepted)})
                 discovery = discover_file(path)
                 metadata = validate_spatial_discovery(discovery, require_apple_camera=require_apple_camera)
                 record = {"source_path": str(path), "source_sha256": discovery.source_sha256,
@@ -187,5 +198,6 @@ def scan_spatial_directory(
                 emit({"event": "photo_skipped", **record})
         pending.extend(reversed(subdirectories))
     return {"directory": str(root), "recursive": recursive, "accepted": accepted, "skipped": skipped,
-            "summary": {"accepted": len(accepted), "skipped": len(skipped)},
+            "summary": {"accepted": len(accepted), "skipped": len(skipped),
+                        "candidates": candidates, "visited_directories": visited_directories},
             "authenticity_note": "Validated Apple camera identity, container structure, decoded grids and calibration; forged metadata or AI-generated pixels cannot be ruled out."}

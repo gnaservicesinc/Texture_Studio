@@ -255,6 +255,21 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME project_session_lifetime COMMAND project_session_regression)
     set_tests_properties(project_session_lifetime PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+    foreach(regression IN ITEMS window_layout_regression studio_preview_regression trainer_workflow_regression)
+        qt_add_executable(${regression} "${CMAKE_CURRENT_SOURCE_DIR}/verification/${regression}.cpp")
+        target_include_directories(${regression} PRIVATE src/gui)
+        target_link_libraries(${regression} PRIVATE Qt6::Widgets Qt6::Network)
+        target_compile_definitions(${regression} PRIVATE
+            RAFT_STUDIO_SOURCE_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/raft_studio.py"
+            IPDE_PYTHON_EXECUTABLE="${IPDE_PYTHON_EXECUTABLE}")
+        if(APPLE AND IPDE_XCRUN_RESULT EQUAL 0)
+            target_link_options(${regression} PRIVATE -nostdlib++)
+            target_link_libraries(${regression} PRIVATE "${IPDE_MACOS_SDK}/usr/lib/libc++.tbd")
+        endif()
+        add_test(NAME ${regression} COMMAND ${regression})
+        set_tests_properties(${regression} PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    endforeach()
 endif()
 
 if(APPLE)

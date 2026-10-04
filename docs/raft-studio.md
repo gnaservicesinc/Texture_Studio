@@ -27,6 +27,10 @@ portraits without calibrated stereo, malformed containers and inconsistent views
 are skipped with a reason. Apple camera metadata and supported stereo structure
 are required. These checks cannot establish authenticity of convincingly forged
 metadata or prove an image was never AI edited.
+Choose the folder containing original HEIC/HEIF/HIF photos, rather than the
+project's workspace or generated dataset folder. Validated photos appear in the
+list as the scan runs; cancelling keeps the photos already found. Scanning and
+manual addition share the same duplicate handling.
 
 Select one to three teachers. Each teacher creates an independently reviewable
 entry for a photo, sharing its raw data and validation split. Uncheck a poor
@@ -37,7 +41,8 @@ composed or curated until generation finishes. A bad photo/result is recorded
 and skipped; a filesystem failure stops safely.
 
 Hover for a synchronized **1:1 magnifier**, or click for a floating pixel-size
-preview (click again or press Escape to dismiss). **Compare teachers** offers
+preview centered on the clicked image point. Drag to pan; right-click, click
+outside, or press Escape to dismiss. **Compare teachers** offers
 shared meter contrast, overlays, disagreement and a draggable lit relief view.
 Relative outputs use explicitly separate visual scaling; their differences do
 not represent meters. Relief is a visual inspection aid, not calibrated 3D
@@ -52,6 +57,18 @@ A/B experiments; exact duplicates, teacher variants and known bursts always stay
 together. External validation overlapping training sources is rejected. Use
 **Compare selected model with baseline** on a spatial photo to inspect the
 original and trained RAFT results with the same grid and meter contrast.
+With a single available dataset, **Use for training** starts checked. The
+message above **Create training set & continue** explains missing selections,
+name conflicts, unsaved review exclusions, or an active task. Save a reviewed
+copy after excluding samples, then select that copy for the training set.
+Creating a set verifies and losslessly
+copies the selected arrays, which can take several minutes for large datasets.
+The button reads **Creating training set…** during this work; the progress
+message reports copying and final verification. Completion selects the saved
+set and opens the training step.
+
+Studio windows fit within the screen's usable area. Scroll to reach controls
+on smaller displays; review captions have their own space beneath the images.
 
 ## Storage and external datasets
 
@@ -183,7 +200,9 @@ loading targets.
 **Generate & review dataset** opens the review tab after generation. To
 inspect an existing dataset, select it in the library and choose **Review depth
 maps**. Select a sample to see its RGB image beside its generated depth map.
-Click either image to open a floating native-pixel preview; click again to dismiss it. Hover for a synchronized 1:1 magnifier.
+Click either image to open a native-pixel preview centered on that point. Drag
+to pan, and right-click or click outside to dismiss it. Hover for a synchronized
+1:1 magnifier.
 Look for incorrect object boundaries, flattened or invented surfaces, holes,
 and inconsistent near/far order. Clear the sample's **Include** checkbox to
 exclude it from the reviewed copy. This removes the whole training sample,

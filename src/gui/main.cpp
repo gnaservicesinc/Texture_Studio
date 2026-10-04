@@ -1,5 +1,6 @@
 #include "project_session.h"
 #include "studio_icons.h"
+#include "window_layout.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -83,7 +84,6 @@ class MainWindow final : public QMainWindow {
 public:
     MainWindow() {
         setWindowTitle(QStringLiteral("IPDE — Precision HEIF Auxiliary Extractor"));
-        resize(1300, 780);
         setAcceptDrops(true);
 
         auto *central = new QWidget(this);
@@ -270,7 +270,7 @@ public:
         log_->setPlaceholderText(QStringLiteral("Structured extraction results appear here."));
         root->addWidget(log_);
 
-        setCentralWidget(central);
+        IPDE::setScrollableCentralWidget(this, central, QSize(1300, 780));
         statusBar()->showMessage(QStringLiteral("Drop Apple HEIC portrait photos here, or choose Add HEIC files."));
 
         process_ = new QProcess(this);

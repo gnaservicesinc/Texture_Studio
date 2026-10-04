@@ -1,5 +1,6 @@
 #include "project_session.h"
 #include "studio_icons.h"
+#include "window_layout.h"
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
@@ -113,7 +114,7 @@ struct ProjectStats {
 class StudioWindow final : public QMainWindow {
 public:
     StudioWindow() {
-        setWindowTitle("IPDE Studio — Projects"); setWindowIcon(IPDE::appIcon("studio")); resize(1080, 780);
+        setWindowTitle("IPDE Studio — Projects"); setWindowIcon(IPDE::appIcon("studio"));
         auto *central = new QWidget(this); auto *layout = new QVBoxLayout(central);
         layout->setContentsMargins(24, 24, 24, 24); layout->setSpacing(12);
         auto *title = new QLabel("IPDE Studio", central);
@@ -163,7 +164,7 @@ public:
         splitter->setStretchFactor(1, 1); splitter->setSizes({270, 730}); layout->addWidget(splitter, 1);
         status_ = new QLabel("Ready", central); status_->setWordWrap(true); layout->addWidget(status_);
         log_ = new QPlainTextEdit(central); log_->setReadOnly(true); log_->setMaximumHeight(80); log_->setMaximumBlockCount(300); layout->addWidget(log_); log_->hide();
-        setCentralWidget(central);
+        IPDE::setScrollableCentralWidget(this, central, QSize(1080, 780));
         connect(create, &QPushButton::clicked, this, [this] { newProject(); });
         connect(open, &QPushButton::clicked, this, [this] { openProject(); });
         connect(folder, &QPushButton::clicked, this, [this] { QDesktopServices::openUrl(QUrl::fromLocalFile(selectedProject())); });

@@ -29,7 +29,10 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSettings>
+#include <QSet>
 #include <QScrollArea>
+#include <QScrollBar>
+#include <QScreen>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QSplitter>
@@ -52,6 +55,7 @@
 
 #include "project_session.h"
 #include "studio_icons.h"
+#include "window_layout.h"
 
 #ifndef IPDE_DATASET_STUDIO
 #define IPDE_DATASET_STUDIO 0
@@ -90,13 +94,107 @@ public:
     }
 };
 
+class NativePixelPreview final : public QDialog {
+public:
+    NativePixelPreview(const QPixmap &display, const QPointF &position, const QPoint &globalPosition, QWidget *parent)
+        : QDialog(parent, Qt::Popup) {
+        setAttribute(Qt::WA_DeleteOnClose);
+        setObjectName("nativePixelPopup");
+        setWindowTitle("Native pixel preview (display copy)");
+        auto *layout = new QVBoxLayout(this);
+        auto *help = new QLabel("Native pixels · Drag to pan · Right-click or click outside to close", this);
+        help->setWordWrap(true); layout->addWidget(help);
+        scroll_ = new QScrollArea(this); scroll_->setObjectName("nativePixelScroll");
+        scroll_->setAlignment(Qt::AlignCenter);
+        scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+        scroll_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+        canvas_ = new QWidget; canvas_->setFixedSize(display.size()); canvas_->setCursor(Qt::OpenHandCursor);
+        auto *full = new QLabel(canvas_); image_ = full; full->setObjectName("nativePixelImage");
+        full->setPixmap(display); full->setFixedSize(display.size());
+        full->setCursor(Qt::OpenHandCursor); full->installEventFilter(this);
+        scroll_->viewport()->setCursor(Qt::OpenHandCursor); scroll_->viewport()->installEventFilter(this);
+        scroll_->setWidget(canvas_); layout->addWidget(scroll_, 1);
+        qApp->installEventFilter(this);
+        QScreen *screen = QGuiApplication::screenAt(globalPosition);
+        if (!screen) screen = QGuiApplication::primaryScreen();
+        const QRect available = screen ? screen->availableGeometry() : QRect(globalPosition - QPoint(550, 400), QSize(1100, 800));
+        resize(qMin(1100, available.width()), qMin(800, available.height()));
+        move(qBound(available.left(), globalPosition.x() - width() / 2, available.right() - width() + 1),
+             qBound(available.top(), globalPosition.y() - height() / 2, available.bottom() - height() + 1));
+        // Scroll ranges are available only after the popup's first layout pass.
+        QTimer::singleShot(0, this, [this, available, position, imageSize = display.size()] {
+            IPDE::fitWindowToAvailableGeometry(this, available);
+            this->layout()->activate();
+            updateCanvas();
+            scroll_->horizontalScrollBar()->setValue(qRound(image_->x() + position.x() * imageSize.width() - scroll_->viewport()->width() / 2.));
+            scroll_->verticalScrollBar()->setValue(qRound(image_->y() + position.y() * imageSize.height() - scroll_->viewport()->height() / 2.));
+        });
+    }
+    ~NativePixelPreview() override {
+        if (qApp) qApp->removeEventFilter(this);
+        scroll_->viewport()->removeEventFilter(this);
+        image_->removeEventFilter(this);
+    }
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (watched == scroll_->viewport() && event->type() == QEvent::Resize) updateCanvas();
+        if (!isVisible()) return QDialog::eventFilter(watched, event);
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto *mouse = static_cast<QMouseEvent *>(event);
+            if (!frameGeometry().contains(mouse->globalPosition().toPoint())) { close(); return true; }
+            if (mouse->button() == Qt::RightButton) { close(); return true; }
+        }
+        if (event->type() == QEvent::MouseMove && dragging_) {
+            const QPoint delta = (static_cast<QMouseEvent *>(event)->globalPosition() - dragStart_).toPoint();
+            scroll_->horizontalScrollBar()->setValue(scrollStart_.x() - delta.x());
+            scroll_->verticalScrollBar()->setValue(scrollStart_.y() - delta.y()); return true;
+        }
+        if (event->type() == QEvent::MouseButtonRelease && dragging_) {
+            dragging_ = false; canvas_->setCursor(Qt::OpenHandCursor); image_->setCursor(Qt::OpenHandCursor); scroll_->viewport()->setCursor(Qt::OpenHandCursor); return true;
+        }
+        if (watched != canvas_ && watched != image_ && watched != scroll_->viewport()) return QDialog::eventFilter(watched, event);
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto *mouse = static_cast<QMouseEvent *>(event);
+            if (mouse->button() == Qt::LeftButton) {
+                dragging_ = true; dragStart_ = mouse->globalPosition();
+                scrollStart_ = QPoint(scroll_->horizontalScrollBar()->value(), scroll_->verticalScrollBar()->value());
+                canvas_->setCursor(Qt::ClosedHandCursor); image_->setCursor(Qt::ClosedHandCursor); scroll_->viewport()->setCursor(Qt::ClosedHandCursor); return true;
+            }
+        }
+        return QDialog::eventFilter(watched, event);
+    }
+    void mousePressEvent(QMouseEvent *event) override {
+        if (event->button() == Qt::RightButton) { close(); return; }
+        QDialog::mousePressEvent(event);
+    }
+private:
+    void updateCanvas() {
+        // Allow edge pixels to reach the center without resampling the image.
+        const QSize viewport = scroll_->viewport()->size();
+        canvas_->setFixedSize(image_->size() + viewport);
+        image_->move(viewport.width() / 2, viewport.height() / 2);
+    }
+    QScrollArea *scroll_ = nullptr;
+    QWidget *canvas_ = nullptr;
+    QLabel *image_ = nullptr;
+    QPointF dragStart_; QPoint scrollStart_; bool dragging_ = false;
+};
+
 class DepthPreview final : public QLabel {
 public:
     explicit DepthPreview(QWidget *parent) : QLabel(parent) {
-        setAlignment(Qt::AlignCenter); setMinimumSize(200, 200); setMouseTracking(true);
+        setAlignment(Qt::AlignCenter); setMinimumSize(160, 200); setMouseTracking(true);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         setStyleSheet("background: #202124; color: #eeeeee; border-radius: 4px;");
         setWordWrap(true);
+    }
+    // QLabel's pixmap size hint otherwise grows with the last fitted image,
+    // leaving too little room for the wrapped captions below the gallery.
+    QSize sizeHint() const override { return QSize(260, 220); }
+    QSize minimumSizeHint() const override { return QSize(160, 200); }
+    void setVisible(bool visible) override {
+        if (onVisibility) onVisibility(visible);
+        QLabel::setVisible(visible);
     }
     bool load(const QString &path) {
         original_ = QPixmap(path);
@@ -109,6 +207,7 @@ public:
     void setAngles(double yaw, double pitch) { yaw_ = yaw; pitch_ = pitch; update(); }
     std::function<void(const QPointF &)> onHover;
     std::function<void(double, double)> onRotate;
+    std::function<void(bool)> onVisibility;
     void showMagnifier(const QPointF &position) {
         hover_ = position; update();
     }
@@ -116,7 +215,7 @@ public:
 protected:
     void resizeEvent(QResizeEvent *event) override { QLabel::resizeEvent(event); updateImage(); }
     void mousePressEvent(QMouseEvent *event) override {
-        if (original_.isNull()) return;
+        if (original_.isNull() || event->button() != Qt::LeftButton) return;
         pressed_ = event->position(); dragged_ = false;
     }
     void mouseMoveEvent(QMouseEvent *event) override {
@@ -126,26 +225,19 @@ protected:
             dragged_ = true; yaw_ += delta.x() * .008; pitch_ = qBound(-1.4, pitch_ + delta.y() * .008, 1.4);
             if (onRotate) onRotate(yaw_, pitch_); update(); return;
         }
-        const QSize fitted = original_.size().scaled(size(), Qt::KeepAspectRatio);
-        const QPointF offset((width() - fitted.width()) / 2., (height() - fitted.height()) / 2.);
-        const QPointF position((event->position().x() - offset.x()) / fitted.width(), (event->position().y() - offset.y()) / fitted.height());
+        const QPointF position = imagePosition(event->position());
         showMagnifier(position); if (onHover) onHover(position);
     }
     void leaveEvent(QEvent *event) override {
         showMagnifier(QPointF(-1, -1)); if (onHover) onHover(QPointF(-1, -1)); QLabel::leaveEvent(event);
     }
-    void mouseReleaseEvent(QMouseEvent *) override {
-        if (original_.isNull() || dragged_) return;
+    void mouseReleaseEvent(QMouseEvent *event) override {
+        if (original_.isNull() || dragged_ || event->button() != Qt::LeftButton) return;
+        const QPointF position = imagePosition(event->position());
+        if (position.x() < 0 || position.x() > 1 || position.y() < 0 || position.y() > 1) return;
         if (floating_) { floating_->close(); return; }
-        floating_ = new QDialog(this); floating_->setAttribute(Qt::WA_DeleteOnClose);
-        floating_->setWindowTitle("Native pixel preview — click image to dismiss (display copy)"); floating_->resize(1100, 800);
-        auto *layout = new QVBoxLayout(floating_); auto *scroll = new QScrollArea(floating_); auto *full = new QLabel(scroll);
-        const QPixmap display = displayPixmap(); full->setPixmap(display); full->resize(display.size()); full->installEventFilter(this);
-        scroll->setWidget(full); layout->addWidget(scroll); floating_->show();
-    }
-    bool eventFilter(QObject *, QEvent *event) override {
-        if (event->type() == QEvent::MouseButtonRelease && floating_) { floating_->close(); return true; }
-        return false;
+        floating_ = new NativePixelPreview(displayPixmap(), position, event->globalPosition().toPoint(), this);
+        floating_->show();
     }
     void paintEvent(QPaintEvent *event) override {
         if (view_ == "surface" && !surface_.isEmpty()) { paintSurface(); return; }
@@ -158,6 +250,12 @@ protected:
         painter.setPen(Qt::yellow); painter.drawRect(lens.adjusted(0, 0, -1, -1)); painter.drawText(lens.adjusted(5, 4, -5, -4), Qt::AlignBottom | Qt::AlignLeft, "1:1 native pixels");
     }
 private:
+    QPointF imagePosition(const QPointF &point) const {
+        const QSize fitted = original_.size().scaled(size(), Qt::KeepAspectRatio);
+        if (fitted.isEmpty()) return QPointF(-1, -1);
+        const QPointF offset((width() - fitted.width()) / 2., (height() - fitted.height()) / 2.);
+        return QPointF((point.x() - offset.x()) / fitted.width(), (point.y() - offset.y()) / fitted.height());
+    }
     QPixmap displayPixmap() const {
         if (view_ != "overlay" || source_.isNull()) return original_;
         QPixmap composed = source_; QPainter painter(&composed); painter.setOpacity(.5);
@@ -207,7 +305,6 @@ public:
         setWindowTitle(datasetMode_ ? "Dataset Studio" : "RAFT Studio");
         if (projectSettings_) setWindowTitle(windowTitle() + " — "
             + projectSettings_->value("name", QFileInfo(projectRoot_).fileName()).toString());
-        resize(1280, 900);
         auto *central = new QWidget(this);
         auto *root = new QVBoxLayout(central);
         root->setContentsMargins(18, 16, 18, 16);
@@ -296,6 +393,7 @@ public:
         });
 
         tabs_ = new QTabWidget(central);
+        tabs_->setMinimumHeight(380);
         buildDatasetTab(); buildReviewTab(); buildCollectionTab(); buildTrainingTab();
         connect(tabs_, &QTabWidget::currentChanged, this, [this](int index) { if (index == 1 && previewProcess_) reviewSelectionChanged(); });
         auto *globalGoal = new QHBoxLayout; globalGoal->addWidget(new QLabel("Main purpose", central)); globalGoal->addWidget(goal_, 1); globalGoal->addWidget(advanced_); root->insertLayout(2, globalGoal);
@@ -314,7 +412,7 @@ public:
         progress_ = new QProgressBar(central); progress_->setRange(0, 1); progress_->setValue(0); progress_->setTextVisible(false);
         cancel_ = new QPushButton("Cancel current task", central); cancel_->setEnabled(false);
         progressRow->addWidget(progress_, 1); progressRow->addWidget(cancel_); root->addLayout(progressRow);
-        setCentralWidget(central);
+        IPDE::setScrollableCentralWidget(this, central, QSize(1280, 900));
 
         process_ = new QProcess(this); process_->setProcessChannelMode(QProcess::SeparateChannels);
         connect(process_, &QProcess::readyReadStandardOutput, this, [this] { stdout_ += process_->readAllStandardOutput(); });
@@ -324,7 +422,9 @@ public:
         connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
             if (error == QProcess::FailedToStart) {
                 log_->appendPlainText("Could not launch Python: " + process_->errorString());
-                setBusy(false); groupsFile_.reset(); refreshAfter_ = false;
+                setBusy(false); groupsFile_.reset(); teachersFile_.reset(); refreshAfter_ = false;
+                if (job_ == "Generate dataset") stopGenerationStreaming("Generation could not start. Generate a new dataset to try again.");
+                statusBar()->showMessage(job_ + " failed to start; see the progress log.");
                 if (job_ == "Preview depth") previewStats_->setText("Preview failed: Python could not be launched.");
             }
         });
@@ -336,6 +436,7 @@ public:
         connect(previewProcess_, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this](int code, QProcess::ExitStatus status) {
             previewStdout_ += previewProcess_->readAllStandardOutput();
             if (!pendingPreviewArgs_.isEmpty()) { const auto args = pendingPreviewArgs_; const auto label = pendingPreviewKind_; pendingPreviewArgs_.clear(); requestPreview(label, args); return; }
+            if (previewKind_ == "discarded") return;
             const auto doc = QJsonDocument::fromJson(previewStdout_.trimmed());
             if (status == QProcess::NormalExit && code == 0 && doc.isObject()) {
                 if (previewKind_ == "review") populateReview(doc.object()); else populatePreview(doc.object());
@@ -385,7 +486,11 @@ public:
         if (process_->state() == QProcess::NotRunning) refreshLibrary(); else refreshAfter_ = true;
     }
 
+#ifdef IPDE_STUDIO_REGRESSION
+public:
+#else
 private:
+#endif
     static QString selectedPath(QTreeWidget *tree) {
         return tree->currentItem() ? tree->currentItem()->data(0, Qt::UserRole).toString() : QString();
     }
@@ -415,6 +520,28 @@ private:
         projectSettings_->setValue("raft/root", raftRoot_->text()); projectSettings_->setValue("raft/model", raftModel_->text()); projectSettings_->sync();
     }
 
+    bool addSourcePhoto(const QString &file, const QJsonObject &metadata = {}) {
+        const QFileInfo info(file);
+        const QString path = info.canonicalFilePath().isEmpty() ? info.absoluteFilePath() : info.canonicalFilePath();
+        if (file.isEmpty()) return false;
+        QTreeWidgetItem *item = nullptr;
+        for (int i = 0; i < sources_->topLevelItemCount(); ++i) {
+            auto *existing = sources_->topLevelItem(i);
+            const QFileInfo existingInfo(existing->data(0, Qt::UserRole).toString());
+            const QString existingPath = existingInfo.canonicalFilePath().isEmpty() ? existingInfo.absoluteFilePath() : existingInfo.canonicalFilePath();
+            if (existingPath == path) { item = existing; break; }
+        }
+        const bool added = item == nullptr;
+        if (added) {
+            item = new QTreeWidgetItem(sources_, {info.fileName(), "", "", ""});
+            item->setData(0, Qt::UserRole, path); item->setToolTip(0, path);
+            item->setFlags(item->flags() | Qt::ItemIsEditable);
+        }
+        if (metadata.contains("camera_model")) item->setText(2, metadata.value("camera_model").toString());
+        if (metadata.contains("captured_at")) item->setText(3, metadata.value("captured_at").toString());
+        return added;
+    }
+
     void buildDatasetTab() {
         auto *tab = new QWidget; auto *root = new QVBoxLayout(tab);
         auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(tab);
@@ -436,6 +563,7 @@ private:
         categoryRow->addWidget(new QLabel("Subject / dataset category", tab)); categoryRow->addWidget(category_, 1);
         useGroups_ = new QCheckBox("Use photo groups", tab); categoryRow->addWidget(useGroups_); root->addLayout(categoryRow);
         sources_ = new QTreeWidget(tab); sources_->setHeaderLabels({"Spatial HEIC", "Optional group — double-click to edit", "Camera", "Captured"});
+        sources_->setObjectName("datasetSources");
         sources_->setMinimumHeight(100); sources_->setMaximumHeight(110);
         sources_->setSelectionMode(QAbstractItemView::ExtendedSelection); sources_->setRootIsDecorated(false);
         sources_->header()->setSectionResizeMode(0, QHeaderView::Stretch); sources_->header()->setSectionResizeMode(1, QHeaderView::Stretch);
@@ -448,18 +576,13 @@ private:
         connect(useGroups_, &QCheckBox::toggled, this, [this, sceneHelp](bool grouped) { sources_->setColumnHidden(1, !grouped); verifiedScenes_->setVisible(grouped); sceneHelp->setVisible(grouped); });
         sources_->setColumnHidden(1, true);
         connect(add, &QPushButton::clicked, this, [this] {
-            const auto files = QFileDialog::getOpenFileNames(this, "Add spatial HEIC photos", {}, "HEIC / HEIF photos (*.heic *.HEIC *.heif *.HEIF)");
-            for (const QString &file : files) {
-                const QString path = QFileInfo(file).absoluteFilePath(); bool exists = false;
-                for (int i = 0; i < sources_->topLevelItemCount(); ++i) exists |= sources_->topLevelItem(i)->data(0, Qt::UserRole).toString() == path;
-                if (exists) continue;
-                auto *item = new QTreeWidgetItem(sources_, {QFileInfo(path).fileName(), "", "", ""});
-                item->setData(0, Qt::UserRole, path); item->setToolTip(0, path); item->setFlags(item->flags() | Qt::ItemIsEditable);
-            }
+            const auto files = QFileDialog::getOpenFileNames(this, "Add spatial HEIC photos", settings_.value("photo_folder").toString(), "HEIC / HEIF photos (*.heic *.HEIC *.heif *.HEIF *.hif *.HIF)");
+            for (const QString &file : files) addSourcePhoto(file);
+            if (!files.isEmpty()) settings_.setValue("photo_folder", QFileInfo(files.first()).absolutePath());
         });
         connect(scan, &QPushButton::clicked, this, [this] {
-            const QString directory = QFileDialog::getExistingDirectory(this, "Find calibrated Apple spatial images; subfolders included, links skipped");
-            if (!directory.isEmpty()) startJob("Scan spatial photos", {"scan-spatial", directory});
+            const QString directory = QFileDialog::getExistingDirectory(this, "Choose the folder containing your original HEIC photos; subfolders included", settings_.value("photo_folder").toString());
+            if (!directory.isEmpty()) { settings_.setValue("photo_folder", directory); startJob("Scan spatial photos", {"scan-spatial", directory}); }
         });
         connect(remove, &QPushButton::clicked, this, [this] { qDeleteAll(sources_->selectedItems()); });
         auto *teachers = new QHBoxLayout; teachers->addWidget(new QLabel("Generate teacher entries", tab));
@@ -569,26 +692,36 @@ private:
         reviewSamples_->header()->setStretchLastSection(false);
         reviewSamples_->header()->setSectionResizeMode(QHeaderView::Interactive);
         reviewSamples_->setColumnWidth(0, 220); reviewSamples_->setColumnWidth(1, 85); reviewSamples_->setColumnWidth(2, 110); reviewSamples_->setColumnWidth(3, 130); reviewSamples_->setColumnWidth(4, 155);
-        auto *preview = new QWidget(body); auto *previewRoot = new QVBoxLayout(preview);
+        auto *previewScroll = new QScrollArea(body); previewScroll->setObjectName("reviewPreviewScroll");
+        previewScroll->setWidgetResizable(true); previewScroll->setFrameShape(QFrame::NoFrame);
+        auto *preview = new QWidget; preview->setObjectName("reviewPreviewContent");
+        auto *previewRoot = new QVBoxLayout(preview);
+        previewScroll->setWidget(preview);
         auto *labelRow = new QHBoxLayout; labelRow->addWidget(new QLabel("Depth to view", preview));
-        reviewLabel_ = new QComboBox(preview); labelRow->addWidget(reviewLabel_, 1);
-        compareTeachers_ = new QCheckBox("Compare teachers for this photo", preview); compareTeachers_->setChecked(true); labelRow->addWidget(compareTeachers_);
+        reviewLabel_ = new QComboBox(preview); reviewLabel_->setMinimumWidth(0); labelRow->addWidget(reviewLabel_, 1);
         previewRoot->addLayout(labelRow);
+        compareTeachers_ = new QCheckBox("Compare teachers for this photo", preview); compareTeachers_->setChecked(true);
+        previewRoot->addWidget(compareTeachers_);
         auto *viewRow = new QHBoxLayout; viewRow->addWidget(new QLabel("Visual inspection", preview));
         visualView_ = new QComboBox(preview); visualView_->addItem("Depth map", "depth"); visualView_->addItem("50% overlay on photo", "overlay"); visualView_->addItem("Lit surface — drag to rotate", "surface"); visualView_->addItem("Teacher / baseline disagreement", "difference");
         viewRow->addWidget(visualView_, 1); previewRoot->addLayout(viewRow);
         auto *images = new QHBoxLayout;
         auto *rgbColumn = new QVBoxLayout; auto *depthColumn = new QVBoxLayout;
-        rgbColumn->addWidget(new QLabel("Source view on the same grid", preview));
-        auto *firstDepthTitle = new QLabel("Generated depth", preview); depthTitles_.append(firstDepthTitle); depthColumn->addWidget(firstDepthTitle);
+        auto *sourceTitle = new QLabel("Source view on the same grid", preview); sourceTitle->setWordWrap(true);
+        rgbColumn->addWidget(sourceTitle);
+        auto *firstDepthTitle = new QLabel("Generated depth", preview); firstDepthTitle->setWordWrap(true); depthTitles_.append(firstDepthTitle); depthColumn->addWidget(firstDepthTitle);
         rgbPreview_ = new DepthPreview(preview); depthPreview_ = new DepthPreview(preview);
+        rgbPreview_->setObjectName("reviewSourcePreview"); depthPreview_->setObjectName("reviewDepthPreview");
         depthPreviews_.append(depthPreview_);
         rgbPreview_->reset("Choose a photo to review."); depthPreview_->reset("Depth appears here.");
         rgbColumn->addWidget(rgbPreview_, 1); depthColumn->addWidget(depthPreview_, 1);
         images->addLayout(rgbColumn, 1); images->addLayout(depthColumn, 1);
         for (int i=0; i<2; ++i) {
-            auto *column = new QVBoxLayout; auto *title = new QLabel("Teacher", preview); auto *image = new DepthPreview(preview);
-            column->addWidget(title); column->addWidget(image, 1); images->addLayout(column, 1);
+            auto *columnWidget = new QWidget(preview); auto *column = new QVBoxLayout(columnWidget); column->setContentsMargins(0, 0, 0, 0);
+            auto *title = new QLabel("Teacher", columnWidget); title->setWordWrap(true); auto *image = new DepthPreview(columnWidget);
+            image->setObjectName(QString("reviewTeacherPreview%1").arg(i + 1));
+            image->onVisibility = [columnWidget](bool visible) { columnWidget->setVisible(visible); };
+            column->addWidget(title); column->addWidget(image, 1); images->addWidget(columnWidget, 1);
             depthTitles_.append(title); depthPreviews_.append(image); title->hide(); image->hide();
         }
         previewRoot->addLayout(images, 1);
@@ -597,10 +730,12 @@ private:
             image->onHover = [linked, image](const QPointF &position) { for (auto *other : linked) if (other != image) other->showMagnifier(position); };
             image->onRotate = [linked, image](double yaw, double pitch) { for (auto *other : linked) if (other != image) other->setAngles(yaw, pitch); };
         }
-        previewStats_ = new QLabel(preview); previewStats_->setWordWrap(true); previewRoot->addWidget(previewStats_);
-        auto *legend = new QLabel("White = nearer · Black = farther · Magenta = invalid. Hover for synchronized 1:1 detail; click for a floating native pixel view, then click to dismiss. Metric comparisons share contrast; relative views use separate ranges. Overlay, relief and disagreement are disposable display copies; saved values stay unchanged.", preview);
+        previewStats_ = new QLabel(preview); previewStats_->setObjectName("reviewPreviewStats"); previewStats_->setWordWrap(true);
+        previewStats_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum); previewRoot->addWidget(previewStats_);
+        auto *legend = new QLabel("White = nearer · Black = farther · Magenta = invalid. Hover for synchronized 1:1 detail. Click an image to open native pixels centered on that point; drag to pan. Right-click or click outside the popup to close. Metric comparisons share contrast; relative views use separate ranges. Overlay, relief and disagreement are display copies; saved values stay unchanged.", preview);
+        legend->setObjectName("reviewPreviewLegend"); legend->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
         legend->setWordWrap(true); previewRoot->addWidget(legend);
-        body->addWidget(reviewSamples_); body->addWidget(preview); body->setSizes({330, 860}); root->addWidget(body, 1);
+        body->addWidget(reviewSamples_); body->addWidget(previewScroll); body->setChildrenCollapsible(false); body->setSizes({330, 860}); root->addWidget(body, 1);
         auto *filterRow = new QHBoxLayout; reviewFilter_ = new QLineEdit(tab); reviewFilter_->setPlaceholderText("Filter photo, teacher, group, or date…");
         reviewCamera_ = new QComboBox(tab); reviewCamera_->addItem("All cameras"); filterRow->addWidget(reviewFilter_, 1); filterRow->addWidget(reviewCamera_); root->addLayout(filterRow);
         auto *navigation = new QHBoxLayout;
@@ -800,6 +935,7 @@ private:
         QString text = QString("%1 of %2 teacher entries included · %3 train / %4 validation").arg(kept).arg(entries.size()).arg(train).arg(validation);
         if (kept && (!train || !validation)) text += " · Training needs samples in both splits; use more held-out groups in a new dataset.";
         reviewCount_->setText(text); saveReviewed_->setEnabled(kept > 0 && !reviewGenerating_ && (!process_ || process_->state() == QProcess::NotRunning));
+        updateCollectionReadiness();
     }
 
     void saveReviewedDataset() {
@@ -823,9 +959,11 @@ private:
         collectionSources_->setRootIsDecorated(false); collectionSources_->header()->setSectionResizeMode(0, QHeaderView::Stretch); collectionSources_->setMinimumHeight(140); root->addWidget(collectionSources_, 1);
         connect(collectionSources_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int column) {
             if (column < 2 && item->checkState(column) == Qt::Checked) { QSignalBlocker blocker(collectionSources_); item->setCheckState(1-column, Qt::Unchecked); }
+            updateCollectionReadiness();
         });
         auto *form = new QFormLayout;
         collectionName_ = new QLineEdit("training-set-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"), tab); form->addRow("Training set name", collectionName_);
+        form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
         splitMode_ = new QComboBox(tab); splitMode_->addItem("Random across all selected datasets", "global-random"); splitMode_->addItem("Same number chosen from each dataset", "equal-per-dataset"); splitMode_->addItem("Use designated validation datasets", "explicit");
         form->addRow("Validation strategy", splitMode_);
         validationFraction_ = new QDoubleSpinBox(tab); validationFraction_->setRange(.01, .9); validationFraction_->setSingleStep(.05); validationFraction_->setValue(.2); validationFraction_->setSuffix(" of photo groups"); form->addRow("Validation fraction", validationFraction_);
@@ -837,9 +975,13 @@ private:
             const QString mode = splitMode_->currentData().toString(); validationFraction_->setEnabled(mode != "explicit"); validationCount_->setEnabled(mode == "equal-per-dataset");
             splitHelp_->setText(mode == "explicit" ? "Tick dedicated validation datasets in the second column. They are held out entirely; overlapping source photos and groups are rejected." : mode == "equal-per-dataset" ? "Each dataset contributes the same count of randomly chosen independent photo groups. Zero uses an automatic count based on the smallest dataset. Related captures and all teachers remain together." : "Validation groups are drawn randomly from the combined selected datasets. Larger datasets usually contribute more validation photos. The seed repeats the same selection.");
         };
-        connect(splitMode_, &QComboBox::currentIndexChanged, this, [updateSplit] { updateSplit(); }); updateSplit();
+        connect(splitMode_, &QComboBox::currentIndexChanged, this, [this, updateSplit] { updateSplit(); updateCollectionReadiness(); }); updateSplit();
+        collectionStatus_ = new QLabel(tab); collectionStatus_->setWordWrap(true); root->addWidget(collectionStatus_);
         compose_ = new QPushButton("Create training set & continue", tab); root->addWidget(compose_);
+        connect(collectionName_, &QLineEdit::textChanged, this, [this] { updateCollectionReadiness(); });
+        updateCollectionReadiness();
         connect(compose_, &QPushButton::clicked, this, [this] {
+            updateCollectionReadiness(); if (!compose_->isEnabled()) return;
             const QString name = collectionName_->text().trimmed(); if (!validName(name)) { QMessageBox::information(this, "Training set name", "Use a folder name without separators."); return; }
             QStringList inputs, validation;
             for (int i=0; i<collectionSources_->topLevelItemCount(); ++i) { auto *item = collectionSources_->topLevelItem(i); if (item->checkState(0) == Qt::Checked) inputs << item->data(0, Qt::UserRole).toString(); if (item->checkState(1) == Qt::Checked) validation << item->data(0, Qt::UserRole).toString(); }
@@ -1027,8 +1169,10 @@ private:
 
     void startJob(const QString &label, const QStringList &arguments) {
         if (process_->state() != QProcess::NotRunning) { statusBar()->showMessage("Finish or cancel the current background task first; photo review remains available."); return; }
-        if (!QFileInfo::exists(scriptPath())) { log_->appendPlainText("RAFT Studio script is missing: " + scriptPath()); groupsFile_.reset(); return; }
-        job_ = label; stdout_.clear(); cancelled_ = false; setBusy(true);
+        if (!QFileInfo::exists(scriptPath())) { log_->appendPlainText("RAFT Studio script is missing: " + scriptPath()); groupsFile_.reset(); teachersFile_.reset(); refreshAfter_ = false; statusBar()->showMessage("Could not start " + label + "; see the progress log."); return; }
+        job_ = label; stdout_.clear(); progressBuffer_.clear(); cancelled_ = false;
+        if (label == "Scan spatial photos") scanDeliveredPaths_.clear();
+        setBusy(true);
         log_->appendPlainText(label + "…");
         process_->setProgram(pythonPath()); process_->setArguments(QStringList{scriptPath(), "--json"} + arguments);
         process_->start();
@@ -1040,21 +1184,103 @@ private:
             const int newline = progressBuffer_.indexOf('\n'); QString line = QString::fromUtf8(progressBuffer_.left(newline)); progressBuffer_.remove(0, newline + 1);
             line.remove(QRegularExpression("\\x1b\\[[0-9;]*m"));
             if (line.startsWith("IPDE_EVENT ")) {
-                const auto event = QJsonDocument::fromJson(line.mid(11).toUtf8()).object(); const QString type = event.value("event").toString();
+                const auto event = QJsonDocument::fromJson(line.mid(11).toUtf8()).object(); const QString type = event.value("event").toString(), phase = event.value("phase").toString();
                 if (type == "dataset_started") streamingDataset_ = event.value("dataset_dir").toString();
                 else if (type == "sample_ready") { streamingDataset_ = event.value("dataset_dir").toString(streamingDataset_); if (!streamingTimer_->isActive()) streamingTimer_->start(); }
                 else if (type == "photo_skipped") log_->appendPlainText("Skipped " + QFileInfo(event.value("source_path").toString()).fileName() + ": " + event.value("reason").toString());
+                else if (job_ == "Scan spatial photos" && type == "scan_started") {
+                    log_->appendPlainText("Searching " + event.value("directory").toString() + ". Photos appear as they are validated; cancelling keeps photos already found.");
+                }
+                else if (job_ == "Scan spatial photos" && type == "scan_photo_started") {
+                    statusBar()->showMessage(QString("Checking photo %1: %2 — %3 spatial photos found").arg(event.value("candidate_count").toInt()).arg(QFileInfo(event.value("source_path").toString()).fileName()).arg(event.value("accepted_count").toInt()));
+                }
+                else if (job_ == "Scan spatial photos" && type == "spatial_photo_found") {
+                    const QString path = event.value("source_path").toString(); const QFileInfo info(path);
+                    scanDeliveredPaths_.insert(info.canonicalFilePath().isEmpty() ? info.absoluteFilePath() : info.canonicalFilePath());
+                    addSourcePhoto(path, event.value("photo_metadata").toObject());
+                    statusBar()->showMessage(QString("Found %1 spatial photos — %2 photos in the list. Scanning continues…").arg(event.value("accepted_count").toInt()).arg(sources_->topLevelItemCount()));
+                }
                 else if (type == "dataset_complete") { streamingTimer_->stop(); streamingDataset_.clear(); }
+                else if (!phase.isEmpty()) {
+                    QString message;
+                    const int processed = event.value("processed").toInt(), total = event.value("total").toInt();
+                    if (phase == "verifying_dataset") message = QString("Checking source dataset %1 of %2: %3. Large datasets can take several minutes.").arg(processed).arg(total).arg(QFileInfo(event.value("dataset_path").toString()).fileName());
+                    else if (phase == "sample_composed") message = QString("Creating training set: %1 of %2 teacher entries copied losslessly (%3 unique arrays).").arg(processed).arg(total).arg(event.value("unique_arrays").toInt());
+                    else if (phase == "compressing") message = QString("Compressing arrays losslessly: %1 of %2 records (%3 unique arrays).").arg(processed).arg(total).arg(event.value("unique_arrays").toInt());
+                    else if (phase == "verifying_output") message = "Checking the saved arrays before publishing the completed training set. Large datasets can take several minutes.";
+                    else if (phase == "publishing_dataset") message = "Publishing the verified training set…";
+                    if (!message.isEmpty()) {
+                        statusBar()->showMessage(message);
+                        if (job_ == "Create training set") collectionStatus_->setText(message + " Use Cancel current task to stop.");
+                        if ((phase == "sample_composed" || phase == "compressing") && total > 0) { progress_->setRange(0, total); progress_->setValue(processed); }
+                        else progress_->setRange(0, 0);
+                    }
+                }
             } else if (!line.trimmed().isEmpty()) log_->appendPlainText(line.trimmed());
         }
     }
 
     void setBusy(bool busy) {
+        busy_ = busy;
         workspace_->setEnabled(!busy); chooseWorkspace_->setEnabled(!busy); refresh_->setEnabled(!busy); export_->setEnabled(!busy);
-        generate_->setEnabled(!busy); train_->setEnabled(!busy); compose_->setEnabled(!busy); importHf_->setEnabled(!busy);
+        generate_->setEnabled(!busy); train_->setEnabled(!busy); importHf_->setEnabled(!busy);
+        collectionSources_->setEnabled(!busy); collectionName_->setEnabled(!busy); splitMode_->setEnabled(!busy); groupingPolicy_->setEnabled(!busy); splitSeed_->setEnabled(!busy);
+        validationFraction_->setEnabled(!busy && splitMode_->currentData().toString() != "explicit"); validationCount_->setEnabled(!busy && splitMode_->currentData().toString() == "equal-per-dataset");
+        updateCollectionReadiness();
         if (busy) saveReviewed_->setEnabled(false); else updateReviewCount();
         cancel_->setEnabled(busy); progress_->setRange(0, busy ? 0 : 1); progress_->setValue(0);
         statusBar()->showMessage(busy ? job_ : "Ready");
+    }
+
+    bool hasUnsavedReviewExclusions(const QString &path) const {
+        if (path.isEmpty() || path != reviewedDataset_) return false;
+        for (auto *item : reviewEntries()) if (item->checkState(0) == Qt::Unchecked) return true;
+        return false;
+    }
+
+    void stopGenerationStreaming(const QString &reason) {
+        const QString path = !streamingDataset_.isEmpty() ? streamingDataset_ : reviewGenerating_ ? reviewedDataset_ : QString();
+        streamingTimer_->stop(); streamingDataset_.clear();
+        if (!path.isEmpty()) {
+            if (pendingPreviewArgs_.contains(path)) pendingPreviewArgs_.clear();
+            if (previewProcess_->arguments().contains(path)) { previewKind_ = "discarded"; if (previewProcess_->state() != QProcess::NotRunning) previewProcess_->kill(); }
+            if (requestedReviewPath_ == path) requestedReviewPath_.clear();
+        }
+        if (reviewGenerating_ && (path.isEmpty() || reviewedDataset_ == path)) {
+            reviewedDataset_.clear(); reviewGenerating_ = false;
+            previewRecords_ = {}; differencePath_.clear();
+            QSignalBlocker samplesBlocker(reviewSamples_), labelsBlocker(reviewLabel_);
+            reviewSamples_->clear(); reviewLabel_->clear();
+            rgbPreview_->reset(reason); for (auto *preview : depthPreviews_) preview->reset("Generate or select a complete dataset to review.");
+            previewStats_->clear(); reviewPath_->setText(reason);
+        }
+        updateReviewCount();
+    }
+
+    void updateCollectionReadiness() {
+        if (!compose_ || !collectionStatus_) return;
+        int training = 0, validation = 0, entries = 0; bool unsavedExclusions = false;
+        for (int i = 0; i < collectionSources_->topLevelItemCount(); ++i) {
+            auto *item = collectionSources_->topLevelItem(i);
+            if (item->checkState(0) == Qt::Checked) { ++training; entries += item->text(3).toInt(); }
+            if (item->checkState(1) == Qt::Checked) ++validation;
+            if (item->checkState(0) == Qt::Checked || (splitMode_->currentData().toString() == "explicit" && item->checkState(1) == Qt::Checked))
+                unsavedExclusions |= hasUnsavedReviewExclusions(item->data(0, Qt::UserRole).toString());
+        }
+        QString reason;
+        if (busy_) reason = job_ == "Create training set" ? "Creating the training set. Checking and losslessly copying full-quality arrays may take several minutes. Use Cancel current task to stop." : job_ + " is running. Finish or cancel it before creating a training set.";
+        else if (!collectionSources_->topLevelItemCount()) reason = "Import or generate a dataset first; it will appear here and can be used for training.";
+        else if (!training) reason = "Tick a dataset in the Use for training column. One dataset is enough; validation photos are held out automatically.";
+        else if (!entries) reason = "The selected training datasets have no teacher entries. Finish generating or import a complete dataset first.";
+        else if (unsavedExclusions) reason = "This dataset has unsaved photo exclusions. Click Save reviewed copy in Review depth maps, then select that saved copy here so the training set respects your choices.";
+        else if (!validName(collectionName_->text().trimmed())) reason = "Enter a training set name without folder separators.";
+        else if (QFileInfo::exists(QDir(workspace_->text()).filePath("datasets/" + collectionName_->text().trimmed()))) reason = "A dataset with this name already exists. Enter a new training set name.";
+        else if (splitMode_->currentData().toString() == "explicit" && !validation) reason = "Tick a separate dataset in Use as validation, or choose random validation to hold out photos from your training dataset.";
+        compose_->setEnabled(reason.isEmpty());
+        compose_->setText(busy_ && job_ == "Create training set" ? "Creating training set…" : "Create training set & continue");
+        const QString ready = QString("Ready: %1 training dataset(s), %2 teacher entries. %3 The set needs at least two independent photo groups.").arg(training).arg(entries).arg(splitMode_->currentData().toString() == "explicit" ? QString("%1 validation dataset(s) will be held out.").arg(validation) : "Validation photos will be held out automatically.");
+        collectionStatus_->setText(reason.isEmpty() ? ready : reason);
+        compose_->setToolTip(reason.isEmpty() ? "Create a lossless training set, then open the training step." : reason);
     }
 
     void processFinished(int code, QProcess::ExitStatus status) {
@@ -1062,20 +1288,28 @@ private:
         if (!progressBuffer_.trimmed().isEmpty()) { log_->appendPlainText(QString::fromUtf8(progressBuffer_).trimmed()); progressBuffer_.clear(); }
         setBusy(false); groupsFile_.reset(); teachersFile_.reset();
         if (cancelled_) {
+            if (job_ == "Generate dataset") stopGenerationStreaming("Generation cancelled. Generate a new dataset before saving a reviewed copy.");
             streamingTimer_->stop(); streamingDataset_.clear();
             refreshAfter_ = false; statusBar()->showMessage("Cancelled");
+            if (job_ == "Scan spatial photos") { log_->appendPlainText("Scan cancelled; photos already found remain in the list."); statusBar()->showMessage("Scan cancelled; photos already found remain in the list."); }
             if (job_ == "Preview depth") { rgbPreview_->reset("Preview cancelled."); depthPreview_->reset("Choose another photo or depth label to retry."); }
             return;
         }
         QJsonParseError error; const QJsonDocument doc = QJsonDocument::fromJson(stdout_.trimmed(), &error);
         if (status != QProcess::NormalExit || code != 0 || !doc.isObject()) {
             log_->appendPlainText(job_ + " failed (exit " + QString::number(code) + ").");
-            if (!stdout_.trimmed().isEmpty()) log_->appendPlainText(QString::fromUtf8(stdout_).left(12000));
+            statusBar()->showMessage(job_ + " failed; see the progress log. You can adjust the selection and retry.");
+            const QString explanation = doc.isObject() ? doc.object().value("error").toString() : QString();
+            if (!explanation.isEmpty()) {
+                log_->appendPlainText(explanation);
+                if (job_ == "Create training set") collectionStatus_->setText("Could not create the training set: " + explanation + " Adjust the selection or settings and retry.");
+            } else if (!stdout_.trimmed().isEmpty()) log_->appendPlainText(QString::fromUtf8(stdout_).left(12000));
             if (code == 0 && error.error != QJsonParseError::NoError) log_->appendPlainText("Could not parse the result: " + error.errorString());
             if (job_ == "Preview depth") {
                 rgbPreview_->reset("Preview unavailable."); depthPreview_->reset("Preview unavailable.");
                 previewStats_->setText("Preview failed. See the error below; this sample has not been automatically excluded.");
             }
+            if (job_ == "Generate dataset") stopGenerationStreaming("Generation failed. See the progress log and generate a new dataset to try again.");
             refreshAfter_ = false; return;
         }
         const QJsonObject result = doc.object();
@@ -1086,18 +1320,22 @@ private:
         else if (job_ == "Review dataset") populateReview(result);
         else if (job_ == "Preview depth") populatePreview(result);
         else if (job_ == "Scan spatial photos") {
-            int added = 0;
-            for (const auto &value : result.value("accepted").toArray()) {
-                const auto accepted = value.toObject(); const QString path = accepted.value("source_path").toString(); bool exists = false;
-                for (int i=0; i<sources_->topLevelItemCount(); ++i) exists |= sources_->topLevelItem(i)->data(0, Qt::UserRole).toString() == path;
-                if (exists) continue;
-                const auto metadata = accepted.value("photo_metadata").toObject();
-                auto *item = new QTreeWidgetItem(sources_, {QFileInfo(path).fileName(), "", metadata.value("camera_model").toString(), metadata.value("captured_at").toString()}); item->setData(0, Qt::UserRole, path); item->setToolTip(0, path); item->setFlags(item->flags() | Qt::ItemIsEditable); ++added;
+            const auto acceptedPhotos = result.value("accepted").toArray();
+            for (const auto &value : acceptedPhotos) {
+                const auto accepted = value.toObject(); const QString path = accepted.value("source_path").toString(); const QFileInfo info(path);
+                const QString canonical = info.canonicalFilePath().isEmpty() ? info.absoluteFilePath() : info.canonicalFilePath();
+                if (!scanDeliveredPaths_.contains(canonical)) addSourcePhoto(path, accepted.value("photo_metadata").toObject());
             }
-            log_->appendPlainText(QString("Added %1 spatial photos; skipped %2 files. %3").arg(added).arg(result.value("skipped").toArray().size()).arg(result.value("authenticity_note").toString()));
+            log_->appendPlainText(QString("Scan complete: %1 valid spatial photos found; %2 skipped. %3 photos are now in the list. %4").arg(acceptedPhotos.size()).arg(result.value("skipped").toArray().size()).arg(sources_->topLevelItemCount()).arg(result.value("authenticity_note").toString()));
+            if (acceptedPhotos.isEmpty()) {
+                const bool noCandidates = result.value("summary").toObject().value("candidates").toInt(-1) == 0;
+                log_->appendPlainText(noCandidates ? "No HEIC / HEIF photos were found. Choose the folder containing your original photos, rather than the workspace or generated dataset folder; subfolders are included."
+                    : "No calibrated Apple spatial photos were found. See the skipped-file reasons above. Portrait and ordinary HEIC photos do not contain the stereo pair needed for RAFT training.");
+            }
         }
         else if (job_ == "Create training set") {
             pendingTrainingPath_ = result.value("dataset_path").toString(); log_->appendPlainText("Training set saved: " + pendingTrainingPath_);
+            for (const auto &warning : result.value("warnings").toArray()) log_->appendPlainText(warning.toString());
         }
         else if (job_ == "Generate dataset" || job_ == "Save reviewed dataset" || job_ == "Import Hugging Face dataset" || job_ == "Compact dataset") {
             pendingReview_ = result.value("dataset_path").toString();
@@ -1151,6 +1389,11 @@ private:
         }
         if (!datasets_->currentItem() && datasets_->topLevelItemCount()) datasets_->setCurrentItem(datasets_->topLevelItem(0));
         if (!runs_->currentItem() && runs_->topLevelItemCount()) runs_->setCurrentItem(runs_->topLevelItem(0));
+        if (collectionSources_->topLevelItemCount() == 1) {
+            auto *item = collectionSources_->topLevelItem(0);
+            if (!collectionChecks.contains(item->data(0, Qt::UserRole).toString())) item->setCheckState(0, Qt::Checked);
+        }
+        updateCollectionReadiness();
     }
 
     void showFolder(const QString &path) {
@@ -1169,7 +1412,7 @@ private:
     QTreeWidget *reviewSamples_ = nullptr, *collectionSources_ = nullptr;
     QComboBox *teacher_ = nullptr, *teacherDevice_ = nullptr, *trainDevice_ = nullptr, *scope_ = nullptr, *trainingMode_ = nullptr;
     QComboBox *reviewLabel_ = nullptr, *goal_ = nullptr, *reviewCamera_ = nullptr, *visualView_ = nullptr, *splitMode_ = nullptr, *groupingPolicy_ = nullptr;
-    QLabel *scaleHelp_ = nullptr, *reviewPath_ = nullptr, *reviewCount_ = nullptr, *previewStats_ = nullptr, *goalHelp_ = nullptr, *splitHelp_ = nullptr;
+    QLabel *scaleHelp_ = nullptr, *reviewPath_ = nullptr, *reviewCount_ = nullptr, *previewStats_ = nullptr, *goalHelp_ = nullptr, *splitHelp_ = nullptr, *collectionStatus_ = nullptr;
     QList<QLabel *> depthTitles_;
     DepthPreview *rgbPreview_ = nullptr, *depthPreview_ = nullptr;
     QList<DepthPreview *> depthPreviews_;
@@ -1187,7 +1430,8 @@ private:
     QString requestedReviewPath_, reviewedDataset_, pendingReview_, pendingTrainingPath_;
     QProcess *previewProcess_ = nullptr; QByteArray previewStdout_, progressBuffer_; QString previewKind_, pendingPreviewKind_, streamingDataset_, differencePath_;
     QStringList pendingPreviewArgs_; QJsonArray previewRecords_; QTimer *streamingTimer_ = nullptr;
-    bool cancelled_ = false, refreshAfter_ = false, reviewGenerating_ = false, requestedReviewOpen_ = true;
+    QSet<QString> scanDeliveredPaths_;
+    bool cancelled_ = false, refreshAfter_ = false, reviewGenerating_ = false, requestedReviewOpen_ = true, busy_ = false;
     std::unique_ptr<QTemporaryFile> groupsFile_, teachersFile_;
     std::unique_ptr<QTemporaryDir> reviewPreviews_;
 };

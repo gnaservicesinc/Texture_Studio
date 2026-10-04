@@ -19,6 +19,12 @@ if("${CONFIG}" STREQUAL "" OR "${CONFIG}" STREQUAL "")
   "CMakeFiles/raft_studio_autogen.dir/ParseCache.txt"
   "CMakeFiles/raw_studio_autogen.dir/AutogenUsed.txt"
   "CMakeFiles/raw_studio_autogen.dir/ParseCache.txt"
+  "CMakeFiles/studio_preview_regression_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/studio_preview_regression_autogen.dir/ParseCache.txt"
+  "CMakeFiles/trainer_workflow_regression_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/trainer_workflow_regression_autogen.dir/ParseCache.txt"
+  "CMakeFiles/window_layout_regression_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/window_layout_regression_autogen.dir/ParseCache.txt"
   "dataset_studio_autogen"
   "ipde_gui_autogen"
   "ipde_icon_builder_autogen"
@@ -27,5 +33,8 @@ if("${CONFIG}" STREQUAL "" OR "${CONFIG}" STREQUAL "")
   "project_session_regression_autogen"
   "raft_studio_autogen"
   "raw_studio_autogen"
+  "studio_preview_regression_autogen"
+  "trainer_workflow_regression_autogen"
+  "window_layout_regression_autogen"
   )
 endif()

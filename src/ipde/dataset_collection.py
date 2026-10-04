@@ -189,9 +189,10 @@ def compose_datasets(
     sources: dict[str, Path] = {}
     manifests: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
-    for root, role in inputs:
+    for source_index, (root, role) in enumerate(inputs, 1):
         if progress_callback is not None:
-            progress_callback({"phase": "verifying_dataset", "dataset_path": str(root), "role": role})
+            progress_callback({"phase": "verifying_dataset", "dataset_path": str(root), "role": role,
+                               "processed": source_index, "total": len(inputs)})
         initial_hash = sha256_file(root / "dataset.json")
         _, manifest = _read_manifest(root)
         _require_complete(manifest)
@@ -264,7 +265,7 @@ def compose_datasets(
     temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination.parent))
     try:
         copied: dict[tuple[str, tuple[int, ...], str], dict[str, Any]] = {}
-        for sample in samples:
+        for sample_index, sample in enumerate(samples, 1):
             origin = sample["collection_provenance"]
             dataset_id, root = origin["dataset_id"], sources[origin["dataset_id"]]
             for record in _array_records(sample):
@@ -280,14 +281,19 @@ def compose_datasets(
                         raise DatasetError(f"Lossless composition changed source array values: {source_name}")
                 record.update(copied[key])
             if progress_callback is not None:
-                progress_callback({"phase": "sample_composed", "sample_id": sample["id"], "unique_arrays": len(copied)})
+                progress_callback({"phase": "sample_composed", "sample_id": sample["id"], "unique_arrays": len(copied),
+                                   "processed": sample_index, "total": len(samples)})
         collection["unique_arrays"] = len(copied)
         collection["storage_format"] = "deduplicated lossless NPZ"
         for report in source_reports:
             if sha256_file(sources[report["dataset_id"]] / "dataset.json") != report["source_manifest_sha256"]:
                 raise DatasetError("Source dataset manifest changed during composition")
         (temporary / "dataset.json").write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+        if progress_callback is not None:
+            progress_callback({"phase": "verifying_output"})
         load_dataset(temporary, verify=True)
+        if progress_callback is not None:
+            progress_callback({"phase": "publishing_dataset"})
         _publish_new_directory(temporary, destination)
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
