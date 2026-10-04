@@ -9,11 +9,11 @@ Create a project in one dialog: name, main purpose, and parent folder. The defau
 
 The project panel shows dataset, sample, source-photo and trained-model counts, along with unavailable links, incomplete datasets and missing selected checkpoints. Its suggested action changes as datasets and training reports appear. Selecting a model remains an explicit action in Trainer. **Show all apps** exposes other tools without changing the main purpose.
 
-The **Datasets** button opens Dataset Studio with its own application icon. **Trainer** opens RAFT Studio. Both share the project's dataset library, linked sources, purpose and selected RAFT checkpoint.
+The **Datasets** button opens Dataset Studio with its own application icon. **Trainer** opens RAFT Studio. Both share the project's dataset library, linked sources, purpose and selected RAFT checkpoint. Dataset Studio owns imports, links, review, reviewed copies, training-set preparation, compacting, archiving and dataset cleanup. Trainer reads selected datasets and owns training, model comparison, export and run cleanup. Links to another step ask the project hub to launch the correct app or focus its existing window, retaining the requested dataset and step.
 
 ## Reusing datasets without copying
 
-**Link datasets from project…** lists datasets from another recent project, or a project selected with **Other project…**. Select the datasets to reference. **Link dataset…** accepts a standalone folder containing a valid IPDE `dataset.json`.
+In Dataset Studio, **Link datasets from project…** lists datasets from another recent project, or a project selected with **Other project…**. Select the datasets to reference. **Link dataset…** accepts a standalone folder containing a valid IPDE `dataset.json`.
 
 Studio stores each canonical dataset directory in the project's `dataset_links` list. Dataset Manager and Trainer read those original paths. Curation, composition and compacting save new outputs under the current project's workspace; archiving is limited to datasets owned by that workspace. Linked source folders must remain available. Moving or deleting a source produces an alert. **Manage links…** removes references without deleting files.
 
@@ -36,6 +36,8 @@ name=My project
 goal=effect/map
 ```
 
-The supported `goal` values are `effect/map`, `depth-estimation`, `photo-effects` and `manual`. `dataset_links` is written as a Qt `QStringList`; use Studio's link controls rather than hand-editing its escaping. Shared RAFT choices use `raft/root`, `raft/model` and `raft/member`. Project data remains in `workspace/datasets`, training runs in `workspace/runs`, and default extraction exports in `exports`.
+The supported `goal` values are `effect/map`, `depth-estimation`, `photo-effects` and `manual`. `dataset_links` is written as a Qt `QStringList`; use Dataset Studio's link controls rather than hand-editing its escaping. Shared RAFT choices use `raft/root`, `raft/model` and `raft/member`. Project data remains in `workspace/datasets`, training runs in `workspace/runs`, and default extraction exports in `exports`.
+
+The project **File processing threads** override is stored in `performance/workers`. Automatic (0) uses available CPU cores; an explicit positive count limits CPU file and preparation tasks. Existing projects default to automatic. Dataset Studio and Trainer read the same setting when starting each task. Full-image jobs also cap concurrency to bound decoded memory. GPU device controls remain separate: model inference/training can use MPS, while file reads, hashing and lossless compression use CPU workers.
 
 Purpose changes choose presets in the tools; they do not alter original source arrays or silently select trained checkpoints. Display previews and derived resized maps must remain distinct from raw preserved data.

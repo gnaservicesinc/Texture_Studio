@@ -19,6 +19,7 @@ import numpy as np
 
 from .dataset import DatasetError, load_dataset, teacher_depth_to_flow
 from .array_storage import read_array
+from .concurrency import memory_limited_workers, ordered_map, resolve_workers
 from .formats import sha256_array, sha256_file
 from .spatial import (
     RaftStereoError, RaftStereoOptions, _checkpoint_bytes, _model_configuration,
@@ -48,6 +49,7 @@ class TrainingOptions:
     require_photometric_support: bool = False
     cache_samples: int = 2
     skip_incompatible_targets: bool = True
+    workers: int | None = None
 
 
 def _selected_target(sample: Mapping[str, Any], mode: str) -> str:
@@ -219,32 +221,50 @@ class _SamplePool(Sequence):
     def prepare(self, role: str, progress_callback: Callable[[dict[str, Any]], None] | None = None,
                 skipped_callback: Callable[[dict[str, Any]], None] | None = None) -> list[dict[str, Any]]:
         retained, excluded = [], []
-        for index in range(len(self)):
-            if progress_callback is not None:
-                progress_callback({"role": role, "processed": index, "total": len(self),
-                    "sample_id": self.samples[index]["id"], "status": "running"})
+        # Native row registration and scientific decoding release the GIL.
+        # Keep worker-owned decoded values separate from the caller-owned LRU,
+        # details, exclusions and progress callbacks.
+        largest_pixels = max((math.prod(sample["rgb"].get("shape", [1])[:2]) for sample in self.samples
+                              if isinstance(sample.get("rgb"), Mapping)), default=1)
+        count = memory_limited_workers(self.options.workers, largest_pixels * 64,
+                                       budget_bytes=1024 * 1024**2)
+
+        def prepare_one(index: int) -> Any:
+            origin = None
             try:
-                value = self[index]
+                value = _load_sample(self.root, self.samples[index], self.options)
                 if role == "training":
                     origin = _training_crop_origin(value, self.options.patch_size)
                     if origin is None:
                         raise TrainingError(f"No supported teacher correspondence fits the requested {self.options.patch_size}-pixel training crop")
-                    self.crop_origins[index] = origin
                 elif not any(_patch(value, y, x, self.options.patch_size)[3].any()
                              for y, x in _validation_crop_origins(value, self.options.patch_size)):
                     raise TrainingError("Fixed validation crops contain no supported teacher correspondences")
             except TrainingError as exc:
+                return index, None, None, exc
+            return index, value, origin, None
+
+        if progress_callback is not None:
+            progress_callback({"role": role, "processed": 0, "total": len(self), "status": "running", "workers": count})
+        for index, value, origin, error in ordered_map(prepare_one, range(len(self)), workers=count):
+            if error is not None:
                 if not self.options.skip_incompatible_targets:
-                    raise
+                    raise error
                 sample = self.samples[index]
                 choice = _selected_target(sample, self.options.mode)
                 rejection = {"sample_id": sample["id"], "source_path": sample.get("source_path", ""),
-                    "target_choice": choice, "units": sample[choice].get("units"), "reason": str(exc)}
+                    "target_choice": choice, "units": sample[choice].get("units"), "reason": str(error)}
                 excluded.append(rejection)
                 if skipped_callback is not None:
                     skipped_callback(rejection)
             else:
                 retained.append(index)
+                self.details[index] = value["details"]
+                self.cache[index] = value
+                if origin is not None:
+                    self.crop_origins[index] = origin
+                while len(self.cache) > self.options.cache_samples:
+                    self.cache.popitem(last=False)
             print(f"Preparing {role} target {index + 1}/{len(self)}", file=sys.stderr, flush=True)
             if progress_callback is not None:
                 progress_callback({"role": role, "processed": index + 1, "total": len(self),
@@ -370,6 +390,10 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
     setup, validation, and checkpoint publication.
     """
     options = options or TrainingOptions()
+    try:
+        worker_count = resolve_workers(options.workers)
+    except ValueError as exc:
+        raise TrainingError(str(exc)) from exc
     if options.mode not in {"auto", "distillation", "supervised", "mixed"} or options.train_scope not in {"update", "full"}:
         raise TrainingError("Use auto/distillation/supervised/mixed mode and update/full train_scope")
     if min(options.epochs, options.steps_per_epoch) < 1 or options.patch_size < 64 or options.patch_size % 32:
@@ -397,7 +421,7 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
         raise TrainingError("Checkpoint output must be outside the input dataset directory")
     progress("checking_dataset", status="started", dataset_path=str(root))
     try:
-        manifest = load_dataset(root)
+        manifest = load_dataset(root, workers=worker_count)
     except DatasetError as exc:
         raise TrainingError(str(exc)) from exc
     if manifest.get("generation_state", "complete") != "complete" or manifest.get("splits_provisional"):
@@ -573,6 +597,7 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
         notes.append("Photometric support is recorded but not required; some teacher labels lack independent stereo evidence")
     report = {"schema": "ipde-raft-training-report-v1", "status": "experimental", "model": "RAFT-Stereo", "mode": options.mode,
         "device": device, "torch_version": str(torch.__version__),
+        "file_workers": worker_count,
         "options": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(options).items()},
         "dataset_manifest_sha256": sha256_file(root / "dataset.json"), "teacher_checkpoint_sha256": sorted(teachers),
         "metric_anchor_checkpoint_sha256": sorted(value for value in metric_anchors if value is not None),

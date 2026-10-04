@@ -41,7 +41,7 @@ class SpatialScanTests(unittest.TestCase):
                 return calibrated_capture(path)
 
             with patch("ipde.spatial_scan.discover_file", side_effect=discover) as decoder:
-                report = scan_spatial_directory(root, progress_callback=events.append)
+                report = scan_spatial_directory(root, progress_callback=events.append, workers=1)
             self.assertEqual(decoder.call_count, 2)
             self.assertEqual([Path(record["source_path"]) for record in report["accepted"]], [first, nested])
             self.assertEqual(events[0]["event"], "scan_started")
@@ -61,6 +61,36 @@ class SpatialScanTests(unittest.TestCase):
             decoder.assert_not_called()
             self.assertEqual(report["summary"]["candidates"], 0)
             self.assertEqual(report["accepted"], [])
+
+    def test_parallel_decoding_preserves_admission_and_owns_callbacks(self):
+        import threading
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            paths = [root / f"photo-{index}.heic" for index in range(4)]
+            for path in paths:
+                path.write_bytes(b"capture")
+            caller = threading.get_ident()
+            callback_threads, decoder_threads = [], set()
+            barrier = threading.Barrier(2)
+            def discover(path):
+                decoder_threads.add(threading.get_ident())
+                barrier.wait(timeout=3)
+                return calibrated_capture(path)
+            def progress(event):
+                callback_threads.append(threading.get_ident())
+            with patch("ipde.spatial_scan.discover_file", side_effect=discover):
+                report = scan_spatial_directory(root, progress_callback=progress, workers=2)
+            self.assertEqual(len(decoder_threads), 2)
+            self.assertEqual(set(callback_threads), {caller})
+            self.assertEqual([Path(record["source_path"]) for record in report["accepted"]], paths)
+            self.assertEqual(report["summary"]["accepted"], 4)
+
+    def test_invalid_worker_count_fails_before_decoding(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with patch("ipde.spatial_scan.discover_file") as decoder:
+                with self.assertRaisesRegex(ValueError, "workers"):
+                    scan_spatial_directory(folder, workers=-1)
+            decoder.assert_not_called()
 
     def test_bad_capture_is_reported_and_does_not_hide_valid_following_photo(self):
         with tempfile.TemporaryDirectory() as folder:

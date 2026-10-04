@@ -24,6 +24,7 @@ import numpy as np
 from .extractor import _asset_record, _jsonable, discover_file
 from .formats import sha256_array, sha256_file, verify_npy, write_npy
 from .array_storage import read_array
+from .concurrency import memory_limited_workers, ordered_map, resolve_workers
 
 if TYPE_CHECKING:
     from .learned_depth import LearnedDepthConfig, LearnedDepthResult
@@ -41,7 +42,7 @@ class DatasetOptions:
     split_seed: int = 0
     reference_paths: Mapping[str, Path] | None = None
     include_display_teacher: bool = True
-    prefer_registered_display_teacher: bool = True
+    prefer_registered_display_teacher: bool = False
     grouping_semantics: str = "capture"
     metric_anchor: LearnedDepthConfig | None = None
     additional_teachers: tuple[LearnedDepthConfig, ...] = ()
@@ -51,6 +52,7 @@ class DatasetOptions:
     category: str | None = None
     require_apple_camera: bool = False
     compress_arrays: bool = False
+    workers: int | None = None
 
 
 def teacher_depth_to_flow(depth: np.ndarray, calibration: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
@@ -214,6 +216,10 @@ def build_dataset(
     progress_callback. Its dataset.json is generation-owned: curation must use
     a separate reviewed copy until dataset_complete reports the final path.
     """
+    try:
+        worker_count = resolve_workers(options.workers)
+    except ValueError as exc:
+        raise DatasetError(str(exc)) from exc
     destination = Path(output_dir).expanduser().resolve()
     inputs = [Path(source).expanduser().resolve() for source in sources]
     if not inputs:
@@ -271,6 +277,33 @@ def build_dataset(
         array_sizes[record["path"]] = ((root / record["path"]).stat().st_size, value.nbytes)
         stored_arrays[identity] = record
         return record
+
+    def store_raw_assets(discovery: Any, folder: Path) -> list[dict[str, Any]]:
+        """Write unique raw planes concurrently; only this caller owns dedup metadata."""
+        from .array_storage import array_record
+        identities = [(asset.array.dtype.str, asset.array.shape, sha256_array(asset.array))
+                      for asset in discovery.assets]
+        planned = {}
+        for ordinal, (asset, identity) in enumerate(zip(discovery.assets, identities)):
+            if identity not in stored_arrays and identity not in planned:
+                planned[identity] = (folder / f"raw-{ordinal:03d}.npy", asset.array)
+
+        def save(item: Any) -> Any:
+            identity, (path, array) = item
+            record = array_record(temporary, path, array, compressed=options.compress_arrays)
+            return identity, record, (temporary / record["path"]).stat().st_size, array.nbytes
+
+        count = memory_limited_workers(worker_count, max((value[1].nbytes for value in planned.values()), default=1) * 2)
+        for identity, record, file_bytes, array_bytes in ordered_map(save, planned.items(), workers=count):
+            stored_arrays[identity] = record
+            array_sizes[record["path"]] = file_bytes, array_bytes
+        raw = []
+        for asset, identity in zip(discovery.assets, identities):
+            record = _asset_record(asset)
+            record["storage"] = dict(stored_arrays[identity])
+            record["metadata_blocks"] = _jsonable(asset.metadata_blocks)
+            raw.append(record)
+        return raw
 
     def discard(folder: Path) -> None:
         shutil.rmtree(folder, ignore_errors=True)
@@ -361,6 +394,7 @@ def build_dataset(
             "category": options.category,
             "precision_policy": "Raw samples/auxiliaries preserved bit-for-bit in NPY/NPZ; no normalization, gamma, or resampling",
             "array_storage": "npz_deflate" if options.compress_arrays else "npy",
+            "file_workers": worker_count,
             "generation_state": state,
             "generation_output_dir": str(destination),
             "splits_provisional": state != "complete",
@@ -573,34 +607,47 @@ def build_dataset(
         print(f"  Preserved {len(raw)} raw arrays and teacher targets", file=sys.stderr, flush=True)
         return sample
 
+    def prepare_source(source: Path) -> Any:
+        try:
+            if source.suffix.lower() not in {".heic", ".heif", ".hif"}:
+                raise DatasetError("Dataset inputs must be original HEIC/HEIF files, not depth previews")
+            discovery = discover_file(source)
+            from .spatial_scan import validate_spatial_discovery
+            metadata = validate_spatial_discovery(discovery, require_apple_camera=options.require_apple_camera)
+            return discovery, metadata
+        except Exception as exc:
+            return exc
+
+    # HEIC input size is compressed; reserve a conservative decoding window.
+    # Prefetch overlaps native file decoding with serial accelerator inference.
+    def source_bytes(source: Path) -> int:
+        try:
+            return source.stat().st_size
+        except OSError:
+            # Admission reports the actual per-photo failure. An unreadable or
+            # raced-out input must not leak the already-created staging folder.
+            return 16 * 1024**2
+    largest_source = max(map(source_bytes, inputs), default=1)
+    discovery_workers = memory_limited_workers(worker_count, largest_source * 32)
     try:
         snapshot("generating", 0)
         emit("dataset_started", dataset_dir=str(temporary), output_dir=str(destination), total_sources=len(inputs))
-        for index, source in enumerate(inputs):
+        for index, prepared in enumerate(ordered_map(prepare_source, inputs, workers=discovery_workers)):
+            source = inputs[index]
             print(f"Dataset photo {index + 1}/{len(inputs)}: {source.name}", file=sys.stderr, flush=True)
-            try:
-                if source.suffix.lower() not in {".heic", ".heif", ".hif"}:
-                    raise DatasetError("Dataset inputs must be original HEIC/HEIF files, not depth previews")
-                discovery = discover_file(source)
-                from .spatial_scan import validate_spatial_discovery
-                photo_metadata = validate_spatial_discovery(discovery, require_apple_camera=options.require_apple_camera)
-            except Exception as exc:
-                skip(source, exc)
+            if isinstance(prepared, Exception):
+                skip(source, prepared)
                 snapshot("generating", index + 1)
                 continue
+            discovery, photo_metadata = prepared
             views = {asset.semantic_name: asset for asset in discovery.assets if asset.kind == "spatial_view"}
             left, right = views["spatial_left"], views["spatial_right"]
             source_id = f"{index:05d}-{discovery.source_sha256[:16]}"
             photo_folder = temporary / source_id
             photo_folder.mkdir()
-            raw: list[dict[str, Any]] = []
             # Store immutable source arrays once, shared by all teacher variants.
             # Storage failures are fatal, rather than silently excluding a photo.
-            for ordinal, asset in enumerate(discovery.assets):
-                record = _asset_record(asset)
-                record["storage"] = dataset_array_record(temporary, photo_folder / f"raw-{ordinal:03d}.npy", asset.array)
-                record["metadata_blocks"] = _jsonable(asset.metadata_blocks)
-                raw.append(record)
+            raw = store_raw_assets(discovery, photo_folder)
             left_index = next(i for i, asset in enumerate(discovery.assets) if asset is left)
             right_index = next(i for i, asset in enumerate(discovery.assets) if asset is right)
             count_before = len(samples)
@@ -642,7 +689,7 @@ def build_dataset(
         raise
 
 
-def load_dataset(directory: Path | str, *, verify: bool = True) -> dict[str, Any]:
+def load_dataset(directory: Path | str, *, verify: bool = True, workers: int | None = None) -> dict[str, Any]:
     """Load and verify a dataset, excluding pickle arrays and escaping paths."""
     root = Path(directory).expanduser().resolve()
     try:
@@ -651,6 +698,14 @@ def load_dataset(directory: Path | str, *, verify: bool = True) -> dict[str, Any
         raise DatasetError(f"Cannot read dataset manifest: {exc}") from exc
     if manifest.get("schema") != "ipde-depth-dataset-v1" or not manifest.get("samples"):
         raise DatasetError("Not a supported, nonempty IPDE depth dataset")
+    try:
+        worker_count = resolve_workers(workers)
+    except ValueError as exc:
+        raise DatasetError(str(exc)) from exc
+    # A raw asset, teacher/native plane and several teacher variants can all
+    # reference one immutable file. Read it once, but reject conflicting
+    # metadata instead of allowing deduplication to hide an invalid record.
+    unique: dict[Path, dict[str, Any]] = {}
     for sample in manifest["samples"]:
         records = [sample["rgb"], sample["right_rgb"]]
         records.extend(asset["storage"] for asset in sample["raw_assets"])
@@ -673,16 +728,29 @@ def load_dataset(directory: Path | str, *, verify: bool = True) -> dict[str, Any
                 records.extend(sample[key][name] for name in ("target", "valid_mask"))
         if "reference" in sample:
             records.extend(sample["reference"][key] for key in ("target", "valid_mask"))
+        # Include optional/future scientific array products as well.
+        from .dataset_review import _array_records, _array_path
+        records.extend(_array_records(sample))
         for record in records:
-            path = (root / record["path"]).resolve()
-            if not path.is_relative_to(root):
-                raise DatasetError("Dataset array path escapes the dataset directory")
-            try:
-                array = read_array(path, mmap_mode="r")
-                if list(array.shape) != record["shape"] or array.dtype.str != record["dtype"]:
-                    raise DatasetError(f"Dataset array shape/dtype mismatch: {record['path']}")
-                if verify and (sha256_file(path) != record["file_sha256"] or sha256_array(array) != record["array_sha256"]):
-                    raise DatasetError(f"Dataset checksum mismatch: {record['path']}")
-            except (ValueError, OSError) as exc:
-                raise DatasetError(f"Cannot read dataset array {record['path']}: {exc}") from exc
+            path = _array_path(root, record)
+            if path in unique and any(unique[path][key] != record[key]
+                                      for key in ("shape", "dtype", "file_sha256", "array_sha256")):
+                raise DatasetError(f"Conflicting dataset array records: {record['path']}")
+            unique[path] = record
+
+    def check(item: tuple[Path, dict[str, Any]]) -> None:
+        path, record = item
+        try:
+            array = read_array(path, mmap_mode="r")
+            if list(array.shape) != record["shape"] or array.dtype.str != record["dtype"]:
+                raise DatasetError(f"Dataset array shape/dtype mismatch: {record['path']}")
+            if verify and (sha256_file(path) != record["file_sha256"] or sha256_array(array) != record["array_sha256"]):
+                raise DatasetError(f"Dataset checksum mismatch: {record['path']}")
+        except (ValueError, OSError) as exc:
+            raise DatasetError(f"Cannot read dataset array {record['path']}: {exc}") from exc
+
+    sizes = [math.prod(record["shape"]) * np.dtype(record["dtype"]).itemsize for record in unique.values()]
+    count = memory_limited_workers(worker_count, max(sizes, default=1) * 2)
+    for _ in ordered_map(check, unique.items(), workers=count):
+        pass
     return manifest

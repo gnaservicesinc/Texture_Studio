@@ -118,6 +118,9 @@ list(APPEND RAFT_STUDIO_PYTHON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/dataset.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/dataset_review.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/training.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/concurrency.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/resource_lock.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/workspace_cleanup.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/pseudo_calibration.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/array_storage.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/dataset_collection.py"
@@ -256,7 +259,7 @@ if(BUILD_TESTING)
     add_test(NAME project_session_lifetime COMMAND project_session_regression)
     set_tests_properties(project_session_lifetime PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-    foreach(regression IN ITEMS window_layout_regression studio_preview_regression trainer_workflow_regression)
+    foreach(regression IN ITEMS window_layout_regression studio_preview_regression trainer_workflow_regression studio_routing_regression)
         qt_add_executable(${regression} "${CMAKE_CURRENT_SOURCE_DIR}/verification/${regression}.cpp")
         target_include_directories(${regression} PRIVATE src/gui)
         target_link_libraries(${regression} PRIVATE Qt6::Widgets Qt6::Network)

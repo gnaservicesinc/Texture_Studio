@@ -7,8 +7,11 @@ individual overrides. Manual exposes all choices. Each project stores its
 workspace and `project.ini`; datasets and models are not silently selected into
 another project's extraction settings.
 
-Studio launches **Extract maps**, **Manage & review datasets**, and **Assemble &
-train**. The manager and trainer have separate windows focused on their step.
+Studio launches **Extract maps**, **Manage & review datasets**, and **Train model &
+compare**. Dataset Studio owns every dataset edit, including optional training-set
+preparation, compacting, archiving and links. Trainer reads datasets and manages
+training runs and models. A request for another step opens or focuses the correct
+project app and selects the requested dataset.
 The hub locks each app/project combination, broadcasts filesystem changes, and
 keeps background tasks alive when its window is closed. Apps for different
 projects can run concurrently. Direct GUI subapp launches require a Studio
@@ -54,7 +57,7 @@ RAFT Studio opens **Train model & compare**. Select an existing dataset and
 click **Start model training** to run epochs and save weights; a single dataset
 does not need a preparation copy.
 
-The optional **Prepare training set** step accepts many datasets. Choose a dedicated
+The optional **Prepare training set** step in Dataset Studio accepts many datasets. Choose a dedicated
 validation dataset, seeded random selection across all datasets, or equal random
 counts of independent groups per dataset. Group preservation/override enables
 A/B experiments; exact duplicates, teacher variants and known bursts always stay
@@ -72,7 +75,7 @@ recompress or make another full array copy. Verification can still take several
 minutes for large datasets.
 The button reads **Creating training set…** during this work; the progress
 message reports reused arrays and final verification. Completion selects the saved
-set and opens the model training step. Preparing a set assigns validation splits;
+set and opens Trainer at the model training step. Preparing a set assigns validation splits;
 **Start model training** runs the optimizer and writes a checkpoint.
 
 Studio windows fit within the screen's usable area. Scroll to reach controls
@@ -96,6 +99,26 @@ requested. Existing older copies are left in place.
 it preserves split assignments and leaves the original available. Using both
 copies consumes additional storage until you remove the original yourself.
 
+**Remove generated dataset…** in Dataset Studio permanently removes an owned
+generated dataset after a confirmation dialog. Original source photographs and
+trained models remain. Linked external datasets cannot be cleaned up here.
+Prepared sets with contained clone/hardlink files survive source removal; shared
+blocks are only released after their last owner is removed. Cleanup refuses
+source/model files placed inside the dataset, external array dependencies, and
+datasets being read by an active CLI task. **Clean run files…** in
+Trainer retains all output checkpoints and their provenance reports. Removing
+dataset storage is a separate explicit Dataset Studio action. Neither action is
+automatic, and neither uploads data.
+
+Set **File processing threads** in the project's Studio window to override concurrency.
+Automatic uses available cores. Verification deduplicates repeated file records
+and checks independent files in parallel; composition, compacting, reviewed
+copies and training target preparation use bounded worker queues. The CLI
+equivalent is `--workers 4` (or `--workers 0` for automatic). These file tasks
+have no MPS filesystem interface. Teacher inference remains serialized to bound
+GPU memory use; training uses MPS when **Device** is `auto` on a supported Mac
+or explicitly `mps`, preserving FP32 rather than adding mixed precision.
+
 **Include display-camera teacher** is an advanced opt-in. It retains extra full
 resolution predictions/anchors that may be useful for registration diagnostics
 but can add hundreds of MiB per photo. The original display RGB remains lossless.
@@ -111,8 +134,8 @@ image or text datasets cannot directly supervise calibrated RAFT. See
 
 ## Model and precision background
 
-RAFT Studio is the separate Qt app for creating and managing spatial-photo
-datasets, distilling a depth teacher into RAFT-Stereo, and exporting checkpoints.
+Dataset Studio is the Qt app for creating and managing spatial-photo datasets.
+RAFT Studio distills a depth teacher into RAFT-Stereo and exports checkpoints.
 IPDE remains the extraction app: choose an exported checkpoint in its existing
 **RAFT model** field and continue extracting images and depth maps.
 
@@ -229,7 +252,9 @@ including both stereo views, rather than only its preview image.
 
 Start with **Selected training target**, which shows the map this sample would
 actually use for distillation. Depending on the sample, that can be the direct left-view
-teacher, the accepted anchored teacher, or a registered display-image teacher.
+teacher, the accepted anchored teacher, or an explicitly selected registered
+display-image teacher in an older/advanced dataset. New datasets default to
+native left-view supervision even when display diagnostics are requested.
 The label selector also exposes the raw teacher and available anchor/display
 maps so you can inspect the source of a problem. Viewing another label does
 not change which target training uses. A relative or rejected-anchor target
@@ -259,11 +284,12 @@ resolution, framing, and processing. RAFT's native correspondence reference is
 the decoded left view. Scaling all three RGB images to the same size and
 overlaying them is a useful alignment diagnostic; it is not a depth registration.
 
-RAFT Studio generates an independent display teacher and retains its grid. A
+Dataset Studio can generate an independent display teacher and retain its grid. A
 same-camera feature registration uses held-out matches and spatial residual
 checks. Only validated regions can supply display-derived left-grid labels.
 Unsupported regions remain NaN. The direct left-view teacher is retained and is
-used when the display registration is rejected; no display depth is stretched
+the default training target, including when display registration succeeds;
+no display depth is stretched
 into the left grid. A registered right-camera target needs additional stereo
 reprojection and is not silently treated as left-camera depth.
 
@@ -278,6 +304,12 @@ The presentation-only HEIC disparity adjustment does not enter this formula.
 Out-of-image/crop correspondences and estimated occlusions are excluded.
 Optional photometric support gives a stricter training mask. A mask does not
 turn an estimated label into independently measured depth.
+
+Review reports include display and stereo dimensions, the metadata's camera
+identity and held-out registration errors. The investigation report also records
+supported cells and capture warnings.
+Equal output dimensions alone do not establish equal camera grids. See the
+read-only [IMG_1689 investigation](alignment-and-checkpoints-2026-10-04.md).
 
 ## Train and export
 

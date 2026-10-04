@@ -23,6 +23,7 @@ from .array_storage import array_record, read_array
 from .dataset import DatasetError, assign_grouped_splits, load_dataset, teacher_depth_to_flow
 from .dataset_review import _publish_new_directory
 from .formats import sha256_array
+from .concurrency import memory_limited_workers, ordered_map, resolve_workers
 
 
 _REQUIRED_COLUMNS = {"left", "right", "depth", "calibration"}
@@ -129,6 +130,7 @@ def import_dataset_rows(
     asset_dir: Path | str | None = None,
     validation_fraction: float = 0.2,
     split_seed: int = 0,
+    workers: int | None = None,
 ) -> dict[str, Any]:
     """Import compatible rows; skip malformed rows and report every rejection.
 
@@ -136,6 +138,10 @@ def import_dataset_rows(
     Non-Apple external datasets remain explicitly identified as external data.
     """
     specification = _validate_mapping(mapping)
+    try:
+        worker_count = resolve_workers(workers)
+    except ValueError as exc:
+        raise DatasetError(str(exc)) from exc
     assign_grouped_splits([], validation_fraction, split_seed)
     columns = specification["columns"]
     origin = _json_object(provenance or {}, "Import provenance")
@@ -153,12 +159,21 @@ def import_dataset_rows(
     skipped: list[dict[str, Any]] = []
     written: dict[tuple[str, tuple[int, ...], str], dict[str, Any]] = {}
 
-    def store(value: np.ndarray) -> dict[str, Any]:
-        key = value.dtype.str, tuple(value.shape), sha256_array(value)
-        if key not in written:
+    def store_values(values: list[np.ndarray]) -> list[dict[str, Any]]:
+        # Row iteration and deduplication remain on the caller. Each worker
+        # publishes one distinct immutable array file, never shared metadata.
+        keys = [(value.dtype.str, tuple(value.shape), sha256_array(value)) for value in values]
+        planned = {key: value for key, value in zip(keys, values) if key not in written}
+
+        def save(item: Any) -> Any:
+            key, value = item
             identity = hashlib.sha256(json.dumps(key).encode()).hexdigest()
-            written[key] = array_record(temporary, temporary / "arrays" / f"{identity}.npz", value, compressed=True)
-        return dict(written[key])
+            return key, array_record(temporary, temporary / "arrays" / f"{identity}.npz", value, compressed=True)
+
+        count = memory_limited_workers(worker_count, max((value.nbytes for value in planned.values()), default=1) * 3)
+        for key, record in ordered_map(save, planned.items(), workers=count):
+            written[key] = record
+        return [dict(written[key]) for key in keys]
 
     try:
         for row_index, row in enumerate(rows):
@@ -204,8 +219,8 @@ def import_dataset_rows(
                 bursts = _mapping_value(row, columns, "burst_ids", [])
                 if not isinstance(bursts, list) or any(not isinstance(item, str) or not item for item in bursts):
                     raise DatasetError("burst_ids must be a list of nonempty strings")
-                left_record, right_record, depth_record = store(left), store(right), store(depth)
-                valid_record = store(np.isfinite(depth) & (depth > 0))
+                left_record, right_record, depth_record, valid_record, flow_record, flow_valid_record = store_values(
+                    [left, right, depth, np.isfinite(depth) & (depth > 0), flow, flow_valid])
                 label_metadata = dict(specification.get("teacher_metadata", {}))
                 label_metadata.update({"label_data_sha256": sha256_array(depth), "input_rgb_sha256": sha256_array(left),
                                        "units": "meters", "reference_label": "spatial_left", "import_provenance": origin,
@@ -224,7 +239,7 @@ def import_dataset_rows(
                     "calibration": calibration, "requested_group": scene, "category_label": category, "burst_ids": bursts,
                     "teacher": teacher, "training_target_choice": "teacher",
                     "raft_target": {"source_label": "reference" if specification["depth_role"] == "measured" else "teacher",
-                                    "target": store(flow), "valid_mask": store(flow_valid), "metadata": geometry},
+                                    "target": flow_record, "valid_mask": flow_valid_record, "metadata": geometry},
                     "external_import": {"row_index": row_index, "external_id": str(external_id), "metadata": metadata, "provenance": origin},
                 }
                 if specification["depth_role"] == "measured":
@@ -248,7 +263,8 @@ def import_dataset_rows(
             warnings.append(f"Skipped {len(skipped)} incompatible or malformed rows; review the import report")
         explicit_scenes = specification.get("verified_scene_groups", False) and all(sample["requested_group"] for sample in samples)
         report = {"provenance": origin, "mapping": specification, "skipped_rows": skipped,
-                  "imported_samples": len(samples), "unique_arrays": len(written), "remote_code_execution_allowed": False}
+                  "imported_samples": len(samples), "unique_arrays": len(written), "remote_code_execution_allowed": False,
+                  "file_workers": worker_count}
         summary = {"samples": len(samples), "groups": len(groups), "train_samples": sum(s["split"] == "train" for s in samples),
                    "validation_samples": sum(s["split"] == "validation" for s in samples)}
         manifest = {"schema": "ipde-depth-dataset-v1", "precision_policy": "Imported NPY values/dtypes preserved bit-for-bit in lossless NPZ; no normalization, gamma or resampling",
@@ -256,7 +272,7 @@ def import_dataset_rows(
                     "grouping_semantics": "scene" if explicit_scenes else "capture", "explicit_scene_groups": bool(explicit_scenes),
                     "samples": samples, "summary": summary, "warnings": warnings, "external_import": report}
         (temporary / "dataset.json").write_text(json.dumps(manifest, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-        load_dataset(temporary, verify=True)
+        load_dataset(temporary, verify=True, workers=worker_count)
         _publish_new_directory(temporary, destination)
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
@@ -276,6 +292,7 @@ def import_huggingface_dataset(
     asset_dir: Path | str | None = None,
     validation_fraction: float = 0.2,
     split_seed: int = 0,
+    workers: int | None = None,
 ) -> dict[str, Any]:
     """Load a local data builder or Hub dataset using the optional datasets lib.
 
@@ -306,4 +323,4 @@ def import_huggingface_dataset(
                   "requested_revision": revision, "fingerprint": fingerprint, "datasets_version": getattr(datasets, "__version__", None),
                   "data_files": data_files, "trust_remote_code": False}
     return import_dataset_rows(rows, output_dir, mapping, provenance=provenance, asset_dir=asset_dir,
-                               validation_fraction=validation_fraction, split_seed=split_seed)
+                               validation_fraction=validation_fraction, split_seed=split_seed, workers=workers)

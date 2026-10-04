@@ -22,6 +22,7 @@ import numpy as np
 from .dataset import DatasetError, load_dataset
 from .formats import sha256_array, sha256_file, write_png
 from .array_storage import read_array
+from .concurrency import ordered_map, resolve_workers
 
 
 LABEL_TITLES = {
@@ -139,6 +140,17 @@ def _warnings(manifest: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(warnings))
 
 
+def _registration_summary(sample: dict[str, Any]) -> dict[str, Any] | None:
+    registration = sample.get("display_registration")
+    if not isinstance(registration, dict):
+        return None
+    return {key: registration[key] for key in (
+        "accepted", "reference_role", "reason", "display_shape", "stereo_shape",
+        "heldout_median_error_pixels", "heldout_p90_error_pixels", "feature_match_count",
+        "unique_feature_match_count", "calibration_recovered",
+    ) if key in registration}
+
+
 def review_dataset(directory: Path | str) -> dict[str, Any]:
     root, manifest = _read_manifest(directory)
     samples = []
@@ -167,6 +179,10 @@ def review_dataset(directory: Path | str) -> dict[str, Any]:
             warnings.append("The selected target uses approximate display-image registration; excluded regions remain invalid.")
             if training_label.get("reference_role") != "left":
                 warnings.append("The selected display target is not aligned to the stereo left image required for RAFT training.")
+        display_registration = _registration_summary(sample)
+        if display_registration is not None and not display_registration.get("accepted"):
+            warnings.append(f"Display alignment was rejected: {display_registration.get('reason', 'registration was not accepted')}. "
+                            "The display image stays on its separate grid; direct stereo-left labels remain aligned to the training image.")
         if not sample.get("calibration", {}).get("raft_stereo_ready"):
             warnings.append("Stereo calibration is not ready for RAFT training.")
         samples.append({
@@ -176,6 +192,7 @@ def review_dataset(directory: Path | str) -> dict[str, Any]:
             "source_id": sample.get("source_id", sample.get("source_sha256", sample["source_path"])),
             "teacher_id": sample.get("teacher_id", sample.get("teacher_model", sample.get("teacher", {}).get("metadata", {}).get("model_id", "Teacher"))),
             "photo_metadata": sample.get("photo_metadata", {}),
+            "rgb_reference": "spatial_left", "display_registration": display_registration,
             "training_ready": training_label["units"] == "meters" and bool(sample.get("calibration", {}).get("raft_stereo_ready"))
                 and (chosen != "registered_display_teacher" or training_label.get("reference_role") == "left"),
         })
@@ -281,6 +298,8 @@ def preview_sample(
         "width": width, "height": height, "preview_width": preview_width, "preview_height": preview_height,
         "valid_fraction": float(valid.mean()), "min": minimum, "max": maximum,
         "training_target_choice": sample.get("training_target_choice", "teacher"),
+        "rgb_reference": {"display_rgb": "display", "right_rgb": "spatial_right", "rgb": "spatial_left"}[rgb_key],
+        "display_registration": _registration_summary(sample),
         "display_range": [contrast_min, contrast_max],
         "surface": _surface_preview(depth, valid, target["units"]),
         "legend": "Near white; far black; invalid magenta. Contrast is for viewing only and is scaled separately for each label.",
@@ -407,7 +426,11 @@ def _publish_new_directory(temporary: Path, destination: Path) -> None:
         raise OSError(error, os.strerror(error), str(destination))
 
 
-def curate_dataset(directory: Path | str, keep_ids: Sequence[str], output_dir: Path | str) -> dict[str, Any]:
+def curate_dataset(directory: Path | str, keep_ids: Sequence[str], output_dir: Path | str, *, workers: int | None = None) -> dict[str, Any]:
+    try:
+        worker_count = resolve_workers(workers)
+    except ValueError as exc:
+        raise DatasetError(str(exc)) from exc
     root, manifest = _read_manifest(directory)
     if manifest.get("generation_state") == "generating" or manifest.get("splits_provisional"):
         raise DatasetError("Wait for dataset generation to finish before saving a reviewed copy; current split assignments are provisional")
@@ -425,7 +448,7 @@ def curate_dataset(directory: Path | str, keep_ids: Sequence[str], output_dir: P
     if unknown:
         raise DatasetError(f"Unknown dataset sample IDs: {', '.join(sorted(unknown))}")
     # Curation is the durable action: validate all source arrays/provenance first.
-    if load_dataset(root, verify=True) != manifest:
+    if load_dataset(root, verify=True, workers=worker_count) != manifest:
         raise DatasetError("Source dataset manifest changed before curation")
     source_manifest_hash = sha256_file(root / "dataset.json")
     kept = set(keep_ids)
@@ -446,18 +469,19 @@ def curate_dataset(directory: Path | str, keep_ids: Sequence[str], output_dir: P
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination.parent))
     try:
-        copied: set[str] = set()
+        records: dict[str, dict[str, Any]] = {}
         for sample in curated["samples"]:
             for record in _array_records(sample):
-                if record["path"] in copied:
-                    continue
-                source = _array_path(root, record)
-                target = temporary / record["path"]
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(source, target)
-                if sha256_file(target) != record["file_sha256"]:
-                    raise DatasetError(f"Dataset checksum mismatch while copying: {record['path']}")
-                copied.add(record["path"])
+                records.setdefault(record["path"], record)
+        def copy_record(record: dict[str, Any]) -> None:
+            source = _array_path(root, record)
+            target = temporary / record["path"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            if sha256_file(target) != record["file_sha256"]:
+                raise DatasetError(f"Dataset checksum mismatch while copying: {record['path']}")
+        for _ in ordered_map(copy_record, records.values(), workers=worker_count):
+            pass
         if sha256_file(root / "dataset.json") != source_manifest_hash:
             raise DatasetError("Source dataset manifest changed during curation")
         (temporary / "dataset.json").write_text(json.dumps(curated, indent=2, allow_nan=False) + "\n", encoding="utf-8")

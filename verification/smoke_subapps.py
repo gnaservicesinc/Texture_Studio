@@ -9,6 +9,42 @@ import socket
 import subprocess
 import tempfile
 import threading
+import sys
+
+
+def backend_smoke(app_root: Path, project: Path) -> None:
+    """Exercise embedded Python modules, rather than just Qt startup/session IPC."""
+    from test_collection_storage import _dataset
+    workspace = project / "workspace"
+    owner = workspace / "datasets"
+    owner.mkdir(parents=True)
+    fixture, _ = _dataset(project)
+    source = owner / "source"
+    fixture.rename(source)
+    prepared = owner / "prepared"
+
+    def invoke(name: str, arguments: list[str]) -> dict:
+        script = app_root / f"{name}.app/Contents/Resources/raft_studio.py"
+        # -I prevents PYTHONPATH from hiding omitted bundle modules. The bundle
+        # entrypoint explicitly selects its own Resources/src package.
+        result = subprocess.run([sys.executable, "-I", str(script), "--json", *arguments],
+                                cwd=project, text=True, capture_output=True, timeout=30)
+        if result.returncode:
+            raise RuntimeError(f"{name} embedded backend failed: {result.stdout} {result.stderr}")
+        return json.loads(result.stdout)
+
+    invoke("Dataset Studio", ["inspect-dataset", str(source), "--workers", "2"])
+    invoke("Dataset Studio", ["compose-datasets", str(source), "--output-dir", str(prepared), "--workers", "2"])
+    report = invoke("RAFT Studio", ["workspace", str(workspace)])
+    if len(report["datasets"]) != 2 or report["warnings"]:
+        raise RuntimeError("Embedded Trainer did not recognize the prepared fixture")
+    invoke("Dataset Studio", ["cleanup-dataset", str(prepared), "--workspace", str(workspace), "--confirm"])
+    if prepared.exists() or not source.is_dir():
+        raise RuntimeError("Embedded cleanup affected the wrong fixture")
+    archived = invoke("Dataset Studio", ["archive-dataset", str(source), "--workspace", str(workspace)])
+    if source.exists() or not Path(archived["archived_dataset"]).is_dir():
+        raise RuntimeError("Embedded archive did not preserve the source fixture")
+    print("Packaged dataset/trainer backends: threaded verification/composition, workspace, confirmed cleanup and locked archive passed")
 
 
 def main() -> None:
@@ -59,6 +95,7 @@ def main() -> None:
             if worker.is_alive() or errors or registered != [role for _, role in roles]:
                 raise RuntimeError(f"Hub registration failed: {registered}, {errors}")
             print("Packaged extractor, datasets, trainer, photo and RAW: project registration and clean exit passed")
+            backend_smoke(app_root, project)
         finally:
             listener.close()
             Path(address).unlink(missing_ok=True)

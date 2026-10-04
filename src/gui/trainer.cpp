@@ -5,7 +5,9 @@
 #include <QDoubleSpinBox>
 #include <QDesktopServices>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
+#include <QDirIterator>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFont>
@@ -17,6 +19,7 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMainWindow>
 #include <QMessageBox>
 #include <QMouseEvent>
@@ -43,6 +46,7 @@
 #include <QTemporaryFile>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QThread>
 #include <QTreeWidget>
 #include <QUrl>
 #include <QVector3D>
@@ -294,12 +298,44 @@ private:
     double yaw_ = -.25, pitch_ = -.5;
 };
 
+QJsonObject readJson(const QString &path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return {};
+    return QJsonDocument::fromJson(file.readAll()).object();
+}
+QStringList localDatasets(const QString &project) {
+    if (project.isEmpty()) return {};
+    QStringList paths;
+    QDir dir(QDir(project).filePath("workspace/datasets"));
+    for (const QFileInfo &info : dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        if (QFileInfo::exists(QDir(info.absoluteFilePath()).filePath("dataset.json"))) {
+            const QString path = info.canonicalFilePath();
+            if (!path.isEmpty() && !paths.contains(path)) paths << path;
+        }
+    }
+    return paths;
+}
+QStringList linkedDatasets(const QString &project) {
+    if (project.isEmpty()) return {};
+    return QSettings(QDir(project).filePath("project.ini"), QSettings::IniFormat).value("dataset_links").toStringList();
+}
+QStringList projectDatasets(const QString &project) {
+    if (project.isEmpty()) return {};
+    QStringList paths = localDatasets(project);
+    for (const QString &link : linkedDatasets(project)) {
+        const QString canonical = QFileInfo(link).canonicalFilePath();
+        const QString path = canonical.isEmpty() ? QDir::cleanPath(link) : canonical;
+        if (!paths.contains(path)) paths << path;
+    }
+    return paths;
+}
+
 class TrainerWindow final : public QMainWindow {
 public:
-    TrainerWindow() : settings_("IPDE", "RAFTStudio") {
+    explicit TrainerWindow(bool datasetMode = bool(IPDE_DATASET_STUDIO)) : settings_(QSettings::defaultFormat(), QSettings::UserScope, "IPDE", "RAFTStudio") {
         const auto arguments = QCoreApplication::arguments();
         const int modeArgument = arguments.indexOf("--mode");
-        datasetMode_ = modeArgument >= 0 ? arguments.value(modeArgument + 1) == "datasets" : bool(IPDE_DATASET_STUDIO);
+        datasetMode_ = modeArgument >= 0 ? arguments.value(modeArgument + 1) == "datasets" : datasetMode;
         projectRoot_ = IPDE::projectRoot();
         if (!projectRoot_.isEmpty()) projectSettings_ = std::make_unique<QSettings>(QDir(projectRoot_).filePath("project.ini"), QSettings::IniFormat);
         setWindowTitle(datasetMode_ ? "Dataset Studio" : "RAFT Studio");
@@ -311,7 +347,7 @@ public:
         auto *title = new QLabel(datasetMode_ ? "Dataset Studio" : "RAFT Studio", central);
         QFont font = title->font(); font.setPointSize(font.pointSize() + 7); font.setBold(true); title->setFont(font);
         root->addWidget(title);
-        auto *purpose = new QLabel(datasetMode_ ? "Organize photo collections, compare teachers, and keep the predictions that suit your project." : "Combine curated datasets, select validation, train, and compare the result with your original model.", central);
+        auto *purpose = new QLabel(datasetMode_ ? "Import, link, review and prepare datasets for your project." : "Train from prepared datasets, manage model runs, and compare with your original model.", central);
         purpose->setWordWrap(true); root->addWidget(purpose);
 
         auto *workspaceRow = new QHBoxLayout;
@@ -346,9 +382,20 @@ public:
         auto *showDataset = new QPushButton("Show files", datasetBox);
         auto *archive = new QPushButton("Archive selected", datasetBox);
         auto *compact = new QPushButton("Compact copy…", datasetBox);
+        compact->setObjectName("compactDataset"); archive->setObjectName("archiveDataset");
+        compact->setVisible(datasetMode_); archive->setVisible(datasetMode_);
+        cleanupDataset_ = new QPushButton("Remove generated dataset…", datasetBox); cleanupDataset_->setVisible(datasetMode_);
+        cleanupDataset_->setToolTip("After training, remove this generated dataset to reclaim disk space. Original photos and trained models stay in place. Requires confirmation.");
+        auto *manageDatasets = new QPushButton("Manage in Dataset Studio", datasetBox); manageDatasets->setVisible(!datasetMode_);
+        review->setText(datasetMode_ ? "Review depth maps" : "Review in Dataset Studio");
         review->setIcon(IPDE::appIcon("datasets")); inspect->setIcon(IPDE::appIcon("datasets"));
-        datasetButtons->addWidget(review); datasetButtons->addWidget(inspect); datasetButtons->addWidget(showDataset); datasetButtons->addWidget(compact); datasetButtons->addWidget(archive); datasetButtons->addStretch();
+        datasetButtons->addWidget(review); datasetButtons->addWidget(inspect); datasetButtons->addWidget(showDataset); datasetButtons->addWidget(compact); datasetButtons->addWidget(archive); datasetButtons->addWidget(cleanupDataset_); datasetButtons->addWidget(manageDatasets); datasetButtons->addStretch();
         datasetLayout->addLayout(datasetButtons);
+        auto *links = new QHBoxLayout; auto *linkProject = new QPushButton("Link datasets from project…", datasetBox); auto *linkDataset = new QPushButton("Link dataset…", datasetBox); auto *manageLinks = new QPushButton("Manage links…", datasetBox);
+        for (auto *button : {linkProject, linkDataset, manageLinks}) { links->addWidget(button); button->setVisible(datasetMode_ && bool(projectSettings_)); } links->addStretch(); datasetLayout->addLayout(links);
+        connect(linkProject, &QPushButton::clicked, this, [this] { importProjectDatasets(); });
+        connect(linkDataset, &QPushButton::clicked, this, [this] { const QString path = QFileDialog::getExistingDirectory(this, "Link an existing dataset folder containing dataset.json", projectRoot_); if (!path.isEmpty()) addDatasetLinks({path}); });
+        connect(manageLinks, &QPushButton::clicked, this, [this] { editDatasetLinks(); });
         auto *runBox = new QGroupBox("Trained models", library);
         auto *runLayout = new QVBoxLayout(runBox);
         runs_ = new QTreeWidget(runBox);
@@ -359,25 +406,29 @@ public:
         auto *runButtons = new QHBoxLayout;
         export_ = new QPushButton("Export selected model…", runBox);
         auto *showRun = new QPushButton("Show files", runBox);
+        cleanupRun_ = new QPushButton("Clean run files…", runBox);
         auto *useModel = new QPushButton("Use selected model in project", runBox);
         useModel->setVisible(bool(projectSettings_));
         useModel->setToolTip("Select a trained model after comparing its depth on independent photos. Extraction uses this model until you choose another.");
-        runButtons->addWidget(export_); runButtons->addWidget(useModel); runButtons->addWidget(showRun); runButtons->addStretch();
+        runButtons->addWidget(export_); runButtons->addWidget(useModel); runButtons->addWidget(showRun); runButtons->addWidget(cleanupRun_); runButtons->addStretch();
         runLayout->addLayout(runButtons);
         library->addWidget(datasetBox); library->addWidget(runBox);
         root->addWidget(library, 2);
-        library->setMaximumHeight(170);
+        library->setMaximumHeight(datasetMode_ ? 235 : 170);
         connect(review, &QPushButton::clicked, this, [this] { reviewDataset(selectedPath(datasets_)); });
         connect(inspect, &QPushButton::clicked, this, [this] {
             const QString path = selectedPath(datasets_);
-            if (!path.isEmpty()) startJob("Inspect dataset", {"inspect-dataset", path});
+            if (!path.isEmpty()) startJob("Inspect dataset", {"inspect-dataset", path, "--workers", QString::number(workerCount())});
         });
         connect(showDataset, &QPushButton::clicked, this, [this] { showFolder(selectedPath(datasets_)); });
         connect(archive, &QPushButton::clicked, this, [this] { archiveDataset(); });
+        connect(manageDatasets, &QPushButton::clicked, this, [this] { openApp("datasets", "prepare", selectedPath(datasets_)); });
+        connect(cleanupDataset_, &QPushButton::clicked, this, [this] { cleanupDataset(); });
+        connect(cleanupRun_, &QPushButton::clicked, this, [this] { cleanupRun(); });
         connect(compact, &QPushButton::clicked, this, [this] {
             const QString source = selectedPath(datasets_); if (source.isEmpty()) return;
             const QString destination = QDir(workspace_->text()).filePath("datasets/" + QFileInfo(source).fileName() + "-compact-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"));
-            refreshAfter_ = true; startJob("Compact dataset", {"compact-dataset", source, "--output-dir", destination});
+            refreshAfter_ = true; startJob("Compact dataset", {"compact-dataset", source, "--output-dir", destination, "--workers", QString::number(workerCount())});
         });
         connect(showRun, &QPushButton::clicked, this, [this] {
             const QString path = selectedPath(runs_); if (!path.isEmpty()) showFolder(QFileInfo(path).absolutePath());
@@ -395,11 +446,12 @@ public:
         tabs_ = new QTabWidget(central);
         tabs_->setMinimumHeight(380);
         buildDatasetTab(); buildReviewTab(); buildCollectionTab(); buildTrainingTab();
-        connect(tabs_, &QTabWidget::currentChanged, this, [this](int index) { if (index == 1 && previewProcess_) reviewSelectionChanged(); });
+        connect(tabs_, &QTabWidget::currentChanged, this, [this](int index) { if (datasetMode_ && index == 1 && previewProcess_) reviewSelectionChanged(); });
         auto *globalGoal = new QHBoxLayout; globalGoal->addWidget(new QLabel("Main purpose", central)); globalGoal->addWidget(goal_, 1); globalGoal->addWidget(advanced_); root->insertLayout(2, globalGoal);
-        if (datasetMode_) { tabs_->setTabVisible(2, false); tabs_->setTabVisible(4, false); runBox->hide(); }
-        else { tabs_->setTabVisible(0, false); tabs_->setCurrentIndex(4); }
-        connect(datasets_, &QTreeWidget::itemSelectionChanged, this, [this] { updateTrainingSelection(); });
+        if (datasetMode_) { tabs_->setTabVisible(4, false); runBox->hide(); }
+        else { for (int index : {0, 2, 3}) tabs_->setTabVisible(index, false); tabs_->setTabText(1, "Compare models"); tabs_->setTabText(4, "Train model and compare"); tabs_->setCurrentIndex(4); }
+        connect(datasets_, &QTreeWidget::itemSelectionChanged, this, [this] { updateTrainingSelection(); updateCleanupActions(); });
+        connect(runs_, &QTreeWidget::itemSelectionChanged, this, [this] { updateCleanupActions(); });
         root->addWidget(tabs_, 3);
         generate_->setIcon(IPDE::appIcon("datasets")); train_->setIcon(IPDE::appIcon("trainer"));
         export_->setIcon(IPDE::appIcon("trainer"));
@@ -452,7 +504,8 @@ public:
             if (!streamingDataset_.isEmpty()) reviewDataset(streamingDataset_, reviewedDataset_.isEmpty());
         });
         statusBar()->showMessage("Ready");
-        if (!arguments.contains("--smoke-test") || arguments.contains("--screenshot")) {
+        updateTrainingSelection(); updateCleanupActions();
+        if (!arguments.contains("--smoke-test")) {
             const int reviewArgument = arguments.indexOf("--review-dataset");
             if (reviewArgument >= 0 && reviewArgument + 1 < arguments.size())
                 QTimer::singleShot(0, this, [this, arguments, reviewArgument] {
@@ -476,6 +529,26 @@ public:
     }
 
     bool taskRunning() const { return process_->state() != QProcess::NotRunning || previewProcess_->state() != QProcess::NotRunning; }
+    void attachSession(IPDE::ProjectSession *session) {
+        session_ = session;
+        session_->setActivationHandler(this, [this](const QJsonObject &request) { activateRequested(request); });
+        session_->setStateHandler(this, [this](const QJsonObject &state) {
+            projectOperations_ = state.value("operations").toObject(); updateCleanupActions(); updateTrainingSelection();
+        });
+    }
+    void activateRequested(const QJsonObject &request) {
+        showNormal(); raise(); activateWindow(); if (windowHandle()) windowHandle()->requestActivate();
+        const QString path = request.value("dataset").toString();
+        const QString section = request.value("section").toString();
+        if (!path.isEmpty()) {
+            if (datasetMode_ && section == "review") pendingReview_ = path;
+            else pendingTrainingPath_ = path;
+            if (busy_) refreshAfter_ = true; else refreshLibrary();
+        }
+        if (datasetMode_ && section == "prepare") tabs_->setCurrentIndex(2);
+        if (datasetMode_ && section == "import") tabs_->setCurrentIndex(0);
+        if (!datasetMode_) tabs_->setCurrentIndex(4);
+    }
     void projectChanged() {
         if (projectSettings_) {
             projectSettings_->sync(); const QString goal = projectSettings_->value("goal", "effect/map").toString();
@@ -493,6 +566,42 @@ public:
 #else
 private:
 #endif
+    int workerCount() const {
+        if (!projectSettings_) return 0;
+        projectSettings_->sync(); return qMax(0, projectSettings_->value("performance/workers", 0).toInt());
+    }
+    void openApp(const QString &role, const QString &section = {}, const QString &dataset = {}) {
+        lastAppRequest_ = QJsonObject{{"role", role}, {"section", section}, {"dataset", dataset}};
+        if (session_ && session_->openApp(role, QJsonObject{{"section", section}, {"dataset", dataset}}))
+            statusBar()->showMessage("Opening " + (role == "datasets" ? QString("Dataset Studio") : QString("Trainer")) + " for this project…");
+        else statusBar()->showMessage("Open this project's " + (role == "datasets" ? QString("Dataset Studio") : QString("Trainer")) + " from IPDE Studio.");
+    }
+    bool ownsDataset(const QString &path) const {
+        const QString container = QFileInfo(QDir(workspace_->text()).filePath("datasets")).canonicalFilePath();
+        const QFileInfo info(path);
+        return !container.isEmpty() && !info.isSymLink() && info.isDir() && QFileInfo(info.absolutePath()).canonicalFilePath() == container;
+    }
+    void updateCleanupActions() {
+        if (!cleanupDataset_ || !cleanupRun_) return;
+        const bool training = !projectOperations_.value("trainer").toString().isEmpty();
+        cleanupDataset_->setEnabled(datasetMode_ && !busy_ && !training && ownsDataset(selectedPath(datasets_)));
+        cleanupDataset_->setToolTip(training ? "Finish or cancel model training in Trainer before removing a dataset." : "Remove a generated dataset after training; original photos and trained models stay in place. Requires confirmation.");
+        cleanupRun_->setEnabled(!datasetMode_ && !busy_ && !selectedPath(runs_).isEmpty());
+    }
+    void cleanupDataset() {
+        if (!datasetMode_) { openApp("datasets", "prepare", selectedPath(datasets_)); return; }
+        updateCleanupActions(); if (!cleanupDataset_->isEnabled()) return;
+        const QString path = selectedPath(datasets_);
+        const QString message = "Permanently remove this generated dataset and its arrays?\n\n" + path + "\n\nOriginal photos and trained models are retained. Training from this dataset requires generating or importing it again. Datasets that depend on these arrays prevent removal.";
+        if (QMessageBox::warning(this, "Remove generated dataset", message, QMessageBox::Cancel | QMessageBox::Yes, QMessageBox::Cancel) != QMessageBox::Yes) return;
+        refreshAfter_ = true; startJob("Remove generated dataset", {"cleanup-dataset", path, "--workspace", workspace_->text(), "--confirm"});
+    }
+    void cleanupRun() {
+        updateCleanupActions(); if (!cleanupRun_->isEnabled()) return;
+        const QString checkpoint = selectedPath(runs_);
+        if (QMessageBox::warning(this, "Clean run files", "Remove intermediate files from this training run?\n\n" + QFileInfo(checkpoint).absolutePath() + "\n\nThe output checkpoint and its training report are retained. Original photos and datasets remain available.", QMessageBox::Cancel | QMessageBox::Yes, QMessageBox::Cancel) != QMessageBox::Yes) return;
+        refreshAfter_ = true; startJob("Clean run files", {"cleanup-run", checkpoint, "--workspace", workspace_->text(), "--confirm"});
+    }
     static QString selectedPath(QTreeWidget *tree) {
         return tree->currentItem() ? tree->currentItem()->data(0, Qt::UserRole).toString() : QString();
     }
@@ -584,7 +693,7 @@ private:
         });
         connect(scan, &QPushButton::clicked, this, [this] {
             const QString directory = QFileDialog::getExistingDirectory(this, "Choose the folder containing your original HEIC photos; subfolders included", settings_.value("photo_folder").toString());
-            if (!directory.isEmpty()) { settings_.setValue("photo_folder", directory); startJob("Scan spatial photos", {"scan-spatial", directory}); }
+            if (!directory.isEmpty()) { settings_.setValue("photo_folder", directory); startJob("Scan spatial photos", {"scan-spatial", directory, "--workers", QString::number(workerCount())}); }
         });
         connect(remove, &QPushButton::clicked, this, [this] { qDeleteAll(sources_->selectedItems()); });
         auto *teachers = new QHBoxLayout; teachers->addWidget(new QLabel("Generate teacher entries", tab));
@@ -709,8 +818,8 @@ private:
         viewRow->addWidget(visualView_, 1); previewRoot->addLayout(viewRow);
         auto *images = new QHBoxLayout;
         auto *rgbColumn = new QVBoxLayout; auto *depthColumn = new QVBoxLayout;
-        auto *sourceTitle = new QLabel("Source view on the same grid", preview); sourceTitle->setWordWrap(true);
-        rgbColumn->addWidget(sourceTitle);
+        sourceTitle_ = new QLabel("Source view on the same grid", preview); sourceTitle_->setWordWrap(true);
+        rgbColumn->addWidget(sourceTitle_);
         auto *firstDepthTitle = new QLabel("Generated depth", preview); firstDepthTitle->setWordWrap(true); depthTitles_.append(firstDepthTitle); depthColumn->addWidget(firstDepthTitle);
         rgbPreview_ = new DepthPreview(preview); depthPreview_ = new DepthPreview(preview);
         rgbPreview_->setObjectName("reviewSourcePreview"); depthPreview_->setObjectName("reviewDepthPreview");
@@ -761,11 +870,18 @@ private:
             if (auto *item = reviewSamples_->currentItem()) { item->setCheckState(0, Qt::Unchecked); advanceReview(1); }
         });
         connect(saveReviewed_, &QPushButton::clicked, this, [this] { saveReviewedDataset(); });
+        if (!datasetMode_) {
+            reviewPath_->setText("Compare a trained model with the original checkpoint using a held-out spatial photo from Train model & compare.");
+            reviewSamples_->hide(); compareTeachers_->hide();
+            for (auto *layout : {labelRow, filterRow, navigation, saveRow}) for (int index=0; index<layout->count(); ++index)
+                if (auto *widget = layout->itemAt(index)->widget()) widget->hide();
+        }
         tabs_->addTab(tab, "2. Review depth maps");
     }
 
     void reviewDataset(const QString &path, bool openTab = true) {
         if (path.isEmpty()) return;
+        if (!datasetMode_) { openApp("datasets", "review", path); return; }
         requestedReviewPath_ = path;
         requestedReviewOpen_ = openTab;
         requestPreview("review", {"review-dataset", path});
@@ -895,9 +1011,29 @@ private:
         if (result.value("comparison").isObject()) text += "\n" + result.value("comparison").toObject().value("legend").toString();
         if (!rgbLoaded || !depthLoaded) text += " · Could not load a preview.";
         if (first.value("valid_fraction").toDouble() == 0) text += "\nNo valid depth samples. Exclude this teacher entry before training.";
+        QJsonObject selectedSample;
         if (auto *item = previewKind_ == "baseline" ? nullptr : selectedReviewEntry()) {
-            const auto sample = item->data(0, Qt::UserRole).toJsonObject();
-            if (!sample.value("training_ready").toBool()) text += "\nNo usable meter-scale training target. Review the anchor or use another teacher before training.";
+            selectedSample = item->data(0, Qt::UserRole).toJsonObject();
+            if (!selectedSample.value("training_ready").toBool()) text += "\nNo usable meter-scale training target. Review the anchor or use another teacher before training.";
+        }
+        const QString reference = first.value("rgb_reference").toString(selectedSample.value("rgb_reference").toString());
+        const QString source = reference == "spatial_left" ? "Native left stereo grid" : reference == "spatial_right" ? "Native right stereo grid" : reference == "display" ? "Display image on its separate grid" : "Source view on the same grid";
+        sourceTitle_->setText(source);
+        if (!reference.isEmpty()) text += "\nSource: " + source + ".";
+        const QJsonObject registration = first.value("display_registration").isObject() ? first.value("display_registration").toObject() : selectedSample.value("display_registration").toObject();
+        if (!registration.isEmpty()) {
+            const bool accepted = registration.value("accepted").toBool();
+            text += "\nDisplay alignment " + QString(accepted ? "accepted" : "rejected");
+            const QString role = registration.value("reference_role").toString();
+            if (!role.isEmpty()) text += " · fit reference: " + role;
+            if (registration.value("heldout_median_error_pixels").isDouble()) text += " · held-out median " + QString::number(registration.value("heldout_median_error_pixels").toDouble(), 'f', 2) + " px";
+            if (registration.value("heldout_p90_error_pixels").isDouble()) text += " / p90 " + QString::number(registration.value("heldout_p90_error_pixels").toDouble(), 'f', 2) + " px";
+            text += ".";
+            if (!accepted) {
+                if (reference == "spatial_left") text += first.value("valid_fraction").toDouble() > 0 && (selectedSample.isEmpty() || selectedSample.value("training_ready").toBool())
+                    ? " Native-left targets remain usable; the display image stays separate." : " Native-left alignment is unaffected; the display image stays separate.";
+                else text += " The display image cannot supply an aligned stereo target.";
+            }
         }
         previewStats_->setText(text); updateVisualView();
         if (previewKind_ == "baseline") tabs_->setCurrentIndex(1);
@@ -936,11 +1072,12 @@ private:
         }
         QString text = QString("%1 of %2 teacher entries included · %3 train / %4 validation").arg(kept).arg(entries.size()).arg(train).arg(validation);
         if (kept && (!train || !validation)) text += " · Training needs samples in both splits; use more held-out groups in a new dataset.";
-        reviewCount_->setText(text); saveReviewed_->setEnabled(kept > 0 && !reviewGenerating_ && (!process_ || process_->state() == QProcess::NotRunning));
+        reviewCount_->setText(text); saveReviewed_->setEnabled(datasetMode_ && kept > 0 && !reviewGenerating_ && (!process_ || process_->state() == QProcess::NotRunning));
         updateCollectionReadiness();
     }
 
     void saveReviewedDataset() {
+        if (!datasetMode_) { openApp("datasets", "review", reviewedDataset_); return; }
         const QString name = reviewedName_->text().trimmed();
         if (!validName(name)) { QMessageBox::information(this, "Reviewed dataset name", "Use a folder name without path separators."); return; }
         QStringList args{"curate-dataset", reviewedDataset_, "--output-dir", QDir(workspace_->text()).filePath("datasets/" + name)};
@@ -950,13 +1087,13 @@ private:
             args << "--keep" << item->data(0, Qt::UserRole).toJsonObject().value("id").toString(); ++kept;
         }
         if (!kept) return;
-        refreshAfter_ = true; startJob("Save reviewed dataset", args);
+        args << "--workers" << QString::number(workerCount()); refreshAfter_ = true; startJob("Save reviewed dataset", args);
     }
 
     void buildCollectionTab() {
         auto *tab = new QWidget; auto *root = new QVBoxLayout(tab);
         auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(tab);
-        auto *intro = new QLabel("Optional: combine datasets or change validation groups. Preparation reuses existing arrays without another full data copy. To train an existing dataset with its current split, select it above and open Train model & compare.", tab); intro->setWordWrap(true); root->addWidget(intro);
+        auto *intro = new QLabel("Optional: combine datasets or change validation groups. Preparation reuses existing arrays without another full data copy. To train an existing dataset with its current split, select it above and open Trainer.", tab); intro->setWordWrap(true); root->addWidget(intro);
         collectionSources_ = new QTreeWidget(tab); collectionSources_->setHeaderLabels({"Use for training", "Use as validation", "Category", "Teacher entries"});
         collectionSources_->setRootIsDecorated(false); collectionSources_->header()->setSectionResizeMode(0, QHeaderView::Stretch); collectionSources_->setMinimumHeight(140); root->addWidget(collectionSources_, 1);
         connect(collectionSources_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem *item, int column) {
@@ -979,8 +1116,8 @@ private:
         };
         connect(splitMode_, &QComboBox::currentIndexChanged, this, [this, updateSplit] { updateSplit(); updateCollectionReadiness(); }); updateSplit();
         collectionStatus_ = new QLabel(tab); collectionStatus_->setWordWrap(true); root->addWidget(collectionStatus_);
-        auto *useExisting = new QPushButton("Use selected dataset directly for model training", tab); root->addWidget(useExisting);
-        connect(useExisting, &QPushButton::clicked, this, [this] { tabs_->setCurrentIndex(4); updateTrainingSelection(); });
+        auto *useExisting = new QPushButton("Open selected dataset in Trainer", tab); root->addWidget(useExisting);
+        connect(useExisting, &QPushButton::clicked, this, [this] { openApp("trainer", "train", selectedPath(datasets_)); });
         compose_ = new QPushButton("Create training set & continue", tab); root->addWidget(compose_);
         connect(collectionName_, &QLineEdit::textChanged, this, [this] { updateCollectionReadiness(); });
         updateCollectionReadiness();
@@ -995,7 +1132,7 @@ private:
             QStringList args{"compose-datasets"}; args << inputs << "--output-dir" << QDir(workspace_->text()).filePath("datasets/" + name) << "--split-mode" << mode << "--validation-fraction" << QString::number(validationFraction_->value()) << "--seed" << QString::number(splitSeed_->value()) << "--grouping" << groupingPolicy_->currentData().toString();
             if (mode == "explicit") for (const QString &path : validation) args << "--validation-dataset" << path;
             if (mode == "equal-per-dataset" && validationCount_->value()) args << "--validation-count-per-dataset" << QString::number(validationCount_->value());
-            refreshAfter_ = true; startJob("Create training set", args);
+            args << "--workers" << QString::number(workerCount()); continueToTrainer_ = true; refreshAfter_ = true; startJob("Create training set", args);
         });
         auto *hfTab = new QWidget; auto *hfRoot = new QVBoxLayout(hfTab); auto *hfScroll = new QScrollArea; hfScroll->setWidgetResizable(true); hfScroll->setFrameShape(QFrame::NoFrame); hfScroll->setWidget(hfTab);
         auto *hf = new QGroupBox("Optional Hugging Face import", hfTab); auto *hfForm = new QFormLayout(hf);
@@ -1017,7 +1154,7 @@ private:
             if (!hfConfig_->text().trimmed().isEmpty()) args << "--config" << hfConfig_->text().trimmed();
             if (!hfDataFiles_->text().trimmed().isEmpty()) args << "--data-files" << hfDataFiles_->text().trimmed();
             if (!hfAssetDir_->text().trimmed().isEmpty()) args << "--asset-dir" << hfAssetDir_->text().trimmed();
-            refreshAfter_ = true; startJob("Import Hugging Face dataset", args);
+            args << "--workers" << QString::number(workerCount()); refreshAfter_ = true; startJob("Import Hugging Face dataset", args);
         });
         root->addStretch(); hfRoot->addWidget(hf); hfRoot->addStretch(); tabs_->addTab(scroll, "3. Prepare training set"); tabs_->addTab(hfScroll, "Import datasets");
     }
@@ -1076,7 +1213,7 @@ private:
         if (!trainingDataset_ || !train_) return;
         if (busy_ && job_ == "Train RAFT-Stereo") return;
         auto *item = datasets_->currentItem();
-        train_->setEnabled(!busy_ && item);
+        train_->setEnabled(!datasetMode_ && !busy_ && item && projectOperations_.value("datasets").toString() != "cleanup-dataset");
         if (!item) { trainingDataset_->setText("Select a dataset from the library above."); return; }
         const auto eligibility = item->data(0, Qt::UserRole + 1).toJsonObject().value("training_eligibility").toObject();
         QString details = QString("Dataset: %1 · %2 entries · %3 train / validation\nPlanned training: %4 epochs × %5 steps = %6 optimizer updates.")
@@ -1121,6 +1258,7 @@ private:
     }
 
     void generateDataset() {
+        if (!datasetMode_) { openApp("datasets", "import"); return; }
         if (sources_->topLevelItemCount() == 0) { QMessageBox::information(this, "Add photos", "Add spatial HEIC photos before generating a dataset."); return; }
         const QString name = datasetName_->text().trimmed();
         if (!validName(name)) { QMessageBox::information(this, "Dataset name", "Use a folder name without path separators."); return; }
@@ -1150,10 +1288,12 @@ private:
              << "--grouping" << (useGroups_->isChecked() ? (verifiedScenes_->isChecked() ? "scene" : "capture") : "none");
         if (anchor_->isChecked()) args << "--metric-anchor" << "depthpro";
         if (includeDisplayTeacher_->isChecked()) args << "--include-display-teacher";
-        refreshAfter_ = true; startJob("Generate dataset", args);
+        args << "--workers" << QString::number(workerCount()); refreshAfter_ = true; startJob("Generate dataset", args);
     }
 
     void trainDataset() {
+        if (datasetMode_) { openApp("trainer", "train", selectedPath(datasets_)); return; }
+        if (projectOperations_.value("datasets").toString() == "cleanup-dataset") { statusBar()->showMessage("Finish dataset cleanup in Dataset Studio before training."); return; }
         const QString dataset = selectedPath(datasets_); const QString name = runName_->text().trimmed();
         if (dataset.isEmpty()) { QMessageBox::information(this, "Choose dataset", "Select a dataset from the library above."); return; }
         if (dataset == reviewedDataset_) {
@@ -1172,7 +1312,7 @@ private:
         refreshAfter_ = true;
         QStringList args{"train", dataset, "--checkpoint", checkpoint, "--raft-root", raftRoot_->text(), "--raft-model", raftModel_->text(),
             "--epochs", QString::number(epochs_->value()), "--steps", QString::number(steps_->value()), "--patch-size", QString::number(patch_->value()),
-            "--iterations", QString::number(iterations_->value()), "--scope", scope_->currentData().toString(), "--device", trainDevice_->currentText(), "--mode", trainingMode_->currentData().toString()};
+            "--iterations", QString::number(iterations_->value()), "--scope", scope_->currentData().toString(), "--device", trainDevice_->currentText(), "--mode", trainingMode_->currentData().toString(), "--workers", QString::number(workerCount())};
         const QString member = projectSettings_ ? projectSettings_->value("raft/member").toString() : QString(); if (!member.isEmpty()) args << "--raft-model-member" << member;
         startJob("Train RAFT-Stereo", args);
     }
@@ -1199,33 +1339,40 @@ private:
     }
 
     void archiveDataset() {
+        if (!datasetMode_) { openApp("datasets", "prepare", selectedPath(datasets_)); return; }
         if (process_->state() != QProcess::NotRunning) return;
         const QString source = selectedPath(datasets_);
         if (source.isEmpty()) return;
-        const QString datasetsRoot = QFileInfo(QDir(workspace_->text()).filePath("datasets")).canonicalFilePath();
-        if (datasetsRoot.isEmpty() || QFileInfo(source).canonicalPath() != datasetsRoot) {
+        if (!ownsDataset(source)) {
             log_->appendPlainText("Only datasets directly inside this workspace can be archived."); return;
         }
-        const QString archiveRoot = QDir(workspace_->text()).filePath("archived");
-        const QString destination = QDir(archiveRoot).filePath("dataset-" + QFileInfo(source).fileName() + "-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss-zzz"));
-        if (!QDir().mkpath(archiveRoot) || !QDir().rename(source, destination)) {
-            log_->appendPlainText("Could not archive dataset; its files remain at " + source); return;
-        }
-        log_->appendPlainText("Dataset archived without deleting files: " + destination);
-        if (source == reviewedDataset_) {
-            reviewedDataset_.clear(); reviewPreviews_.reset();
-            QSignalBlocker samplesBlocker(reviewSamples_), labelBlocker(reviewLabel_);
-            reviewSamples_->clear(); reviewLabel_->clear();
-            rgbPreview_->reset("Dataset archived."); depthPreview_->reset("Select another dataset to review.");
-            previewStats_->clear(); reviewPath_->setText("Dataset archived to " + destination); updateReviewCount();
-        }
-        refreshLibrary();
+        refreshAfter_ = true; startJob("Archive dataset", {"archive-dataset", source, "--workspace", workspace_->text()});
+    }
+
+    void clearUnavailableReview(const QString &path, const QString &message) {
+        if (path.isEmpty() || path != reviewedDataset_) return;
+        pendingPreviewArgs_.clear(); previewKind_ = "discarded"; previewProcess_->kill();
+        reviewedDataset_.clear(); requestedReviewPath_.clear(); reviewPreviews_.reset(); reviewGenerating_ = false;
+        { QSignalBlocker blocker(reviewSamples_); reviewSamples_->clear(); }
+        { QSignalBlocker blocker(reviewLabel_); reviewLabel_->clear(); }
+        rgbPreview_->reset(message); depthPreview_->reset("Select another dataset to review.");
+        previewStats_->clear(); reviewPath_->setText(message); updateReviewCount();
     }
 
     void startJob(const QString &label, const QStringList &arguments) {
+        const QString operation = arguments.value(0);
+        const bool mutatesDataset = QStringList{"dataset", "compose-datasets", "compact-dataset", "curate-dataset", "import-hf", "cleanup-dataset", "archive-dataset"}.contains(operation);
+        if ((!datasetMode_ && mutatesDataset) || (datasetMode_ && QStringList{"train", "export", "cleanup-run"}.contains(operation))) {
+            openApp(mutatesDataset ? "datasets" : "trainer", mutatesDataset ? "prepare" : "train", selectedPath(datasets_));
+            groupsFile_.reset(); teachersFile_.reset(); refreshAfter_ = false; return;
+        }
+        if (operation == "cleanup-dataset" && !projectOperations_.value("trainer").toString().isEmpty()) {
+            statusBar()->showMessage("Finish or cancel model training in Trainer before removing a dataset."); refreshAfter_ = false; return;
+        }
         if (process_->state() != QProcess::NotRunning) { statusBar()->showMessage("Finish or cancel the current background task first; photo review remains available."); return; }
         if (!QFileInfo::exists(scriptPath())) { log_->appendPlainText("RAFT Studio script is missing: " + scriptPath()); groupsFile_.reset(); teachersFile_.reset(); refreshAfter_ = false; statusBar()->showMessage("Could not start " + label + "; see the progress log."); return; }
         job_ = label; stdout_.clear(); progressBuffer_.clear(); cancelled_ = false;
+        activeOperation_ = operation;
         if (label == "Scan spatial photos") scanDeliveredPaths_.clear();
         setBusy(true);
         log_->appendPlainText(label + "…");
@@ -1278,6 +1425,7 @@ private:
 
     void setBusy(bool busy) {
         busy_ = busy;
+        if (session_) session_->setBusy(busy && job_ != "Refresh library" ? activeOperation_ : QString());
         workspace_->setEnabled(!busy); chooseWorkspace_->setEnabled(!busy); refresh_->setEnabled(!busy); export_->setEnabled(!busy);
         generate_->setEnabled(!busy); train_->setEnabled(!busy); importHf_->setEnabled(!busy);
         train_->setText(busy && job_ == "Train RAFT-Stereo" ? "Training model…" : "Start model training");
@@ -1295,6 +1443,7 @@ private:
             progress_->setTextVisible(true); progress_->setFormat("%v / %m updates");
         } else { progress_->setTextVisible(false); progress_->setRange(0, busy ? 0 : 1); progress_->setValue(0); }
         updateTrainingSelection();
+        updateCleanupActions();
         statusBar()->showMessage(busy ? job_ : "Ready");
     }
 
@@ -1334,7 +1483,8 @@ private:
                 unsavedExclusions |= hasUnsavedReviewExclusions(item->data(0, Qt::UserRole).toString());
         }
         QString reason;
-        if (busy_) reason = job_ == "Create training set" ? "Preparing the training set using existing array storage. Checking full-quality arrays may take several minutes. Use Cancel current task to stop." : job_ + " is running. Finish or cancel it before creating a training set.";
+        if (!datasetMode_) reason = "Open Dataset Studio to prepare or manage training datasets.";
+        else if (busy_) reason = job_ == "Create training set" ? "Preparing the training set using existing array storage. Checking full-quality arrays may take several minutes. Use Cancel current task to stop." : job_ + " is running. Finish or cancel it before creating a training set.";
         else if (!collectionSources_->topLevelItemCount()) reason = "Import or generate a dataset first; it will appear here and can be used for training.";
         else if (!training) reason = "Tick a dataset in the Use for training column. One dataset is enough; validation photos are held out automatically.";
         else if (!entries) reason = "The selected training datasets have no teacher entries. Finish generating or import a complete dataset first.";
@@ -1354,6 +1504,7 @@ private:
         if (!progressBuffer_.trimmed().isEmpty()) { log_->appendPlainText(QString::fromUtf8(progressBuffer_).trimmed()); progressBuffer_.clear(); }
         setBusy(false); groupsFile_.reset(); teachersFile_.reset();
         if (cancelled_) {
+            if (job_ == "Create training set") continueToTrainer_ = false;
             if (job_ == "Generate dataset") stopGenerationStreaming("Generation cancelled. Generate a new dataset before saving a reviewed copy.");
             if (job_ == "Train RAFT-Stereo") trainingStatus_->setText("Model training cancelled. The dataset is unchanged; this run did not finish.");
             streamingTimer_->stop(); streamingDataset_.clear();
@@ -1364,6 +1515,7 @@ private:
         }
         QJsonParseError error; const QJsonDocument doc = QJsonDocument::fromJson(stdout_.trimmed(), &error);
         if (status != QProcess::NormalExit || code != 0 || !doc.isObject()) {
+            if (job_ == "Create training set") continueToTrainer_ = false;
             log_->appendPlainText(job_ + " failed (exit " + QString::number(code) + ").");
             statusBar()->showMessage(job_ + " failed; see the progress log. You can adjust the selection and retry.");
             const QString explanation = doc.isObject() ? doc.object().value("error").toString() : QString();
@@ -1406,6 +1558,15 @@ private:
             trainingStatus_->setText("Training set prepared. Click Start model training to run epochs and save a model checkpoint.");
             for (const auto &warning : result.value("warnings").toArray()) log_->appendPlainText(warning.toString());
         }
+        else if (job_ == "Archive dataset") {
+            const QString destination = result.value("archived_dataset").toString();
+            clearUnavailableReview(result.value("source_dataset").toString(), "Dataset archived to " + destination);
+            log_->appendPlainText("Dataset archived without deleting files: " + destination);
+        }
+        else if (job_ == "Remove generated dataset") {
+            clearUnavailableReview(result.value("cleaned_dataset").toString(), "Generated dataset removed. Original photos and trained models retained.");
+            log_->appendPlainText(QString("Removed %1 generated files (%2 MiB logical size). Shared storage may remain in other datasets.").arg(result.value("removed_files").toInt()).arg(result.value("removed_logical_bytes").toDouble() / (1024*1024), 0, 'f', 1));
+        }
         else if (job_ == "Generate dataset" || job_ == "Save reviewed dataset" || job_ == "Import Hugging Face dataset" || job_ == "Compact dataset") {
             pendingReview_ = result.value("dataset_path").toString();
             log_->appendPlainText("Dataset saved: " + pendingReview_ + "\n" + QString::fromUtf8(QJsonDocument(result.value("summary").toObject()).toJson(QJsonDocument::Compact)));
@@ -1435,7 +1596,11 @@ private:
             const QString path = pendingReview_; pendingReview_.clear();
             QTimer::singleShot(0, this, [this, path] { reviewDataset(path); });
         }
-        else if (job_ == "Refresh library" && !pendingTrainingPath_.isEmpty()) { pendingTrainingPath_.clear(); tabs_->setCurrentIndex(4); }
+        else if (job_ == "Refresh library" && !pendingTrainingPath_.isEmpty()) {
+            const QString path = pendingTrainingPath_; pendingTrainingPath_.clear();
+            if (datasetMode_ && continueToTrainer_) { continueToTrainer_ = false; openApp("trainer", "train", path); }
+            else if (!datasetMode_) tabs_->setCurrentIndex(4);
+        }
     }
 
     void populateLibrary(const QJsonObject &result) {
@@ -1484,6 +1649,65 @@ private:
         updateTrainingSelection();
     }
 
+    void importProjectDatasets() {
+        if (!datasetMode_) { openApp("datasets", "prepare"); return; }
+        QDialog dialog(this); dialog.setWindowTitle("Link datasets from another project"); dialog.resize(640, 430); auto *layout = new QVBoxLayout(&dialog);
+        auto *hint = new QLabel("Choose a source project, then select datasets to reference in this project. Their files stay in the source location.", &dialog); hint->setWordWrap(true); layout->addWidget(hint);
+        auto *row = new QHBoxLayout; auto *source = new QComboBox(&dialog); source->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); source->setMinimumContentsLength(20); row->addWidget(source, 1); auto *browse = new QPushButton("Other project…", &dialog); row->addWidget(browse); layout->addLayout(row);
+        auto *datasets = new QListWidget(&dialog); layout->addWidget(datasets, 1); auto *notice = new QLabel(&dialog); notice->setWordWrap(true); layout->addWidget(notice);
+        auto populate = [&] {
+            datasets->clear(); for (const QString &path : projectDatasets(source->currentData().toString())) {
+                auto *item = new QListWidgetItem(QFileInfo(path).fileName(), datasets); item->setToolTip(path); item->setData(Qt::UserRole, path); item->setFlags(item->flags() | Qt::ItemIsUserCheckable); item->setCheckState(Qt::Checked);
+                if (readJson(QDir(path).filePath("dataset.json")).value("schema").toString() != "ipde-depth-dataset-v1") { item->setText(item->text() + " (unavailable)"); item->setCheckState(Qt::Unchecked); item->setFlags(item->flags() & ~Qt::ItemIsEnabled); }
+            }
+            notice->setText(datasets->count() ? "Linked datasets are available in this project's Dataset Manager and Trainer." : "This project does not contain any datasets yet.");
+        };
+        connect(source, &QComboBox::currentIndexChanged, &dialog, populate);
+        QSettings recent("IPDE", "Studio");
+        for (const QString &path : recent.value("projects").toStringList()) if (path != projectRoot_)
+            source->addItem(QSettings(QDir(path).filePath("project.ini"), QSettings::IniFormat).value("name", QFileInfo(path).fileName()).toString(), path);
+        connect(browse, &QPushButton::clicked, &dialog, [&] {
+            const QString path = QFileDialog::getExistingDirectory(&dialog, "Choose source project", QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)); if (path.isEmpty()) return;
+            const QString canonical = QFileInfo(path).canonicalFilePath(); if (canonical == projectRoot_) { notice->setText("Choose a different project; this project's own datasets are already available."); return; }
+            int index = source->findData(canonical); if (index < 0) { source->addItem(QFileInfo(path).fileName(), canonical); index = source->count()-1; } source->setCurrentIndex(index); populate();
+        });
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog); buttons->button(QDialogButtonBox::Ok)->setText("Link selected datasets"); layout->addWidget(buttons);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+            QStringList paths; for (int i=0; i<datasets->count(); ++i) if (datasets->item(i)->checkState() == Qt::Checked) paths << datasets->item(i)->data(Qt::UserRole).toString();
+            if (paths.isEmpty()) { notice->setText("Select at least one available dataset."); return; }
+            addDatasetLinks(paths); dialog.accept();
+        });
+        populate(); dialog.exec();
+    }
+    void addDatasetLinks(const QStringList &paths) {
+        if (!datasetMode_) { openApp("datasets", "prepare"); return; }
+        const QString project = projectRoot_; if (project.isEmpty() || !projectSettings_) return;
+        QStringList links = linkedDatasets(project); const QStringList existing = projectDatasets(project); int added = 0; QStringList invalid;
+        for (const QString &path : paths) {
+            const QString canonical = QFileInfo(path).canonicalFilePath();
+            if (canonical.isEmpty() || readJson(QDir(canonical).filePath("dataset.json")).value("schema").toString() != "ipde-depth-dataset-v1") { invalid << path; continue; }
+            if (!existing.contains(canonical) && !links.contains(canonical)) { links << canonical; ++added; }
+        }
+        QSettings settings(QDir(project).filePath("project.ini"), QSettings::IniFormat); settings.setValue("dataset_links", links); settings.sync();
+        statusBar()->showMessage(settings.status() != QSettings::NoError ? "Could not save dataset links." : QString("Linked %1 datasets without copying files.%2").arg(added).arg(invalid.isEmpty() ? QString() : " Unavailable folders: " + invalid.join(", ")));
+        refreshLibrary();
+    }
+    void editDatasetLinks() {
+        if (!datasetMode_) { openApp("datasets", "prepare"); return; }
+        const QString project = projectRoot_; if (project.isEmpty() || !projectSettings_) return;
+        QDialog dialog(this); dialog.setWindowTitle("Dataset links"); dialog.resize(650, 330); auto *layout = new QVBoxLayout(&dialog);
+        auto *hint = new QLabel("Uncheck a link to remove it from this project. The original dataset files remain in place.", &dialog); hint->setWordWrap(true); layout->addWidget(hint);
+        auto *list = new QListWidget(&dialog); layout->addWidget(list, 1);
+        for (const QString &path : linkedDatasets(project)) { auto *item = new QListWidgetItem(path, list); item->setData(Qt::UserRole, path); item->setCheckState(Qt::Checked); }
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Save, &dialog); layout->addWidget(buttons);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+            QStringList links; for (int i=0; i<list->count(); ++i) if (list->item(i)->checkState() == Qt::Checked) links << list->item(i)->data(Qt::UserRole).toString();
+            QSettings settings(QDir(project).filePath("project.ini"), QSettings::IniFormat); settings.setValue("dataset_links", links); settings.sync(); refreshLibrary(); dialog.accept();
+        }); dialog.exec();
+    }
+
     void showFolder(const QString &path) {
         if (!path.isEmpty()) QDesktopServices::openUrl(QUrl::fromLocalFile(path));
     }
@@ -1491,6 +1715,10 @@ private:
     QSettings settings_;
     std::unique_ptr<QSettings> projectSettings_;
     QString projectRoot_; bool datasetMode_ = false;
+    IPDE::ProjectSession *session_ = nullptr;
+    QJsonObject projectOperations_, lastAppRequest_;
+    QString activeOperation_;
+    bool continueToTrainer_ = false;
     QLineEdit *workspace_ = nullptr, *datasetName_ = nullptr, *runName_ = nullptr;
     QLineEdit *teacherPath_ = nullptr, *teacherSource_ = nullptr, *raftRoot_ = nullptr, *raftModel_ = nullptr;
     QLineEdit *reviewedName_ = nullptr, *category_ = nullptr, *reviewFilter_ = nullptr, *collectionName_ = nullptr;
@@ -1501,7 +1729,7 @@ private:
     QComboBox *teacher_ = nullptr, *teacherDevice_ = nullptr, *trainDevice_ = nullptr, *scope_ = nullptr, *trainingMode_ = nullptr;
     QComboBox *reviewLabel_ = nullptr, *goal_ = nullptr, *reviewCamera_ = nullptr, *visualView_ = nullptr, *splitMode_ = nullptr, *groupingPolicy_ = nullptr;
     QLabel *scaleHelp_ = nullptr, *reviewPath_ = nullptr, *reviewCount_ = nullptr, *previewStats_ = nullptr, *goalHelp_ = nullptr, *splitHelp_ = nullptr, *collectionStatus_ = nullptr;
-    QLabel *trainingStatus_ = nullptr, *trainingDataset_ = nullptr;
+    QLabel *trainingStatus_ = nullptr, *trainingDataset_ = nullptr, *sourceTitle_ = nullptr;
     QList<QLabel *> depthTitles_;
     DepthPreview *rgbPreview_ = nullptr, *depthPreview_ = nullptr;
     QList<DepthPreview *> depthPreviews_;
@@ -1515,6 +1743,7 @@ private:
     QTabWidget *tabs_ = nullptr; QPlainTextEdit *log_ = nullptr; QProgressBar *progress_ = nullptr;
     QPushButton *chooseWorkspace_ = nullptr, *refresh_ = nullptr, *generate_ = nullptr, *train_ = nullptr, *cancel_ = nullptr, *export_ = nullptr;
     QPushButton *saveReviewed_ = nullptr, *compose_ = nullptr, *importHf_ = nullptr, *compareBaseline_ = nullptr;
+    QPushButton *cleanupDataset_ = nullptr, *cleanupRun_ = nullptr;
     QProcess *process_ = nullptr; QByteArray stdout_; QString job_, exportDestination_;
     QString requestedReviewPath_, reviewedDataset_, pendingReview_, pendingTrainingPath_;
     QProcess *previewProcess_ = nullptr; QByteArray previewStdout_, progressBuffer_; QString previewKind_, pendingPreviewKind_, streamingDataset_, differencePath_;
@@ -1530,11 +1759,18 @@ private:
 int main(int argc, char **argv) {
     QApplication application(argc, argv);
     const QStringList args = application.arguments(); const int mode = args.indexOf("--mode");
+    std::unique_ptr<QTemporaryDir> smokeSettings;
+    if (args.contains("--smoke-test")) {
+        smokeSettings = std::make_unique<QTemporaryDir>();
+        if (!smokeSettings->isValid()) return 2;
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, smokeSettings->path());
+    }
     const bool datasetMode = mode >= 0 ? args.value(mode + 1) == "datasets" : bool(IPDE_DATASET_STUDIO);
     application.setApplicationName(datasetMode ? "Dataset Studio" : "RAFT Studio"); application.setOrganizationName("IPDE");
     IPDE::ProjectSession session(datasetMode ? "datasets" : "trainer", &application);
     if (!session.start()) return 2;
-    TrainerWindow window; window.show();
+    TrainerWindow window; window.attachSession(&session); window.show();
     const auto icon = IPDE::appIcon(datasetMode ? "datasets" : "trainer");
     application.setWindowIcon(icon); window.setWindowIcon(icon);
     session.setChangedHandler(&window, [&window] { QTimer::singleShot(0, &window, [&window] { window.projectChanged(); }); });
@@ -1546,6 +1782,7 @@ int main(int argc, char **argv) {
         auto *capture = new QTimer(&application); capture->setInterval(1000);
         QObject::connect(capture, &QTimer::timeout, &window, [&application, &window, args, screenshot] {
             if (window.taskRunning()) return;
+            if (args.contains("--smoke-test")) window.resize(1440, 1000);
             const bool saved = window.grab().save(args.at(screenshot + 1));
             application.exit(saved ? 0 : 2);
         });

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QCoreApplication>
+#include <QApplication>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QElapsedTimer>
@@ -13,6 +14,7 @@
 #include <QObject>
 #include <QPointer>
 #include <QTimer>
+#include <QWindow>
 #include <functional>
 #include <memory>
 
@@ -43,10 +45,27 @@ public:
     void setDisconnectedHandler(QObject *context, std::function<void()> callback) {
         disconnected_ = {context, std::move(callback)};
     }
+    void setActivationHandler(QObject *context, std::function<void(const QJsonObject &)> callback) {
+        activationContext_ = context; activation_ = std::move(callback);
+    }
+    void setStateHandler(QObject *context, std::function<void(const QJsonObject &)> callback) {
+        stateContext_ = context; state_ = std::move(callback);
+    }
+    void setBusy(const QString &operation) {
+        if (stopping_ || !started_) return;
+        socket_.write(QJsonDocument(QJsonObject{{"command", "busy"}, {"operation", operation}}).toJson(QJsonDocument::Compact) + '\n'); socket_.flush();
+    }
+    bool openApp(const QString &role, const QJsonObject &request = {}) {
+        if (stopping_ || !started_ || socket_.state() != QLocalSocket::ConnectedState) return false;
+        QJsonObject message = request;
+        message.insert("command", "open_app"); message.insert("role", role);
+        socket_.write(QJsonDocument(message).toJson(QJsonDocument::Compact) + '\n');
+        socket_.flush(); return true;
+    }
     void shutdown() {
         if (stopping_) return;
         stopping_ = true;
-        changed_ = {}; disconnected_ = {};
+        changed_ = {}; disconnected_ = {}; activationContext_.clear(); activation_ = {}; stateContext_.clear(); state_ = {};
         // QLocalSocket::~QLocalSocket can synchronously emit disconnected.
         // Disconnect before any member or the captured window is destroyed.
         socket_.disconnect(this);
@@ -97,6 +116,28 @@ public:
                 const auto event = QJsonDocument::fromJson(buffer_.left(end)).object();
                 buffer_.remove(0, end + 1);
                 if (event.value("event") == "project_changed") queue(changed_);
+                if (event.value("event") == "activate") {
+                    const QPointer<QObject> context = activationContext_;
+                    const auto callback = activation_;
+                    if (context && callback) QTimer::singleShot(0, context, [guard, context, callback, event] {
+                        if (guard && !guard->stopping_ && context) callback(event);
+                    });
+                    else QTimer::singleShot(0, this, [guard] {
+                        if (!guard || guard->stopping_) return;
+                        for (auto *window : QApplication::topLevelWidgets()) {
+                            if (window->windowType() != Qt::Window) continue;
+                            window->showNormal(); window->raise(); window->activateWindow();
+                            if (window->windowHandle()) window->windowHandle()->requestActivate();
+                            break;
+                        }
+                    });
+                }
+                if (event.value("event") == "project_busy") {
+                    const QPointer<QObject> context = stateContext_; const auto callback = state_;
+                    if (context && callback) QTimer::singleShot(0, context, [guard, context, callback, event] {
+                        if (guard && !guard->stopping_ && context) callback(event);
+                    });
+                }
                 if (!guard || stopping_) return;
             }
         };
@@ -130,6 +171,10 @@ private:
     QByteArray buffer_;
     std::unique_ptr<QLockFile> lock_;
     Handler changed_, disconnected_;
+    QPointer<QObject> activationContext_;
+    std::function<void(const QJsonObject &)> activation_;
+    QPointer<QObject> stateContext_;
+    std::function<void(const QJsonObject &)> state_;
     QString error_;
     bool started_ = false, stopping_ = false;
 };

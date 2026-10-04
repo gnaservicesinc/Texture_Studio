@@ -33,9 +33,11 @@
 #include <QSet>
 #include <QSignalBlocker>
 #include <QSplitter>
+#include <QSpinBox>
 #include <QStandardPaths>
 #include <QSystemTrayIcon>
 #include <QTimer>
+#include <QThread>
 #include <QUrl>
 #include <QUuid>
 #include <QVBoxLayout>
@@ -103,6 +105,7 @@ struct Hub {
     QTimer *debounce = nullptr;
     QMap<QString, QLocalSocket *> clients;
     QMap<QString, QProcess *> processes;
+    QMap<QString, QJsonObject> pendingActivations;
 };
 struct ProjectStats {
     int datasets = 0, linked = 0, readyDatasets = 0, samples = 0, models = 0;
@@ -153,13 +156,15 @@ public:
         }
         appButtons_["extractor"]->setToolTip("Extract original auxiliary arrays or estimate stereo products. NPY and lossless TIFF retain numerical precision; display previews are separate.");
         appButtons_["datasets"]->setToolTip("Build and review labels, organize independent scenes, and reuse linked datasets without copying their files.");
-        appButtons_["trainer"]->setToolTip("Assemble curated datasets, train a project model, and compare it with the generic baseline before choosing it.");
+        appButtons_["trainer"]->setToolTip("Train from prepared datasets, manage model runs, and compare with the generic baseline before choosing a model.");
         appButtons_["photo"]->setToolTip("Preview portrait depth and person mattes, select mask layers, and export image cutouts and depth products.");
         appButtons_["raw"]->setToolTip("Inspect decoded sensor data, precision and metadata, then preserve arrays for a depth workflow.");
         projectLayout->addLayout(apps);
-        auto *links = new QHBoxLayout; auto *linkProject = new QPushButton("Link datasets from project…", projectPane_); auto *linkDataset = new QPushButton("Link dataset…", projectPane_); auto *manageLinks = new QPushButton("Manage links…", projectPane_);
-        links->addWidget(linkProject); links->addWidget(linkDataset); links->addWidget(manageLinks); projectLayout->addLayout(links);
-        auto *linkHint = new QLabel("Links reuse the original files. Keep their source folder available; review and curated outputs are saved in this project.", projectPane_); linkHint->setWordWrap(true); projectLayout->addWidget(linkHint);
+        auto *manageDatasets = new QPushButton("Manage datasets and links in Dataset Studio", projectPane_); projectLayout->addWidget(manageDatasets);
+        auto *performance = new QFormLayout;
+        workers_ = new QSpinBox(projectPane_); workers_->setRange(0, 1024); workers_->setSpecialValueText(QString("Automatic (%1 cores)").arg(qMax(1, QThread::idealThreadCount())));
+        workers_->setToolTip("Parallel file import, array preparation and run initialization. Zero uses available processor cores. Teacher inference and model training use the selected device, including MPS on Apple Silicon.");
+        performance->addRow("File processing threads", workers_); projectLayout->addLayout(performance);
         projectLayout->addStretch(); areaLayout->addWidget(projectPane_, 1); projectPane_->hide();
         splitter->setStretchFactor(1, 1); splitter->setSizes({270, 730}); layout->addWidget(splitter, 1);
         status_ = new QLabel("Ready", central); status_->setWordWrap(true); layout->addWidget(status_);
@@ -177,12 +182,12 @@ public:
         });
         connect(allTools_, &QCheckBox::toggled, this, [this] { refreshProject(); });
         connect(next_, &QPushButton::clicked, this, [this] { launch(nextRole_); });
-        connect(linkProject, &QPushButton::clicked, this, [this] { importProjectDatasets(); });
-        connect(linkDataset, &QPushButton::clicked, this, [this] {
-            const QString path = QFileDialog::getExistingDirectory(this, "Link an existing dataset folder containing dataset.json", documentsFolder());
-            if (!path.isEmpty()) addDatasetLinks({path});
+        connect(manageDatasets, &QPushButton::clicked, this, [this] { launch("datasets"); });
+        connect(workers_, &QSpinBox::valueChanged, this, [this](int value) {
+            if (loading_ || selectedProject().isEmpty()) return;
+            QSettings settings(QDir(selectedProject()).filePath("project.ini"), QSettings::IniFormat); settings.setValue("performance/workers", value); settings.sync();
+            if (settings.status() != QSettings::NoError) status_->setText("Could not save the thread override. Check folder permissions.");
         });
-        connect(manageLinks, &QPushButton::clicked, this, [this] { editDatasetLinks(); });
         setupTray();
         QSettings recent("IPDE", "Studio");
         if (!QCoreApplication::arguments().contains("--smoke-test"))
@@ -208,9 +213,16 @@ protected:
         if (hasActiveApps()) { event->ignore(); status_->setText("Close the project apps before closing Studio so their shared session remains available."); }
         else event->accept();
     }
+#ifdef IPDE_STUDIO_REGRESSION
+public:
+#else
 private:
+#endif
     bool hasActiveApps() const {
-        for (const auto &entry : hubs_) for (auto *process : entry.second->processes) if (process->state() != QProcess::NotRunning) return true;
+        for (const auto &entry : hubs_) {
+            if (!entry.second->clients.isEmpty()) return true;
+            for (auto *process : entry.second->processes) if (process->state() != QProcess::NotRunning) return true;
+        }
         return false;
     }
     QString selectedProject() const { return projects_->currentItem() ? projects_->currentItem()->data(Qt::UserRole).toString() : QString(); }
@@ -267,7 +279,7 @@ private:
     void loadProject() {
         const QString project = selectedProject(); projectPane_->setVisible(!project.isEmpty()); empty_->setVisible(project.isEmpty()); if (project.isEmpty()) return;
         loading_ = true; QSettings settings(QDir(project).filePath("project.ini"), QSettings::IniFormat);
-        const int index = goal_->findData(settings.value("goal", "effect/map").toString()); goal_->setCurrentIndex(qMax(0, index)); loading_ = false;
+        const int index = goal_->findData(settings.value("goal", "effect/map").toString()); goal_->setCurrentIndex(qMax(0, index)); workers_->setValue(settings.value("performance/workers", 0).toInt()); loading_ = false;
         projectTitle_->setText(settings.value("name", QFileInfo(project).fileName()).toString()); setWindowTitle("IPDE Studio — " + projectTitle_->text());
         hubFor(project); persistRecent(); refreshProject(); updateStatus();
     }
@@ -313,7 +325,7 @@ private:
         if (goal == "effect/map") {
             if (stats.selectedCustomModel) { nextRole_ = "extractor"; next_->setText("Extract displacement with your selected model"); guidance_->setText("Your project has a selected trained checkpoint. Extract depth/displacement maps now, and return to Datasets or Trainer to add captures, refine labels or compare a new model. Keep a generic baseline comparison for unfamiliar scenes."); }
             else if (stats.models) { nextRole_ = "trainer"; next_->setText("Compare and choose a trained model"); guidance_->setText("Training has produced a checkpoint. Compare it with the generic RAFT baseline on held-out captures, then explicitly choose it for this project. You can also extract using the generic model now."); }
-            else if (stats.readyDatasets) { nextRole_ = "trainer"; next_->setText("Review, assemble and train"); guidance_->setText("You have datasets to work with. Review their depth labels, keep independent scenes together, then assemble a training set and fine-tune RAFT. A generic RAFT model can still produce maps while you build your custom model."); }
+            else if (stats.readyDatasets) { nextRole_ = "trainer"; next_->setText("Train from a prepared dataset"); guidance_->setText("Review labels and prepare validation groups in Dataset Studio, then train and compare a model in Trainer. Existing datasets with a suitable split can be trained directly. A generic RAFT model remains available for extraction."); }
             else if (stats.datasets) { nextRole_ = "datasets"; next_->setText("Finish and review your datasets"); guidance_->setText("Your datasets are empty or still being generated. Open Datasets to finish generation and review labels before assembly or training. Extract maps is available with a generic RAFT model in the meantime."); }
             else { nextRole_ = "datasets"; next_->setText("Build your first dataset"); guidance_->setText("Start with a varied collection of spatial photos, or link datasets from another project below. Generate and review teacher depth, then train and compare a custom RAFT model. Extract maps is available now with a generic RAFT model."); }
         } else if (goal == "depth-estimation") {
@@ -337,59 +349,6 @@ private:
         const auto owner = hubs_.find(selectedProject()); const bool available = owner != hubs_.end(); goal_->setEnabled(available); next_->setEnabled(available);
         for (auto *button : appButtons_) button->setEnabled(available);
         updateTray();
-    }
-    void importProjectDatasets() {
-        QDialog dialog(this); dialog.setWindowTitle("Link datasets from another project"); dialog.resize(640, 430); auto *layout = new QVBoxLayout(&dialog);
-        auto *hint = new QLabel("Choose a source project, then select datasets to reference in this project. Their files stay in the source location.", &dialog); hint->setWordWrap(true); layout->addWidget(hint);
-        auto *row = new QHBoxLayout; auto *source = new QComboBox(&dialog); source->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon); source->setMinimumContentsLength(20); row->addWidget(source, 1); auto *browse = new QPushButton("Other project…", &dialog); row->addWidget(browse); layout->addLayout(row);
-        auto *datasets = new QListWidget(&dialog); layout->addWidget(datasets, 1); auto *notice = new QLabel(&dialog); notice->setWordWrap(true); layout->addWidget(notice);
-        auto populate = [&] {
-            datasets->clear(); for (const QString &path : projectDatasets(source->currentData().toString())) {
-                auto *item = new QListWidgetItem(QFileInfo(path).fileName(), datasets); item->setToolTip(path); item->setData(Qt::UserRole, path); item->setFlags(item->flags() | Qt::ItemIsUserCheckable); item->setCheckState(Qt::Checked);
-                if (readJson(QDir(path).filePath("dataset.json")).value("schema").toString() != "ipde-depth-dataset-v1") { item->setText(item->text() + " (unavailable)"); item->setCheckState(Qt::Unchecked); item->setFlags(item->flags() & ~Qt::ItemIsEnabled); }
-            }
-            notice->setText(datasets->count() ? "Linked datasets are available in this project's Dataset Manager and Trainer." : "This project does not contain any datasets yet.");
-        };
-        connect(source, &QComboBox::currentIndexChanged, &dialog, populate);
-        for (int i=0; i<projects_->count(); ++i) { auto *item = projects_->item(i); if (item->data(Qt::UserRole).toString() != selectedProject()) source->addItem(item->text(), item->data(Qt::UserRole)); }
-        connect(browse, &QPushButton::clicked, &dialog, [&] {
-            const QString path = QFileDialog::getExistingDirectory(&dialog, "Choose source project", documentsFolder()); if (path.isEmpty()) return;
-            const QString canonical = QFileInfo(path).canonicalFilePath(); if (canonical == selectedProject()) { notice->setText("Choose a different project; this project's own datasets are already available."); return; }
-            int index = source->findData(canonical); if (index < 0) { source->addItem(QFileInfo(path).fileName(), canonical); index = source->count()-1; } source->setCurrentIndex(index); populate();
-        });
-        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Ok, &dialog); buttons->button(QDialogButtonBox::Ok)->setText("Link selected datasets"); layout->addWidget(buttons);
-        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-        connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
-            QStringList paths; for (int i=0; i<datasets->count(); ++i) if (datasets->item(i)->checkState() == Qt::Checked) paths << datasets->item(i)->data(Qt::UserRole).toString();
-            if (paths.isEmpty()) { notice->setText("Select at least one available dataset."); return; }
-            addDatasetLinks(paths); dialog.accept();
-        });
-        populate(); dialog.exec();
-    }
-    void addDatasetLinks(const QStringList &paths) {
-        const QString project = selectedProject(); if (project.isEmpty() || !hubFor(project)) return;
-        QStringList links = linkedDatasets(project); const QStringList existing = projectDatasets(project); int added = 0; QStringList invalid;
-        for (const QString &path : paths) {
-            const QString canonical = QFileInfo(path).canonicalFilePath();
-            if (canonical.isEmpty() || readJson(QDir(canonical).filePath("dataset.json")).value("schema").toString() != "ipde-depth-dataset-v1") { invalid << path; continue; }
-            if (!existing.contains(canonical) && !links.contains(canonical)) { links << canonical; ++added; }
-        }
-        QSettings settings(QDir(project).filePath("project.ini"), QSettings::IniFormat); settings.setValue("dataset_links", links); settings.sync();
-        status_->setText(settings.status() != QSettings::NoError ? "Could not save dataset links." : QString("Linked %1 datasets without copying files.%2").arg(added).arg(invalid.isEmpty() ? QString() : " Unavailable folders: " + invalid.join(", ")));
-        refreshProject(); watchProject(hubs_[project].get());
-    }
-    void editDatasetLinks() {
-        const QString project = selectedProject(); if (project.isEmpty() || !hubFor(project)) return;
-        QDialog dialog(this); dialog.setWindowTitle("Dataset links"); dialog.resize(650, 330); auto *layout = new QVBoxLayout(&dialog);
-        auto *hint = new QLabel("Uncheck a link to remove it from this project. The original dataset files remain in place.", &dialog); hint->setWordWrap(true); layout->addWidget(hint);
-        auto *list = new QListWidget(&dialog); layout->addWidget(list, 1);
-        for (const QString &path : linkedDatasets(project)) { auto *item = new QListWidgetItem(path, list); item->setData(Qt::UserRole, path); item->setCheckState(Qt::Checked); }
-        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel | QDialogButtonBox::Save, &dialog); layout->addWidget(buttons);
-        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-        connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
-            QStringList links; for (int i=0; i<list->count(); ++i) if (list->item(i)->checkState() == Qt::Checked) links << list->item(i)->data(Qt::UserRole).toString();
-            QSettings settings(QDir(project).filePath("project.ini"), QSettings::IniFormat); settings.setValue("dataset_links", links); settings.sync(); refreshProject(); dialog.accept();
-        }); dialog.exec();
     }
     void setupTray() {
         if (QCoreApplication::arguments().contains("--smoke-test") || !QSystemTrayIcon::isSystemTrayAvailable()) return;
@@ -437,14 +396,24 @@ private:
                     *buffer += socket->readAll(); if (buffer->size() > 65536) { socket->disconnectFromServer(); return; }
                     while (buffer->contains('\n')) {
                         const int end = buffer->indexOf('\n'); const auto message = QJsonDocument::fromJson(buffer->left(end)).object(); buffer->remove(0, end + 1); const QString role = message.value("role").toString();
+                        const QString registeredRole = socket->property("role").toString();
+                        if (!registeredRole.isEmpty() && pointer->clients.value(registeredRole) == socket) {
+                            if (message.value("command") == "open_app") launchFor(pointer, role, message);
+                            else if (message.value("command") == "busy") {
+                                socket->setProperty("operation", message.value("operation").toString()); broadcastBusy(pointer);
+                            }
+                            continue;
+                        }
                         const bool accepted = message.value("command") == "register" && message.value("token") == pointer->token && QStringList{"extractor", "datasets", "trainer", "photo", "raw"}.contains(role) && !pointer->clients.contains(role);
                         socket->write(QJsonDocument(QJsonObject{{"accepted", accepted}, {"error", accepted ? "" : "An app is already registered, or the project session is invalid."}}).toJson(QJsonDocument::Compact) + '\n'); socket->flush();
                         if (!accepted) { socket->disconnectFromServer(); return; }
                         pointer->clients[role] = socket; socket->setProperty("role", role); updateStatus();
+                        if (pointer->pendingActivations.contains(role)) socket->write(QJsonDocument(pointer->pendingActivations.take(role)).toJson(QJsonDocument::Compact) + '\n');
+                        broadcastBusy(pointer);
                     }
                 });
                 connect(socket, &QLocalSocket::disconnected, this, [this, pointer, socket] {
-                    const QString role = socket->property("role").toString(); if (pointer->clients.value(role) == socket) pointer->clients.remove(role); socket->deleteLater(); updateStatus();
+                    const QString role = socket->property("role").toString(); if (pointer->clients.value(role) == socket) pointer->clients.remove(role); socket->deleteLater(); broadcastBusy(pointer); updateStatus();
                 });
             }
         });
@@ -456,6 +425,15 @@ private:
             if (selectedProject() == pointer->project) loadProject();
         });
         watchProject(pointer); hubs_[project] = std::move(hub); return pointer;
+    }
+    void broadcastBusy(Hub *hub) {
+        QJsonObject operations;
+        for (auto iterator = hub->clients.cbegin(); iterator != hub->clients.cend(); ++iterator) {
+            const QString operation = iterator.value()->property("operation").toString();
+            if (!operation.isEmpty()) operations.insert(iterator.key(), operation);
+        }
+        const auto event = QJsonDocument(QJsonObject{{"event", "project_busy"}, {"operations", operations}}).toJson(QJsonDocument::Compact) + '\n';
+        for (auto *client : hub->clients) { client->write(event); client->flush(); }
     }
     void watchProject(Hub *hub) {
         QStringList paths{hub->project, QDir(hub->project).filePath("project.ini"), QDir(hub->project).filePath("workspace"), QDir(hub->project).filePath("workspace/datasets"), QDir(hub->project).filePath("workspace/runs")};
@@ -476,29 +454,39 @@ private:
     void launch(const QString &role) {
         const QString project = selectedProject(); if (project.isEmpty()) { status_->setText("Create or open a project first."); showStudio(); return; }
         Hub *hub = hubFor(project); if (!hub) { showStudio(); return; }
-        if (hub->clients.contains(role) || (hub->processes.contains(role) && hub->processes[role]->state() != QProcess::NotRunning)) { status_->setText("This app is already running for this project. Select its existing window."); showStudio(); return; }
+        launchFor(hub, role);
+    }
+    void launchFor(Hub *hub, const QString &role, QJsonObject request = {}) {
+        if (!QStringList{"extractor", "datasets", "trainer", "photo", "raw"}.contains(role)) return;
+        request.remove("command"); request.remove("role"); request.insert("event", "activate");
+        if (hub->clients.contains(role)) {
+            hub->clients[role]->write(QJsonDocument(request).toJson(QJsonDocument::Compact) + '\n'); hub->clients[role]->flush(); return;
+        }
+        hub->pendingActivations[role] = request;
+        if (hub->processes.contains(role) && hub->processes[role]->state() != QProcess::NotRunning) return;
+        const QString project = hub->project;
         const QString path = executable(role); if (!QFileInfo::exists(path)) { status_->setText("The app is missing from Studio: " + path); showStudio(); return; }
         auto *process = new QProcess(this); process->setProgram(path); process->setArguments({"--project", project, "--mode", role});
         auto environment = QProcessEnvironment::systemEnvironment(); environment.insert("IPDE_STUDIO_TOKEN", hub->token); process->setProcessEnvironment(environment); hub->processes[role] = process;
         connect(process, &QProcess::readyReadStandardError, this, [this, process] { const QString output = QString::fromUtf8(process->readAllStandardError()).trimmed(); if (!output.isEmpty()) { log_->show(); log_->appendPlainText(output); } });
         connect(process, &QProcess::errorOccurred, this, [this, hub, role, process](QProcess::ProcessError error) {
             status_->setText("App launch failed: " + process->errorString()); showStudio();
-            if (error == QProcess::FailedToStart) { hub->processes.remove(role); process->deleteLater(); }
+            if (error == QProcess::FailedToStart) { hub->processes.remove(role); hub->pendingActivations.remove(role); process->deleteLater(); }
         });
         connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this, hub, role, process](int code, QProcess::ExitStatus exitStatus) {
-            if (hub->processes.value(role) == process) hub->processes.remove(role); process->deleteLater();
+            if (hub->processes.value(role) == process) hub->processes.remove(role); hub->pendingActivations.remove(role); process->deleteLater();
             log_->appendPlainText(role + " closed (" + QString::number(code) + ")."); if (code || exitStatus == QProcess::CrashExit) { log_->show(); showStudio(); }
             updateStatus(); refreshProject();
             if (!isVisible() && !tray_ && !hasActiveApps()) QCoreApplication::quit();
         });
-        process->start(); status_->setText("Opening " + role + " for " + projectTitle_->text() + "…");
+        process->start(); status_->setText("Opening " + role + " for " + QFileInfo(project).fileName() + "…");
     }
     void updateStatus() {
         QStringList active; for (const auto &entry : hubs_) for (const auto &role : entry.second->clients.keys()) active << QFileInfo(entry.first).fileName() + ": " + role;
         if (!selectedProject().isEmpty() && hubs_.find(selectedProject()) == hubs_.end()) return;
         status_->setText(active.isEmpty() ? (tray_ ? "Ready · Closing this window keeps Studio available in the menu bar." : "Ready") : "Open apps — " + active.join(" · "));
     }
-    QListWidget *projects_ = nullptr; QComboBox *goal_ = nullptr; QWidget *projectPane_ = nullptr; QCheckBox *allTools_ = nullptr;
+    QListWidget *projects_ = nullptr; QComboBox *goal_ = nullptr; QWidget *projectPane_ = nullptr; QCheckBox *allTools_ = nullptr; QSpinBox *workers_ = nullptr;
     QLabel *empty_ = nullptr, *projectTitle_ = nullptr, *description_ = nullptr, *summary_ = nullptr, *alerts_ = nullptr, *guidance_ = nullptr, *status_ = nullptr;
     QPushButton *next_ = nullptr; QPlainTextEdit *log_ = nullptr; QGridLayout *appLayout_ = nullptr; QMap<QString, QPushButton *> appButtons_; QString nextRole_;
     QSystemTrayIcon *tray_ = nullptr; QMenu *trayMenu_ = nullptr; bool loading_ = false;

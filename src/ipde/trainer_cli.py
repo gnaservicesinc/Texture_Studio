@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 import json
 import sys
 from pathlib import Path
@@ -118,6 +118,18 @@ def _parser() -> argparse.ArgumentParser:
     export = commands.add_parser("export", help="verify and export a RAFT checkpoint ready to select in IPDE")
     export.add_argument("checkpoint", type=Path)
     export.add_argument("--output", required=True, type=Path, help="new export directory for raft-model.pth and provenance")
+    archive = commands.add_parser("archive-dataset", help="move an owned dataset out of the library without deleting files")
+    archive.add_argument("dataset", type=Path)
+    archive.add_argument("--workspace", required=True, type=Path)
+    for command, label in (("cleanup-dataset", "remove an owned generated dataset, preserving source photos and trained models"),
+                           ("cleanup-run", "remove run intermediates while retaining checkpoints and provenance")):
+        cleanup = commands.add_parser(command, help=label)
+        cleanup.add_argument("dataset" if command == "cleanup-dataset" else "checkpoint", type=Path)
+        cleanup.add_argument("--workspace", required=True, type=Path)
+        cleanup.add_argument("--confirm", action="store_true", help="explicitly confirm permanent removal")
+    for command in (inspect, scan, compose, compact, hf, curate, dataset, train):
+        command.add_argument("--workers", type=int, default=0,
+                             help="CPU file/preparation workers; 0 uses available cores (default)")
     return parser
 
 
@@ -211,12 +223,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         # Third-party model imports/loggers must not corrupt the GUI JSON protocol.
-        with redirect_stdout(sys.stderr):
+        with redirect_stdout(sys.stderr), ExitStack() as locks:
+            from .resource_lock import resource_lock
+            if args.command in {"inspect-dataset", "review-dataset", "preview-sample", "compare-samples", "compose-datasets", "compact-dataset", "curate-dataset", "train"}:
+                inputs = [*args.datasets, *args.validation_dataset] if args.command == "compose-datasets" else [args.dataset]
+                for path in sorted({path.expanduser().resolve() for path in inputs}):
+                    locks.enter_context(resource_lock(path, shared=True))
+            if args.command == "train":
+                locks.enter_context(resource_lock(args.checkpoint.expanduser().resolve().parent))
+            if args.command in {"dataset", "compose-datasets", "compact-dataset", "curate-dataset", "import-hf"}:
+                locks.enter_context(resource_lock(args.output_dir))
+            if args.command == "export":
+                locks.enter_context(resource_lock(args.checkpoint.expanduser().resolve().parent, shared=True))
             if args.command == "workspace":
                 report = workspace_report(args.workspace, args.linked_dataset)
             elif args.command == "inspect-dataset":
                 from .dataset import load_dataset
-                report = load_dataset(args.dataset)
+                report = load_dataset(args.dataset, workers=args.workers)
             elif args.command == "review-dataset":
                 from .dataset_review import review_dataset
                 report = review_dataset(args.dataset)
@@ -232,22 +255,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                     candidate_model=args.candidate_model, raft_root=args.raft_root, device=args.device, iterations=args.iterations)
             elif args.command == "scan-spatial":
                 from .spatial_scan import scan_spatial_directory
-                report = scan_spatial_directory(args.directory, recursive=not args.no_recursive, progress_callback=_progress)
+                report = scan_spatial_directory(args.directory, recursive=not args.no_recursive, progress_callback=_progress, workers=args.workers)
             elif args.command == "compose-datasets":
                 from .dataset_collection import CollectionOptions, compose_datasets
                 report = compose_datasets(args.datasets, args.output_dir, CollectionOptions(split_mode=args.split_mode,
                     validation_fraction=args.validation_fraction, split_seed=args.seed, grouping=args.grouping,
-                    validation_count_per_dataset=args.validation_count_per_dataset, storage_mode=args.storage_mode), validation_datasets=args.validation_dataset, progress_callback=_progress)
+                    validation_count_per_dataset=args.validation_count_per_dataset, storage_mode=args.storage_mode), validation_datasets=args.validation_dataset, progress_callback=_progress, workers=args.workers)
             elif args.command == "compact-dataset":
                 from .dataset_collection import compress_dataset
-                report = compress_dataset(args.dataset, args.output_dir, progress_callback=_progress)
+                report = compress_dataset(args.dataset, args.output_dir, progress_callback=_progress, workers=args.workers)
             elif args.command == "import-hf":
                 from .huggingface_datasets import import_huggingface_dataset
                 report = import_huggingface_dataset(args.dataset, args.output_dir, json.loads(args.mapping_json.read_text()),
-                    config=args.config, split=args.split, revision=args.revision, asset_dir=args.asset_dir, data_files=args.data_files)
+                    config=args.config, split=args.split, revision=args.revision, asset_dir=args.asset_dir, data_files=args.data_files, workers=args.workers)
             elif args.command == "curate-dataset":
                 from .dataset_review import curate_dataset
-                report = curate_dataset(args.dataset, args.keep, args.output_dir)
+                report = curate_dataset(args.dataset, args.keep, args.output_dir, workers=args.workers)
             elif args.command == "dataset":
                 from .dataset import DatasetOptions, build_dataset
                 from .learned_depth import LearnedDepthConfig
@@ -259,7 +282,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     DatasetOptions(teacher=teacher_configs[0], additional_teachers=tuple(teacher_configs[1:]), teacher_ids=tuple(teacher_ids),
                         group_ids=groups, include_display_teacher=args.include_display_teacher, grouping_semantics=args.grouping,
                         name=args.name, category=args.category, compress_arrays=not args.uncompressed, require_apple_camera=True,
-                        validation_fraction=args.validation_fraction, split_seed=args.seed,
+                        validation_fraction=args.validation_fraction, split_seed=args.seed, workers=args.workers,
                         metric_anchor=LearnedDepthConfig(model="depthpro", model_path=args.anchor_model_path,
                             source_dir=args.anchor_source_dir, device=args.device) if args.metric_anchor else None), progress_callback=_progress)
                 report = {"dataset_path": str(args.output_dir.expanduser().resolve()), **report}
@@ -281,8 +304,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     epochs=args.epochs, steps_per_epoch=args.steps, patch_size=args.patch_size, mode=args.mode,
                     iterations=args.iterations, train_scope=args.scope, device=args.device,
                     raft_root=args.raft_root, raft_model=args.raft_model, raft_model_member=args.raft_model_member,
-                    require_photometric_support=args.photometric_support,
+                    require_photometric_support=args.photometric_support, workers=args.workers,
                 ), progress_callback=_progress)
+            elif args.command == "cleanup-dataset":
+                from .workspace_cleanup import cleanup_dataset
+                report = cleanup_dataset(args.dataset, args.workspace, confirm=args.confirm)
+            elif args.command == "archive-dataset":
+                from .workspace_cleanup import archive_dataset
+                report = archive_dataset(args.dataset, args.workspace)
+            elif args.command == "cleanup-run":
+                from .workspace_cleanup import cleanup_run
+                report = cleanup_run(args.checkpoint, args.workspace, confirm=args.confirm)
             else:
                 from .training import export_raft_checkpoint
                 report = export_raft_checkpoint(args.checkpoint, args.output)

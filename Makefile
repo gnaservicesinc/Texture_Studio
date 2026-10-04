@@ -26,7 +26,7 @@ studio: build
 	open "$(CURDIR)/$(BUILD_DIR)/IPDE Studio.app"
 
 test:
-	PYTHONPATH=$(CURDIR)/src $(PYTHON) -m unittest discover -s tests -v
+	PYTHONPATH=$(CURDIR)/src $(PYTHON) -m unittest discover -s verification -v
 
 smoke: build
 	"$(CURDIR)/$(BUILD_DIR)/IPDE.app/Contents/MacOS/IPDE" --smoke-test

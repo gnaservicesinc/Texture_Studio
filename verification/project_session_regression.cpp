@@ -44,6 +44,12 @@ public:
                     QObject::connect(peer, &QLocalSocket::readyRead, peer, [this, peer, buffer, accepted, malformed, fragmented, initialChanged] {
                         *buffer += peer->readAll();
                         if (!buffer->contains('\n')) return;
+                        const auto request = QJsonDocument::fromJson(buffer->left(buffer->indexOf('\n'))).object();
+                        if (request.value("command") == "open_app") {
+                            lastOpen_ = request;
+                            QJsonObject activation = request; activation.insert("event", "activate");
+                            peer->write(QJsonDocument(activation).toJson(QJsonDocument::Compact) + '\n'); peer->flush(); buffer->clear(); return;
+                        }
                         registrations_.fetch_add(1);
                         QByteArray response = malformed ? "not JSON\n" : accepted ? "{\"accepted\":true}\n"
                             : "{\"accepted\":false,\"error\":\"Fixture rejected registration\"}\n";
@@ -75,13 +81,33 @@ public:
             for (const auto &peer : peers_) if (peer) peer->abort();
         }, Qt::BlockingQueuedConnection);
     }
+    QJsonObject lastOpen() {
+        QJsonObject result;
+        QMetaObject::invokeMethod(worker_, [&] { result = lastOpen_; }, Qt::BlockingQueuedConnection);
+        return result;
+    }
 private:
     QObject *worker_ = nullptr;
     QLocalServer *server_ = nullptr;
     QList<QPointer<QLocalSocket>> peers_;
     QThread thread_;
     std::atomic<int> registrations_{0};
+    QJsonObject lastOpen_;
 };
+
+void crossAppRequestAndActivation(const QString &serverName) {
+    Hub hub(serverName);
+    IPDE::ProjectSession session("trainer", nullptr);
+    require(!session.openApp("datasets"), "inactive session sent a project app request");
+    require(session.start(false), "cross-app fixture could not register");
+    QObject context; QJsonObject activated;
+    session.setActivationHandler(&context, [&](const QJsonObject &request) { activated = request; });
+    require(session.openApp("datasets", {{"section", "review"}, {"dataset", "/fixture/dataset"}}), "live session could not route to Dataset Studio");
+    require(await([&] { return !activated.isEmpty(); }), "activation request was not delivered to its window handler");
+    require(hub.lastOpen().value("role") == "datasets" && activated.value("dataset") == "/fixture/dataset" && activated.value("section") == "review", "cross-app routing dropped role, section or selected dataset");
+    session.shutdown();
+    require(!session.openApp("trainer"), "stopped session sent a project app request");
+}
 
 void liveHandlersAndShutdown(const QString &serverName, const QString &project) {
     Hub hub(serverName);
@@ -225,8 +251,9 @@ int main(int argc, char **argv) {
         reentrantCallbackDestruction(serverName);
         queuedHandlersCancelled(serverName);
         handshakeFraming(serverName);
+        crossAppRequestAndActivation(serverName);
         failedStartup(serverName, projectPath);
-        std::cout << "ProjectSession: live callbacks, window-first and connected teardown, repeated shutdown, failed registration, and lock release passed\n";
+        std::cout << "ProjectSession: cross-app routing and activation, live callbacks, window-first and connected teardown, repeated shutdown, failed registration, and lock release passed\n";
         return 0;
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n'; return 1;

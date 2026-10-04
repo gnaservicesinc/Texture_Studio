@@ -10,10 +10,13 @@ def read_array(path: Path | str, mmap_mode: str | None = "r") -> np.ndarray:
         return np.load(source, mmap_mode=mmap_mode, allow_pickle=False)
     if source.suffix.lower() != ".npz":
         raise ValueError("Dataset arrays must use NPY or losslessly compressed NPZ")
-    with np.load(source, allow_pickle=False) as archive:
-        if archive.files != ["data"]:
-            raise ValueError("A dataset NPZ must contain exactly one array named data")
-        return archive["data"]
+    # Own the stream explicitly so corrupt ZIP headers cannot leave NumPy's
+    # internally opened descriptor alive when concurrent verification fails.
+    with source.open("rb") as stream:
+        with np.load(stream, allow_pickle=False) as archive:
+            if archive.files != ["data"]:
+                raise ValueError("A dataset NPZ must contain exactly one array named data")
+            return archive["data"]
 
 
 def write_array(path: Path | str, value: np.ndarray, *, compressed: bool = True) -> Path:

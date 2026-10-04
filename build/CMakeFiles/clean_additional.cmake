@@ -21,6 +21,8 @@ if("${CONFIG}" STREQUAL "" OR "${CONFIG}" STREQUAL "")
   "CMakeFiles/raw_studio_autogen.dir/ParseCache.txt"
   "CMakeFiles/studio_preview_regression_autogen.dir/AutogenUsed.txt"
   "CMakeFiles/studio_preview_regression_autogen.dir/ParseCache.txt"
+  "CMakeFiles/studio_routing_regression_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/studio_routing_regression_autogen.dir/ParseCache.txt"
   "CMakeFiles/trainer_workflow_regression_autogen.dir/AutogenUsed.txt"
   "CMakeFiles/trainer_workflow_regression_autogen.dir/ParseCache.txt"
   "CMakeFiles/window_layout_regression_autogen.dir/AutogenUsed.txt"
@@ -34,6 +36,7 @@ if("${CONFIG}" STREQUAL "" OR "${CONFIG}" STREQUAL "")
   "raft_studio_autogen"
   "raw_studio_autogen"
   "studio_preview_regression_autogen"
+  "studio_routing_regression_autogen"
   "trainer_workflow_regression_autogen"
   "window_layout_regression_autogen"
   )

@@ -28,10 +28,11 @@ and exports separate developed RGB, cropped depth estimates and Apple Vision
 person masks. Both apps preserve source arrays and keep viewing copies separate.
 [Photo/Raw precision, workflows and HEIC limitations](docs/photo-raw-studios.md).
 
-Dataset Manager supports categories, optional groups, recursive spatial discovery,
+Dataset Studio owns dataset imports, links, categories, optional groups, recursive spatial discovery,
 1–3 depth teachers, per-photo/per-teacher curation, pixel-size review, overlays and
-rotatable lit surface previews. Trainer assembles multiple reviewed datasets with
-explicit or seeded validation choices and compares a project model with its
+rotatable lit surface previews, compaction, archiving and confirmed cleanup. It
+assembles reviewed datasets with explicit or seeded validation choices. Trainer
+reads those datasets, trains and exports models, and compares a project model with its
 baseline. [Dataset library and import details](docs/dataset-library.md).
 
 New GUI datasets use verified lossless compressed NumPy arrays and deduplicate
@@ -39,6 +40,11 @@ identical arrays. Existing datasets can be compacted into new copies. Extra
 full-display teacher predictions are optional because their full-resolution depth
 and anchor planes can dominate storage. Scientific arrays retain their exact
 dtype and sample bits; display previews are separate temporary visualizations.
+
+Projects can override **File processing threads**; automatic uses available
+cores, with bounded decoded memory. File import, verification and preparation
+run concurrently on CPU. Teacher inference and RAFT training support Apple MPS.
+Cross-app actions launch or focus the correct app for the current project.
 
 ## Precision model
 

@@ -395,7 +395,7 @@ class TrainingProgressTests(unittest.TestCase):
 
     def test_checking_stage_precedes_expensive_verification_and_failure_never_completes(self):
         events = []
-        def fail_loading(_directory):
+        def fail_loading(_directory, *, workers=None):
             self.assertEqual(events[0]["stage"], "checking_dataset")
             self.assertEqual(events[0]["completed_steps"], 0)
             raise TrainingError("invalid dataset")

@@ -145,7 +145,7 @@ class CollectionStorageTests(unittest.TestCase):
                  patch("ipde.dataset_collection.os.link", side_effect=failing_link), \
                  patch("ipde.dataset_collection.array_record", side_effect=AssertionError("Unexpected copy fallback")):
                 with self.assertRaisesRegex(DatasetError, "same filesystem.*existing dataset directly"):
-                    compose_datasets([source], output)
+                    compose_datasets([source], output, workers=1)
             self.assertEqual(calls, 2)
             self.assertFalse(output.exists())
             self.assertEqual(list(root.iterdir()), [source])

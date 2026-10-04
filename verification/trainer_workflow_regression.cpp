@@ -29,7 +29,7 @@ QJsonObject dataset(const QString &path) {
 
 void trainingSetReadiness(TrainerWindow &window, const QString &workspace) {
     window.workspace_->setText(workspace);
-    require(window.tabs_->currentIndex() == 4, "trainer did not open directly on model training");
+    require(window.datasetMode_ && window.tabs_->isTabVisible(2), "Dataset Studio did not expose training-set preparation");
     require(!window.compose_->isEnabled(), "empty library enabled composition");
     const QString first = QDir(workspace).filePath("datasets/imported");
     QJsonObject imported = dataset(first); imported.insert("training_eligibility", QJsonObject{{"eligible_count", 3}, {"excluded_count", 1}});
@@ -37,7 +37,7 @@ void trainingSetReadiness(TrainerWindow &window, const QString &workspace) {
     window.populateLibrary(single);
     auto *source = window.collectionSources_->topLevelItem(0);
     require(source->checkState(0) == Qt::Checked && window.compose_->isEnabled(), "one imported dataset was not immediately usable");
-    require(window.train_->isEnabled() && window.train_->text() == "Start model training" && window.trainingDataset_->text().contains("imported"), "an imported dataset did not enable direct model training with a visible selection");
+    require(!window.train_->isEnabled(), "Dataset Studio enabled a local model training action");
     require(window.trainingDataset_->text().contains("3 usable targets") && window.trainingDataset_->text().contains("1 unusable target"), "direct training did not explain which targets will be skipped");
     window.reviewedDataset_ = first;
     auto *reviewPhoto = new QTreeWidgetItem(window.reviewSamples_, {"review fixture"});
@@ -84,14 +84,14 @@ void trainingSetReadiness(TrainerWindow &window, const QString &workspace) {
     require(window.compose_->isEnabled() && window.collectionSources_->topLevelItem(0)->checkState(0) == Qt::Checked, "cancelled composition lost selection or stayed disabled");
     window.splitMode_->setCurrentIndex(window.splitMode_->findData("global-random"));
     const QString output = QDir(workspace).filePath("datasets/test-training-set");
-    window.job_ = "Create training set"; window.stdout_ = QJsonDocument(QJsonObject{{"dataset_path", output}}).toJson(); window.setBusy(true);
+    window.job_ = "Create training set"; window.continueToTrainer_ = true; window.stdout_ = QJsonDocument(QJsonObject{{"dataset_path", output}}).toJson(); window.setBusy(true);
     window.processFinished(0, QProcess::NormalExit);
     require(window.pendingTrainingPath_ == output, "completed composition did not retain its output for continuation");
     require(window.trainingStatus_->text().contains("Start model training") && !window.trainingStatus_->text().contains("Training complete", Qt::CaseInsensitive), "preparing a training set was presented as model training completion");
     window.job_ = "Refresh library"; window.stdout_ = QJsonDocument(QJsonObject{{"datasets", QJsonArray{dataset(first), dataset(output)}}}).toJson(); window.setBusy(true);
     window.processFinished(0, QProcess::NormalExit);
-    require(window.pendingTrainingPath_.isEmpty() && window.tabs_->currentIndex() == 4 && TrainerWindow::selectedPath(window.datasets_) == output, "completed composition did not select its set and continue to training");
-    require(window.train_->isEnabled() && window.trainingDataset_->text().contains("test-training-set") && window.trainingStatus_->text().contains("Start model training"), "continuation hid the selected prepared set or erased the next training action");
+    require(window.pendingTrainingPath_.isEmpty() && TrainerWindow::selectedPath(window.datasets_) == output, "completed composition did not select its prepared dataset");
+    require(window.lastAppRequest_.value("role") == "trainer" && window.lastAppRequest_.value("dataset") == output, "completed preparation did not route the prepared dataset to Trainer");
     window.startJob("Inspect dataset", {"inspect-dataset", QDir(workspace).filePath("missing")});
     require(window.busy_, "real backend failure fixture did not start");
     require(await([&] { return !window.busy_; }), "backend failure left the interface busy");
@@ -152,6 +152,7 @@ void failedGenerationStreaming(TrainerWindow &window, const QString &workspace) 
 }
 
 void modelTrainingProgress(TrainerWindow &window, const QString &workspace) {
+    window.populateLibrary({{"datasets", QJsonArray{dataset(QDir(workspace).filePath("datasets/imported"))}}});
     const QString selectedDataset = TrainerWindow::selectedPath(window.datasets_);
     require(!selectedDataset.isEmpty(), "training progress fixture has no selected dataset");
     window.job_ = "Train RAFT-Stereo"; window.stdout_.clear(); window.progressBuffer_.clear();
@@ -212,6 +213,46 @@ void modelTrainingProgress(TrainerWindow &window, const QString &workspace) {
     require(await([&] { return !window.busy_; }), "failed training launch left the interface busy");
     require(window.trainingStatus_->text().contains("failed", Qt::CaseInsensitive), "failed training launch hid its result from the training step");
 }
+
+void applicationResponsibilities(TrainerWindow &trainer, TrainerWindow &datasets, const QString &workspace) {
+    require(trainer.tabs_->currentIndex() == 4 && !trainer.tabs_->isTabVisible(0) && !trainer.tabs_->isTabVisible(2) && !trainer.tabs_->isTabVisible(3), "Trainer exposed dataset import or preparation tabs");
+    require(trainer.tabs_->isTabVisible(1) && trainer.tabs_->tabText(1) == "Compare models" && trainer.reviewSamples_->isHidden() && trainer.saveReviewed_->isHidden(), "Trainer model comparison exposed dataset editing controls");
+    require(trainer.findChild<QPushButton *>("compactDataset")->isHidden() && trainer.findChild<QPushButton *>("archiveDataset")->isHidden(), "Trainer exposed compact or archive dataset actions");
+    const QString path = QDir(workspace).filePath("datasets/imported");
+    trainer.reviewDataset(path); require(trainer.lastAppRequest_.value("role") == "datasets" && trainer.lastAppRequest_.value("dataset") == path, "Trainer did not route review with the selected dataset");
+    for (const QString &operation : {"dataset", "compose-datasets", "compact-dataset", "curate-dataset", "import-hf", "cleanup-dataset", "archive-dataset"}) {
+        trainer.startJob("Wrong app fixture", {operation, path});
+        require(!trainer.busy_ && trainer.process_->state() == QProcess::NotRunning && trainer.lastAppRequest_.value("role") == "datasets", "Trainer started a dataset mutation through a hidden action");
+    }
+    datasets.trainDataset(); require(datasets.lastAppRequest_.value("role") == "trainer", "Dataset Studio started model training locally");
+    QDir().mkpath(path); datasets.populateLibrary({{"datasets", QJsonArray{dataset(path)}}});
+    datasets.projectOperations_ = {{"trainer", "train"}}; datasets.updateCleanupActions(); require(!datasets.cleanupDataset_->isEnabled(), "Dataset cleanup remained available during model training");
+    datasets.projectOperations_ = {}; datasets.updateCleanupActions(); require(datasets.cleanupDataset_->isEnabled(), "Owned dataset cleanup stayed disabled after model training");
+    datasets.projectSettings_->setValue("performance/workers", 3); require(datasets.workerCount() == 3, "Dataset Studio ignored the project's file-worker override");
+    datasets.reviewedDataset_ = path; datasets.requestedReviewPath_ = path;
+    datasets.clearUnavailableReview(path, "Removed fixture");
+    require(datasets.reviewedDataset_.isEmpty() && datasets.requestedReviewPath_.isEmpty() && datasets.reviewEntries().isEmpty() && !datasets.saveReviewed_->isEnabled(), "removing a reviewed dataset left saveable stale review state");
+}
+
+void visibleDisplayRegistration(TrainerWindow &window, const QString &workspace) {
+    const QString image = QDir(workspace).filePath("alignment-preview.png"); QPixmap fixture(96, 64); fixture.fill(Qt::gray);
+    require(fixture.save(image), "could not save alignment preview fixture");
+    QJsonObject registration{{"accepted", false}, {"reference_role", "right"}, {"reason", "held-out p90 13.20 px exceeds 3 px"},
+        {"heldout_median_error_pixels", 2.15}, {"heldout_p90_error_pixels", 13.20}};
+    QJsonObject preview{{"sample_id", "aligned-native"}, {"label", "training"}, {"label_title", "Selected training target: Teacher"},
+        {"rgb_preview_path", image}, {"depth_preview_path", image}, {"width", 96}, {"height", 64}, {"valid_fraction", 1.0},
+        {"min", 1.0}, {"max", 2.0}, {"units", "meters"}, {"rgb_reference", "spatial_left"}, {"display_registration", registration}};
+    window.populatePreview(preview);
+    QString text = window.previewStats_->text();
+    require(text.contains("Source: Native left stereo grid") && window.sourceTitle_->text() == "Native left stereo grid", "native stereo-left preview did not identify its actual source grid");
+    require(text.contains("Display alignment rejected") && text.contains("fit reference: right") && text.contains("median 2.15 px / p90 13.20 px"), "display rejection and held-out geometry evidence remained hidden in tooltips");
+    require(text.contains("Native-left targets remain usable") && !text.contains("Display alignment accepted"), "rejected display registration implied the direct native-left label was unusable or the display was accepted");
+    preview.insert("rgb_reference", "display"); window.populatePreview(preview);
+    require(window.sourceTitle_->text().contains("separate grid") && window.previewStats_->text().contains("cannot supply an aligned stereo target") && !window.previewStats_->text().contains("Source: Native left"), "display preview was mislabeled as a stereo-left grid");
+    registration.insert("accepted", true); registration.insert("reference_role", "left"); preview.insert("display_registration", registration); preview.insert("rgb_reference", "spatial_left");
+    window.populatePreview(preview);
+    require(window.previewStats_->text().contains("Display alignment accepted") && window.previewStats_->text().contains("fit reference: left") && !window.previewStats_->text().contains("Display alignment rejected"), "accepted registration retained a stale rejected status");
+}
 } // namespace
 
 int main(int argc, char **argv) {
@@ -225,13 +266,15 @@ int main(int argc, char **argv) {
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, temporary.path());
     try {
-        TrainerWindow window;
+        TrainerWindow window(true), trainer(false);
         const QString workspace = QDir(temporary.path()).filePath("workspace"); QDir().mkpath(workspace);
         trainingSetReadiness(window, workspace);
         streamedFolderImport(window, workspace);
         failedGenerationStreaming(window, workspace);
-        modelTrainingProgress(window, workspace);
-        std::cout << "Trainer: readiness, review exclusions, progress, retry/cancel, continuation, scan removals, failed generation streaming, and model training progress passed\n";
+        trainer.workspace_->setText(workspace); modelTrainingProgress(trainer, workspace);
+        applicationResponsibilities(trainer, window, workspace);
+        visibleDisplayRegistration(window, workspace);
+        std::cout << "Dataset Studio / Trainer: exclusive dataset management, cross-app continuation, cleanup guards, worker override, readiness, review, retry, scan, and training progress passed\n";
         return 0;
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }
 }

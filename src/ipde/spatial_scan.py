@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping
 import numpy as np
 
 from .extractor import Discovery, discover_file
+from .concurrency import memory_limited_workers, ordered_map, resolve_workers
 
 
 class SpatialScanError(ValueError):
@@ -133,6 +134,7 @@ def validate_spatial_discovery(discovery: Discovery, *, require_apple_camera: bo
 def scan_spatial_directory(
     directory: Path | str, *, recursive: bool = True, require_apple_camera: bool = True,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    workers: int | None = None,
 ) -> dict[str, Any]:
     """Discover supported captures recursively; skip every symlink and bad file."""
     requested_root = Path(directory).expanduser().absolute()
@@ -148,12 +150,14 @@ def scan_spatial_directory(
     pending = [root]
     candidates = 0
     visited_directories = 0
+    worker_count = resolve_workers(workers)
 
     def emit(event: dict[str, Any]) -> None:
         if progress_callback is not None:
             progress_callback(event)
 
     emit({"event": "scan_started", "directory": str(root), "recursive": recursive})
+    paths: list[Path] = []
     while pending:
         folder = pending.pop()
         try:
@@ -182,22 +186,47 @@ def scan_spatial_directory(
                     continue
                 if not entry.is_file(follow_symlinks=False) or path.suffix.lower() not in {".heic", ".heif", ".hif"}:
                     continue
-                candidates += 1
-                emit({"event": "scan_photo_started", "source_path": str(path),
-                      "candidate_count": candidates, "accepted_count": len(accepted)})
-                discovery = discover_file(path)
-                metadata = validate_spatial_discovery(discovery, require_apple_camera=require_apple_camera)
-                record = {"source_path": str(path), "source_sha256": discovery.source_sha256,
-                          "source_bytes": discovery.source_size, "photo_metadata": metadata,
-                          "calibration": discovery.spatial_photo}
-                accepted.append(record)
-                emit({"event": "spatial_photo_found", **record, "accepted_count": len(accepted)})
+                paths.append(path)
             except Exception as exc:
                 record = {"source_path": str(path), "reason": str(exc), "kind": "invalid_capture"}
                 skipped.append(record)
                 emit({"event": "photo_skipped", **record})
         pending.extend(reversed(subdirectories))
+    # Decoding returns only small metadata; pixel arrays are released inside
+    # each worker. Bound concurrent native decoders as well as queued tasks.
+    largest = max((path.stat().st_size for path in paths if path.is_file()), default=1)
+    decoding_workers = memory_limited_workers(worker_count, max(128 * 1024**2, largest * 48))
+
+    def admitted_paths():
+        nonlocal candidates
+        for path in paths:
+            candidates += 1
+            emit({"event": "scan_photo_started", "source_path": str(path),
+                  "candidate_count": candidates, "accepted_count": len(accepted)})
+            yield path
+
+    def decode(path: Path):
+        try:
+            # Recheck links after directory enumeration before decoding.
+            if path.is_symlink():
+                return False, {"source_path": str(path), "reason": "Symbolic link excluded", "kind": "link"}
+            discovery = discover_file(path)
+            metadata = validate_spatial_discovery(discovery, require_apple_camera=require_apple_camera)
+            return True, {"source_path": str(path), "source_sha256": discovery.source_sha256,
+                          "source_bytes": discovery.source_size, "photo_metadata": metadata,
+                          "calibration": discovery.spatial_photo}
+        except Exception as exc:
+            return False, {"source_path": str(path), "reason": str(exc), "kind": "invalid_capture"}
+
+    for valid, record in ordered_map(decode, admitted_paths(), workers=decoding_workers):
+        if valid:
+            accepted.append(record)
+            emit({"event": "spatial_photo_found", **record, "accepted_count": len(accepted)})
+        else:
+            skipped.append(record)
+            emit({"event": "photo_skipped", **record})
     return {"directory": str(root), "recursive": recursive, "accepted": accepted, "skipped": skipped,
+            "file_workers": worker_count, "decoding_workers": decoding_workers,
             "summary": {"accepted": len(accepted), "skipped": len(skipped),
                         "candidates": candidates, "visited_directories": visited_directories},
             "authenticity_note": "Validated Apple camera identity, container structure, decoded grids and calibration; forged metadata or AI-generated pixels cannot be ruled out."}

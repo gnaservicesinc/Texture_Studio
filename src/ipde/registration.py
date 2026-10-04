@@ -36,6 +36,22 @@ def _fit_matches(display_points: np.ndarray, stereo_points: np.ndarray,
 
     record: dict[str, Any] = {"accepted": False, "reason": "insufficient feature correspondences",
                               "feature_match_count": len(display_points)}
+    display_points = np.asarray(display_points, dtype=np.float64).reshape(-1, 2)
+    stereo_points = np.asarray(stereo_points, dtype=np.float64).reshape(-1, 2)
+    if display_points.shape != stereo_points.shape or not np.isfinite(display_points).all() or not np.isfinite(stereo_points).all():
+        record["reason"] = "feature correspondences have different shapes or nonfinite coordinates"
+        return record
+    # SIFT can emit multiple orientations for one keypoint. They are a single
+    # geometric observation, and must not leak from the fit into validation or
+    # inflate a cell's independent correspondence count.
+    if len(display_points):
+        _, unique = np.unique(display_points, axis=0, return_index=True)
+        unique.sort()
+        display_points, stereo_points = display_points[unique], stereo_points[unique]
+        _, unique = np.unique(stereo_points, axis=0, return_index=True)
+        unique.sort()
+        display_points, stereo_points = display_points[unique], stereo_points[unique]
+    record["unique_feature_match_count"] = len(display_points)
     if len(display_points) < 64:
         return record
     indices = np.random.default_rng(42).permutation(len(display_points))
@@ -74,7 +90,8 @@ def _fit_matches(display_points: np.ndarray, stereo_points: np.ndarray,
                    "heldout_count": len(heldout), "heldout_median_error_pixels": float(median),
                    "heldout_p90_error_pixels": float(p90),
                    "heldout_fraction_within_2_pixels": float(np.mean(errors < 2.)),
-                   "inlier_hull_fraction": coverage, "spatial_validation_cells": cells,
+                   "inlier_hull_fraction": coverage, "stereo_inlier_hull": hull.reshape(-1, 2).tolist(),
+                   "spatial_validation_cells": cells,
                    "supported_cells": support.tolist(), "projective_denominator_change": projective_change,
                    "validation_thresholds": {"minimum_matches": 64, "maximum_heldout_median_pixels": 1.,
                        "maximum_heldout_p90_pixels": 3., "minimum_hull_fraction": .5,
@@ -83,8 +100,21 @@ def _fit_matches(display_points: np.ndarray, stereo_points: np.ndarray,
                        "cell_maximum_p90_pixels": 3.}})
     record["accepted"] = bool(median <= 1. and p90 <= 3. and coverage >= .5
                                and support.sum() >= 8 and projective_change <= .01)
-    record["reason"] = ("empirical same-camera registration accepted only inside validated spatial cells"
-                        if record["accepted"] else "held-out residuals or spatial coverage do not support a reliable homography")
+    if record["accepted"]:
+        record["reason"] = "empirical same-camera registration accepted only inside validated spatial cells and feature hull"
+    else:
+        failures = []
+        if median > 1.:
+            failures.append(f"held-out median {median:.2f} px exceeds 1.00 px")
+        if p90 > 3.:
+            failures.append(f"held-out p90 {p90:.2f} px exceeds 3.00 px")
+        if coverage < .5:
+            failures.append(f"feature hull covers {coverage:.1%}, below 50%")
+        if support.sum() < 8:
+            failures.append(f"only {int(support.sum())}/16 spatial cells are supported, below 8")
+        if projective_change > .01:
+            failures.append(f"projective variation {projective_change:.1%} exceeds 1%")
+        record["reason"] = "Display registration rejected: " + "; ".join(failures)
     return record
 
 
@@ -96,7 +126,7 @@ def estimate_display_registration(discovery: Any) -> dict[str, Any]:
     side = str(spatial.get("monoscopic_image_location", "")).lower()
     record: dict[str, Any] = {"accepted": False, "source_sha256": discovery.source_sha256,
         "reference_role": side, "reason": "monoscopic camera location is unknown",
-        "method": "mutual SIFT ratio matches; same-side MAGSAC homography; held-out 4x4 spatial validation",
+        "method": "mutual SIFT ratio matches at unique positions; same-side MAGSAC homography; held-out 4x4 spatial validation",
         "raw_assets_modified": False, "calibration_recovered": False,
         "coordinate_policy": "native decoded pixel centers; EXIF orientation is not separately applied",
         "precision_scope": "approximate RGB registration; camera-axis depth transport assumes nearly identical optical axes",
@@ -166,6 +196,17 @@ def _spatial_support(x: np.ndarray, y: np.ndarray, registration: dict[str, Any])
             cell_x = np.clip(np.floor(xx * 4 / width).astype(np.intp), 0, 3)
             cell_y = np.clip(np.floor(yy * 4 / height).astype(np.intp), 0, 3)
             valid &= support[cell_y, cell_x]
+            # Accepted cells can include a corner outside the fitted feature
+            # hull. Do not extrapolate a depth label into that unobserved area.
+            if "stereo_inlier_hull" in registration:
+                hull = np.asarray(registration["stereo_inlier_hull"], dtype=np.float64)
+                orientation = np.sum(hull[:, 0] * np.roll(hull[:, 1], -1)
+                                     - hull[:, 1] * np.roll(hull[:, 0], -1))
+                inside = np.ones(x.shape, dtype=bool)
+                for start, end in zip(hull, np.roll(hull, -1, axis=0)):
+                    cross = (end[0] - start[0]) * (yy - start[1]) - (end[1] - start[1]) * (xx - start[0])
+                    inside &= cross >= -1e-7 if orientation >= 0 else cross <= 1e-7
+                valid &= inside
     return valid
 
 
@@ -179,7 +220,7 @@ def _sample_depth(depth: np.ndarray, x: np.ndarray, y: np.ndarray) -> tuple[np.n
     dx, dy = xx - x0, yy - y0
     weights = np.stack(((1-dx)*(1-dy), dx*(1-dy), (1-dx)*dy, dx*dy))
     values = np.stack((depth[y0, x0], depth[y0, x1], depth[y1, x0], depth[y1, x1]))
-    active = weights > 1e-7
+    active = weights > 0
     valid &= np.all(~active | (np.isfinite(values) & (values > 0)), axis=0)
     minimum = np.min(np.where(active, values, np.inf), axis=0)
     maximum = np.max(np.where(active, values, -np.inf), axis=0)

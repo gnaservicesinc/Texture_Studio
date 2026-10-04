@@ -22,10 +22,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from .array_storage import array_record, read_array
+import numpy as np
+
+from .array_storage import array_record
 from .dataset import DatasetError, load_dataset
 from .dataset_review import _array_path, _array_records, _publish_new_directory, _read_manifest, _verified_array
 from .formats import sha256_file
+from .concurrency import memory_limited_workers, ordered_map, resolve_workers
 
 
 @dataclass(frozen=True)
@@ -207,6 +210,7 @@ def compose_datasets(
     validation_datasets: Sequence[Path | str] = (),
     categories: Mapping[str, str] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    workers: int | None = None,
 ) -> dict[str, Any]:
     """Make an atomic, lossless training collection from reviewed v1 datasets.
 
@@ -222,6 +226,10 @@ def compose_datasets(
     """
     options = options or CollectionOptions()
     _validate_options(options)
+    try:
+        worker_count = resolve_workers(workers)
+    except ValueError as exc:
+        raise DatasetError(str(exc)) from exc
     if not datasets:
         raise DatasetError("Choose at least one training dataset")
     if options.split_mode == "explicit" and not validation_datasets:
@@ -252,12 +260,8 @@ def compose_datasets(
         initial_hash = sha256_file(root / "dataset.json")
         _, manifest = _read_manifest(root)
         _require_complete(manifest)
-        if load_dataset(root, verify=True) != manifest or sha256_file(root / "dataset.json") != initial_hash:
+        if load_dataset(root, verify=True, workers=worker_count) != manifest or sha256_file(root / "dataset.json") != initial_hash:
             raise DatasetError("Source dataset manifest changed before composition")
-        # Include optional future array records as well as all current v1 fields.
-        for sample in manifest["samples"]:
-            for record in _array_records(sample):
-                _verified_array(root, record)
         dataset_id = hashlib.sha256((str(root) + ":" + initial_hash).encode()).hexdigest()
         sources[dataset_id] = root
         manifests[dataset_id] = manifest
@@ -326,31 +330,43 @@ def compose_datasets(
     try:
         copied: dict[tuple[str, tuple[int, ...], str], dict[str, Any]] = {}
         storage_methods: dict[str, int] = {}
-        for sample_index, sample in enumerate(samples, 1):
+        planned: dict[Any, tuple[Path, dict[str, Any], list[dict[str, Any]]]] = {}
+        for sample in samples:
             origin = sample["collection_provenance"]
             root = sources[origin["dataset_id"]]
             for record in _array_records(sample):
-                source_name = record["path"]
                 key = record["dtype"], tuple(record["shape"]), record["array_sha256"]
-                if key not in copied:
-                    # All identical planes share one physical file, including
-                    # RGB repeated in raw_assets and teacher-variant datasets.
-                    identity = hashlib.sha256(json.dumps(key).encode()).hexdigest()
-                    value = _verified_array(root, record)
-                    if options.storage_mode == "shared":
-                        source = _array_path(root, record)
-                        target = temporary / "arrays" / f"{identity}{source.suffix.lower()}"
-                        method = _share_array_file(source, target)
-                        saved = {field: record[field] for field in ("shape", "dtype", "array_sha256", "file_sha256")}
-                        saved["path"] = target.relative_to(temporary).as_posix()
-                        copied[key] = saved
-                    else:
-                        method = "compressed-copy"
-                        copied[key] = array_record(temporary, temporary / "arrays" / f"{identity}.npz", value, compressed=True)
-                    storage_methods[method] = storage_methods.get(method, 0) + 1
-                    if any(copied[key][field] != record[field] for field in ("array_sha256", "shape", "dtype")):
-                        raise DatasetError(f"Lossless composition changed source array values: {source_name}")
-                record.update(copied[key])
+                if key not in planned:
+                    planned[key] = root, dict(record), []
+                planned[key][2].append(record)
+
+        def transfer(item: Any) -> Any:
+            key, (root, record, _) = item
+            identity = hashlib.sha256(json.dumps(key).encode()).hexdigest()
+            value = _verified_array(root, record)
+            if options.storage_mode == "shared":
+                source = _array_path(root, record)
+                target = temporary / "arrays" / f"{identity}{source.suffix.lower()}"
+                method = _share_array_file(source, target)
+                saved = {field: record[field] for field in ("shape", "dtype", "array_sha256", "file_sha256")}
+                saved["path"] = target.relative_to(temporary).as_posix()
+            else:
+                method = "compressed-copy"
+                saved = array_record(temporary, temporary / "arrays" / f"{identity}.npz", value, compressed=True)
+            if any(saved[field] != record[field] for field in ("array_sha256", "shape", "dtype")):
+                raise DatasetError(f"Lossless composition changed source array values: {record['path']}")
+            return key, saved, method
+
+        largest = max((math.prod(key[1]) * np.dtype(key[0]).itemsize for key in planned), default=1)
+        transfer_workers = memory_limited_workers(worker_count, largest * 3)
+        for key, saved, method in ordered_map(transfer, planned.items(), workers=transfer_workers):
+            copied[key] = saved
+            storage_methods[method] = storage_methods.get(method, 0) + 1
+            for record in planned[key][2]:
+                record.update(saved)
+        collection["file_workers"] = worker_count
+        collection["transfer_workers"] = transfer_workers
+        for sample_index, sample in enumerate(samples, 1):
             if progress_callback is not None:
                 progress_callback({"phase": "sample_composed", "sample_id": sample["id"], "unique_arrays": len(copied),
                                    "processed": sample_index, "total": len(samples), "storage_mode": options.storage_mode})
@@ -383,7 +399,7 @@ def compose_datasets(
         (temporary / "dataset.json").write_bytes(serialized)
         if progress_callback is not None:
             progress_callback({"phase": "verifying_output"})
-        load_dataset(temporary, verify=True)
+        load_dataset(temporary, verify=True, workers=worker_count)
         if progress_callback is not None:
             progress_callback({"phase": "publishing_dataset"})
         _publish_new_directory(temporary, destination)
@@ -398,6 +414,7 @@ def compress_dataset(
     output_dir: Path | str,
     *,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    workers: int | None = None,
 ) -> dict[str, Any]:
     """Publish a new deduplicated lossless ZIP-compressed array dataset.
 
@@ -406,6 +423,10 @@ def compress_dataset(
     Each unique plane is stored once, regardless of how many sample records or
     teachers reference it. Publication refuses existing/raced-in destinations.
     """
+    try:
+        worker_count = resolve_workers(workers)
+    except ValueError as exc:
+        raise DatasetError(str(exc)) from exc
     root, manifest = _read_manifest(directory)
     _require_complete(manifest)
     destination = Path(output_dir).expanduser().resolve()
@@ -414,7 +435,7 @@ def compress_dataset(
     if destination.is_relative_to(root):
         raise DatasetError("Compressed dataset must be outside the original dataset")
     source_manifest_hash = sha256_file(root / "dataset.json")
-    if load_dataset(root, verify=True) != manifest:
+    if load_dataset(root, verify=True, workers=worker_count) != manifest:
         raise DatasetError("Source dataset manifest changed before compression")
     compact = copy.deepcopy(manifest)
     records = list(_array_records(compact["samples"]))
@@ -424,21 +445,32 @@ def compress_dataset(
     temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination.parent))
     try:
         written: dict[tuple[str, tuple[int, ...], str], dict[str, Any]] = {}
-        for index, record in enumerate(records):
+        planned: dict[Any, tuple[dict[str, Any], list[dict[str, Any]]]] = {}
+        for record in records:
             key = record["dtype"], tuple(record["shape"]), record["array_sha256"]
-            # Verification includes every source file, even if another copy of
-            # the same plane has already been compacted successfully.
-            _verified_array(root, record)
-            if key not in written:
-                identity = hashlib.sha256(json.dumps(key).encode()).hexdigest()
-                value = read_array(_array_path(root, record))
-                saved = array_record(temporary, temporary / "arrays" / f"{identity}.npz", value, compressed=True)
-                if any(saved[field] != record[field] for field in ("array_sha256", "shape", "dtype")):
-                    raise DatasetError("Lossless compression changed a source array's values, shape or dtype")
-                written[key] = saved
-            record.update(written[key])
+            if key not in planned:
+                planned[key] = dict(record), []
+            planned[key][1].append(record)
+
+        def compress(item: Any) -> Any:
+            key, (record, _) = item
+            identity = hashlib.sha256(json.dumps(key).encode()).hexdigest()
+            value = _verified_array(root, record)
+            saved = array_record(temporary, temporary / "arrays" / f"{identity}.npz", value, compressed=True)
+            if any(saved[field] != record[field] for field in ("array_sha256", "shape", "dtype")):
+                raise DatasetError("Lossless compression changed a source array's values, shape or dtype")
+            return key, saved
+
+        largest = max((math.prod(key[1]) * np.dtype(key[0]).itemsize for key in planned), default=1)
+        transfer_workers = memory_limited_workers(worker_count, largest * 3)
+        processed = 0
+        for key, saved in ordered_map(compress, planned.items(), workers=transfer_workers):
+            written[key] = saved
+            for record in planned[key][1]:
+                record.update(saved)
+            processed += len(planned[key][1])
             if progress_callback is not None:
-                progress_callback({"phase": "compressing", "processed": index + 1, "total": len(records), "unique_arrays": len(written)})
+                progress_callback({"phase": "compressing", "processed": processed, "total": len(records), "unique_arrays": len(written)})
         if sha256_file(root / "dataset.json") != source_manifest_hash:
             raise DatasetError("Source dataset manifest changed during compression")
         after = sum((temporary / record["path"]).stat().st_size for record in written.values())
@@ -449,13 +481,14 @@ def compress_dataset(
             "unique_arrays": len(written), "source_array_files": len(source_files),
             "array_values_preserved": True, "split_assignments_preserved": True,
             "format": "NPZ: ZIP deflate of one data.npy plane per unique array",
+            "file_workers": worker_count, "transfer_workers": transfer_workers,
         }
         compact["storage_compaction"] = compaction
         if "generation_output_dir" in compact:
             compact["generation_output_dir"] = str(destination)
         compact["precision_policy"] = "Lossless ZIP-compressed NPY planes, verified by dtype/shape/array hashes; no normalization, gamma or resampling"
         (temporary / "dataset.json").write_text(json.dumps(compact, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-        load_dataset(temporary, verify=True)
+        load_dataset(temporary, verify=True, workers=worker_count)
         _publish_new_directory(temporary, destination)
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)

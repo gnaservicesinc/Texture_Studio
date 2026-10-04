@@ -9,7 +9,7 @@ measuring generalization to new scenes.
 
 Train an existing dataset directly from **Train model & compare** when its current
 split is suitable. To combine datasets or choose new validation groups, select
-datasets in **Prepare training set** and create a collection. Preparation reuses
+datasets in Dataset Studio's **Prepare training set** and create a collection. Preparation reuses
 the original array storage without a full payload copy. Original dataset files
 remain unchanged. Every teacher variant of a photo stays on the same side of the
 training/validation boundary. Identical source files, identical left RGB planes,
@@ -36,14 +36,15 @@ override, and resulting per-dataset counts are recorded in the new manifest.
 Category labels never establish independence. Ignoring scene groups is useful
 for controlled comparisons but cannot detect unknown related captures.
 
-Studio can link a dataset directory, or link datasets from another project.
+Dataset Studio can link a dataset directory, or link datasets from another project.
 The link stores its existing path in `project.ini`; it does not duplicate large
 arrays. Dataset Manager and Trainer show linked datasets in the same library
 and training-set selector. Inspection and training read the original location.
 Review, composition, and compacting produce new datasets inside the current
 workspace, leaving linked source files untouched. A missing or moved directory
 appears as a library warning. Archive applies only to datasets owned by the
-current workspace.
+current workspace. Dataset Studio owns all dataset actions; Trainer's dataset
+library is read-only and links back to the manager for review or preparation.
 
 ```sh
 raft-studio workspace ./workspace --linked-dataset /path/to/existing-dataset
