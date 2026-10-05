@@ -161,7 +161,7 @@ raft-studio edit-dataset original-dataset --edits-json edits.json --add-dataset 
 
 Its destination must be new and outside every source dataset. It verifies source
 arrays and the completed output before publication and preserves each original
-NPY/NPZ file's bytes and hashes. Shared storage requires the same filesystem.
+NPY/NPZ/EXR/PNG file's bytes and hashes. Shared storage requires the same filesystem.
 
 For automatic collections:
 
@@ -174,21 +174,34 @@ raft-studio compose-datasets flowers rooms --output-dir experiment-ignore-groups
 
 ## Lossless storage
 
-New collections reuse each unique original NPY/NPZ file through independent
+New collections reuse each unique original NPY/NPZ/EXR/PNG file through independent
 copy-on-write clones on supported macOS filesystems, or immutable hard links on
 the same filesystem. No array values or file containers are rewritten. Each
 collection has contained array paths and survives removal of its source folder.
 Cross-volume preparation requires an explicit `--storage-mode copy`, or direct
 training from the existing dataset.
 
-Newly generated datasets and explicit portable copies store each unique plane
-once using NPZ (a ZIP archive containing one NPY plane named `data`). Compression
-changes the file representation; the
+Newly generated datasets and explicit portable copies store each unique float16/32
+depth plane in lossless ZIP EXR, and supported unsigned 8/16-bit RGB planes in
+lossless PNG. Each float32 teacher result is a single 32-bit channel, with no
+RGB duplication or alpha. Masks and other dtypes/layouts use NPZ (a ZIP archive
+containing one NPY plane named `data`). Compression changes the file representation; the
 array dtype, dimensions, byte order, NaN payloads, signed zero, and numerical
-values are checked by exact array hashes. Preview PNGs are disposable viewing
+values are checked by exact array hashes. Scientific RGB PNGs preserve their
+original sample codes; separately generated preview PNGs remain disposable viewing
 images and never become training labels.
 
-Existing datasets can be copied into this compact form:
+New datasets omit native teacher outputs, confidence and unrelated embedded
+auxiliary planes by default. Advanced storage switches or CLI
+`--retain-intermediates --preserve-auxiliary-assets` retain them explicitly.
+Equivalent positive-finite masks are computed from depth; restrictive masks are
+still stored. Source photos are never rewritten. Use one teacher without metric
+anchoring when relative labels meet the task; additional teachers/anchor maps
+retain different numerical data and add to storage. The detail preset now leaves
+metric anchoring off by default.
+
+Existing datasets can be copied into this compact form, without removing any
+existing scientific planes:
 
 ```sh
 raft-studio compact-dataset original-dataset --output-dir compact-dataset

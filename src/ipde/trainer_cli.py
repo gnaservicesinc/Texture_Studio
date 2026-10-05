@@ -87,6 +87,8 @@ def _parser() -> argparse.ArgumentParser:
     compact = commands.add_parser("compact-dataset", help="write a verified lossless compressed, deduplicated dataset copy")
     compact.add_argument("dataset", type=Path)
     compact.add_argument("--output-dir", required=True, type=Path)
+    compact.add_argument("--array-format", choices=("images", "numpy"), default="images",
+                         help="lossless EXR depth / PNG unsigned images (default), or NPZ arrays")
     hf = commands.add_parser("import-hf", help="import mapped lossless stereo arrays through the optional datasets backend")
     hf.add_argument("dataset")
     hf.add_argument("--output-dir", type=Path, required=True)
@@ -124,7 +126,13 @@ def _parser() -> argparse.ArgumentParser:
     dataset.add_argument("--teacher-view", choices=("display", "stereo-left"), default="display",
                          help="teacher input is the full display photo by default; stereo-left is an explicit legacy experiment")
     dataset.add_argument("--include-display-teacher", action="store_true", help="also retain display teachers in explicit stereo-left experiments; display mode always retains them")
-    dataset.add_argument("--uncompressed", action="store_true", help="store NPY instead of lossless NPZ")
+    dataset.add_argument("--uncompressed", action="store_true", help="store exact NPY arrays instead of compressed images")
+    dataset.add_argument("--array-format", choices=("images", "numpy"), default="images",
+                         help="lossless EXR depth / PNG unsigned images (default), or NPZ arrays")
+    dataset.add_argument("--retain-intermediates", action="store_true",
+                         help="also retain native teacher predictions, confidence and derived validity planes")
+    dataset.add_argument("--preserve-auxiliary-assets", action="store_true",
+                         help="also copy unrelated embedded auxiliary planes into the training dataset")
     dataset.add_argument("--validation-fraction", type=float, default=.2)
     dataset.add_argument("--seed", type=int, default=0)
     dataset.add_argument("--metric-anchor", choices=("depthpro",), help="explicitly anchor a relative teacher's scale to a separate DepthPro estimate")
@@ -346,7 +354,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     validation_count_per_dataset=args.validation_count_per_dataset, storage_mode=args.storage_mode), validation_datasets=args.validation_dataset, progress_callback=_progress, workers=args.workers)
             elif args.command == "compact-dataset":
                 from .dataset_collection import compress_dataset
-                report = compress_dataset(args.dataset, args.output_dir, progress_callback=_progress, workers=args.workers)
+                report = compress_dataset(args.dataset, args.output_dir, storage=args.array_format,
+                                          progress_callback=_progress, workers=args.workers)
             elif args.command == "import-hf":
                 from .huggingface_datasets import import_huggingface_dataset
                 report = import_huggingface_dataset(args.dataset, args.output_dir, json.loads(args.mapping_json.read_text()),
@@ -376,6 +385,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         group_ids=groups, teacher_view=args.teacher_view,
                         include_display_teacher=args.teacher_view == "display" or args.include_display_teacher, grouping_semantics=args.grouping,
                         name=args.name, category=args.category, compress_arrays=not args.uncompressed, require_apple_camera=True,
+                        array_format=args.array_format, retain_intermediates=args.retain_intermediates,
+                        preserve_auxiliary_assets=args.preserve_auxiliary_assets,
                         validation_fraction=args.validation_fraction, split_seed=args.seed, workers=args.workers,
                         metric_anchor=LearnedDepthConfig(model="depthpro", model_path=args.anchor_model_path,
                             source_dir=args.anchor_source_dir, device=args.device) if args.metric_anchor else None), progress_callback=_progress)

@@ -166,7 +166,7 @@ class CollectionStorageTests(unittest.TestCase):
             for old, new in zip(_array_records(left["samples"]), _array_records(right["samples"])):
                 self.assertEqual(old["array_sha256"], new["array_sha256"])
                 self.assertEqual(read_array(shared / old["path"]).tobytes(), read_array(portable / new["path"]).tobytes())
-            self.assertTrue(all(path.suffix == ".npz" for path in (portable / "arrays").iterdir()))
+            self.assertEqual({path.suffix for path in (portable / "arrays").iterdir()}, {".exr", ".png", ".npz"})
             self.assertEqual(report["collection"]["reused_array_storage_bytes"], 0)
             self.assertEqual(report["collection"]["added_storage_bytes"], sum(len(value) for value in _file_bytes(portable).values()))
             self.assertEqual(before, _file_bytes(source))

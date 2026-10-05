@@ -111,10 +111,16 @@ on smaller displays; review captions have their own space beneath the images.
 
 ## Storage and external datasets
 
-New GUI datasets use lossless NPZ (ZIP deflate of an NPY plane) with exact
+New GUI datasets use single-channel lossless ZIP EXR for each float32 teacher
+result, exact PNG for unsigned RGB, and NPZ for masks/other layouts, with bit-exact
 round-trip checks. Identical arrays are stored once even when several records or
 teacher variants use them. Raw arrays are never normalized or gamma corrected.
-Prepared training sets retain the original NPY/NPZ files byte-for-byte through
+Native teacher predictions, confidence and unrelated auxiliary planes are omitted
+by default; Advanced can retain them explicitly. Equivalent positive-finite masks
+are derived from depth, while restrictive masks stay stored. Source photos stay
+unchanged. The detail preset leaves metric anchoring off because relative labels
+can train the display student directly; extra teacher and scale maps add storage.
+Prepared training sets retain the original scientific files byte-for-byte through
 shared storage. Their array paths stay inside the new set, so removing the source
 directory does not break the set. Hard-linked payloads must remain immutable;
 Studio's array writers publish new files rather than editing existing ones.
@@ -123,8 +129,8 @@ prepared sets must be on the same filesystem; train a linked dataset directly
 when its files are on another volume. The CLI's explicit
 `compose-datasets --storage-mode copy` creates a portable compressed copy when
 requested. Existing older copies are left in place.
-**Compact dataset** creates a new verified compressed copy of an older dataset;
-it preserves split assignments and leaves the original available. Using both
+**Compact dataset** creates a new verified EXR/PNG copy of an older dataset;
+it preserves every existing scientific plane and split assignment and leaves the original available. Using both
 copies consumes additional storage until you remove the original yourself.
 
 **Remove generated dataset…** in Dataset Studio permanently removes an owned
@@ -324,7 +330,7 @@ RGB/auxiliary data are untouched. A visually plausible map still needs
 independent accuracy checks for displacement work.
 
 Membership and split edits atomically update the selected dataset's manifest.
-Original NPY/NPZ values and files stay unchanged, and existing teachers are not
+Original scientific values and files stay unchanged, and existing teachers are not
 rerun. The save status shows when changes are pending, saving, or saved. A
 durable per-dataset draft preserves unfinished changes after a save failure or
 reopening. Closing while a save is unfinished requires an explicit choice, and

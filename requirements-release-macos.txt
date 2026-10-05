@@ -1,4 +1,4 @@
-# IPDE Studio v0.9.1 macOS runtime dependency closure.
+# IPDE Studio v0.9.2 macOS runtime dependency closure.
 # Exact versions validated in the development environment; shared by setup,
 # the release workflow and the standalone runtime builder. Includes only the
 # base/teacher/datasets dependency closure, not unrelated environment packages.

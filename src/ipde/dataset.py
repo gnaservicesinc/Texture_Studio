@@ -53,7 +53,10 @@ class DatasetOptions:
     name: str | None = None
     category: str | None = None
     require_apple_camera: bool = False
-    compress_arrays: bool = False
+    compress_arrays: bool = True
+    array_format: str = "images"
+    retain_intermediates: bool = False
+    preserve_auxiliary_assets: bool = False
     workers: int | None = None
 
 
@@ -234,6 +237,8 @@ def build_dataset(
         raise DatasetError("grouping_semantics must be capture, scene or none")
     if options.teacher_view not in {"display", "stereo-left"}:
         raise DatasetError("teacher_view must be display or stereo-left")
+    if options.array_format not in {"images", "numpy"}:
+        raise DatasetError("array_format must be images or numpy")
     teachers = (options.teacher, *options.additional_teachers)
     if len(teachers) > 3:
         raise DatasetError("Choose one, two or three teachers")
@@ -277,36 +282,39 @@ def build_dataset(
             # Byte-identical source copies, duplicate HEIF views and repeated
             # teacher planes share one immutable lossless file.
             return dict(stored_arrays[identity])
-        record = array_record(root, path, value, compressed=options.compress_arrays)
+        record = array_record(root, path, value, compressed=options.compress_arrays, storage=options.array_format)
         array_sizes[record["path"]] = ((root / record["path"]).stat().st_size, value.nbytes)
         stored_arrays[identity] = record
         return record
 
-    def store_raw_assets(discovery: Any, folder: Path) -> list[dict[str, Any]]:
+    def store_raw_assets(discovery: Any, folder: Path) -> dict[int, dict[str, Any]]:
         """Write unique raw planes concurrently; only this caller owns dedup metadata."""
         from .array_storage import array_record
+        selected = [(ordinal, asset) for ordinal, asset in enumerate(discovery.assets)
+                    if options.preserve_auxiliary_assets or asset.kind == "display_view"
+                    or asset.kind == "spatial_view" and asset.semantic_name in {"spatial_left", "spatial_right"}]
         identities = [(asset.array.dtype.str, asset.array.shape, sha256_array(asset.array))
-                      for asset in discovery.assets]
+                      for _, asset in selected]
         planned = {}
-        for ordinal, (asset, identity) in enumerate(zip(discovery.assets, identities)):
+        for (ordinal, asset), identity in zip(selected, identities):
             if identity not in stored_arrays and identity not in planned:
                 planned[identity] = (folder / f"raw-{ordinal:03d}.npy", asset.array)
 
         def save(item: Any) -> Any:
             identity, (path, array) = item
-            record = array_record(temporary, path, array, compressed=options.compress_arrays)
+            record = array_record(temporary, path, array, compressed=options.compress_arrays, storage=options.array_format)
             return identity, record, (temporary / record["path"]).stat().st_size, array.nbytes
 
         count = memory_limited_workers(worker_count, max((value[1].nbytes for value in planned.values()), default=1) * 2)
         for identity, record, file_bytes, array_bytes in ordered_map(save, planned.items(), workers=count):
             stored_arrays[identity] = record
             array_sizes[record["path"]] = file_bytes, array_bytes
-        raw = []
-        for asset, identity in zip(discovery.assets, identities):
+        raw = {}
+        for (ordinal, asset), identity in zip(selected, identities):
             record = _asset_record(asset)
             record["storage"] = dict(stored_arrays[identity])
             record["metadata_blocks"] = _jsonable(asset.metadata_blocks)
-            raw.append(record)
+            raw[ordinal] = record
         return raw
 
     def discard(folder: Path) -> None:
@@ -348,8 +356,11 @@ def build_dataset(
         anchor_record = {
             "label_kind": "metric_model_anchor_pseudo_label", "units": "meters", "metadata": _jsonable(anchor_prediction.metadata),
             "target": dataset_array_record(temporary, folder / f"{prefix}metric-anchor.npy", anchor_depth),
-            "native_target": dataset_array_record(temporary, folder / f"{prefix}metric-anchor-native.npy", anchor_native),
+            "native_prediction_retained": options.retain_intermediates,
         }
+        anchor_record["metadata"]["native_prediction_shape"] = list(anchor_native.shape)
+        if options.retain_intermediates:
+            anchor_record["native_target"] = dataset_array_record(temporary, folder / f"{prefix}metric-anchor-native.npy", anchor_native)
         from .pseudo_calibration import PseudoCalibrationError, anchor_relative_depth
         try:
             anchored, accepted, calibration = anchor_relative_depth(prediction.source_depth, prediction.metadata["units"], anchor_depth)
@@ -396,8 +407,12 @@ def build_dataset(
             "schema": "ipde-depth-dataset-v1",
             "name": options.name or destination.name,
             "category": options.category,
-            "precision_policy": "Raw samples/auxiliaries preserved bit-for-bit in NPY/NPZ; no normalization, gamma, or resampling",
-            "array_storage": "npz_deflate" if options.compress_arrays else "npy",
+            "precision_policy": "Raw samples/auxiliaries preserved bit-for-bit for retained assets; no normalization, gamma, or resampling",
+            "array_storage": "lossless_exr_png_npz" if options.compress_arrays and options.array_format == "images" else "npz_deflate" if options.compress_arrays else "npy",
+            "storage_policy": {"array_format": options.array_format,
+                               "retain_intermediates": options.retain_intermediates,
+                               "preserve_auxiliary_assets": options.preserve_auxiliary_assets,
+                               "computed_positive_finite_masks": "stored" if options.retain_intermediates else "derived_on_read"},
             "file_workers": worker_count,
             "teacher_view": options.teacher_view,
             "generation_state": state,
@@ -439,7 +454,7 @@ def build_dataset(
         print(f"  Skipped {source.name}: {error}", file=sys.stderr, flush=True)
         emit("photo_skipped", dataset_dir=str(temporary), **record)
 
-    def make_sample(source: Path, discovery: Any, index: int, teacher_index: int, raw: list[dict[str, Any]],
+    def make_sample(source: Path, discovery: Any, index: int, teacher_index: int, raw: Mapping[int, dict[str, Any]],
                     left: Any, right: Any, left_index: int, right_index: int, source_id: str,
                     photo_metadata: dict[str, Any], folder: Path) -> dict[str, Any]:
         spatial = discovery.spatial_photo
@@ -502,18 +517,21 @@ def build_dataset(
             "coordinate_reference": "spatial_left: exact decoded sample coordinates, no EXIF rotation",
             "calibration": _jsonable(spatial),
             "top_level_images": _jsonable(discovery.top_level_images),
-            "raw_assets": raw,
+            "raw_assets": list(raw.values()),
             "teacher": {
                 "label_kind": "pseudo_label",
                 "units": units,
                 "metadata": _jsonable(metadata),
                 "target": dataset_array_record(temporary, folder / "teacher.npy", target),
-                "native_target": dataset_array_record(temporary, folder / "teacher-native.npy", native),
-                "valid_mask": dataset_array_record(temporary, folder / "teacher-valid.npy", valid),
+                "native_prediction_retained": options.retain_intermediates,
+                "validity_policy": "stored_mask" if options.retain_intermediates else "positive_finite",
                 "valid_pixel_count": int(valid.sum()),
                 "coordinate_reference": "display; separate from RAFT's spatial_left reference" if display_mode else "spatial_left",
             },
         }
+        if options.retain_intermediates:
+            sample["teacher"]["native_target"] = dataset_array_record(temporary, folder / "teacher-native.npy", native)
+            sample["teacher"]["valid_mask"] = dataset_array_record(temporary, folder / "teacher-valid.npy", valid)
         anchor_record, anchored_record, pseudo_calibration = (None, None, None) if display_mode else anchored_label(
             source, left.array, prediction, folder, display=False,
             focal_pixels=spatial["left_camera"]["focal_length_x_pixels"],
@@ -567,10 +585,13 @@ def build_dataset(
                     "units": display_prediction.metadata["units"],
                     "metadata": _jsonable(display_metadata),
                     "target": dataset_array_record(temporary, folder / "display-teacher.npy", display_target),
-                    "native_target": dataset_array_record(temporary, folder / "display-teacher-native.npy", display_prediction.native_depth),
-                    "valid_mask": dataset_array_record(temporary, folder / "display-teacher-valid.npy", np.isfinite(display_target) & (display_target > 0)),
+                    "native_prediction_retained": options.retain_intermediates,
+                    "validity_policy": "stored_mask" if options.retain_intermediates else "positive_finite",
                     "coordinate_reference": "display; separate from RAFT's spatial_left reference",
                 }
+                if options.retain_intermediates:
+                    sample["display_teacher"]["native_target"] = dataset_array_record(temporary, folder / "display-teacher-native.npy", display_prediction.native_depth)
+                    sample["display_teacher"]["valid_mask"] = dataset_array_record(temporary, folder / "display-teacher-valid.npy", np.isfinite(display_target) & (display_target > 0))
                 display_anchor, anchored_display, display_calibration = anchored_label(
                     source, display.array, display_prediction, folder, display=True, focal_pixels=None,
                 )
@@ -626,7 +647,7 @@ def build_dataset(
                     sample["training_target_choice_note"] = (
                         "Explicit legacy supervision uses empirically registered LEFT-camera display labels; holes stay excluded"
                         if use_display else "Explicit legacy supervision uses the separate LEFT-grid teacher; display diagnostics are not selected")
-        if getattr(prediction, "confidence", None) is not None:
+        if options.retain_intermediates and getattr(prediction, "confidence", None) is not None:
             confidence = np.asarray(prediction.confidence)
             sample["teacher"]["confidence"] = dataset_array_record(temporary, folder / "teacher-confidence.npy", confidence)
             sample["teacher"]["confidence_note"] = "Model confidence is not a measured error bound"
@@ -650,9 +671,11 @@ def build_dataset(
                 "source_path": str(reference_path),
                 "source_sha256": sha256_file(reference_path),
                 "target": dataset_array_record(temporary, folder / "reference.npy", reference),
-                "valid_mask": dataset_array_record(temporary, folder / "reference-valid.npy", reference_valid),
+                "validity_policy": "stored_mask" if options.retain_intermediates else "positive_finite",
                 "accuracy_note": "User must verify measurement accuracy and left-camera registration independently",
             }
+            if options.retain_intermediates:
+                sample["reference"]["valid_mask"] = dataset_array_record(temporary, folder / "reference-valid.npy", reference_valid)
         print(f"  Preserved {len(raw)} raw arrays and teacher targets", file=sys.stderr, flush=True)
         return sample
 
@@ -773,9 +796,15 @@ def _sample_scientific_records(sample: Mapping[str, Any]) -> list[dict[str, Any]
         if not isinstance(label, dict):
             raise DatasetError(f"Sample {identity} has malformed {key} depth label")
         for field in required:
+            if field == "native_target" and field not in label and label.get("native_prediction_retained") is False:
+                continue
+            if (field == "valid_mask" and field not in label and key in {"teacher", "reference"}
+                    and label.get("validity_policy") == "positive_finite"):
+                continue
             require_record(label.get(field), f"{key}.{field}")
-        if "confidence" in label:
-            require_record(label["confidence"], f"{key}.confidence")
+        for field in ("native_target", "valid_mask", "confidence"):
+            if field in label:
+                require_record(label[field], f"{key}.{field}")
     if "display_rgb" in sample:
         require_record(sample["display_rgb"], "display_rgb")
 
@@ -783,7 +812,7 @@ def _sample_scientific_records(sample: Mapping[str, Any]) -> list[dict[str, Any]
         if isinstance(value, dict):
             present = _ARRAY_FIELDS.intersection(value)
             path = value.get("path")
-            if len(present) >= 3 or (isinstance(path, str) and Path(path).suffix.lower() in {".npy", ".npz"}):
+            if len(present) >= 3 or (isinstance(path, str) and Path(path).suffix.lower() in {".npy", ".npz", ".exr", ".png"}):
                 require_record(value, field)
             else:
                 for key, child in value.items():

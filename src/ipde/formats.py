@@ -31,6 +31,8 @@ def sha256_file(path: Path) -> str:
 
 def sha256_array(array: np.ndarray) -> str:
     contiguous = np.ascontiguousarray(array)
+    if contiguous.size == 0:
+        return hashlib.sha256(b"").hexdigest()
     return hashlib.sha256(memoryview(contiguous).cast("B")).hexdigest()
 
 

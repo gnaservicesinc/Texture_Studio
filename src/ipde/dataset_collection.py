@@ -321,9 +321,9 @@ def compose_datasets(
                   "storage_mode": options.storage_mode}
     manifest = {
         "schema": "ipde-depth-dataset-v1", "precision_policy": (
-            "Original deduplicated NPY/NPZ files preserved byte-for-byte using copy-on-write clones or immutable hard links; no array rewriting"
+            "Original deduplicated array files preserved byte-for-byte using copy-on-write clones or immutable hard links; no array rewriting"
             if options.storage_mode == "shared" else
-            "Array payloads preserved bit-for-bit in deduplicated lossless NPZ without changing any array values"),
+            "Array payloads preserved bit-for-bit in deduplicated ZIP EXR, PNG or NPZ without changing any array values"),
         "split_seed": options.split_seed, "validation_fraction": options.validation_fraction,
         "group_ids": sorted({sample["group_id"] for sample in samples}), "explicit_scene_groups": bool(explicit_scenes),
         "grouping_semantics": "scene" if explicit_scenes else "capture", "warnings": sorted(set(warnings)),
@@ -356,7 +356,7 @@ def compose_datasets(
                 saved["path"] = target.relative_to(temporary).as_posix()
             else:
                 method = "compressed-copy"
-                saved = array_record(temporary, temporary / "arrays" / f"{identity}.npz", value, compressed=True)
+                saved = array_record(temporary, temporary / "arrays" / f"{identity}.npz", value, compressed=True, storage="images")
             if any(saved[field] != record[field] for field in ("array_sha256", "shape", "dtype")):
                 raise DatasetError(f"Lossless composition changed source array values: {record['path']}")
             return key, saved, method
@@ -376,9 +376,9 @@ def compose_datasets(
                                    "processed": sample_index, "total": len(samples), "storage_mode": options.storage_mode})
         collection["unique_arrays"] = len(copied)
         collection["storage_methods"] = storage_methods
-        collection["storage_format"] = "deduplicated original NPY/NPZ with " + ", ".join(
+        collection["storage_format"] = "deduplicated original array files with " + ", ".join(
             "copy-on-write clones" if method == "clonefile" else "immutable hard links" for method in storage_methods
-        ) if options.storage_mode == "shared" else "deduplicated lossless NPZ"
+        ) if options.storage_mode == "shared" else "deduplicated lossless ZIP EXR, PNG and NPZ fallback"
         array_bytes = sum((temporary / record["path"]).stat().st_size for record in copied.values())
         collection["array_storage_bytes"] = array_bytes
         collection["reused_array_storage_bytes"] = array_bytes if options.storage_mode == "shared" else 0
@@ -419,8 +419,9 @@ def compress_dataset(
     *,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     workers: int | None = None,
+    storage: str = "images",
 ) -> dict[str, Any]:
-    """Publish a new deduplicated lossless ZIP-compressed array dataset.
+    """Publish a new deduplicated lossless image/array dataset.
 
     Numerical payloads (including NaNs, signed zero, endian and dtype) must have
     exactly the same array hash. The original remains usable and untouched.
@@ -431,6 +432,8 @@ def compress_dataset(
         worker_count = resolve_workers(workers)
     except ValueError as exc:
         raise DatasetError(str(exc)) from exc
+    if storage not in {"images", "numpy"}:
+        raise DatasetError("Dataset array storage must be images or numpy")
     root, manifest = _read_manifest(directory)
     _require_complete(manifest)
     destination = Path(output_dir).expanduser().resolve()
@@ -460,7 +463,7 @@ def compress_dataset(
             key, (record, _) = item
             identity = hashlib.sha256(json.dumps(key).encode()).hexdigest()
             value = _verified_array(root, record)
-            saved = array_record(temporary, temporary / "arrays" / f"{identity}.npz", value, compressed=True)
+            saved = array_record(temporary, temporary / "arrays" / f"{identity}.npz", value, compressed=True, storage=storage)
             if any(saved[field] != record[field] for field in ("array_sha256", "shape", "dtype")):
                 raise DatasetError("Lossless compression changed a source array's values, shape or dtype")
             return key, saved
@@ -484,13 +487,15 @@ def compress_dataset(
             "compression_ratio": after / before if before else 1.0,
             "unique_arrays": len(written), "source_array_files": len(source_files),
             "array_values_preserved": True, "split_assignments_preserved": True,
-            "format": "NPZ: ZIP deflate of one data.npy plane per unique array",
+            "format": "ZIP EXR for float16/32, PNG for uint8/16, NPZ fallback; one file per unique array" if storage == "images" else "NPZ: ZIP deflate of one data.npy plane per unique array",
             "file_workers": worker_count, "transfer_workers": transfer_workers,
         }
         compact["storage_compaction"] = compaction
+        compact["array_storage"] = "lossless_exr_png_npz" if storage == "images" else "npz_deflate"
+        compact["storage_policy"] = {**compact.get("storage_policy", {}), "array_format": storage}
         if "generation_output_dir" in compact:
             compact["generation_output_dir"] = str(destination)
-        compact["precision_policy"] = "Lossless ZIP-compressed NPY planes, verified by dtype/shape/array hashes; no normalization, gamma or resampling"
+        compact["precision_policy"] = "Lossless array payloads, verified by dtype/shape/array hashes; no normalization, gamma or resampling"
         (temporary / "dataset.json").write_text(json.dumps(compact, indent=2, allow_nan=False) + "\n", encoding="utf-8")
         load_dataset(temporary, verify=True, workers=worker_count)
         _publish_new_directory(temporary, destination)

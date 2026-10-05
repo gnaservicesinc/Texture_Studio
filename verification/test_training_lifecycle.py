@@ -199,7 +199,8 @@ class TrainingLifecycleTests(unittest.TestCase):
             target_path = edited / json.loads((edited / "dataset.json").read_text())["samples"][0]["teacher"]["target"]["path"]
             changed = np.array(read_array(target_path), copy=True)
             changed[1, 1] += np.float32(.125)
-            write_array(target_path, changed, compressed=True)
+            rewritten = write_array(target_path, changed, compressed=True, storage="images")
+            self.assertEqual(rewritten, target_path, "Corruption must modify the recorded scientific file")
             with self.assertRaisesRegex(TrainingIntegrityError, "checksum mismatch"):
                 self._run(root, edited, root / "changed-descendant.pth", self._options(epochs=1, checkpoint_schedule="end"))
 

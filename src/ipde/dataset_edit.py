@@ -552,7 +552,7 @@ def edit_dataset(
     manifest = copy.deepcopy(base_manifest)
     manifest.update({"name": destination.name, "samples": samples, "summary": summary,
                      "group_ids": sorted(components), "generation_state": "complete", "splits_provisional": False,
-                     "precision_policy": "Original NPY/NPZ files preserved byte-for-byte using copy-on-write clones or immutable hard links; no normalization, gamma, resampling or array rewriting"})
+                     "precision_policy": "Original scientific array files preserved byte-for-byte using copy-on-write clones or immutable hard links; no normalization, gamma, resampling or array rewriting"})
     if "generation_output_dir" in manifest:
         manifest["generation_output_dir"] = str(destination)
     for inherited in ("curation", "storage_compaction"):
@@ -608,7 +608,7 @@ def edit_dataset(
         storage.update({"unique_arrays": len(planned), "storage_methods": methods, "transfer_workers": transfer_workers,
                         "array_storage_bytes": array_bytes, "reused_array_storage_bytes": array_bytes,
                         "added_array_storage_bytes": 0, "shared_array_files_immutable": bool(methods.get("hardlink")),
-                        "storage_format": "deduplicated original NPY/NPZ files"})
+                        "storage_format": "deduplicated original scientific array files"})
         if methods.get("hardlink"):
             warnings.append("Edited arrays share immutable files with their sources. Archiving or removing a source keeps this dataset usable; do not edit shared array files in place.")
         manifest["warnings"] = sorted(set(warnings))

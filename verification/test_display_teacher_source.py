@@ -73,7 +73,8 @@ class DisplayTeacherSourceTests(unittest.TestCase):
                 patch("ipde.registration.estimate_display_registration") as estimate, \
                 patch("ipde.registration.register_display_depth") as transport:
             root = Path(directory)
-            dataset, manifest = self._build(root, factory=factory)
+            dataset, manifest = self._build(root, factory=factory, options=DatasetOptions(
+                teacher=LearnedDepthConfig(), retain_intermediates=True, workers=1, skip_bad_photos=False))
             self.assertEqual(len(calls), 3)
             estimate.assert_not_called()
             transport.assert_not_called()

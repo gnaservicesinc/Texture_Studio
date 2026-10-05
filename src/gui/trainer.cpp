@@ -897,6 +897,18 @@ private:
             modelPaths_.insert(model, modelEdit); modelSources_.insert(model, sourceEdit);
         }
         advancedLayout->addLayout(additionalForm);
+        auto *storageControls = new QFormLayout;
+        retainTeacherIntermediates_ = binaryButton("Keep teacher intermediate arrays", datasetAdvanced_);
+        retainTeacherIntermediates_->setObjectName("retainTeacherIntermediates");
+        retainTeacherIntermediates_->setToolTip("Also stores native teacher predictions, confidence and derived masks. Training does not need these; full display targets and their provenance are always retained.");
+        preserveAuxiliaryAssets_ = binaryButton("Copy all embedded auxiliary images", datasetAdvanced_);
+        preserveAuxiliaryAssets_->setObjectName("preserveAuxiliaryAssets");
+        preserveAuxiliaryAssets_->setToolTip("Adds embedded depth, gain maps and mattes to this dataset. These are not inputs to the display student. Originals remain in your source photos and can be extracted separately.");
+        storageControls->addRow("Optional extra storage", retainTeacherIntermediates_);
+        storageControls->addRow("Auxiliary archive", preserveAuxiliaryAssets_);
+        advancedLayout->addLayout(storageControls);
+        auto *storageHelp = new QLabel("Dataset depth uses one lossless 32-bit EXR per teacher result. Stereo and display RGB use lossless PNG; calibration and hashes stay in the manifest. Extra teachers and estimated meter-scale maps add separate depth results. Teacher intermediates and unrelated auxiliary planes are omitted unless enabled above.", datasetAdvanced_);
+        storageHelp->setWordWrap(true); advancedLayout->addWidget(storageHelp);
         auto *teacherView = new QLabel("Teacher source: full display photo. Stereo left/right images are student inputs only.", datasetAdvanced_);
         teacherView->setWordWrap(true); advancedLayout->addWidget(teacherView);
         scaleHelp_ = new QLabel(tab); scaleHelp_->setWordWrap(true); advancedLayout->addWidget(scaleHelp_);
@@ -922,7 +934,8 @@ private:
         if (save && projectSettings_) { projectSettings_->setValue("goal", goal); projectSettings_->sync(); }
         if (goal == "manual") { advanced_->setChecked(true); goalHelp_->setText("Every inference, scale, and training setting is available for manual control."); }
         else {
-            advanced_->setChecked(false); datasetAdvanced_->hide(); teacherDevice_->setCurrentIndex(0); anchor_->setChecked(true);
+            advanced_->setChecked(false); datasetAdvanced_->hide(); teacherDevice_->setCurrentIndex(0); anchor_->setChecked(false);
+            retainTeacherIntermediates_->setChecked(false); preserveAuxiliaryAssets_->setChecked(false);
             const QString preferred = goal == "effect/map" ? "depth-anything-3" : "depthpro";
             teacher_->setCurrentIndex(teacher_->findData(preferred));
             for (auto *check : teacherChecks_) check->setChecked(check->property("model").toString() == preferred);
@@ -2051,6 +2064,8 @@ private:
              << "--teacher-view" << "display"
              << "--grouping" << (useGroups_->isChecked() ? (verifiedScenes_->isChecked() ? "scene" : "capture") : "none");
         if (anchor_->isChecked()) args << "--metric-anchor" << "depthpro";
+        if (retainTeacherIntermediates_->isChecked()) args << "--retain-intermediates";
+        if (preserveAuxiliaryAssets_->isChecked()) args << "--preserve-auxiliary-assets";
         args << "--workers" << QString::number(workerCount()); refreshAfter_ = true; startJob("Generate dataset", args);
     }
 
@@ -2590,6 +2605,7 @@ private:
     QList<DepthPreview *> depthPreviews_;
     QSplitter *library_ = nullptr;
     QPushButton *verifiedScenes_ = nullptr, *anchor_ = nullptr, *advanced_ = nullptr, *useGroups_ = nullptr, *compareTeachers_ = nullptr;
+    QPushButton *retainTeacherIntermediates_ = nullptr, *preserveAuxiliaryAssets_ = nullptr;
     QList<QPushButton *> teacherChecks_;
     QGroupBox *datasetAdvanced_ = nullptr, *trainingAdvanced_ = nullptr;
     QSpinBox *inputSize_ = nullptr, *epochs_ = nullptr, *steps_ = nullptr, *patch_ = nullptr, *iterations_ = nullptr;

@@ -1,7 +1,7 @@
 """Inspect and curate datasets without changing their precision-preserved arrays.
 
-The PNGs here are disposable visualizations. They never become training labels:
-the original NPY files, including NaNs and floating-point bit patterns, stay intact.
+Review PNGs are disposable visualizations. They never become training labels:
+the original scientific arrays, including NaNs and floating-point bits, stay intact.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import numpy as np
 
 from .dataset import DatasetError, load_dataset
 from .formats import sha256_array, sha256_file, write_png
-from .array_storage import read_array
+from .array_storage import ARRAY_SUFFIXES, read_array
 from .concurrency import ordered_map, resolve_workers
 
 
@@ -67,13 +67,13 @@ def _array_path(root: Path, record: dict[str, Any], *, validate_file: bool = Tru
     if not isinstance(name, str) or not name or Path(name).is_absolute() or ".." in Path(name).parts:
         raise DatasetError("Dataset array path escapes the dataset directory or is not relative")
     path = root / name
-    if path.suffix.lower() not in {".npy", ".npz"}:
-        raise DatasetError("Dataset array path is not an NPY/NPZ array")
+    if path.suffix.lower() not in ARRAY_SUFFIXES:
+        raise DatasetError("Dataset array path is not an NPY/NPZ/EXR/PNG array")
     if not validate_file:
         return path
     path = path.resolve()
-    if not path.is_relative_to(root) or path == root or path.suffix.lower() not in {".npy", ".npz"}:
-        raise DatasetError("Dataset array path escapes the dataset directory or is not an NPY/NPZ array")
+    if not path.is_relative_to(root) or path == root or path.suffix.lower() not in ARRAY_SUFFIXES:
+        raise DatasetError("Dataset array path escapes the dataset directory or is not an NPY/NPZ/EXR/PNG array")
     if not path.is_file():
         raise DatasetError(f"Dataset array is missing: {name}")
     return path

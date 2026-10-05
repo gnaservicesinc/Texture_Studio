@@ -321,10 +321,13 @@ def _load_sample(root: Path, sample: dict[str, Any], options: TrainingOptions) -
         geometry = {**geometry, "label_kind": "user_declared_measured_reference", "precision_note": "Reference accuracy and calibration require independent verification"}
     right, right_valid, registration = register_stereo_rows(left, raw_right)
     valid &= correspondence_validity(flow, right_valid)
-    recorded_valid = _verified_array(root, label["valid_mask"])
-    if recorded_valid.shape != valid.shape or recorded_valid.dtype != np.bool_:
-        raise TrainingError("Dataset target validity mask has the wrong shape or dtype")
-    valid &= recorded_valid
+    if "valid_mask" in label:
+        recorded_valid = _verified_array(root, label["valid_mask"])
+        if recorded_valid.shape != valid.shape or recorded_valid.dtype != np.bool_:
+            raise TrainingError("Dataset target validity mask has the wrong shape or dtype")
+        valid &= recorded_valid
+    elif label.get("validity_policy") != "positive_finite":
+        raise TrainingError("Dataset target is missing its recorded validity mask or derived validity policy")
     valid = _visible_teacher_pixels(depth, flow, valid)
     if options.require_photometric_support:
         photometric, evidence = stereo_photometric_support(left, right, -flow)
