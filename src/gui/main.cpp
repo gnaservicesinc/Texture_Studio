@@ -223,13 +223,17 @@ public:
                     ? QFileDialog::getExistingDirectory(this, QStringLiteral("Choose RAFT-Stereo source folder"), edit->text())
                     : QFileDialog::getOpenFileName(this, QStringLiteral("Choose RAFT-Stereo model"), edit->text(),
                           QStringLiteral("Model checkpoints (*.pth *.pt *.zip);;All files (*)"));
-                if (!chosen.isEmpty()) edit->setText(chosen);
+                if (!chosen.isEmpty()) {
+                    edit->setText(chosen);
+                    modelSelectionChanged();
+                }
             });
             return edit;
         };
         raftModel_ = addPathRow(QStringLiteral("RAFT model:"), QStringLiteral("raft/model"), false);
-        connect(raftModel_, &QLineEdit::editingFinished, this, [this] { if (!running_) applyGoal(); });
+        connect(raftModel_, &QLineEdit::editingFinished, this, [this] { modelSelectionChanged(); });
         raftRoot_ = addPathRow(QStringLiteral("RAFT source folder:"), QStringLiteral("raft/root"), true);
+        connect(raftRoot_, &QLineEdit::editingFinished, this, [this] { modelSelectionChanged(); });
         auto *memberRow = new QHBoxLayout;
         memberRow->addWidget(new QLabel(QStringLiteral("Model inside ZIP:"), central));
         raftMember_ = new QLineEdit(sharedValue(QStringLiteral("raft/member")).toString(), central);
@@ -239,6 +243,7 @@ public:
         connect(raftMember_, &QLineEdit::textChanged, this, [this](const QString &text) {
             setSharedValue(QStringLiteral("raft/member"), text);
         });
+        connect(raftMember_, &QLineEdit::editingFinished, this, [this] { modelSelectionChanged(); });
         auto *help = new QLabel(QStringLiteral(
             "Check individual outputs, then Export checked. Or select one row and click Export this map. "
             "Stereo outputs use the left view's pixel grid; the separate display image can have different framing. "
@@ -385,6 +390,7 @@ public:
             if (output_->text().isEmpty()) output_->setText(QDir(IPDE::projectRoot()).filePath("exports"));
             setWindowTitle("IPDE Extractor — " + sharedValue("name", QFileInfo(IPDE::projectRoot()).fileName()).toString());
         }
+        modelSelectionChanged();
     }
 
 protected:
@@ -406,7 +412,11 @@ protected:
         event->acceptProposedAction();
     }
 
+#ifdef IPDE_EXTRACTOR_REGRESSION
+public:
+#else
 private:
+#endif
     QVariant sharedValue(const QString &key, const QVariant &fallback = {}) const {
         if (IPDE::projectRoot().isEmpty()) return QSettings().value(key, fallback);
         return QSettings(QDir(IPDE::projectRoot()).filePath("project.ini"), QSettings::IniFormat).value(key, fallback);
@@ -415,14 +425,16 @@ private:
         if (IPDE::projectRoot().isEmpty()) { QSettings().setValue(key, value); return; }
         QSettings settings(QDir(IPDE::projectRoot()).filePath("project.ini"), QSettings::IniFormat); settings.setValue(key, value); settings.sync();
     }
-    void applyGoal() {
+    void applyGoal(bool updateSelections = true) {
         const QString goal = goal_->currentData().toString();
-        advancedToggle_->setChecked(goal == "manual"); advanced_->setVisible(advancedToggle_->isChecked());
-        if (goal == "effect/map") goalHint_->setText(displayStudentSelected() ? "Suggested output: experimental student display height map. Native stereo inputs predict the display grid directly; compare with the display teacher on unseen scenes." : "Suggested output: stock RAFT displacement on the left stereo grid. Select a trained display-model.pth for direct display-grid height maps.");
+        if (updateSelections) {
+            advancedToggle_->setChecked(goal == "manual"); advanced_->setVisible(advancedToggle_->isChecked());
+        }
+        if (goal == "effect/map") goalHint_->setText(displayStudentSelected() ? "Suggested output: experimental student display height map. Native stereo inputs predict the display grid directly; compare with the display teacher on unseen scenes." : "Suggested output: selected RAFT model displacement on the left stereo grid. Select a trained display checkpoint for direct display-grid height maps.");
         else if (goal == "depth-estimation") goalHint_->setText(displayStudentSelected() ? "Suggested output: experimental student display depth. Units follow its training labels; relative outputs are not meter distances." : "Suggested output: calibrated RAFT meter depth plus its support mask. Unknown or unsupported values need review.");
         else if (goal == "photo-effects") goalHint_->setText("Suggested outputs: embedded Apple depth and mattes from portrait photos. Original depth values are preserved.");
         else goalHint_->setText("Choose individual products and override any inference settings.");
-        if (goal != "manual" && !running_) {
+        if (updateSelections && goal != "manual" && !running_) {
             const QSignalBlocker blocker(files_);
             for (int i = 0; i < files_->topLevelItemCount(); ++i) for (int j = 0; j < files_->topLevelItem(i)->childCount(); ++j) {
                 auto *child = files_->topLevelItem(i)->child(j);
@@ -438,12 +450,32 @@ private:
         return false;
     }
     bool displayStudentSelected() const {
-        if (!raftModel_) return false;
-        const QString path = raftModel_->text().trimmed();
-        if (QFileInfo(path).fileName() == "display-model.pth") return true;
-        QFile file(path + ".json");
-        if (!file.open(QIODevice::ReadOnly)) return false;
-        return QJsonDocument::fromJson(file.readAll()).object().value("schema").toString() == "ipde-display-training-report-v1";
+        return selectedModelKind_ == "display_student" && resolvedModelSelection_ == modelSelectionKey();
+    }
+    QStringList modelSelectionKey() const {
+        return {raftModel_->text().trimmed(), raftRoot_->text().trimmed(), raftMember_->text().trimmed()};
+    }
+    void modelSelectionChanged() {
+        if (running_ || !raftModel_ || !raftRoot_ || !raftMember_) return;
+        const auto selection = modelSelectionKey();
+        if (selection == lastModelSelection_) return;
+        lastModelSelection_ = selection;
+        selectedModelKind_.clear();
+        resolvedModelSelection_.clear();
+        applyGoal(false);
+        if (!sources_.isEmpty()) beginQueue(true);
+    }
+    QString productForSelectedModel(const QString &id) const {
+        if (displayStudentSelected()) {
+            if (id == "raft-depth" || id == "raft-display-depth") return "student-display-depth";
+            if (id == "raft-displacement") return "student-display-displacement";
+            if (id == "raft-preview" || id == "raft-display-preview") return "student-display-preview";
+        } else {
+            if (id == "student-display-depth") return "raft-depth";
+            if (id == "student-display-displacement") return "raft-displacement";
+            if (id == "student-display-preview") return "raft-preview";
+        }
+        return id;
     }
     void addFiles(const QStringList &paths) {
         if (running_) return;
@@ -529,12 +561,24 @@ private:
     void startNext() {
         if (queue_.isEmpty()) {
             running_ = false;
-            if (reloadPending_) reloadProjectSettings();
+            if (reloadPending_) {
+                reloadProjectSettings();
+                if (running_) return;
+            }
             updateButtons();
             statusBar()->showMessage(cancelled_ ? QStringLiteral("Cancelled") : QStringLiteral("Finished"), 5000);
             return;
         }
         current_ = queue_.takeFirst();
+        const auto arguments = processArguments();
+        if (auto *item = rootForPath(current_)) {
+            item->setText(1, inspectOnly_ ? QStringLiteral("Inspecting…") : QStringLiteral("Extracting…"));
+        }
+        statusBar()->showMessage(QStringLiteral("%1 %2").arg(inspectOnly_ ? QStringLiteral("Inspecting") : QStringLiteral("Extracting"), QFileInfo(current_).fileName()));
+        process_->start(configuredPython(), arguments);
+    }
+
+    QStringList processArguments() const {
         QStringList arguments{bundledScriptPath(), QStringLiteral("--json")};
         if (inspectOnly_) {
             arguments << QStringLiteral("--inspect");
@@ -558,20 +602,15 @@ private:
                 arguments << QStringLiteral("--color-matching") << QStringLiteral("--color-hero")
                           << colorHero_->currentData().toString();
             }
-            if (!raftModel_->text().trimmed().isEmpty())
-                arguments << QStringLiteral("--raft-model") << raftModel_->text().trimmed();
-            if (!raftRoot_->text().trimmed().isEmpty())
-                arguments << QStringLiteral("--raft-root") << raftRoot_->text().trimmed();
-            if (!raftMember_->text().trimmed().isEmpty())
-                arguments << QStringLiteral("--raft-model-member") << raftMember_->text().trimmed();
-
         }
+        if (!raftModel_->text().trimmed().isEmpty())
+            arguments << QStringLiteral("--raft-model") << raftModel_->text().trimmed();
+        if (!raftRoot_->text().trimmed().isEmpty())
+            arguments << QStringLiteral("--raft-root") << raftRoot_->text().trimmed();
+        if (!raftMember_->text().trimmed().isEmpty())
+            arguments << QStringLiteral("--raft-model-member") << raftMember_->text().trimmed();
         arguments << current_;
-        if (auto *item = rootForPath(current_)) {
-            item->setText(1, inspectOnly_ ? QStringLiteral("Inspecting…") : QStringLiteral("Extracting…"));
-        }
-        statusBar()->showMessage(QStringLiteral("%1 %2").arg(inspectOnly_ ? QStringLiteral("Inspecting") : QStringLiteral("Extracting"), QFileInfo(current_).fileName()));
-        process_->start(configuredPython(), arguments);
+        return arguments;
     }
 
     void processFinished(int exitCode, QProcess::ExitStatus exitStatus) {
@@ -592,13 +631,23 @@ private:
                     root->setToolTip(1, message);
                 }
             } else if (root) {
+                const auto selection = modelSelectionKey();
+                const auto reportedKind = object.value(QStringLiteral("selected_model")).toObject().value(QStringLiteral("kind")).toString();
+                // Raw-only exports do not inspect their unused model. Keep the
+                // previous inspection valid when its selection still matches.
+                if (inspectOnly_ || !reportedKind.isEmpty() || resolvedModelSelection_ != selection) {
+                    selectedModelKind_ = reportedKind;
+                    resolvedModelSelection_ = selection;
+                }
+                lastModelSelection_ = selection;
+                applyGoal(false);
                 const bool firstInspection = root->childCount() == 0;
                 QSet<QString> checked;
                 const QString currentProduct = files_->currentItem()
-                    ? files_->currentItem()->data(0, Qt::UserRole + 1).toString() : QString();
+                    ? productForSelectedModel(files_->currentItem()->data(0, Qt::UserRole + 1).toString()) : QString();
                 for (int j = 0; j < root->childCount(); ++j) {
                     if (root->child(j)->checkState(0) == Qt::Checked)
-                        checked.insert(root->child(j)->data(0, Qt::UserRole + 1).toString());
+                        checked.insert(productForSelectedModel(root->child(j)->data(0, Qt::UserRole + 1).toString()));
                 }
                 while (root->childCount() > 0) {
                     delete root->takeChild(0);
@@ -619,9 +668,12 @@ private:
                         log_->append(entry.toObject().value(QStringLiteral("path")).toString().toHtmlEscaped());
                 }
                 const auto products = object.value(QStringLiteral("available_products")).toArray();
+                const bool displayModel = displayStudentSelected();
+                const bool nativeModel = selectedModelKind_ == "raft_stereo" && resolvedModelSelection_ == selection;
                 for (const auto &entry : products) {
                     const auto product = entry.toObject();
                     const auto id = product.value(QStringLiteral("id")).toString();
+                    if ((displayModel && id.startsWith("raft-")) || (nativeModel && id.startsWith("student-"))) continue;
                     auto *child = new QTreeWidgetItem(root);
                     child->setText(0, product.value(QStringLiteral("name")).toString());
                     child->setText(1, dimensionText(product));
@@ -706,6 +758,9 @@ private:
     QLineEdit *raftModel_ = nullptr;
     QLineEdit *raftRoot_ = nullptr;
     QLineEdit *raftMember_ = nullptr;
+    QString selectedModelKind_;
+    QStringList lastModelSelection_;
+    QStringList resolvedModelSelection_;
     QPushButton *exportOne_ = nullptr;
     QMap<QString, QStringList> selectedProducts_;
     QString singleSource_;

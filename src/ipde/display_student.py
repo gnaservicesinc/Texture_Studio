@@ -213,13 +213,18 @@ def create_student(*, raft_root: Path | None, raft_model: Path | None, device: s
 
 
 def load_student_checkpoint(payload: Mapping[str, Any] | Path | str, *, raft_root: Path | None,
-                            device: str = "auto", train_scope: str = "update"):
+                            device: str = "auto", train_scope: str = "update",
+                            checkpoint_member: str | None = None):
     import torch
-    from .spatial import RaftStereoOptions, resolve_raft_resources, _select_device
+    from .spatial import RaftStereoOptions, resolve_raft_resources, _select_device, _checkpoint_bytes
     filename = None
     if not isinstance(payload, Mapping):
         filename = Path(payload).expanduser().resolve()
-        payload = torch.load(filename, map_location="cpu", weights_only=True)
+        try:
+            data, _ = _checkpoint_bytes(filename, checkpoint_member)
+            payload = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
+        except Exception as exc:
+            raise DisplayStudentError(f"could not load selected display checkpoint {filename}: {exc}") from exc
     if not isinstance(payload, Mapping) or payload.get("schema") != SCHEMA:
         raise DisplayStudentError("This is not a stereo-to-display student checkpoint")
     configuration = payload.get("architecture", payload.get("ipde_configuration"))
@@ -229,7 +234,7 @@ def load_student_checkpoint(payload: Mapping[str, Any] | Path | str, *, raft_roo
     if raft_root is None:
         if filename is None:
             raise DisplayStudentError("Supply the RAFT source directory when loading an in-memory student")
-        raft_root, _, _ = resolve_raft_resources(RaftStereoOptions(model=filename))
+        raft_root, _, _ = resolve_raft_resources(RaftStereoOptions(model=filename, model_member=checkpoint_member))
     model = _model(configuration, Path(raft_root))
     state = payload.get("state_dict")
     if not isinstance(state, Mapping) or not state or any(not isinstance(value, torch.Tensor) or not bool(torch.isfinite(value).all()) for value in state.values()):
@@ -254,9 +259,11 @@ def tile_bounds(output_shape: tuple[int, int], tile_size: int) -> Iterator[tuple
 
 def predict_display_depth(left: np.ndarray, right: np.ndarray, output_shape: tuple[int, int], checkpoint: Path,
                           *, raft_root: Path | None = None, device: str = "auto", tile_size: int = 256,
+                          checkpoint_member: str | None = None,
                           left_record: Mapping[str, Any] | None = None, right_record: Mapping[str, Any] | None = None):
     import torch
-    model, configuration, selected = load_student_checkpoint(checkpoint, raft_root=raft_root, device=device)
+    model, configuration, selected = load_student_checkpoint(checkpoint, raft_root=raft_root, device=device,
+                                                            checkpoint_member=checkpoint_member)
     model.eval()
     result = np.empty(output_shape, dtype=np.float32)
     with torch.inference_mode():

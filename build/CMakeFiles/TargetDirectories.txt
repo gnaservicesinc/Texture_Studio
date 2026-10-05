@@ -42,6 +42,9 @@
 /opt/ipde/ipde/build/CMakeFiles/trainer_workflow_regression.dir
 /opt/ipde/ipde/build/CMakeFiles/dataset_management_regression.dir
 /opt/ipde/ipde/build/CMakeFiles/studio_routing_regression.dir
+/opt/ipde/ipde/build/CMakeFiles/help_server_regression.dir
+/opt/ipde/ipde/build/CMakeFiles/extractor_model_regression.dir
+/opt/ipde/ipde/build/CMakeFiles/distribution.dir
 /opt/ipde/ipde/build/CMakeFiles/test.dir
 /opt/ipde/ipde/build/CMakeFiles/edit_cache.dir
 /opt/ipde/ipde/build/CMakeFiles/rebuild_cache.dir
@@ -71,3 +74,7 @@
 /opt/ipde/ipde/build/CMakeFiles/dataset_management_regression_autogen.dir
 /opt/ipde/ipde/build/CMakeFiles/studio_routing_regression_autogen_timestamp_deps.dir
 /opt/ipde/ipde/build/CMakeFiles/studio_routing_regression_autogen.dir
+/opt/ipde/ipde/build/CMakeFiles/help_server_regression_autogen_timestamp_deps.dir
+/opt/ipde/ipde/build/CMakeFiles/help_server_regression_autogen.dir
+/opt/ipde/ipde/build/CMakeFiles/extractor_model_regression_autogen_timestamp_deps.dir
+/opt/ipde/ipde/build/CMakeFiles/extractor_model_regression_autogen.dir

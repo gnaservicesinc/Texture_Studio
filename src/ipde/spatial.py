@@ -367,6 +367,38 @@ def _model_configuration(checkpoint_name: str) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+def inspect_raft_checkpoint(options: RaftStereoOptions) -> dict[str, Any] | None:
+    """Identify the selected decoder from checkpoint contents, never its name.
+
+    Inspection needs no upstream source imports or device allocation. An explicit
+    selection (including IPDE_RAFT_MODEL) must not fall back to another model.
+    """
+    selected = options.model or os.environ.get("IPDE_RAFT_MODEL")
+    if not selected:
+        return None
+    model = Path(selected).expanduser().resolve()
+    if not model.is_file():
+        raise RaftStereoError(f"Selected model does not exist: {model}")
+    member = (options.model_member or "raftstereo-middlebury.pth") if model.suffix.lower() == ".zip" else None
+    data, name = _checkpoint_bytes(model, member)
+    try:
+        import torch
+        checkpoint = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
+    except Exception as exc:
+        raise RaftStereoError(f"could not inspect selected checkpoint {model}: {exc}") from exc
+    schema = checkpoint.get("schema") if isinstance(checkpoint, Mapping) else None
+    schema = schema if isinstance(schema, str) else None
+    student = schema == "ipde-display-depth-v1"
+    result = {"path": str(model), "member": member, "name": name,
+              "kind": "display_student" if student else "raft_stereo",
+              "schema": schema, "checkpoint_sha256": hashlib.sha256(data).hexdigest()}
+    if student:
+        architecture = checkpoint.get("architecture", checkpoint.get("ipde_configuration", {}))
+        units = architecture.get("units") if isinstance(architecture, Mapping) else None
+        result["units"] = units if isinstance(units, str) else None
+    return result
+
+
 def checkpoint_model_configuration(checkpoint: Any, checkpoint_name: str) -> SimpleNamespace:
     """Restore explicit IPDE RAFT architecture metadata independent of filename.
 
@@ -375,7 +407,7 @@ def checkpoint_model_configuration(checkpoint: Any, checkpoint_name: str) -> Sim
     renaming a realtime/instance-normalized checkpoint cannot change its model.
     """
     if isinstance(checkpoint, Mapping) and checkpoint.get("schema") == "ipde-display-depth-v1":
-        raise RaftStereoError("This checkpoint predicts display depth, not native-left disparity. Select a Student display depth/displacement product.")
+        raise RaftStereoError("The selected model requires the display-depth decoder; native disparity inference is unavailable.")
     fallback = _model_configuration(checkpoint_name)
     if not isinstance(checkpoint, Mapping) or "ipde_configuration" not in checkpoint:
         return fallback

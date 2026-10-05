@@ -7,14 +7,14 @@
 
 # =============================================================================
 # Project: IPDE
-# Configurations: 
+# Configurations: Release
 # =============================================================================
 # =============================================================================
 
 #############################################
 # Rule for compiling CXX files.
 
-rule CXX_COMPILER__ipde_gui_unscanned_
+rule CXX_COMPILER__ipde_gui_unscanned_Release
   depfile = $DEP_FILE
   deps = gcc
   command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
@@ -40,16 +40,16 @@ rule COPY_OSX_CONTENT_DIR
 #############################################
 # Rule for linking CXX executable.
 
-rule CXX_EXECUTABLE_LINKER__ipde_gui_
+rule CXX_EXECUTABLE_LINKER__ipde_gui_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
-  description = Linking CXX executable $TARGET_FILE; Embedding the Python extraction engine in IPDE.app
+  description = Linking CXX executable $TARGET_FILE; Embedding the Python extraction engine in IPDE.app; Bundling documentation and Qt dependencies in ipde_gui
   restat = $RESTAT
 
 
 #############################################
 # Rule for compiling CXX files.
 
-rule CXX_COMPILER__raft_studio_unscanned_
+rule CXX_COMPILER__raft_studio_unscanned_Release
   depfile = $DEP_FILE
   deps = gcc
   command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
@@ -59,16 +59,16 @@ rule CXX_COMPILER__raft_studio_unscanned_
 #############################################
 # Rule for linking CXX executable.
 
-rule CXX_EXECUTABLE_LINKER__raft_studio_
+rule CXX_EXECUTABLE_LINKER__raft_studio_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
-  description = Linking CXX executable $TARGET_FILE; Embedding the separate RAFT Studio workflow
+  description = Linking CXX executable $TARGET_FILE; Embedding the separate RAFT Studio workflow; Bundling documentation and Qt dependencies in raft_studio
   restat = $RESTAT
 
 
 #############################################
 # Rule for compiling CXX files.
 
-rule CXX_COMPILER__dataset_studio_unscanned_
+rule CXX_COMPILER__dataset_studio_unscanned_Release
   depfile = $DEP_FILE
   deps = gcc
   command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
@@ -78,16 +78,16 @@ rule CXX_COMPILER__dataset_studio_unscanned_
 #############################################
 # Rule for linking CXX executable.
 
-rule CXX_EXECUTABLE_LINKER__dataset_studio_
+rule CXX_EXECUTABLE_LINKER__dataset_studio_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
-  description = Linking CXX executable $TARGET_FILE; Embedding the separate RAFT Studio workflow
+  description = Linking CXX executable $TARGET_FILE; Embedding the separate RAFT Studio workflow; Bundling documentation and Qt dependencies in dataset_studio
   restat = $RESTAT
 
 
 #############################################
 # Rule for compiling CXX files.
 
-rule CXX_COMPILER__ipde_studio_unscanned_
+rule CXX_COMPILER__ipde_studio_unscanned_Release
   depfile = $DEP_FILE
   deps = gcc
   command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
@@ -97,16 +97,16 @@ rule CXX_COMPILER__ipde_studio_unscanned_
 #############################################
 # Rule for linking CXX executable.
 
-rule CXX_EXECUTABLE_LINKER__ipde_studio_
+rule CXX_EXECUTABLE_LINKER__ipde_studio_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
-  description = Linking CXX executable $TARGET_FILE
+  description = Linking CXX executable $TARGET_FILE; Bundling documentation and Qt dependencies in ipde_studio
   restat = $RESTAT
 
 
 #############################################
 # Rule for compiling CXX files.
 
-rule CXX_COMPILER__photo_studio_unscanned_
+rule CXX_COMPILER__photo_studio_unscanned_Release
   depfile = $DEP_FILE
   deps = gcc
   command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
@@ -116,16 +116,16 @@ rule CXX_COMPILER__photo_studio_unscanned_
 #############################################
 # Rule for linking CXX executable.
 
-rule CXX_EXECUTABLE_LINKER__photo_studio_
+rule CXX_EXECUTABLE_LINKER__photo_studio_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
-  description = Linking CXX executable $TARGET_FILE; Embedding precision photo and RAW workflows
+  description = Linking CXX executable $TARGET_FILE; Embedding precision photo and RAW workflows; Bundling documentation and Qt dependencies in photo_studio
   restat = $RESTAT
 
 
 #############################################
 # Rule for compiling CXX files.
 
-rule CXX_COMPILER__raw_studio_unscanned_
+rule CXX_COMPILER__raw_studio_unscanned_Release
   depfile = $DEP_FILE
   deps = gcc
   command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
@@ -135,16 +135,16 @@ rule CXX_COMPILER__raw_studio_unscanned_
 #############################################
 # Rule for linking CXX executable.
 
-rule CXX_EXECUTABLE_LINKER__raw_studio_
+rule CXX_EXECUTABLE_LINKER__raw_studio_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
-  description = Linking CXX executable $TARGET_FILE; Embedding precision photo and RAW workflows
+  description = Linking CXX executable $TARGET_FILE; Embedding precision photo and RAW workflows; Bundling documentation and Qt dependencies in raw_studio
   restat = $RESTAT
 
 
 #############################################
 # Rule for compiling CXX files.
 
-rule CXX_COMPILER__ipde_icon_builder_unscanned_
+rule CXX_COMPILER__ipde_icon_builder_unscanned_Release
   depfile = $DEP_FILE
   deps = gcc
   command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
@@ -154,26 +154,7 @@ rule CXX_COMPILER__ipde_icon_builder_unscanned_
 #############################################
 # Rule for linking CXX executable.
 
-rule CXX_EXECUTABLE_LINKER__ipde_icon_builder_
-  command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
-  description = Linking CXX executable $TARGET_FILE
-  restat = $RESTAT
-
-
-#############################################
-# Rule for compiling CXX files.
-
-rule CXX_COMPILER__project_session_regression_unscanned_
-  depfile = $DEP_FILE
-  deps = gcc
-  command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
-  description = Building CXX object $out
-
-
-#############################################
-# Rule for linking CXX executable.
-
-rule CXX_EXECUTABLE_LINKER__project_session_regression_
+rule CXX_EXECUTABLE_LINKER__ipde_icon_builder_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
   description = Linking CXX executable $TARGET_FILE
   restat = $RESTAT
@@ -182,7 +163,7 @@ rule CXX_EXECUTABLE_LINKER__project_session_regression_
 #############################################
 # Rule for compiling CXX files.
 
-rule CXX_COMPILER__window_layout_regression_unscanned_
+rule CXX_COMPILER__project_session_regression_unscanned_Release
   depfile = $DEP_FILE
   deps = gcc
   command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
@@ -192,7 +173,7 @@ rule CXX_COMPILER__window_layout_regression_unscanned_
 #############################################
 # Rule for linking CXX executable.
 
-rule CXX_EXECUTABLE_LINKER__window_layout_regression_
+rule CXX_EXECUTABLE_LINKER__project_session_regression_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
   description = Linking CXX executable $TARGET_FILE
   restat = $RESTAT
@@ -201,7 +182,7 @@ rule CXX_EXECUTABLE_LINKER__window_layout_regression_
 #############################################
 # Rule for compiling CXX files.
 
-rule CXX_COMPILER__studio_preview_regression_unscanned_
+rule CXX_COMPILER__window_layout_regression_unscanned_Release
   depfile = $DEP_FILE
   deps = gcc
   command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
@@ -211,7 +192,7 @@ rule CXX_COMPILER__studio_preview_regression_unscanned_
 #############################################
 # Rule for linking CXX executable.
 
-rule CXX_EXECUTABLE_LINKER__studio_preview_regression_
+rule CXX_EXECUTABLE_LINKER__window_layout_regression_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
   description = Linking CXX executable $TARGET_FILE
   restat = $RESTAT
@@ -220,7 +201,7 @@ rule CXX_EXECUTABLE_LINKER__studio_preview_regression_
 #############################################
 # Rule for compiling CXX files.
 
-rule CXX_COMPILER__trainer_workflow_regression_unscanned_
+rule CXX_COMPILER__studio_preview_regression_unscanned_Release
   depfile = $DEP_FILE
   deps = gcc
   command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
@@ -230,7 +211,7 @@ rule CXX_COMPILER__trainer_workflow_regression_unscanned_
 #############################################
 # Rule for linking CXX executable.
 
-rule CXX_EXECUTABLE_LINKER__trainer_workflow_regression_
+rule CXX_EXECUTABLE_LINKER__studio_preview_regression_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
   description = Linking CXX executable $TARGET_FILE
   restat = $RESTAT
@@ -239,7 +220,7 @@ rule CXX_EXECUTABLE_LINKER__trainer_workflow_regression_
 #############################################
 # Rule for compiling CXX files.
 
-rule CXX_COMPILER__dataset_management_regression_unscanned_
+rule CXX_COMPILER__trainer_workflow_regression_unscanned_Release
   depfile = $DEP_FILE
   deps = gcc
   command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
@@ -249,7 +230,7 @@ rule CXX_COMPILER__dataset_management_regression_unscanned_
 #############################################
 # Rule for linking CXX executable.
 
-rule CXX_EXECUTABLE_LINKER__dataset_management_regression_
+rule CXX_EXECUTABLE_LINKER__trainer_workflow_regression_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
   description = Linking CXX executable $TARGET_FILE
   restat = $RESTAT
@@ -258,7 +239,7 @@ rule CXX_EXECUTABLE_LINKER__dataset_management_regression_
 #############################################
 # Rule for compiling CXX files.
 
-rule CXX_COMPILER__studio_routing_regression_unscanned_
+rule CXX_COMPILER__dataset_management_regression_unscanned_Release
   depfile = $DEP_FILE
   deps = gcc
   command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
@@ -268,7 +249,64 @@ rule CXX_COMPILER__studio_routing_regression_unscanned_
 #############################################
 # Rule for linking CXX executable.
 
-rule CXX_EXECUTABLE_LINKER__studio_routing_regression_
+rule CXX_EXECUTABLE_LINKER__dataset_management_regression_Release
+  command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
+  description = Linking CXX executable $TARGET_FILE
+  restat = $RESTAT
+
+
+#############################################
+# Rule for compiling CXX files.
+
+rule CXX_COMPILER__studio_routing_regression_unscanned_Release
+  depfile = $DEP_FILE
+  deps = gcc
+  command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
+  description = Building CXX object $out
+
+
+#############################################
+# Rule for linking CXX executable.
+
+rule CXX_EXECUTABLE_LINKER__studio_routing_regression_Release
+  command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
+  description = Linking CXX executable $TARGET_FILE
+  restat = $RESTAT
+
+
+#############################################
+# Rule for compiling CXX files.
+
+rule CXX_COMPILER__help_server_regression_unscanned_Release
+  depfile = $DEP_FILE
+  deps = gcc
+  command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
+  description = Building CXX object $out
+
+
+#############################################
+# Rule for linking CXX executable.
+
+rule CXX_EXECUTABLE_LINKER__help_server_regression_Release
+  command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
+  description = Linking CXX executable $TARGET_FILE
+  restat = $RESTAT
+
+
+#############################################
+# Rule for compiling CXX files.
+
+rule CXX_COMPILER__extractor_model_regression_unscanned_Release
+  depfile = $DEP_FILE
+  deps = gcc
+  command = ${LAUNCHER}${CODE_CHECK}/usr/bin/c++ $DEFINES $INCLUDES $FLAGS -MD -MT $out -MF $DEP_FILE -o $out -c $in
+  description = Building CXX object $out
+
+
+#############################################
+# Rule for linking CXX executable.
+
+rule CXX_EXECUTABLE_LINKER__extractor_model_regression_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
   description = Linking CXX executable $TARGET_FILE
   restat = $RESTAT
@@ -288,6 +326,15 @@ rule CUSTOM_COMMAND
 rule RERUN_CMAKE
   command = /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/bin/cmake --regenerate-during-build -S/opt/ipde/ipde -B/opt/ipde/ipde/build
   description = Re-running CMake...
+  generator = 1
+
+
+#############################################
+# Rule for re-checking globbed directories.
+
+rule VERIFY_GLOBS
+  command = /Library/Frameworks/Python.framework/Versions/3.14/lib/python3.14/site-packages/cmake/data/bin/cmake -P /opt/ipde/ipde/build/CMakeFiles/VerifyGlobs.cmake
+  description = Re-checking globbed directories...
   generator = 1
 
 

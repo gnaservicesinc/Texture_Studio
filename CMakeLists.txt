@@ -114,6 +114,7 @@ set(IPDE_PYTHON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/__main__.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/apple_imageio.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/cli.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/display_student.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/extractor.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/formats.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/libheif_aux.py"
@@ -317,11 +318,12 @@ if(BUILD_TESTING)
     add_test(NAME project_session_lifetime COMMAND project_session_regression)
     set_tests_properties(project_session_lifetime PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-    foreach(regression IN ITEMS window_layout_regression studio_preview_regression trainer_workflow_regression dataset_management_regression studio_routing_regression help_server_regression)
+    foreach(regression IN ITEMS window_layout_regression studio_preview_regression trainer_workflow_regression dataset_management_regression studio_routing_regression help_server_regression extractor_model_regression)
         qt_add_executable(${regression} "${CMAKE_CURRENT_SOURCE_DIR}/verification/${regression}.cpp")
         target_include_directories(${regression} PRIVATE src/gui)
         target_link_libraries(${regression} PRIVATE Qt6::Widgets Qt6::Network)
         target_compile_definitions(${regression} PRIVATE
+            IPDE_SOURCE_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/ipde_extract.py"
             RAFT_STUDIO_SOURCE_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/raft_studio.py"
             IPDE_PYTHON_EXECUTABLE="${IPDE_PYTHON_EXECUTABLE}")
         if(APPLE AND IPDE_XCRUN_RESULT EQUAL 0)

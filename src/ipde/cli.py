@@ -10,6 +10,7 @@ from typing import Sequence
 
 from . import __version__
 from .extractor import ExtractOptions, ExtractionError, extract_file, inspect_file
+from .spatial import RaftStereoOptions
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -95,7 +96,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--raft-model",
         type=Path,
-        help="RAFT-Stereo .pth checkpoint or models.zip (otherwise auto-detected or read from IPDE_RAFT_MODEL)",
+        help="selected RAFT-Stereo or display-depth student checkpoint, or ZIP (otherwise auto-detected or read from IPDE_RAFT_MODEL)",
     )
     parser.add_argument(
         "--raft-model-member",
@@ -159,7 +160,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     for source in args.sources:
         try:
             if args.inspect:
-                report = inspect_file(source)
+                report = inspect_file(source, raft_options=RaftStereoOptions(
+                    root=args.raft_root, model=args.raft_model, model_member=args.raft_model_member))
             else:
                 report = extract_file(
                     source,

@@ -1,4 +1,5 @@
 #define ARCHITECTURE_ID "arm64"
+#define IPDE_DOCS_DIR "/opt/ipde/ipde/docs"
 #define IPDE_PYTHON_EXECUTABLE "/opt/ipde/ipde/.venv/bin/python"
 #define IPDE_SOURCE_SCRIPT "/opt/ipde/ipde/ipde_extract.py"
 #define QT_CORE_LIB 1

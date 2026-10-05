@@ -1,12 +1,16 @@
 # Additional clean files
 cmake_minimum_required(VERSION 3.16)
 
-if("${CONFIG}" STREQUAL "" OR "${CONFIG}" STREQUAL "")
+if("${CONFIG}" STREQUAL "" OR "${CONFIG}" STREQUAL "Release")
   file(REMOVE_RECURSE
   "CMakeFiles/dataset_management_regression_autogen.dir/AutogenUsed.txt"
   "CMakeFiles/dataset_management_regression_autogen.dir/ParseCache.txt"
   "CMakeFiles/dataset_studio_autogen.dir/AutogenUsed.txt"
   "CMakeFiles/dataset_studio_autogen.dir/ParseCache.txt"
+  "CMakeFiles/extractor_model_regression_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/extractor_model_regression_autogen.dir/ParseCache.txt"
+  "CMakeFiles/help_server_regression_autogen.dir/AutogenUsed.txt"
+  "CMakeFiles/help_server_regression_autogen.dir/ParseCache.txt"
   "CMakeFiles/ipde_gui_autogen.dir/AutogenUsed.txt"
   "CMakeFiles/ipde_gui_autogen.dir/ParseCache.txt"
   "CMakeFiles/ipde_icon_builder_autogen.dir/AutogenUsed.txt"
@@ -31,6 +35,8 @@ if("${CONFIG}" STREQUAL "" OR "${CONFIG}" STREQUAL "")
   "CMakeFiles/window_layout_regression_autogen.dir/ParseCache.txt"
   "dataset_management_regression_autogen"
   "dataset_studio_autogen"
+  "extractor_model_regression_autogen"
+  "help_server_regression_autogen"
   "ipde_gui_autogen"
   "ipde_icon_builder_autogen"
   "ipde_studio_autogen"

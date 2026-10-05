@@ -34,6 +34,7 @@ from .formats import (
 from .libheif_aux import HighBitAuxiliaryError, decode_high_bit_auxiliary
 from .learned_depth import LearnedDepthConfig, LearnedDepthError, infer_learned_depth
 from .spatial import (
+    _checkpoint_bytes,
     ColorMatchingError,
     DisplacementMappingError,
     RaftStereoError,
@@ -44,6 +45,7 @@ from .spatial import (
     analyze_spatial_photo,
     derive_raft_height_and_depth,
     histogram_match_stereo_pair,
+    inspect_raft_checkpoint,
     linear_depth_displacement,
     run_raft_stereo,
     run_stereo_matching,
@@ -1365,7 +1367,17 @@ _SPATIAL_PRODUCTS = {
 }
 
 
-def _available_products(discovery: Discovery, *, include_learned: bool = False) -> list[dict[str, Any]]:
+_STUDENT_PRODUCT_ALIASES = {
+    "raft-depth": "student-display-depth",
+    "raft-display-depth": "student-display-depth",
+    "raft-displacement": "student-display-displacement",
+    "raft-preview": "student-display-preview",
+    "raft-display-preview": "student-display-preview",
+}
+
+
+def _available_products(discovery: Discovery, *, include_learned: bool = False,
+                        selected_model: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
     products = []
     for index, asset in enumerate(discovery.assets):
         common = {"asset_index": index, "width": asset.array.shape[1], "height": asset.array.shape[0],
@@ -1413,6 +1425,11 @@ def _available_products(discovery: Discovery, *, include_learned: bool = False) 
     if discovery.spatial_photo and discovery.spatial_photo.get("rectified_stereo_ready"):
         camera = discovery.spatial_photo["left_camera"]
         for key, (label, _) in _SPATIAL_PRODUCTS.items():
+            if selected_model is not None:
+                if selected_model["kind"] == "display_student" and key.startswith("raft-"):
+                    continue
+                if selected_model["kind"] == "raft_stereo" and key.startswith("student-"):
+                    continue
             description = "Computed on the left-view grid; inferred, not measured source depth. "
             product_camera = camera
             if "-display-" in key:
@@ -1462,21 +1479,25 @@ def _student_display_outputs(output_dir: Path, discovery: Discovery, config: Ext
     reference = _learned_reference(discovery, display=True)
     if reference is None:
         raise ExtractionError("The display student requires the full display image dimensions")
-    if config.raft_model is None or config.raft_model_member:
-        raise ExtractionError("Choose an exported display-model.pth checkpoint for the display student")
+    if config.raft_model is None:
+        raise ExtractionError("Choose an exported display-depth checkpoint for the display student")
     if config.histogram_color_matching:
         raise ExtractionError("Disable Color Matching for the display student; its training uses the original native stereo RGB")
     index, display = reference
     try:
         depth, metadata = predict_display_depth(left.array, right.array, display.array.shape[:2], config.raft_model,
             raft_root=config.raft_root, device=config.raft_device,
+            checkpoint_member=config.raft_model_member,
             left_record={"source_bit_depth": left.source_bit_depth or left.array.dtype.itemsize * 8},
             right_record={"source_bit_depth": right.source_bit_depth or right.array.dtype.itemsize * 8})
     except (DisplayStudentError, RuntimeError, ValueError, OSError) as exc:
         raise ExtractionError(str(exc)) from exc
     if depth.dtype != np.float32 or depth.shape != display.array.shape[:2] or not np.isfinite(depth).all() or np.any(depth <= 0):
         raise ExtractionError("Display student returned invalid depth or the wrong display grid")
-    metadata = {**metadata, "checkpoint_sha256": hashlib.sha256(config.raft_model.read_bytes()).hexdigest(),
+    checkpoint_data, checkpoint_name = _checkpoint_bytes(config.raft_model, config.raft_model_member)
+    metadata = {**metadata, "checkpoint_sha256": hashlib.sha256(checkpoint_data).hexdigest(),
+        "checkpoint_path": str(config.raft_model), "checkpoint_name": checkpoint_name,
+        "checkpoint_member": config.raft_model_member if config.raft_model.suffix.lower() == ".zip" else None,
         "source_heic_sha256": discovery.source_sha256, "left_rgb_sha256": sha256_array(left.array),
         "right_rgb_sha256": sha256_array(right.array), "display_rgb_used_for_inference": False,
         "normalization": False, "gamma_correction": False, "tone_mapping": False}
@@ -1512,7 +1533,8 @@ def _student_display_outputs(output_dir: Path, discovery: Discovery, config: Ext
     return pending
 
 
-def _build_manifest(discovery: Discovery, asset_records: list[dict[str, Any]], warnings: list[str], *, include_learned: bool = False) -> dict[str, Any]:
+def _build_manifest(discovery: Discovery, asset_records: list[dict[str, Any]], warnings: list[str], *,
+                    include_learned: bool = False, selected_model: Mapping[str, Any] | None = None) -> dict[str, Any]:
     try:
         numpy_version = version("numpy")
     except PackageNotFoundError:
@@ -1554,7 +1576,8 @@ def _build_manifest(discovery: Discovery, asset_records: list[dict[str, Any]], w
             "explicitly identified inferred float32 estimates derived from the preserved stereo views. "
             "No output can restore information lost when the source HEIF was encoded."
         ),
-        "available_products": _available_products(discovery, include_learned=include_learned),
+        "selected_model": selected_model,
+        "available_products": _available_products(discovery, include_learned=include_learned, selected_model=selected_model),
         "asset_count": len(asset_records),
         "assets": asset_records,
         "warnings": warnings,
@@ -1577,18 +1600,24 @@ def _discovery_warnings(discovery: Discovery) -> list[str]:
     return warnings
 
 
-def _report(discovery: Discovery, *, include_learned: bool = False) -> dict[str, Any]:
+def _report(discovery: Discovery, *, include_learned: bool = False,
+            selected_model: Mapping[str, Any] | None = None) -> dict[str, Any]:
     records = [_asset_record(asset) for asset in discovery.assets]
     warnings = _discovery_warnings(discovery)
     if not records:
         warnings.append(
             "No depth, non-alpha auxiliary, alpha, or spatial-view planes were exposed."
         )
-    return _build_manifest(discovery, records, warnings, include_learned=include_learned)
+    return _build_manifest(discovery, records, warnings, include_learned=include_learned, selected_model=selected_model)
 
 
-def inspect_file(source: Path | str, *, include_learned: bool = False) -> dict[str, Any]:
-    return _report(discover_file(Path(source)), include_learned=include_learned)
+def inspect_file(source: Path | str, *, include_learned: bool = False,
+                 raft_options: RaftStereoOptions | None = None) -> dict[str, Any]:
+    try:
+        selected_model = inspect_raft_checkpoint(raft_options or RaftStereoOptions())
+    except RaftStereoError as exc:
+        raise ExtractionError(str(exc)) from exc
+    return _report(discover_file(Path(source)), include_learned=include_learned, selected_model=selected_model)
 
 
 def _temporary_path(final_path: Path) -> Path:
@@ -1676,8 +1705,43 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
     config = options or ExtractOptions()
     discovery = discover_file(Path(source))
     selected = None if config.selected_products is None else set(config.selected_products)
+    requested_products = None if selected is None else set(selected)
+    remapping: dict[str, str] = {}
+    model_warnings: list[str] = []
+    legacy_student_products: set[str] = set()
+    selected_model = None
+    requests_raft = (bool(selected and any(key.startswith("raft-") for key in selected)) if selected is not None
+                     else config.write_raft_stereo or config.write_raft_diagnostics)
+    requests_student = bool(selected and any(key.startswith("student-") for key in selected))
+    if (requests_raft or requests_student) and config.raft_model is None and os.environ.get("IPDE_RAFT_MODEL"):
+        config = replace(config, raft_model=Path(os.environ["IPDE_RAFT_MODEL"]))
+    if requests_raft:
+        try:
+            selected_model = inspect_raft_checkpoint(RaftStereoOptions(
+                model=config.raft_model, model_member=config.raft_model_member))
+        except RaftStereoError as exc:
+            raise ExtractionError(str(exc)) from exc
+        if selected_model and selected_model["kind"] == "display_student":
+            if selected is not None:
+                remapping = {key: _STUDENT_PRODUCT_ALIASES[key] for key in selected if key in _STUDENT_PRODUCT_ALIASES}
+                selected = {remapping.get(key, key) for key in selected}
+                unsupported = {key for key in selected if key.startswith("raft-")}
+                if unsupported:
+                    raise ExtractionError(f"The selected display-depth model does not provide native stereo diagnostics: {sorted(unsupported)}")
+            else:
+                legacy_student_products.add("student-display-depth")
+                if config.write_displacement_maps:
+                    legacy_student_products.add("student-display-displacement")
+                if config.write_raft_diagnostics:
+                    model_warnings.append("The selected display-depth model exports its own depth units; native disparity and signed-flow diagnostics are unavailable.")
+                config = replace(config, write_raft_stereo=False, write_raft_diagnostics=False,
+                                 write_displacement_maps=config.write_displacement_maps and config.write_stereo_matching)
+    elif requests_student:
+        # The student loader verifies schema and weights during inference. Avoid
+        # loading the same selected checkpoint a second time for explicit IDs.
+        selected_model = {"kind": "display_student", "path": str(config.raft_model) if config.raft_model else None}
     if selected is not None:
-        available = {product["id"] for product in _available_products(discovery, include_learned=True)}
+        available = {product["id"] for product in _available_products(discovery, include_learned=True, selected_model=selected_model)}
         if not selected or selected - available:
             raise ExtractionError(f"Select available products from --inspect; unavailable selection: {sorted(selected - available)}")
         config = replace(
@@ -1700,7 +1764,9 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
 
     names = _base_names(discovery)
     records = [_asset_record(asset) for asset in discovery.assets]
-    warnings = _discovery_warnings(discovery)
+    warnings = _discovery_warnings(discovery) + model_warnings
+    if remapping:
+        warnings.append("Using the selected display-depth model on its display grid; exported units follow the checkpoint's training labels.")
     if not records:
         warnings.append(
             "No depth, non-alpha auxiliary, alpha, or spatial-view planes were exposed."
@@ -1773,7 +1839,8 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
         _check_output_paths([item.final_path for item in pending] + predicted + manifest_paths, overwrite=config.overwrite)
         pending.extend(_learned_pending_outputs(output_dir, discovery, config, selected))
     write_raft = config.write_raft_stereo or config.write_raft_diagnostics
-    write_student = bool(selected and any(key.startswith("student-") for key in selected))
+    student_products = ({key for key in selected if key.startswith("student-")} if selected is not None else legacy_student_products)
+    write_student = bool(student_products)
     write_spatial_height = config.write_stereo_matching or write_raft or write_student
     if config.write_displacement_maps and not write_spatial_height:
         raise ExtractionError(
@@ -1833,6 +1900,11 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
                     suffixes[f"{engine}-{key}"] = f"{filename}{color_suffix}_{suffix}"
             predicted_bases = [output_dir / f"{discovery.source.stem}_spatial_{suffix}"
                                for key, suffix in suffixes.items() if key in selected]
+        elif write_student:
+            predicted_bases.extend(output_dir / f"{discovery.source.stem}_spatial_student_display_{suffix}"
+                                   for product, suffix in (("student-display-depth", "depth"),
+                                                           ("student-display-displacement", "displacement_0_to_1"))
+                                   if product in student_products)
         predicted_paths = [Path(f"{base}.png" if str(base).endswith("_depth_preview") else f"{base}.exr")
                            for base in predicted_bases]
         if config.write_npy:
@@ -1867,7 +1939,7 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
         left_array = discovery.assets[left_asset_index].array
         right_array = discovery.assets[right_asset_index].array
         if write_student:
-            pending.extend(_student_display_outputs(output_dir, discovery, config, selected,
+            pending.extend(_student_display_outputs(output_dir, discovery, config, student_products,
                 discovery.assets[left_asset_index], discovery.assets[right_asset_index]))
         color_matching_details: dict[str, Any] = {
             "applied": False,
@@ -2029,8 +2101,12 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
             if item.asset_index is not None:
                 records[item.asset_index]["outputs"].append(output_record)
 
-        manifest = _build_manifest(discovery, records, warnings, include_learned=config.write_learned_depth)
+        manifest = _build_manifest(discovery, records, warnings, include_learned=config.write_learned_depth,
+                                   selected_model=selected_model)
         manifest["selected_products"] = sorted(selected) if selected is not None else None
+        if remapping:
+            manifest["requested_products"] = sorted(requested_products)
+            manifest["product_remapping"] = remapping
         manifest["manifest_path"] = str(manifest_path) if config.write_manifest else None
 
         installs: list[tuple[Path, Path]] = []

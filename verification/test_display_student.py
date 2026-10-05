@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import io
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
 import numpy as np
 import torch
@@ -180,6 +182,23 @@ class DisplayStudentTests(unittest.TestCase):
             bounds = (0, 49, 0, 71)
             torch.testing.assert_close(restored.render(self.context(restored), (49, 71), bounds),
                                        model.render(self.context(model), (49, 71), bounds), rtol=0, atol=0)
+
+    def test_archived_checkpoint_loads_the_selected_member_exactly(self):
+        model, configuration, _ = self.model("full")
+        selected = self.payload(model, configuration)
+        other = deepcopy(selected)
+        other["state_dict"]["depth.4.bias"].add_(5)
+        archive = self.root / "trained-models.zip"
+        with zipfile.ZipFile(archive, "w") as zipped:
+            for name, payload in (("other.pth", other), ("exports/chosen.pth", selected)):
+                buffer = io.BytesIO(); torch.save(payload, buffer)
+                zipped.writestr(name, buffer.getvalue())
+        restored, saved_configuration, device = student.load_student_checkpoint(archive,
+            checkpoint_member="exports/chosen.pth", raft_root=self.root, device="cpu", train_scope="full")
+        self.assertEqual(saved_configuration, configuration)
+        self.assertEqual(device, "cpu")
+        for name, weight in model.state_dict().items():
+            torch.testing.assert_close(restored.state_dict()[name], weight, rtol=0, atol=0)
 
     def test_checkpoint_schema_aliases_and_weights_are_strict(self):
         model, configuration, _ = self.model()

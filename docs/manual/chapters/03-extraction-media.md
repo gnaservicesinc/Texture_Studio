@@ -8,6 +8,8 @@ Raw extracted arrays stay in their stored coordinate system; recorded orientatio
 
 Enable RAFT or classical stereo only when estimating new geometry is your goal. RAFT requires the local source/runtime and a compatible checkpoint. Invalid explicitly selected model paths fail; model selection is not an implicit download. Reverse-consistency checks are additional computation. Classical estimates and their support masks use different evidence requirements; unsupported smooth surfaces are not automatically zero-height surfaces.
 
+Extractor reads the selected checkpoint's metadata to choose its decoder, including renamed checkpoints. A display-depth student automatically supplies display-grid depth, displacement and preview products when those outputs are requested. Raw student depth retains its checkpoint units and float32 values; displacement and previews remain separate derivatives. Native disparity, signed-flow and stereo support diagnostics are offered for compatible RAFT checkpoints.
+
 **Color Matching** is optional inference preprocessing. The selected Hero view remains the reference, and the other view's RGB distribution is matched. It does not edit original extracted arrays or provide a camera-profile calibration. **Tolerate camera detail differences** affects the classical matcher's inference copies. These controls are unnecessary when exporting only raw auxiliary planes.
 
 ## Photo Studio
