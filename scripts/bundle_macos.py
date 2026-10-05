@@ -8,6 +8,7 @@ datasets, user site-packages or editable links back to this checkout.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import importlib.metadata
 import json
@@ -19,11 +20,142 @@ import struct
 import subprocess
 import sys
 import sysconfig
+import tempfile
 
 
 MACHO_MAGICS = {b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe",
                 b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca"}
 SYSTEM_PREFIXES = ("/System/Library/", "/usr/lib/")
+RUNTIME_EXCLUDES = {"site-packages", "__pycache__", "test", "tests", "idlelib", "tkinter"}
+
+
+def clone_or_copy(source: str | Path, destination: str | Path) -> str:
+    """Use macOS copy-on-write cloning for large already-built runtimes."""
+    source, destination = Path(source), Path(destination)
+    if sys.platform == "darwin":
+        clonefile = ctypes.CDLL(None, use_errno=True).clonefile
+        clonefile.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int)
+        clonefile.restype = ctypes.c_int
+        if clonefile(os.fsencode(source), os.fsencode(destination), 0) == 0:
+            shutil.copystat(source, destination)
+            return str(destination)
+    return shutil.copy2(source, destination)
+
+
+def runtime_metadata(bundle: Path) -> dict:
+    path = bundle / "Contents/Resources/runtime-build.json"
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def locked_distributions():
+    lock = Path(__file__).resolve().parents[1] / "requirements-release-macos.txt"
+    for line in lock.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        name, expected = line.split("==", 1)
+        distribution = importlib.metadata.distribution(name)
+        if distribution.version != expected:
+            raise RuntimeError(f"Release runtime requires {name}=={expected}; installed {distribution.version}. Run make setup or update and validate the release lock intentionally.")
+        if distribution.files is None:
+            raise RuntimeError(f"Distribution {name} has no installed file manifest")
+        yield distribution
+
+
+def runtime_inputs(previous: dict | None = None) -> dict:
+    """Fingerprint actual runtime inputs without loading costly ML libraries.
+
+    Versions alone miss repaired/replaced files. Size, mtime and ctime cover
+    the installed file closure and interpreter library; package manifests and
+    the dependency lock ensure additions/removals invalidate the package too.
+    """
+    base = Path(sys.base_prefix).resolve()
+    version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    digest = hashlib.sha256()
+    digest.update(sys.version.encode())
+    lock = Path(__file__).resolve().parents[1] / "requirements-release-macos.txt"
+    digest.update(lock.read_bytes())
+
+    def add(path: Path) -> None:
+        digest.update(str(path).encode())
+        info = path.stat()
+        digest.update(f"{info.st_size}:{info.st_mtime_ns}:{info.st_ctime_ns}:{info.st_mode}".encode())
+
+    for path in (Path(sys.executable).resolve(), base / "Python", base / "LICENSE"):
+        if path.is_file():
+            add(path)
+    stdlib = base / f"lib/python{version}"
+    for directory, folders, files in os.walk(stdlib):
+        folders[:] = sorted(name for name in folders if name not in RUNTIME_EXCLUDES)
+        for name in sorted(files):
+            path = Path(directory) / name
+            if path.suffix not in (".a", ".o", ".pyc") and not name.startswith("_tkinter"):
+                add(path)
+    for distribution in locked_distributions():
+        package_root = Path(distribution.locate_file("")).resolve()
+        digest.update(f"{distribution.metadata['Name']}=={distribution.version}".encode())
+        for record in sorted(distribution.files, key=str):
+            relative = Path(str(record))
+            if ".." in relative.parts or "__pycache__" in relative.parts or relative.suffix in (".pth", ".a", ".o", ".pyc"):
+                continue
+            original = Path(distribution.locate_file(record))
+            if not original.is_file() or not original.resolve().is_relative_to(package_root):
+                raise RuntimeError(f"Missing or external installed file for {distribution.metadata['Name']}: {record}")
+            add(original)
+    external = (previous or {}).get("external_runtime_dependencies", [])
+    for name in sorted(external):
+        add(Path(name))
+    return {"fingerprint": digest.hexdigest(), "external_runtime_dependencies": external}
+
+
+def write_if_changed(path: Path, value: dict) -> bool:
+    text = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    if path.is_file() and path.read_text() == text:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return True
+
+
+def sync_tree(source: Path, destination: Path) -> None:
+    """Refresh changed native subapp files while retaining unchanged Qt files."""
+    destination.mkdir(parents=True, exist_ok=True)
+    names = {path.name for path in source.iterdir()}
+    for target in destination.iterdir():
+        if target.name not in names:
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+    for original in source.iterdir():
+        target = destination / original.name
+        if original.is_symlink():
+            link = os.readlink(original)
+            if target.is_symlink() and os.readlink(target) == link:
+                continue
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            elif target.exists() or target.is_symlink():
+                target.unlink()
+            target.symlink_to(link, target_is_directory=original.is_dir())
+        elif original.is_dir():
+            if target.is_symlink() or (target.exists() and not target.is_dir()):
+                target.unlink()
+            sync_tree(original, target)
+        else:
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            if target.is_symlink():
+                target.unlink()
+            old = target.stat() if target.exists() else None
+            new = original.stat()
+            if old is None or (old.st_size, old.st_mtime_ns, old.st_mode) != (new.st_size, new.st_mtime_ns, new.st_mode):
+                if target.exists():
+                    target.unlink()
+                clone_or_copy(original, target)
 
 
 def run(*arguments: str | Path, capture: bool = False) -> str:
@@ -127,19 +259,10 @@ def loader_reference(source: Path, destination: Path) -> str:
 
 def copy_release_packages(destination: Path) -> None:
     """Copy only pinned runtime distributions, including their native assets."""
-    lock = Path(__file__).resolve().parents[1] / "requirements-release-macos.txt"
     destination.mkdir(parents=True)
-    for line in lock.read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        name, expected = line.split("==", 1)
-        distribution = importlib.metadata.distribution(name)
-        if distribution.version != expected:
-            raise RuntimeError(f"Release runtime requires {name}=={expected}; installed {distribution.version}. Run make setup or update and validate the release lock intentionally.")
+    for distribution in locked_distributions():
+        name = distribution.metadata["Name"]
         package_root = Path(distribution.locate_file("")).resolve()
-        if distribution.files is None:
-            raise RuntimeError(f"Distribution {name} has no installed file manifest")
         for record in distribution.files:
             relative = Path(str(record))
             if ".." in relative.parts or "__pycache__" in relative.parts or relative.suffix in (".pth", ".a", ".o", ".pyc"):
@@ -152,7 +275,7 @@ def copy_release_packages(destination: Path) -> None:
             shutil.copy2(original, copied)
 
 
-def copy_runtime(bundle: Path) -> Path:
+def copy_runtime(bundle: Path, external_dependencies: set[str] | None = None) -> Path:
     if sys.platform != "darwin":
         raise RuntimeError("Portable macOS packages must be built on macOS")
     base = Path(sys.base_prefix).resolve()
@@ -249,6 +372,8 @@ exec "$PYTHONHOME/bin/python{version}" -B "$@"
             if copied is None:
                 if not original.is_file():
                     raise RuntimeError(f"Missing runtime dependency: {binary}: {dependency}")
+                if external_dependencies is not None:
+                    external_dependencies.add(str(original.resolve()))
                 external.mkdir(exist_ok=True)
                 digest = hashlib.sha256(str(original).encode()).hexdigest()[:12]
                 copied = external / (digest + "-" + original.name)
@@ -370,59 +495,149 @@ def audit(bundle: Path) -> None:
     print(f"Verified {len(binaries)} native binaries have no external non-system dependencies and support declared macOS {declared}")
 
 
-def sign(bundle: Path) -> None:
+def sign(bundle: Path, *, preserved_runtime: bool = False) -> None:
     # Every install_name_tool edit invalidates its signature. Sign code from
     # the inside out, then nested apps, then the outer application.
-    for binary in macho_files(bundle):
-        run("codesign", "--force", "--sign", "-", binary, capture=True)
+    runtime = bundle / "Contents/Resources/python"
+    binaries = macho_files(bundle)
+    timestamps = {binary: (binary.stat().st_atime_ns, binary.stat().st_mtime_ns) for binary in binaries}
+    for binary in binaries:
+        if preserved_runtime and binary.is_relative_to(runtime):
+            continue
+        # Qt libraries already carry valid signatures. Avoid replacing them
+        # when only Python source or documentation resources changed.
+        verified = subprocess.run(["codesign", "--verify", str(binary)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if verified.returncode:
+            run("codesign", "--force", "--sign", "-", binary, capture=True)
     for application in apps(bundle):
         for framework in sorted(application.glob("Contents/Frameworks/*.framework")):
             run("codesign", "--force", "--sign", "-", framework, capture=True)
         run("codesign", "--force", "--sign", "-", application, capture=True)
     run("codesign", "--verify", "--deep", "--strict", bundle, capture=True)
+    # Sealing application resources updates its Mach-O signature. Retain the
+    # linked output's timestamp so it does not invalidate the deployment and
+    # resource stamps on the following otherwise unchanged build.
+    for binary, (accessed, modified) in timestamps.items():
+        if binary.stat().st_mtime_ns != modified:
+            os.utime(binary, ns=(accessed, modified))
+
+
+def check_runtime_imports(bundle: Path) -> None:
+    wrapper = bundle / "Contents/Resources/python/bin/python3"
+    if not wrapper.is_file():
+        raise RuntimeError("Release checks require a packaged Python runtime")
+    subprocess.run([str(wrapper), "-c", "import numpy, scipy, torch, torchvision, cv2, pillow_heif, OpenEXR, rawpy, imagecodecs, tifffile, timm, huggingface_hub, safetensors, omegaconf, addict, einops, evo, e3nn, imageio, datasets; print('Bundled Python, teacher and dataset imports passed')"],
+                   cwd="/", env={"PATH": "/usr/bin:/bin", "HOME": str(Path.home())}, check=True)
+
+
+def package(source: Path, output: Path, *, bundle_python: bool, skip_audit: bool, macdeployqt: Path | None = None) -> None:
+    """Stage and sign a replacement, retaining the previous package on failure."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".ipde-package-", dir=output.parent))
+    staged = staging / output.name
+    previous = runtime_metadata(output)
+    try:
+        shutil.copytree(source, staged, symlinks=True, copy_function=clone_or_copy)
+        if macdeployqt:
+            for application in apps(staged):
+                run(macdeployqt, application, "-no-strip", "-no-codesign", "-verbose=0")
+        preserved_runtime = False
+        if bundle_python:
+            inputs = runtime_inputs(previous)
+            runtime = output / "Contents/Resources/python"
+            if previous.get("runtime_input_fingerprint") == inputs["fingerprint"] and (runtime / "bin/python3").is_file():
+                # The old package's resource seal protects the reused runtime.
+                run("codesign", "--verify", "--deep", "--strict", output, capture=True)
+                copied_runtime = staged / "Contents/Resources/python"
+                if copied_runtime.exists():
+                    shutil.rmtree(copied_runtime)
+                shutil.copytree(runtime, copied_runtime, symlinks=True, copy_function=clone_or_copy)
+                write_if_changed(staged / "Contents/Resources/runtime-build.json", previous)
+                preserved_runtime = True
+                print("Reusing unchanged packaged Python runtime")
+            else:
+                external: set[str] = set()
+                copy_runtime(staged, external)
+                inputs = runtime_inputs({"external_runtime_dependencies": sorted(external)})
+                metadata = {"python": sys.version, "source_prefix": str(sys.base_prefix),
+                            "runtime": "shared relocatable Python prefix", "notarized": False,
+                            "dependency_lock_sha256": hashlib.sha256((Path(__file__).resolve().parents[1] / "requirements-release-macos.txt").read_bytes()).hexdigest(),
+                            "runtime_input_fingerprint": inputs["fingerprint"],
+                            "external_runtime_dependencies": inputs["external_runtime_dependencies"]}
+                write_if_changed(staged / "Contents/Resources/runtime-build.json", metadata)
+        if not skip_audit:
+            audit(staged)
+        sign(staged, preserved_runtime=preserved_runtime)
+        if bundle_python and not preserved_runtime:
+            # Validate a newly relocated runtime once; app-only updates reuse
+            # these results. Full dependency/import checks remain explicit.
+            check_runtime_imports(staged)
+        backup = staging / "previous.app"
+        if output.exists():
+            output.rename(backup)
+        try:
+            staged.rename(output)
+        except BaseException:
+            if backup.exists():
+                backup.rename(output)
+            raise
+    finally:
+        shutil.rmtree(staging)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--macdeployqt", type=Path)
-    parser.add_argument("--output", type=Path, help="Create a fresh distribution copy instead of changing the build bundle")
+    parser.add_argument("--output", type=Path, help="Update a distribution copy, reusing its unchanged Python runtime")
     parser.add_argument("--bundle-python", action="store_true")
+    parser.add_argument("--assemble", nargs="+", type=Path, help="Refresh these subapps inside the suite")
+    parser.add_argument("--skip-audit", action="store_true", help="Local build: verify signatures; run release-check for the full dependency audit")
     parser.add_argument("--audit-only", action="store_true")
+    parser.add_argument("--release-check", action="store_true")
+    parser.add_argument("--runtime-inputs", type=Path, help="Update an input fingerprint only if the configured runtime has changed")
     args = parser.parse_args()
     bundle = args.bundle.resolve()
+    if args.runtime_inputs:
+        changed = write_if_changed(args.runtime_inputs, runtime_inputs(runtime_metadata(bundle)))
+        print("Python runtime inputs changed" if changed else "Python runtime inputs unchanged")
+        return
+    if not (bundle / "Contents/Info.plist").is_file():
+        parser.error("Input must be a complete macOS application bundle")
+    if args.audit_only or args.release_check:
+        audit(bundle)
+        if args.release_check:
+            run("codesign", "--verify", "--deep", "--strict", bundle, capture=True)
+            check_runtime_imports(bundle)
+        return
     if args.output:
         output = args.output.resolve()
         if output == bundle or output.is_relative_to(bundle) or bundle.is_relative_to(output):
             parser.error("Output and input bundles must be separate")
-        if output.exists():
-            shutil.rmtree(output)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(bundle, output, symlinks=True)
-        bundle = output
-    if not (bundle / "Contents/Info.plist").is_file():
-        parser.error("Input must be a complete macOS application bundle")
-    if args.audit_only:
-        audit(bundle)
+        package(bundle, output, bundle_python=args.bundle_python, skip_audit=args.skip_audit,
+                macdeployqt=args.macdeployqt)
         return
+    if args.assemble:
+        destination = bundle / "Contents/Applications"
+        for application in args.assemble:
+            sync_tree(application.resolve(), destination / application.name)
     if args.macdeployqt:
         for application in apps(bundle):
-            run(args.macdeployqt, application, "-always-overwrite", "-no-strip", "-no-codesign", "-verbose=0")
-    wrapper = copy_runtime(bundle) if args.bundle_python else None
-    audit(bundle)
+            run(args.macdeployqt, application, "-no-strip", "-no-codesign", "-verbose=0")
+    if args.bundle_python:
+        external: set[str] = set()
+        copy_runtime(bundle, external)
+        inputs = runtime_inputs({"external_runtime_dependencies": sorted(external)})
+        write_if_changed(bundle / "Contents/Resources/runtime-build.json", {
+            "python": sys.version, "source_prefix": str(sys.base_prefix),
+            "runtime": "shared relocatable Python prefix", "notarized": False,
+            "runtime_input_fingerprint": inputs["fingerprint"],
+            "external_runtime_dependencies": inputs["external_runtime_dependencies"]})
+    if not args.skip_audit:
+        audit(bundle)
     sign(bundle)
-    if wrapper:
-        # Run from outside the checkout with a clean environment. Importing
-        # these exercises the embedded native dependency chains too.
-        subprocess.run([str(wrapper), "-c", "import numpy, scipy, torch, torchvision, cv2, pillow_heif, OpenEXR, rawpy, imagecodecs, tifffile, timm, huggingface_hub, safetensors, omegaconf, addict, einops, evo, e3nn, imageio, datasets; print('Bundled Python, teacher and dataset imports passed')"],
-                       cwd="/", env={"PATH": "/usr/bin:/bin", "HOME": str(Path.home())}, check=True)
-        metadata = {"python": sys.version, "source_prefix": str(sys.base_prefix),
-                    "runtime": "shared relocatable Python prefix", "notarized": False,
-                    "dependency_lock_sha256": hashlib.sha256((Path(__file__).resolve().parents[1] / "requirements-release-macos.txt").read_bytes()).hexdigest()}
-        (bundle / "Contents/Resources/runtime-build.json").write_text(json.dumps(metadata, indent=2) + "\n")
-        # Metadata was written after signing; refresh the outer resource seal.
-        run("codesign", "--force", "--sign", "-", bundle, capture=True)
-        run("codesign", "--verify", "--deep", "--strict", bundle, capture=True)
+    if args.bundle_python:
+        check_runtime_imports(bundle)
 
 
 if __name__ == "__main__":

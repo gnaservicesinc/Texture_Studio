@@ -51,6 +51,7 @@ class RaftStereoOptions:
     model_member: str | None = None
     device: str = "auto"
     iterations: int = 32
+    allow_display_checkpoint: bool = False
 
 
 @dataclass
@@ -367,6 +368,38 @@ def _model_configuration(checkpoint_name: str) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+def inspect_raft_checkpoint(options: RaftStereoOptions) -> dict[str, Any] | None:
+    """Identify the selected decoder from checkpoint contents, never its name.
+
+    Inspection needs no upstream source imports or device allocation. An explicit
+    selection (including IPDE_RAFT_MODEL) must not fall back to another model.
+    """
+    selected = options.model or os.environ.get("IPDE_RAFT_MODEL")
+    if not selected:
+        return None
+    model = Path(selected).expanduser().resolve()
+    if not model.is_file():
+        raise RaftStereoError(f"Selected model does not exist: {model}")
+    member = (options.model_member or "raftstereo-middlebury.pth") if model.suffix.lower() == ".zip" else None
+    data, name = _checkpoint_bytes(model, member)
+    try:
+        import torch
+        checkpoint = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
+    except Exception as exc:
+        raise RaftStereoError(f"could not inspect selected checkpoint {model}: {exc}") from exc
+    schema = checkpoint.get("schema") if isinstance(checkpoint, Mapping) else None
+    schema = schema if isinstance(schema, str) else None
+    student = schema == "ipde-display-depth-v1"
+    result = {"path": str(model), "member": member, "name": name,
+              "kind": "display_student" if student else "raft_stereo",
+              "schema": schema, "checkpoint_sha256": hashlib.sha256(data).hexdigest()}
+    if student:
+        architecture = checkpoint.get("architecture", checkpoint.get("ipde_configuration", {}))
+        units = architecture.get("units") if isinstance(architecture, Mapping) else None
+        result["units"] = units if isinstance(units, str) else None
+    return result
+
+
 def checkpoint_model_configuration(checkpoint: Any, checkpoint_name: str) -> SimpleNamespace:
     """Restore explicit IPDE RAFT architecture metadata independent of filename.
 
@@ -375,7 +408,7 @@ def checkpoint_model_configuration(checkpoint: Any, checkpoint_name: str) -> Sim
     renaming a realtime/instance-normalized checkpoint cannot change its model.
     """
     if isinstance(checkpoint, Mapping) and checkpoint.get("schema") == "ipde-display-depth-v1":
-        raise RaftStereoError("This checkpoint predicts display depth, not native-left disparity. Select a Student display depth/displacement product.")
+        raise RaftStereoError("The selected model requires the display-depth decoder; native disparity inference is unavailable.")
     fallback = _model_configuration(checkpoint_name)
     if not isinstance(checkpoint, Mapping) or "ipde_configuration" not in checkpoint:
         return fallback
@@ -397,6 +430,33 @@ def checkpoint_model_configuration(checkpoint: Any, checkpoint_name: str) -> Sim
     if values["corr_implementation"] not in {"alt", "reg"} or values["context_norm"] not in {"batch", "instance", "group", "none"}:
         raise RaftStereoError("trained RAFT checkpoint has unsupported correlation/normalization settings")
     return SimpleNamespace(**values)
+
+
+def native_raft_checkpoint(checkpoint: Any, checkpoint_name: str, *, allow_display: bool = False):
+    """Return the selected checkpoint's native correspondence weights/config.
+
+    Display-depth checkpoints retain their own RAFT component. Diagnostics use
+    those exact weights, never a different pretrained model or invented flow.
+    """
+    component = "raft_stereo"
+    if isinstance(checkpoint, Mapping) and checkpoint.get("schema") == "ipde-display-depth-v1":
+        if not allow_display:
+            raise RaftStereoError("The selected model requires its display-depth decoder")
+        architecture = checkpoint.get("architecture", checkpoint.get("ipde_configuration"))
+        weights = checkpoint.get("state_dict")
+        if not isinstance(architecture, Mapping) or not isinstance(weights, Mapping):
+            raise RaftStereoError("Selected model has no valid embedded RAFT configuration/weights")
+        configuration = checkpoint_model_configuration({"ipde_configuration": architecture.get("raft_configuration")}, checkpoint_name)
+        state = {str(key).removeprefix("raft."): value for key, value in weights.items() if str(key).startswith("raft.")}
+        if not state:
+            raise RaftStereoError("Selected model has no embedded RAFT correspondence weights")
+        component = "embedded_raft_correspondence"
+    else:
+        configuration = checkpoint_model_configuration(checkpoint, checkpoint_name)
+        state = checkpoint.get("state_dict", checkpoint) if isinstance(checkpoint, Mapping) else checkpoint
+    if not isinstance(state, Mapping):
+        raise RaftStereoError("checkpoint does not contain a model state dictionary")
+    return configuration, {str(key).removeprefix("module."): value for key, value in state.items()}, component
 
 
 def _select_device(torch: Any, requested: str) -> str:
@@ -1276,15 +1336,9 @@ def run_raft_stereo(
             map_location="cpu",
             weights_only=True,
         )
-        configuration = checkpoint_model_configuration(state, checkpoint_name)
+        configuration, state_without_parallel_prefix, checkpoint_component = native_raft_checkpoint(
+            state, checkpoint_name, allow_display=options.allow_display_checkpoint)
         model = RAFTStereo(configuration)
-        if isinstance(state, Mapping) and "state_dict" in state:
-            state = state["state_dict"]
-        if not isinstance(state, Mapping):
-            raise RaftStereoError("checkpoint does not contain a model state dictionary")
-        state_without_parallel_prefix = {
-            str(key).removeprefix("module."): value for key, value in state.items()
-        }
         model.load_state_dict(state_without_parallel_prefix, strict=True)
         model.to(device)
         model.eval()
@@ -1388,6 +1442,7 @@ def run_raft_stereo(
         "checkpoint_member": model_member,
         "checkpoint_name": checkpoint_name,
         "checkpoint_sha256": checkpoint_sha256,
+        "checkpoint_component": checkpoint_component,
         "torch_version": str(torch.__version__),
         "device": device,
         "iterations": options.iterations,

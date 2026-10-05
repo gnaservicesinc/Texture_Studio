@@ -1,4 +1,4 @@
-"""Production display exports use native stereo and the student's declared units."""
+"""All RAFT export products use the selected model and preserve declared units."""
 import json
 import hashlib
 import os
@@ -31,11 +31,7 @@ class StudentDisplayExportTests(unittest.TestCase):
                                   np.float32(np.inf)).reshape(4, 6)
         originals = [array.copy() for array in (self.left, self.right, self.display, prediction)]
         aliases = {
-            "raft-depth": "student-display-depth",
-            "raft-display-depth": "student-display-depth",
-            "raft-displacement": "student-display-displacement",
-            "raft-preview": "student-display-preview",
-            "raft-display-preview": "student-display-preview",
+            key: key for key in ("raft-depth", "raft-display-depth", "raft-displacement", "raft-preview", "raft-display-preview")
         }
         for requested, product in aliases.items():
             with self.subTest(requested=requested):
@@ -58,8 +54,8 @@ class StudentDisplayExportTests(unittest.TestCase):
                 stock.assert_not_called(); classical.assert_not_called()
                 register.assert_not_called(); project.assert_not_called()
                 self.assertEqual(report["selected_products"], [product])
-                self.assertEqual(report["requested_products"], [requested])
-                self.assertEqual(report["product_remapping"], {requested: product})
+                self.assertNotIn("requested_products", report)
+                self.assertNotIn("product_remapping", report)
                 self.assertIsNone(report["manifest_path"])
                 files = list(output.iterdir())
                 self.assertEqual(len(files), 1)
@@ -103,12 +99,12 @@ class StudentDisplayExportTests(unittest.TestCase):
         student.assert_called_once()
         self.assertEqual(student.call_args.args[3], checkpoint)
         stock.assert_not_called(); register.assert_not_called()
-        self.assertEqual(report["selected_products"], ["student-display-depth",
-            "student-display-displacement", "student-display-preview"])
+        self.assertEqual(report["selected_products"], sorted(["raft-depth", "raft-display-depth",
+            "raft-displacement", "raft-preview", "raft-display-preview"]))
         files = list(output.iterdir())
-        self.assertEqual(len(files), 3)
-        self.assertEqual(len(report["assets"][0]["outputs"]), 3)
-        depth_file = next(path for path in files if path.name.endswith("_student_display_depth.exr"))
+        self.assertEqual(len(files), 5)
+        self.assertEqual(len(report["assets"][0]["outputs"]), 5)
+        depth_file = next(path for path in files if path.name.endswith("_raft_display_depth.exr"))
         np.testing.assert_array_equal(read_exr_exact(depth_file, prediction.shape).view(np.uint32),
                                       prediction.view(np.uint32))
 
@@ -134,11 +130,9 @@ class StudentDisplayExportTests(unittest.TestCase):
             self.assertTrue(call.kwargs["weights_only"])
             self.assertEqual(call.kwargs["map_location"], "cpu")
         products = {product["id"]: product for product in report["available_products"]}
-        self.assertEqual(set(products), {"raw:0", "raw:1", "raw:2",
-            "student-display-depth", "student-display-displacement", "student-display-preview",
-            "stereo-depth", "stereo-displacement", "stereo-preview", "stereo-height",
-            "stereo-support", "stereo-supported-depth"})
-        for product in ("student-display-depth", "student-display-displacement", "student-display-preview"):
+        from ipde.extractor import _SPATIAL_PRODUCTS
+        self.assertEqual(set(products), {"raw:0", "raw:1", "raw:2"} | set(_SPATIAL_PRODUCTS))
+        for product in ("raft-depth", "raft-display-depth", "raft-displacement", "raft-preview", "raft-display-preview"):
             self.assertEqual((products[product]["height"], products[product]["width"]), self.display.shape[:2])
 
     def test_cli_inspection_forwards_selected_checkpoint(self):
@@ -171,7 +165,7 @@ class StudentDisplayExportTests(unittest.TestCase):
         student.assert_called_once()
         self.assertEqual(student.call_args.args[3], checkpoint)
         stock.assert_not_called(); register.assert_not_called()
-        self.assertEqual(report["selected_products"], ["student-display-depth"])
+        self.assertEqual(report["selected_products"], ["raft-depth"])
 
     def test_stock_checkpoint_named_display_model_keeps_native_stereo_output(self):
         import torch
@@ -196,31 +190,87 @@ class StudentDisplayExportTests(unittest.TestCase):
 
     def test_legacy_raft_flags_use_selected_display_checkpoint(self):
         import torch
-
         checkpoint = self.directory / "legacy-choice.pth"
         torch.save({"schema": "ipde-display-depth-v1"}, checkpoint)
         prediction = np.arange(1, 25, dtype=np.float32).reshape(4, 6)
         with patch("ipde.extractor.discover_file", return_value=self.discovery), \
              patch("ipde.display_student.predict_display_depth", return_value=(prediction, {
-                 "units": "relative_depth", "reference_image": "display"})) as student, \
-             patch("ipde.extractor.run_raft_stereo") as stock, \
+                 "units": "relative_depth", "reference_image": "display"})) as decoder, \
+             patch("ipde.extractor.run_raft_stereo", return_value=self.raft) as native, \
              patch("ipde.registration.estimate_display_registration") as register:
             report = extract_file(self.source, ExtractOptions(output_dir=self.directory / "legacy",
                 raft_model=checkpoint, write_raft_stereo=True, write_raft_diagnostics=True,
                 write_displacement_maps=True, write_npy=False))
-        student.assert_called_once()
-        self.assertEqual(student.call_args.args[3], checkpoint)
-        stock.assert_not_called(); register.assert_not_called()
-        self.assertIsNone(report["selected_products"])
-        products = [output for asset in report["assets"] for output in asset["outputs"]
-                    if output["role"].startswith("derived_student_")]
-        self.assertEqual({output["role"] for output in products},
-            {"derived_student_display_depth", "derived_student_display_displacement"})
-        self.assertEqual(len(products), 2)
-        depth_file = Path(next(output["path"] for output in products
-                              if output["role"] == "derived_student_display_depth"))
+        decoder.assert_called_once(); native.assert_called_once(); register.assert_not_called()
+        self.assertEqual(decoder.call_args.args[3], checkpoint)
+        self.assertEqual(native.call_args.args[3].model, checkpoint)
+        self.assertTrue(native.call_args.args[3].allow_display_checkpoint)
+        outputs = [output for asset in report["assets"] for output in asset["outputs"]]
+        depth_file = Path(next(output["path"] for output in outputs
+                              if output["role"] == "derived_raft_stereo_metric_depth"))
         np.testing.assert_array_equal(read_exr_exact(depth_file, prediction.shape).view(np.uint32),
                                       prediction.view(np.uint32))
+        self.assertEqual(sum(item["role"] == "derived_raft_stereo_metric_depth" for item in outputs), 1)
+        self.assertTrue(any(item["role"] == "derived_raft_stereo_signed_flow" for item in outputs))
+
+    def test_legacy_display_flags_ignore_collisions_for_unused_native_depth_products(self):
+        import torch
+        checkpoint = self.directory / "legacy-selected.pth"
+        torch.save({"schema": "ipde-display-depth-v1"}, checkpoint)
+        prediction = np.arange(1, 25, dtype=np.float32).reshape(4, 6)
+        for write_npy in (False, True):
+            with self.subTest(write_npy=write_npy):
+                output = self.directory / f"legacy-stale-{write_npy}"
+                output.mkdir()
+                stale_paths = [output / f"photo_spatial_raft_stereo_{suffix}{extension}"
+                    for suffix in ("depth_meters", "displacement_0_to_1")
+                    for extension in (".exr", ".npy")]
+                for path in stale_paths:
+                    path.write_bytes(b"existing unused native product")
+                with patch("ipde.extractor.discover_file", return_value=self.discovery), \
+                     patch("ipde.display_student.predict_display_depth", return_value=(prediction, {
+                         "units": "relative_depth", "reference_image": "display"})) as decoder, \
+                     patch("ipde.extractor.run_raft_stereo", return_value=self.raft) as native:
+                    report = extract_file(self.source, ExtractOptions(output_dir=output,
+                        raft_model=checkpoint, write_raft_stereo=True, write_raft_diagnostics=True,
+                        write_displacement_maps=True, write_npy=write_npy))
+                decoder.assert_called_once(); native.assert_called_once()
+                outputs = [item for asset in report["assets"] for item in asset["outputs"]]
+                written = {Path(item["path"]) for item in outputs}
+                self.assertFalse(written.intersection(stale_paths))
+                for path in stale_paths:
+                    self.assertEqual(path.read_bytes(), b"existing unused native product")
+                np.testing.assert_array_equal(read_exr_exact(output / "photo_spatial_raft_depth.exr", prediction.shape), prediction)
+                expected = (prediction.max() - prediction) / (prediction.max() - prediction.min())
+                np.testing.assert_array_equal(read_exr_exact(output / "photo_spatial_raft_displacement_0_to_1.exr", prediction.shape), expected)
+                self.assertTrue((output / "photo_spatial_raft_stereo_height.exr").is_file())
+                self.assertTrue((output / "photo_spatial_raft_stereo_signed_flow.exr").is_file())
+                if write_npy:
+                    np.testing.assert_array_equal(np.load(output / "photo_spatial_raft_depth.npy"), prediction)
+                    np.testing.assert_array_equal(np.load(output / "photo_spatial_raft_displacement_0_to_1.npy"), expected)
+
+    def test_legacy_display_flags_still_refuse_collisions_for_emitted_products(self):
+        import torch
+        checkpoint = self.directory / "legacy-collision-selected.pth"
+        torch.save({"schema": "ipde-display-depth-v1"}, checkpoint)
+        suffixes = ("raft_depth", "raft_displacement_0_to_1", "raft_stereo_height", "raft_stereo_signed_flow")
+        for suffix in suffixes:
+            for extension in (".exr", ".npy"):
+                with self.subTest(suffix=suffix, extension=extension):
+                    output = self.directory / f"collision-{suffix}-{extension[1:]}"
+                    output.mkdir()
+                    collision = output / f"photo_spatial_{suffix}{extension}"
+                    collision.write_bytes(b"existing requested product")
+                    with patch("ipde.extractor.discover_file", return_value=self.discovery), \
+                         patch("ipde.display_student.predict_display_depth") as decoder, \
+                         patch("ipde.extractor.run_raft_stereo") as native:
+                        with self.assertRaisesRegex(ExtractionError, "output already exists"):
+                            extract_file(self.source, ExtractOptions(output_dir=output,
+                                raft_model=checkpoint, write_raft_stereo=True, write_raft_diagnostics=True,
+                                write_displacement_maps=True, write_npy=True))
+                    decoder.assert_not_called(); native.assert_not_called()
+                    self.assertEqual(list(output.iterdir()), [collision])
+                    self.assertEqual(collision.read_bytes(), b"existing requested product")
 
     def test_selected_zip_member_routes_display_alias_and_retains_member_identity(self):
         import torch
@@ -249,7 +299,7 @@ class StudentDisplayExportTests(unittest.TestCase):
         self.assertEqual(student.call_args.args[3], archive)
         self.assertEqual(student.call_args.kwargs["checkpoint_member"], member)
         stock.assert_not_called(); register.assert_not_called()
-        self.assertEqual(report["selected_products"], ["student-display-depth"])
+        self.assertEqual(report["selected_products"], ["raft-depth"])
         self.assertEqual(report["selected_model"]["member"], member)
         output = report["assets"][0]["outputs"][0]
         np.testing.assert_array_equal(read_exr_exact(Path(output["path"]), prediction.shape).view(np.uint32),
@@ -290,11 +340,11 @@ class StudentDisplayExportTests(unittest.TestCase):
                         selected_products=("raft-depth",), raft_model=checkpoint,
                         raft_root=root, raft_device="cpu", write_npy=False))
                 stock.assert_not_called(); register.assert_not_called()
-                self.assertEqual(len(FixtureRAFT.calls), 1)
+                self.assertEqual(len(FixtureRAFT.calls), 2)  # forward and reverse consistency
         finally:
             torch.set_num_threads(previous_threads)
             FixtureRAFT.calls[:] = previous_calls
-        self.assertEqual(report["selected_products"], ["student-display-depth"])
+        self.assertEqual(report["selected_products"], ["raft-depth"])
         files = list(output.iterdir())
         self.assertEqual(len(files), 1)
         np.testing.assert_array_equal(read_exr_exact(files[0], expected.shape).view(np.uint32),
@@ -305,7 +355,8 @@ class StudentDisplayExportTests(unittest.TestCase):
 
     def test_native_stereo_direct_display_depth_and_height_units(self):
         checkpoint = self.directory / "display-model.pth"
-        checkpoint.write_bytes(b"student fixture")
+        import torch
+        torch.save({"schema": "ipde-display-depth-v1"}, checkpoint)
         prediction = np.arange(1, 25, dtype=np.float32).reshape(4, 6)
         originals = [a.copy() for a in (self.left, self.right, self.display, prediction)]
         for units in ("meters", "relative_depth", "relative_inverse_depth"):
@@ -347,13 +398,67 @@ class StudentDisplayExportTests(unittest.TestCase):
             np.testing.assert_array_equal(value, original)
 
     def test_color_preprocessing_refused_before_student_inference(self):
+        import torch
+        checkpoint = self.directory / "display-model.pth"
+        torch.save({"schema": "ipde-display-depth-v1"}, checkpoint)
         with patch("ipde.extractor.discover_file", return_value=self.discovery), \
              patch("ipde.display_student.predict_display_depth") as infer:
             with self.assertRaisesRegex(ExtractionError, "Disable Color Matching"):
                 extract_file(self.source, ExtractOptions(output_dir=self.directory / "color",
-                    selected_products=("student-display-depth",), raft_model=Path("display-model.pth"),
+                    selected_products=("student-display-depth",), raft_model=checkpoint,
                     histogram_color_matching=True))
         infer.assert_not_called()
+
+    def test_all_raft_products_remain_available_and_use_selected_components(self):
+        import torch
+        from ipde.extractor import _SPATIAL_PRODUCTS
+        checkpoint = self.directory / "selected.pth"
+        torch.save({"schema": "ipde-display-depth-v1", "architecture": {"units": "relative_depth"}}, checkpoint)
+        prediction = np.arange(1, 25, dtype=np.float32).reshape(4, 6)
+        selected = tuple(_SPATIAL_PRODUCTS)
+        with patch("ipde.extractor.discover_file", return_value=self.discovery), \
+             patch("ipde.display_student.predict_display_depth", return_value=(prediction, {
+                 "units": "relative_depth", "reference_image": "display"})) as decoder, \
+             patch("ipde.extractor.run_raft_stereo", return_value=self.raft) as native, \
+             patch("ipde.extractor.run_stereo_matching") as classical, \
+             patch("ipde.registration.estimate_display_registration") as register:
+            report = extract_file(self.source, ExtractOptions(output_dir=self.directory / "all",
+                selected_products=selected, raft_model=checkpoint, write_npy=False))
+        decoder.assert_called_once(); native.assert_called_once()
+        classical.assert_not_called(); register.assert_not_called()
+        self.assertEqual(decoder.call_args.args[3], checkpoint)
+        self.assertEqual(native.call_args.args[3].model, checkpoint)
+        self.assertTrue(native.call_args.args[3].allow_display_checkpoint)
+        self.assertEqual(report["selected_products"], sorted(selected))
+        outputs = [item for asset in report["assets"] for item in asset["outputs"]]
+        self.assertEqual(len(outputs), len(selected))
+        self.assertEqual(len(list((self.directory / "all").iterdir())), len(selected))
+        for item in outputs:
+            if item["filename"].endswith(".png"):
+                self.assertEqual(read_png_exact(Path(item["path"])).ndim, 2)
+            self.assertNotIn("student", item["filename"])
+        supported = next(item for item in outputs if item["role"] == "derived_raft_stereo_supported_depth")
+        np.testing.assert_array_equal(read_exr_exact(Path(supported["path"]), self.depth.shape),
+                                      np.where(self.support, self.depth, np.float32(np.nan)))
+        self.assertEqual(supported["derivation"]["reference_image"], "spatial_left")
+        for item in report["available_products"]:
+            self.assertNotIn("Experimental", item["name"])
+            self.assertNotIn("student", item["name"].lower())
+            if item["id"].startswith("raft-"):
+                self.assertNotIn("alpha", item["precision"])
+
+    def test_classical_export_has_been_removed(self):
+        from ipde.cli import _parser
+        help_text = _parser().format_help()
+        self.assertNotIn("--stereo-matching", help_text)
+        self.assertNotIn("--stereo-comparison", help_text)
+        with patch("ipde.extractor.discover_file", return_value=self.discovery), \
+             patch("ipde.extractor.run_stereo_matching") as classical:
+            for options in (ExtractOptions(selected_products=("stereo-depth",)),
+                            ExtractOptions(write_stereo_matching=True)):
+                with self.subTest(options=options), self.assertRaisesRegex(ExtractionError, "has been removed"):
+                    extract_file(self.source, options)
+        classical.assert_not_called()
 
     def test_comparison_preserves_different_camera_grids_without_a_warp(self):
         import torch

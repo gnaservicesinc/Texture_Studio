@@ -20,15 +20,15 @@ Run teacher inference serially and use bounded file preparation. Preserve FP32 a
 
 | Symptom | Investigate | Recommended action |
 | --- | --- | --- |
-| Blurry full-sized output | Teacher processing size, native predictions, student architecture and labels. | Inspect source/target at native pixels; increase appropriate teacher detail and review before retraining. |
-| Tiny "patch pixels" | Chosen student: display-query tile versus stock native crop. | Display tiles visit the full target; stock crops preserve original pixel scale. Neither squeezes the whole photo into the tile. |
+| Blurry full-sized output | Teacher processing size, native predictions, model architecture and labels. | Inspect source/target at native pixels; increase appropriate teacher detail and review before retraining. |
+| Depth tile side length | 768 means at most 768 × 768 output pixels in each temporary decoder tile. | 48 portions cover one 5712 × 4284 map as 8 columns × 6 rows; output dimensions stay unchanged. |
 | Dataset checking dominates startup | Dataset origin/schema and external import. | Supported native datasets check payloads as consumed; external/unknown datasets require full preflight. |
 | Training is on CPU | Reported device and available PyTorch backend. | Select MPS on compatible Apple Silicon; inspect the failure if it is unavailable. |
 | Low GPU load between updates | Decompression, preprocessing, synchronization or frequent validation. | Inspect phase timings, use suitable cache/worker settings and reduce validation overhead. |
 | Validation error varies | Different random subsets or scarce independent scenes. | Increase sample count or use full validation; compare identical policies. |
 | Validation stays good but new scenes fail | Scene leakage or insufficient diversity. | Rebuild an independent split and add genuinely new scenes. |
 | Error diverges / zero / NaN | Incorrect calibration, invalid targets, loss or runtime problem. | Read the stop reason; review data before resuming the saved state. |
-| Display target is ineligible for stock RAFT | Display and native-left grids represent different outputs/viewpoints. | Use the experimental display student for that output task, or compare direct display AI; do not substitute a left teacher or force a registration/resize. |
+| Display target is ineligible for stock RAFT | Display and native-left grids represent different outputs/viewpoints. | Use the display depth model for that output task, or compare direct display AI; do not substitute a left teacher or force a registration/resize. |
 | EXR looks black in an image viewer | Numerical units, range or NaN handling. | Inspect the values in a data-aware program; use a separate visualization. |
 | HEIC rewrite refused | Writer changes retained data or loses auxiliary/calibration items. | Export separate exact arrays; retain the original container. |
 | A linked dataset disappears | Its original directory moved or became unavailable. | Restore the source or update the link in Dataset Studio. |

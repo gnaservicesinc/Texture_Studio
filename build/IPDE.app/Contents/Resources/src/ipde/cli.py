@@ -10,6 +10,7 @@ from typing import Sequence
 
 from . import __version__
 from .extractor import ExtractOptions, ExtractionError, extract_file, inspect_file
+from .spatial import RaftStereoOptions
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -39,32 +40,12 @@ def _parser() -> argparse.ArgumentParser:
         help="do not calibrate eligible uint8 uniform-disparity planes as float32 inverse-meter EXRs",
     )
     parser.add_argument(
-        "--stereo-matching",
-        action="store_true",
-        help="infer one full-resolution classical StereoSGBM height map for an Apple Spatial Photo",
-    )
-    parser.add_argument(
-        "--stereo-comparison",
-        action="store_true",
-        help="export matching StereoSGBM and RAFT-Stereo height maps for direct comparison",
-    )
-    parser.add_argument(
         "--displacement-maps",
         action="store_true",
         help=(
             "also export explicit float32 0..1 displacement derivatives using the "
             "full linear-depth range per map"
         ),
-    )
-    parser.add_argument(
-        "--stereo-max-disparity",
-        type=int,
-        metavar="PIXELS",
-        help="classical matching search range (default: one eighth of the full stereo width)",
-    )
-    parser.add_argument(
-        "--stereo-noise-sigma", type=float, default=1.0, metavar="PIXELS",
-        help="classical shared-detail Gaussian scale in pixels, 0 to disable (default: 1; maximum: 3); raw assets unchanged",
     )
     parser.add_argument(
         "--color-matching",
@@ -95,7 +76,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--raft-model",
         type=Path,
-        help="RAFT-Stereo .pth checkpoint or models.zip (otherwise auto-detected or read from IPDE_RAFT_MODEL)",
+        help="selected RAFT-Stereo or trained depth checkpoint, or ZIP (otherwise auto-detected or read from IPDE_RAFT_MODEL)",
     )
     parser.add_argument(
         "--raft-model-member",
@@ -159,7 +140,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     for source in args.sources:
         try:
             if args.inspect:
-                report = inspect_file(source)
+                report = inspect_file(source, raft_options=RaftStereoOptions(
+                    root=args.raft_root, model=args.raft_model, model_member=args.raft_model_member))
             else:
                 report = extract_file(
                     source,
@@ -170,20 +152,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                         write_manifest=args.manifest,
                         write_metric_depth=not args.no_metric_depth,
                         write_physical_disparity=not args.no_physical_disparity,
-                        write_stereo_matching=(
-                            args.stereo_matching or args.stereo_comparison
-                        ),
                         write_raft_stereo=(
                             args.raft_stereo
                             or args.raft_diagnostics
-                            or args.stereo_comparison
                         ),
                         write_raft_diagnostics=args.raft_diagnostics,
                         histogram_color_matching=args.color_matching,
                         color_matching_hero=args.color_hero,
                         write_displacement_maps=args.displacement_maps,
-                        stereo_maximum_disparity=args.stereo_max_disparity,
-                        stereo_noise_sigma_pixels=args.stereo_noise_sigma,
                         raft_root=args.raft_root,
                         raft_model=args.raft_model,
                         raft_model_member=args.raft_model_member,

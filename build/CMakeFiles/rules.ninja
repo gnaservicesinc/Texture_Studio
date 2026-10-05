@@ -42,7 +42,7 @@ rule COPY_OSX_CONTENT_DIR
 
 rule CXX_EXECUTABLE_LINKER__ipde_gui_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
-  description = Linking CXX executable $TARGET_FILE; Embedding the Python extraction engine in IPDE.app; Bundling documentation and Qt dependencies in ipde_gui
+  description = Linking CXX executable $TARGET_FILE
   restat = $RESTAT
 
 
@@ -61,7 +61,7 @@ rule CXX_COMPILER__raft_studio_unscanned_Release
 
 rule CXX_EXECUTABLE_LINKER__raft_studio_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
-  description = Linking CXX executable $TARGET_FILE; Embedding the separate RAFT Studio workflow; Bundling documentation and Qt dependencies in raft_studio
+  description = Linking CXX executable $TARGET_FILE
   restat = $RESTAT
 
 
@@ -80,7 +80,7 @@ rule CXX_COMPILER__dataset_studio_unscanned_Release
 
 rule CXX_EXECUTABLE_LINKER__dataset_studio_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
-  description = Linking CXX executable $TARGET_FILE; Embedding the separate RAFT Studio workflow; Bundling documentation and Qt dependencies in dataset_studio
+  description = Linking CXX executable $TARGET_FILE
   restat = $RESTAT
 
 
@@ -99,7 +99,7 @@ rule CXX_COMPILER__ipde_studio_unscanned_Release
 
 rule CXX_EXECUTABLE_LINKER__ipde_studio_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
-  description = Linking CXX executable $TARGET_FILE; Bundling documentation and Qt dependencies in ipde_studio
+  description = Linking CXX executable $TARGET_FILE
   restat = $RESTAT
 
 
@@ -118,7 +118,7 @@ rule CXX_COMPILER__photo_studio_unscanned_Release
 
 rule CXX_EXECUTABLE_LINKER__photo_studio_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
-  description = Linking CXX executable $TARGET_FILE; Embedding precision photo and RAW workflows; Bundling documentation and Qt dependencies in photo_studio
+  description = Linking CXX executable $TARGET_FILE
   restat = $RESTAT
 
 
@@ -137,7 +137,7 @@ rule CXX_COMPILER__raw_studio_unscanned_Release
 
 rule CXX_EXECUTABLE_LINKER__raw_studio_Release
   command = $PRE_LINK && /usr/bin/c++ $FLAGS $LINK_FLAGS $in -o $TARGET_FILE $LINK_PATH $LINK_LIBRARIES && $POST_BUILD
-  description = Linking CXX executable $TARGET_FILE; Embedding precision photo and RAW workflows; Bundling documentation and Qt dependencies in raw_studio
+  description = Linking CXX executable $TARGET_FILE
   restat = $RESTAT
 
 

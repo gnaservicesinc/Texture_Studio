@@ -106,6 +106,52 @@ class DisplayStudentTests(unittest.TestCase):
         linear = np.array([[[0.0, 0.25, 1.0]]], np.float32)
         np.testing.assert_array_equal(student.rgb_tensor(linear, {}, torch, "cpu")[0].permute(1, 2, 0).numpy(), linear * 255)
 
+    def test_known_stereo_shift_aligns_one_edge_and_excludes_occluded_matches(self):
+        left = torch.zeros(1, 3, 16, 64, dtype=torch.float32)
+        left[..., 20:28] = 100
+        left[..., 40:42] = 200
+        right = torch.zeros_like(left)
+        right[..., :56] = left[..., 8:]
+        forward = torch.full((1, 1, 16, 64), -8.0)
+        reverse = torch.full_like(forward, 8.0)
+        originals = [value.clone() for value in (left, right, forward, reverse)]
+        aligned, support = student.align_right_to_left(right, forward, reverse)
+        self.assertFalse(bool(support[..., :8].any()))
+        self.assertTrue(bool(support[..., 8:].all()))
+        torch.testing.assert_close(aligned[..., 8:], left[..., 8:], rtol=0, atol=2e-5)
+        self.assertEqual(int(right[0, 0, 0].argmax()), 32)
+        self.assertEqual(int(aligned[0, 0, 0].argmax()), 40)
+        for value, original in zip((left, right, forward, reverse), originals):
+            torch.testing.assert_close(value, original, rtol=0, atol=0)
+        # A conflicting reverse match must never contribute its shifted edge.
+        reverse[..., 12:20] = -100
+        masked, accepted = student.align_right_to_left(right, forward, reverse)
+        self.assertFalse(bool(accepted[..., 20:28].any()))
+        self.assertTrue(bool((masked[..., 20:28] == 0).all()))
+
+    def test_legacy_weights_retain_inference_but_cannot_resume_new_alignment(self):
+        _, configuration, _ = self.model()
+        legacy_configuration = deepcopy(configuration)
+        legacy_configuration["architecture"] = student.LEGACY_ARCHITECTURE
+        legacy_configuration.pop("stereo_alignment")
+        legacy_configuration.pop("query_reference")
+        legacy = student._model(legacy_configuration, self.root)
+        legacy.raft.load_state_dict(torch.load(self.original, weights_only=True))
+        checkpoint = self.root / "previous-model.pth"
+        torch.save(self.payload(legacy, legacy_configuration), checkpoint)
+        restored, saved_configuration, _ = student.load_student_checkpoint(checkpoint, raft_root=self.root, device="cpu")
+        self.assertEqual(saved_configuration, legacy_configuration)
+        for name, weight in legacy.state_dict().items():
+            torch.testing.assert_close(restored.state_dict()[name], weight, rtol=0, atol=0)
+        with self.assertRaisesRegex(student.DisplayStudentError, "Start a new training run"):
+            student.load_student_checkpoint(checkpoint, raft_root=self.root, device="cpu", allow_legacy=False)
+        corrected, corrected_configuration, _ = student.create_student(raft_root=self.root,
+            raft_model=checkpoint, device="cpu", quality=0)
+        self.assertEqual(corrected_configuration["architecture"], student.ARCHITECTURE)
+        self.assertEqual(corrected.offset[-1].out_channels, 2)
+        for name, weight in legacy.raft.state_dict().items():
+            torch.testing.assert_close(corrected.raft.state_dict()[name], weight, rtol=0, atol=0)
+
     def test_encoder_receives_native_images_and_both_cameras_have_gradients(self):
         model, _, _ = self.model("full")
         left = student.rgb_tensor(self.left, {}, torch, "cpu").requires_grad_()
@@ -119,10 +165,13 @@ class DisplayStudentTests(unittest.TestCase):
         self.assertEqual(context["input_shape"], (35, 47))
         self.assertEqual([tuple(value.shape) for value in observed], [(1, 3, 35, 47)] * 2)
         torch.testing.assert_close(observed[0], left.detach() / 127.5 - 1, rtol=0, atol=0)
-        torch.testing.assert_close(observed[1], right.detach() / 127.5 - 1, rtol=0, atol=0)
         padder = FixturePadder(left.shape)
-        torch.testing.assert_close(padder.unpad(FixtureRAFT.calls[-1][0]), left.detach(), rtol=0, atol=0)
-        torch.testing.assert_close(padder.unpad(FixtureRAFT.calls[-1][1]), right.detach(), rtol=0, atol=0)
+        torch.testing.assert_close(padder.unpad(FixtureRAFT.calls[-2][0]), left.detach(), rtol=0, atol=0)
+        torch.testing.assert_close(padder.unpad(FixtureRAFT.calls[-2][1]), right.detach(), rtol=0, atol=0)
+        torch.testing.assert_close(padder.unpad(FixtureRAFT.calls[-1][0]), torch.flip(right.detach(), [3]), rtol=0, atol=0)
+        self.assertEqual(set(context), {"fused", "global", "input_shape", "stereo_support"})
+        self.assertEqual(model.offset[-1].out_channels, 2)
+        self.assertEqual(model.depth[-1].out_channels, 1)
         prediction = model.render(context, (83, 109), (0, 83, 0, 109))
         prediction.square().mean().backward()
         for gradient in (left.grad, right.grad, model.raft.update_block.weight.grad):
@@ -134,7 +183,7 @@ class DisplayStudentTests(unittest.TestCase):
         model, _, _ = self.model()
         model.eval()
         with torch.no_grad():
-            model.offset[-1].bias.copy_(torch.tensor([0.07, -0.04, -0.05, 0.03]))
+            model.offset[-1].bias.copy_(torch.tensor([0.07, -0.04]))
             context = self.context(model)
             shape = (83, 109)
             full = model.render(context, shape, (0, shape[0], 0, shape[1]))
@@ -218,8 +267,9 @@ class DisplayStudentTests(unittest.TestCase):
             student.load_student_checkpoint(self.original, raft_root=self.root, device="cpu")
         checkpoint = self.root / "student.pth"
         torch.save(good, checkpoint)
-        with self.assertRaisesRegex(student.DisplayStudentError, "Use --resume"):
-            student.create_student(raft_root=self.root, raft_model=checkpoint, device="cpu", quality=0)
+        initialized, _, _ = student.create_student(raft_root=self.root, raft_model=checkpoint, device="cpu", quality=0)
+        for name, weight in model.state_dict().items():
+            torch.testing.assert_close(initialized.state_dict()[name], weight, rtol=0, atol=0)
 
     def test_checkpoint_rejects_changed_coordinate_contract_or_unknown_architecture_fields(self):
         model, configuration, _ = self.model()

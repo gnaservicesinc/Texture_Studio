@@ -1,4 +1,4 @@
-"""Experimental full-display-grid supervision from native stereo inputs.
+"""Full-display-grid supervision from native stereo inputs.
 
 Teacher coordinates are never registered or resized. Every valid display pixel
 participates in each image loss; bounded decoder tiles limit temporary memory.
@@ -43,13 +43,13 @@ def _display_exclusion(sample: Mapping[str, Any], mode: str) -> dict[str, Any] |
         allowed.add("reference")
     if (choice not in allowed
             or not isinstance(label, Mapping) or not isinstance(display, Mapping)):
-        reason = "Select a full display-grid teacher label; registered/native stereo targets cannot supervise the display student"
+        reason = "Select a full display-grid teacher label; registered/native stereo targets cannot supervise the display-depth model"
     elif choice == "reference" and not str(label.get("coordinate_reference", "")).startswith("display"):
         reason = "The supplied measured reference is on the LEFT stereo grid; display training requires an independently measured display-grid reference"
     elif choice != "reference" and (not str(label.get("coordinate_reference", "")).startswith("display")
             or not isinstance(metadata, Mapping) or metadata.get("reference_label") != "display"
             or metadata.get("input_rgb_sha256") != display.get("array_sha256") or not display.get("array_sha256")):
-        reason = "Regenerate full display-image teacher labels; native-stereo or unknown teacher inputs cannot train this display student"
+        reason = "Regenerate full display-image teacher labels; native-stereo or unknown teacher inputs cannot train this display-depth model"
     elif not isinstance(label.get("target"), Mapping) or label["target"].get("shape") != display.get("shape", [])[:2]:
         reason = "Display teacher target must retain the exact full display H×W grid"
     elif label.get("units") not in {"meters", "relative_depth", "relative_inverse_depth"}:
@@ -142,7 +142,7 @@ class _DisplayPool:
         left, right = (_verified_array(self.root, sample[name]) for name in ("rgb", "right_rgb"))
         target = _verified_array(self.root, label["target"])
         if left.shape != right.shape or left.ndim != 3 or left.shape[2] != 3:
-            raise TrainingError("Display student requires matching full native RGB views")
+            raise TrainingError("Display-depth model requires matching full native RGB views")
         if target.ndim != 2 or target.dtype.kind != "f" or list(target.shape) != sample["display_rgb"]["shape"][:2]:
             raise TrainingIntegrityError("Display target grid/dtype differs from its full display reference")
         valid = np.isfinite(target) & (target > 0)
@@ -222,9 +222,9 @@ def train_display_dataset(dataset_dir: Path | str, checkpoint_path: Path | str,
     progress("model_setup", status="started", device=device)
     if options.resume_from:
         model, architecture, device = load_student_checkpoint(options.resume_from, raft_root=options.raft_root,
-            device=device, train_scope=options.train_scope)
+            device=device, train_scope=options.train_scope, allow_legacy=False)
         if architecture.get("units") != eligibility["units"] or architecture.get("iterations") != options.iterations:
-            raise TrainingError("Resume student units/iterations differ from the selected training contract")
+            raise TrainingError("Resume model units/iterations differ from the selected training contract")
     else:
         model, architecture, device = create_student(raft_root=options.raft_root, raft_model=options.raft_model,
             raft_model_member=options.raft_model_member, device=device, train_scope=options.train_scope,
@@ -232,7 +232,7 @@ def train_display_dataset(dataset_dir: Path | str, checkpoint_path: Path | str,
             quality=0 if options.patch_size <= 256 else 1 if options.patch_size <= 512 else 2)
     trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not trainable:
-        raise TrainingError("Display student has no trainable parameters")
+        raise TrainingError("Display-depth model has no trainable parameters")
     optimizer = torch.optim.AdamW(trainable, lr=options.learning_rate, weight_decay=1e-5, eps=1e-8)
     pools = _DisplayPool(root, train, options), _DisplayPool(root, validation, options)
     progress("model_setup", status="finished", device=device, precision="float32", student_architecture="ipde-display-depth-v1")
@@ -240,10 +240,10 @@ def train_display_dataset(dataset_dir: Path | str, checkpoint_path: Path | str,
     epoch, cursor, epochs_completed = 1, 0, 0
     order: list[int] = []
     epoch_losses, history, checkpoints, notes = [], [], [], [
-        "Experimental stereo-to-display student: no automatic teacher camera registration or target resizing.",
+        "Stereo correspondence aligns right features to one left-reference field; the loss compares one predicted map with the untouched depth target.",
         "Teacher agreement is not independent accuracy and cannot guarantee detail absent from native stereo inputs."]
     if len({sample["group_id"] for sample in eligible}) < 10:
-        notes.append("Fewer than ten independent groups: pipeline experiment, not a validated camera-specific model")
+        notes.append("Fewer than ten independent groups; validation coverage is limited")
     if not manifest.get("explicit_scene_groups"):
         notes.append("Explicit scene groups were not fully supplied; undetected related captures may leak across validation splits")
     baseline, final = {}, {}
@@ -268,14 +268,14 @@ def train_display_dataset(dataset_dir: Path | str, checkpoint_path: Path | str,
         loaded = torch.load(options.resume_from, map_location="cpu", weights_only=True)
         saved, previous = loaded.get("ipde_resume", {}), loaded.get("ipde_training", {})
         if loaded.get("schema") != "ipde-display-depth-v1" or saved.get("schema") != "ipde-display-resume-v1":
-            raise TrainingError("Resume requires a display-student training checkpoint")
+            raise TrainingError("Resume requires a display-depth training checkpoint")
         if saved.get("dataset_manifest_sha256") != manifest_digest:
             raise TrainingError("Resume dataset has changed; use its identical snapshot")
         for key in ("mode", "train_scope", "patch_size", "iterations", "steps_per_update", "learning_rate", "seed"):
             if previous.get("options", {}).get(key) != options_json[key]:
                 raise TrainingError(f"Resume must preserve {key}")
         if loaded.get("architecture") != architecture:
-            raise TrainingError("Resume display-student architecture/units differ")
+            raise TrainingError("Resume display-depth model architecture/units differ")
         model.load_state_dict(loaded["state_dict"], strict=True)
         optimizer.load_state_dict(saved["optimizer_state"])
         ids = {sample["id"]: index for index, sample in enumerate(train)}
@@ -295,7 +295,7 @@ def train_display_dataset(dataset_dir: Path | str, checkpoint_path: Path | str,
         progress("resumed", status="finished", source_checkpoint=str(options.resume_from))
 
     def report(reason: str, intermediate=False):
-        return {"schema": "ipde-display-training-report-v1", "status": "experimental", "model": "IPDE stereo-to-display depth student",
+        return {"schema": "ipde-display-training-report-v1", "status": "trained", "model": "RAFT stereo depth model",
             "mode": options.mode, "units": eligibility["units"], "device": device, "torch_version": str(torch.__version__),
             "options": options_json, "architecture": architecture, "dataset_manifest_sha256": manifest_digest,
             "trainable_parameter_count": sum(parameter.numel() for parameter in trainable),
@@ -305,7 +305,7 @@ def train_display_dataset(dataset_dir: Path | str, checkpoint_path: Path | str,
             "label_provenance": [{"sample_id": sample["id"], "target_choice": _display_label(sample, options.mode)[0],
                 "target_array_sha256": _display_label(sample, options.mode)[1]["target"]["array_sha256"],
                 "source_sha256": sample["source_sha256"]} for sample in eligible],
-            "input_preprocessing": "Full native LEFT/RIGHT RGB; student model preprocessing only; no image crops or input resizing",
+            "input_preprocessing": "Full native LEFT/RIGHT RGB; right-to-left correspondence alignment and masked feature fusion into one reference; no input resizing",
             "target_preprocessing": "Full unregistered display grid; each supported positive finite pixel visited once per image in bounded decoder tiles",
             "divergence_guard": "Mean absolute fractional depth error abs(prediction-target)/target; dimensionless",
             "integrity_policy": "Consumed-array checksums; native datasets defer unused arrays" if lazy else "Full dataset plus consumed-array verification",
@@ -319,7 +319,7 @@ def train_display_dataset(dataset_dir: Path | str, checkpoint_path: Path | str,
     def snapshot(reason: str, intermediate=False):
         weights = _cpu_tree(torch, model.state_dict())
         if any(not bool(torch.isfinite(value).all()) for value in weights.values()):
-            raise TrainingError("Display-student weights became nonfinite")
+            raise TrainingError("Display-depth model weights became nonfinite")
         metadata = report(reason, intermediate)
         resume = {"schema": "ipde-display-resume-v1", "dataset_manifest_sha256": manifest_digest,
             "optimizer_state": _cpu_tree(torch, optimizer.state_dict()), "epoch": epoch, "cursor": cursor,
@@ -573,7 +573,7 @@ def train_display_dataset(dataset_dir: Path | str, checkpoint_path: Path | str,
 
 def export_display_checkpoint(checkpoint_path: Path | str, destination: Path | str, *,
                               raft_root: Path | None = None) -> dict[str, Any]:
-    """Strict-load an explicitly selected student and export self-contained weights."""
+    """Strict-load an explicitly selected model and export self-contained weights."""
     import torch
     from .display_student import SCHEMA, load_student_checkpoint
     source = Path(checkpoint_path).expanduser().resolve()
@@ -589,7 +589,7 @@ def export_display_checkpoint(checkpoint_path: Path | str, destination: Path | s
         raise TrainingError("Export destination already exists; choose a new directory")
     payload = torch.load(source, map_location="cpu", weights_only=True)
     if not isinstance(payload, Mapping) or payload.get("schema") != SCHEMA or not isinstance(payload.get("ipde_training"), Mapping):
-        raise TrainingError("Export requires a trained display-student checkpoint with provenance")
+        raise TrainingError("Export requires a trained display-depth checkpoint with provenance")
     model, architecture, _ = load_student_checkpoint(source, raft_root=raft_root, device="cpu")
     del model
     if sha256_file(source) != source_digest:
@@ -607,15 +607,15 @@ def export_display_checkpoint(checkpoint_path: Path | str, destination: Path | s
         checked = torch.load(output, map_location="cpu", weights_only=True)
         original = payload["state_dict"]
         if set(checked["state_dict"]) != set(original) or any(not torch.equal(original[key], checked["state_dict"][key]) for key in original):
-            raise TrainingError("Export changed display-student weights")
+            raise TrainingError("Export changed display-depth model weights")
         reloaded, configuration, _ = load_student_checkpoint(output, raft_root=raft_root, device="cpu")
         if configuration != architecture:
-            raise TrainingError("Export changed display-student architecture metadata")
+            raise TrainingError("Export changed display-depth model architecture metadata")
         del reloaded
-        manifest = {"schema": "ipde-display-model-export-v1", "model": "IPDE stereo-to-display depth student", "status": "experimental",
+        manifest = {"schema": "ipde-display-model-export-v1", "model": "RAFT stereo depth model", "status": "trained",
             "checkpoint": "display-model.pth", "checkpoint_sha256": sha256_file(output),
             "source_checkpoint_sha256": source_digest, "architecture": architecture, "training": training,
-            "weights_verified": "Strict student architecture load plus bit-exact tensor round trip",
+            "weights_verified": "Strict model architecture load plus bit-exact tensor round trip",
             "source_photos_included": False, "installed_as_default": False,
             "use": "Select display-model.pth explicitly in IPDE with its compatible RAFT-Stereo source folder"}
         sidecar = {**training, "checkpoint_sha256": manifest["checkpoint_sha256"],

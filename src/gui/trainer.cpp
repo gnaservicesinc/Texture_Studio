@@ -904,16 +904,16 @@ private:
         retainTeacherIntermediates_->setToolTip("Also stores native teacher predictions, confidence and derived masks. Training does not need these; full display targets and their provenance are always retained.");
         preserveAuxiliaryAssets_ = binaryButton("Copy all embedded auxiliary images", datasetAdvanced_);
         preserveAuxiliaryAssets_->setObjectName("preserveAuxiliaryAssets");
-        preserveAuxiliaryAssets_->setToolTip("Adds embedded depth, gain maps and mattes to this dataset. These are not inputs to the display student. Originals remain in your source photos and can be extracted separately.");
+        preserveAuxiliaryAssets_->setToolTip("Adds embedded depth, gain maps and mattes to this dataset. Training uses the selected reference depth map and stereo RGB. Originals remain in your source photos and can be extracted separately.");
         storageControls->addRow("Optional extra storage", retainTeacherIntermediates_);
         storageControls->addRow("Auxiliary archive", preserveAuxiliaryAssets_);
         advancedLayout->addLayout(storageControls);
         auto *storageHelp = new QLabel("Dataset depth uses one lossless 32-bit EXR per teacher result. Stereo and display RGB use lossless PNG; calibration and hashes stay in the manifest. Extra teachers and estimated meter-scale maps add separate depth results. Teacher intermediates and unrelated auxiliary planes are omitted unless enabled above.", datasetAdvanced_);
         storageHelp->setWordWrap(true); advancedLayout->addWidget(storageHelp);
-        auto *teacherView = new QLabel("Teacher source: full display photo. Stereo left/right images are student inputs only.", datasetAdvanced_);
+        auto *teacherView = new QLabel("Teacher source: full display photo. Training inputs: left/right stereo RGB. Training labels: the teacher's depth map.", datasetAdvanced_);
         teacherView->setWordWrap(true); advancedLayout->addWidget(teacherView);
         scaleHelp_ = new QLabel(tab); scaleHelp_->setWordWrap(true); advancedLayout->addWidget(scaleHelp_);
-        auto *sizeHelp = new QLabel("Teachers receive the full display photo, never a stereo image. V2 uses the configured shortest side; DA3 uses the longest side. Set 0 to request native display dimensions on the required 14-pixel grid. The stored display map matches the display photo. DepthPro internally processes a fixed 1536-pixel grid and restores the source size; its model does not support a no-resize mode. Whether DA3 Giant at 5712×4284 fits in 64 GB is unverified: its decoder can hold several very large feature arrays. The experimental student learns these full, unregistered display labels from native stereo RGB. Stock RAFT remains a separate native-left experiment.", tab);
+        auto *sizeHelp = new QLabel("Teachers receive the full display photo. V2 uses the configured shortest side; DA3 uses the longest side. Set 0 to request native display dimensions on the required 14-pixel grid. The stored depth map matches the display photo and supplies reference labels during training. DepthPro internally processes a fixed 1536-pixel grid and restores the source size; its model does not support a no-resize mode. Whether DA3 Giant at 5712×4284 fits in 64 GB is unverified: its decoder can hold several very large feature arrays. The stereo pair trains against this one full reference depth map.", tab);
         sizeHelp->setWordWrap(true); advancedLayout->addWidget(sizeHelp); root->addWidget(datasetAdvanced_);
         connect(teacher_, &QComboBox::currentIndexChanged, this, [this] { teacherDefaults(); });
         for (auto *check : teacherChecks_) connect(check, &QPushButton::toggled, this, [this] { updateTeacherSizeControl(); });
@@ -940,7 +940,7 @@ private:
             const QString preferred = goal == "effect/map" ? "depth-anything-3" : "depthpro";
             teacher_->setCurrentIndex(teacher_->findData(preferred));
             for (auto *check : teacherChecks_) check->setChecked(check->property("model").toString() == preferred);
-            goalHelp_->setText(goal == "effect/map" ? "Detail preset: DA3 teacher on the full display photo, with optional DepthPro meter scale. Review direct display maps before training the experimental stereo-to-display student; output detail and accuracy are not guaranteed." : goal == "depth-estimation" ? "Distance preset: DepthPro estimates meters from the full display photo. Independent photo groups stay together during validation; model estimates still require visual checking." : "Portrait preset: use Photo Studio for embedded depth and composited portrait mattes. Portraits do not have the calibrated stereo pair required for stereo-student datasets; the scanner skips them.");
+            goalHelp_->setText(goal == "effect/map" ? "Detail preset: DA3 teacher on the full display photo, with optional DepthPro meter scale. Review reference depth maps before model training; output detail and accuracy require checking." : goal == "depth-estimation" ? "Distance preset: DepthPro estimates meters from the full display photo. Independent photo groups stay together during validation; model estimates still require visual checking." : "Portrait preset: use Photo Studio for embedded depth and composited portrait mattes. Portraits do not have the calibrated stereo pair required for stereo training datasets; the scanner skips them.");
         }
         if (trainingAdvanced_) trainingAdvanced_->setVisible(advanced_->isChecked());
     }
@@ -950,7 +950,7 @@ private:
             scaleHelp_->setText("DepthPro already estimates distance in meters, so a second scale model is unnecessary. These are AI estimates; meter units do not establish physical accuracy.");
         } else {
             scaleHelp_->setText(QString("Relative depth tells you which surfaces are nearer or farther, with an arbitrary scale for each photo. %1 When enabled, DepthPro supplies an estimated meter scale while the selected teacher supplies detail. This adds inference time, inherits scale errors, and can be rejected when the models disagree. Original relative values are kept separately.")
-                .arg(anchor_->isChecked() ? "Enable this when an estimated meter scale is useful; the anchor sees the same full display photo." : "With this off, the display student can learn relative labels directly; keep one unit convention per run. Meter scale is required only for physical native-stereo flow labels."));
+                .arg(anchor_->isChecked() ? "Enable this when an estimated meter scale is useful; the anchor sees the same full display photo." : "With this off, the display depth model can learn relative labels directly; keep one unit convention per run. Meter scale is required only for physical native-stereo flow labels."));
         }
     }
 
@@ -1925,7 +1925,7 @@ private:
     void buildTrainingTab() {
         auto *tab = new QWidget; auto *root = new QVBoxLayout(tab);
         auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(tab);
-        auto *instruction = new QLabel("Select an existing dataset above and choose the student model, then Start model training. The experimental display student uses native stereo inputs and learns full, unregistered display targets. Stock RAFT is a separate native-left experiment. Preparing another training set is optional.", tab);
+        auto *instruction = new QLabel("Select a dataset above, choose the model output, then Start model training. The stereo pair produces one depth map, trained against the dataset's reference depth map. Preparing another training set is optional.", tab);
         instruction->setWordWrap(true); root->addWidget(instruction);
         trainingDataset_ = new QLabel("Select a dataset from the library above.", tab); trainingDataset_->setObjectName("trainingDataset");
         trainingDataset_->setWordWrap(true); trainingDataset_->setTextFormat(Qt::PlainText); root->addWidget(trainingDataset_);
@@ -1935,10 +1935,10 @@ private:
         form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
         runName_ = new QLineEdit("run-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"), tab); form->addRow("New run", runName_);
         student_ = new QComboBox(tab); student_->setObjectName("trainingStudent");
-        student_->addItem("Experimental stereo → display depth", "display");
-        student_->addItem("Stock RAFT native-left disparity", "raft");
-        student_->setToolTip("Display: native left/right inputs, full unregistered display target and learned display-grid output. Stock RAFT: calibrated native-left flow/disparity task. Their targets and error units differ.");
-        form->addRow("Student model", student_);
+        student_->addItem("RAFT depth on the display grid", "display");
+        student_->addItem("RAFT disparity on the left camera grid", "raft");
+        student_->setToolTip("Both modes use the left/right stereo pair and learn one reference map. Display depth retains its label units and full display dimensions; left-camera disparity uses calibrated correspondence in native stereo pixels.");
+        form->addRow("Model output", student_);
         form->addRow("RAFT source", pathRow(raftRoot_, projectSettings_ ? projectSettings_->value("raft/root", "/opt/ipde/RAFT-Stereo").toString() : settings_.value("raft_root", "/opt/ipde/RAFT-Stereo").toString(), true, "Choose RAFT-Stereo source", tab));
         form->addRow("Initial RAFT model", pathRow(raftModel_, projectSettings_ ? projectSettings_->value("raft/model", "/opt/ipde/models/raftstereo-middlebury.pth").toString() : settings_.value("raft_model", "/opt/ipde/models/raftstereo-middlebury.pth").toString(), false, "Choose original RAFT checkpoint", tab));
         connect(raftRoot_, &QLineEdit::editingFinished, this, [this] { saveSharedModelSettings(); }); connect(raftModel_, &QLineEdit::editingFinished, this, [this] { saveSharedModelSettings(); });
@@ -1965,7 +1965,7 @@ private:
         scope_->setToolTip("Update block changes the refinement module. Full network changes all weights and needs diverse data and more memory.");
         trainingAdvancedLayout->addRow("Stop training by", limitMode_); trainingAdvancedLayout->addRow("Number of training epochs", epochs_);
         trainingAdvancedLayout->addRow("Total Steps", steps_); trainingAdvancedLayout->addRow("Steps Per Update", stepsPerUpdate_);
-        patchLabel_ = new QLabel("Display decoder tile pixels", tab);
+        patchLabel_ = new QLabel("Depth tile side length (pixels)", tab);
         trainingAdvancedLayout->addRow(patchLabel_, patch_); trainingAdvancedLayout->addRow("RAFT iterations", iterations_);
         trainingAdvancedLayout->addRow("Train scope", scope_); trainingAdvancedLayout->addRow("Device", trainDevice_);
         learningRate_ = new QDoubleSpinBox(tab); learningRate_->setDecimals(9); learningRate_->setRange(0.000000001, 0.1); learningRate_->setValue(0.00001);
@@ -1975,7 +1975,7 @@ private:
         trainingAdvancedLayout->addRow("Training labels", trainingMode_);
         trainingLabelHelp_ = new QLabel(tab); trainingLabelHelp_->setWordWrap(true); trainingAdvancedLayout->addRow(trainingLabelHelp_);
         validationSchedule_ = new QComboBox(tab); validationSchedule_->addItem("Every epoch", "epoch"); validationSchedule_->addItem("Only when saving a checkpoint", "checkpoint");
-        validationSamples_ = spin(tab, 0, 1000000, 0); validationSamples_->setSpecialValueText("All validation images"); validationSamples_->setToolTip("N selects fresh random validation images on each check. A passing early-stop threshold is confirmed with the full held-out set before stopping.");
+        validationSamples_ = spin(tab, 0, 1000000, 0); validationSamples_->setSpecialValueText("All validation images"); validationSamples_->setToolTip("N selects at most N eligible held-out images on each check. N is capped at the available validation count; 0 uses all. A passing early-stop threshold is confirmed with the full held-out set before stopping.");
         checkpointSchedule_ = new QComboBox(tab); checkpointSchedule_->addItem("Each epoch", "epoch"); checkpointSchedule_->addItem("Every N epochs", "epochs"); checkpointSchedule_->addItem("Every N Total Steps", "steps"); checkpointSchedule_->addItem("Only at the end", "end");
         checkpointEvery_ = spin(tab, 1, 1000000, 1);
         earlyStop_ = binaryButton("Stop when validation error reaches goal", tab);
@@ -1994,13 +1994,16 @@ private:
         train_ = new QPushButton("Start model training", tab); root->addWidget(train_);
         saveCheckpoint_ = new QPushButton("Save checkpoint now", tab); saveCheckpoint_->setObjectName("saveCheckpointNow"); saveCheckpoint_->setEnabled(false); root->addWidget(saveCheckpoint_);
         connect(saveCheckpoint_, &QPushButton::clicked, this, [this] { requestTrainingControl("save"); });
-        for (auto *control : {epochs_, steps_, stepsPerUpdate_}) connect(control, qOverload<int>(&QSpinBox::valueChanged), this, [this] { updateTrainingSelection(); });
+        for (auto *control : {epochs_, steps_, stepsPerUpdate_, patch_, iterations_, validationSamples_}) connect(control, qOverload<int>(&QSpinBox::valueChanged), this, [this] { updateTrainingSelection(); });
         connect(limitMode_, &QComboBox::currentIndexChanged, this, [this] { updateTrainingSelection(); });
         connect(student_, &QComboBox::currentIndexChanged, this, [this] { updateStudentControls(true); updateTrainingSelection(); });
         connect(trainingMode_, &QComboBox::currentIndexChanged, this, [this] { updateTrainingSelection(); });
+        for (auto *control : {scope_, validationSchedule_}) connect(control, &QComboBox::currentIndexChanged, this, [this] { updateTrainingSelection(); });
+        connect(earlyStop_, &QPushButton::toggled, this, [this] { updateTrainingSelection(); });
+        connect(earlyStopError_, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this] { updateTrainingSelection(); });
         connect(checkpointSchedule_, &QComboBox::currentIndexChanged, this, [this] { checkpointEvery_->setEnabled(!busy_ && (checkpointSchedule_->currentData() == "epochs" || checkpointSchedule_->currentData() == "steps")); });
-        for (auto *slider : {quality_, length_}) connect(slider, &QSlider::valueChanged, this, [this] { applySimpleTrainingSettings(); updateTrainingSelection(); });
-        connect(advanced_, &QPushButton::toggled, this, [this](bool visible) { trainingSimple_->setVisible(!visible); if (!visible) applySimpleTrainingSettings(); updateTrainingSelection(); });
+        for (auto *slider : {quality_, length_}) connect(slider, &QSlider::valueChanged, this, [this] { updateTrainingSelection(); });
+        connect(advanced_, &QPushButton::toggled, this, [this](bool visible) { trainingSimple_->setVisible(!visible); updateTrainingSelection(); });
         connect(train_, &QPushButton::clicked, this, [this] { trainDataset(); });
         compareBaseline_ = new QPushButton("Compare selected trained model with baseline on a photo…", tab); root->addWidget(compareBaseline_);
         connect(compareBaseline_, &QPushButton::clicked, this, [this] {
@@ -2037,20 +2040,20 @@ private:
     void updateStudentControls(bool resetDefaults) {
         if (!patchLabel_ || !trainingHelp_) return;
         const bool display = displayStudent();
-        patchLabel_->setText(display ? "Display decoder tile pixels" : "Native stereo patch pixels");
-        patch_->setToolTip(display ? "Output-query tile side. Each image uses every supported full-display target pixel; native stereo RGB is encoded whole. Larger tiles reduce dispatch overhead and increase decoder memory, without adding source information." : "Width and height of a native stereo training crop; a multiple of 32. A crop preserves source pixel scale. Larger crops give more context and use more memory.");
+        patchLabel_->setText(display ? "Depth tile side length (pixels)" : "Native stereo patch pixels");
+        patch_->setToolTip(display ? "768 means up to 768 × 768 output pixels per temporary decoder tile (589,824 pixels). A 5712 × 4284 map uses 8 columns × 6 rows = 48 tiles, with smaller edge tiles. They cover one 5712 × 4284 map; the tile count never multiplies its width or height. Native stereo RGB is encoded whole. Larger tiles use more decoder memory." : "Width and height of a native stereo training crop; a multiple of 32. A crop preserves source pixel scale. Larger crops give more context and use more memory.");
         epochs_->setToolTip(display ? "An epoch visits every eligible image/teacher entry once, using every supported display target pixel in bounded tiles." : "An epoch visits every eligible image/teacher entry once, drawing one native-resolution crop per image.");
         stepsPerUpdate_->setToolTip("Accumulate this many image gradients before one optimizer update. The last update of an epoch may contain fewer images. Total Steps updates immediately in epoch mode.");
         iterations_->setToolTip(display ? "RAFT refinement passes for whole-native-pair correspondence context; more passes cost time and memory." : "RAFT refinement passes for each native crop and validation prediction.");
         scope_->setItemText(scope_->findData("update"), display ? "Added encoders + decoder (RAFT frozen)" : "RAFT update block");
         scope_->setToolTip(display ? "Limited scope trains the added encoders and query decoder while freezing RAFT. Full network also adapts RAFT and costs more memory. Full-native encoding memory is not guaranteed by dataset size." : "Update block changes RAFT's refinement module. Full network changes all weights and needs diverse data and more memory.");
-        quality_->setToolTip(display ? "Larger output tiles, wider added student features/decoder, and more native RAFT iterations. All display target pixels are still used. Experimental: higher quality is not a guarantee of better geometry or 64 GB fit." : "Larger native pixel crops and more RAFT refinement passes; more memory and context, without repairing bad labels.");
+        quality_->setToolTip(display ? "Larger output tiles, wider depth features/decoder, and more native RAFT iterations. All display target pixels are still used. More computation does not guarantee better geometry or a fit in device memory." : "Larger native pixel crops and more RAFT refinement passes; more memory and context, without repairing bad labels.");
         earlyStopError_->setSuffix(display ? " fraction" : " px MAE");
         earlyStopError_->setToolTip(display ? "Mean abs(prediction-target)/target over valid held-out display pixels. 0.10 is a 10% average relative difference. Subsample success is confirmed on the full validation set; teacher agreement is not physical accuracy." : "Mean absolute horizontal flow error against held-out labels, in native stereo pixels; not a percent or proof of accuracy.");
         maxLoss_->setSuffix(display ? " fraction" : " px");
         maxLoss_->setToolTip(display ? "Stop if mean fractional display error abs(prediction-target)/target reaches this limit, is zero or nonfinite. Saves finite model and resume state." : "Stop if weighted mean absolute flow error across refinement iterations reaches this pixel limit, is zero or nonfinite. Saves finite model and resume state.");
-        trainingLabelHelp_->setText(display ? "Distillation learns the full display teacher, including its blur, scale and mistakes. Relative depth or inverse depth can train directly; one run must retain one unit convention. Supervised requires an independently measured display-grid reference. The teacher and optional anchor see full display RGB; the student sees only native left/right RGB. No teacher warp or stereo-teacher fallback is used." : "Distillation learns compatible native-left teacher labels, including blur, scale and mistakes; physical flow labels require meter scale and calibration. Supervised uses measured references aligned with the native left camera. Display-grid teachers cannot directly train stock RAFT. Teacher agreement does not prove physical accuracy.");
-        trainingHelp_->setText(display ? "Total Steps = epochs × ceil(training entries ÷ Steps Per Update). Each entry visits all supported full-display target pixels in bounded decoder tiles. Native left/right RGB remains full size; output is predicted directly on the display grid. Stop saves resumable state at a safe update boundary. This student is experimental." : "Total Steps = epochs × ceil(training entries ÷ Steps Per Update). Each entry supplies a native stereo crop and the output stays on the left grid. Stop saves resumable state at a safe update boundary.");
+        trainingLabelHelp_->setText(display ? "Training uses the depth map: each predicted pixel is compared with the dataset's reference depth pixel to calculate the loss and update the model. Distillation uses teacher-generated depth; supervised training uses measured reference depth. Both stereo RGB views are model inputs. The right view is aligned to the left using RAFT correspondence before their features are fused and a shared decoder predicts one map. At export, only the stereo pair is needed; the reference depth map supplies training labels. A run retains one label unit convention." : "Training compares the stereo pair's predicted correspondence with the dataset's native-left reference labels. Distillation uses compatible teacher depth; supervised training uses measured references. Calibrated flow labels require meter scale and stereo calibration. At export, only the stereo pair and calibration are needed. Teacher agreement does not prove physical accuracy.");
+        trainingHelp_->setText(display ? "Total Steps = epochs × ceil(training entries ÷ Steps Per Update). Every supported reference-depth pixel contributes to one predicted map. Decoder tiles process portions of that map at its original output dimensions; 48 tiles means 48 portions, not 48 maps. Native left/right RGB remains full size. Stop saves resumable state at a safe update boundary." : "Total Steps = epochs × ceil(training entries ÷ Steps Per Update). Each entry supplies a native stereo crop and the output stays on the left grid. Stop saves resumable state at a safe update boundary.");
         if (resetDefaults) learningRate_->setValue(display ? .0001 : .00001);
         if (resetDefaults) { earlyStopError_->setValue(display ? .10 : 1.0); maxLoss_->setValue(1000); }
     }
@@ -2061,6 +2064,11 @@ private:
         const auto eligibility = trainingEligibility(record);
         return eligibility.value("train_count").toInt(record.value("train_count").toInt());
     }
+    int validationImageCount() const {
+        auto *item = datasets_->currentItem(); if (!item) return 0;
+        const auto record = item->data(0, Qt::UserRole + 1).toJsonObject();
+        return qMax(0, trainingEligibility(record).value("validation_count").toInt(record.value("validation_count").toInt()));
+    }
     qint64 plannedTrainingSteps() const {
         if (!limitMode_ || !stepsPerUpdate_) return 0;
         if (limitMode_->currentData() == "steps") return steps_->value();
@@ -2068,8 +2076,11 @@ private:
     }
     void applySimpleTrainingSettings() {
         if (!quality_ || advanced_->isChecked() || busy_) return;
+        QSignalBlocker e(epochs_), t(steps_), u(stepsPerUpdate_), m(limitMode_), p(patch_), i(iterations_), s(scope_),
+            v(validationSchedule_), n(validationSamples_), c(checkpointSchedule_), f(checkpointEvery_), a(earlyStop_), r(earlyStopError_), l(trainingMode_);
+        trainingMode_->setCurrentIndex(0);
         const int count = qMax(1, trainingImageCount()), quality = quality_->value(), length = length_->value();
-        QSignalBlocker e(epochs_), t(steps_), u(stepsPerUpdate_), m(limitMode_);
+        validationSamples_->setMaximum(datasets_->currentItem() ? validationImageCount() : 1000000);
         patch_->setValue(quality == 0 ? 256 : quality == 1 ? 512 : 768);
         iterations_->setValue(quality == 0 ? 8 : quality == 1 ? 16 : 24);
         const int budget = length == 0 ? 1000 : length == 1 ? 5000 : 15000;
@@ -2080,16 +2091,17 @@ private:
         const bool fullScope = count >= 500 && quality >= 1 && (!displayStudent() || (nativePixels > 0 && nativePixels <= 512 * 512));
         scope_->setCurrentIndex(scope_->findData(fullScope ? "full" : "update"));
         checkpointSchedule_->setCurrentIndex(checkpointSchedule_->findData("epochs")); checkpointEvery_->setValue(length == 0 ? 1 : length == 1 ? 2 : 5);
-        validationSchedule_->setCurrentIndex(validationSchedule_->findData("checkpoint")); validationSamples_->setValue(count >= 100 ? 16 : 0);
+        validationSchedule_->setCurrentIndex(validationSchedule_->findData("checkpoint")); validationSamples_->setValue(count >= 100 ? qMin(16, validationImageCount()) : 0);
         earlyStop_->setChecked(true); earlyStopError_->setValue(displayStudent() ? (length == 0 ? .20 : length == 1 ? .10 : .05) : (length == 0 ? 2.0 : length == 1 ? 1.0 : 0.5));
-        trainingMode_->setCurrentIndex(0); maxLoss_->setValue(1000);
+        maxLoss_->setValue(1000);
         learningRate_->setValue(displayStudent() ? .0001 : .00001);
     }
     void updateTrainingSelection() {
         if (!trainingDataset_ || !train_) return;
         if (busy_ && job_ == "Train RAFT-Stereo") return;
-        applySimpleTrainingSettings();
         auto *item = datasets_->currentItem();
+        { QSignalBlocker blocker(validationSamples_); validationSamples_->setMaximum(item ? validationImageCount() : 1000000); }
+        applySimpleTrainingSettings();
         train_->setEnabled(!datasetMode_ && !busy_ && item && projectOperations_.value("datasets").toString() != "cleanup-dataset");
         const bool epochMode = limitMode_->currentData() == "epochs";
         epochs_->setEnabled(!busy_ && epochMode); steps_->setEnabled(!busy_ && !epochMode);
@@ -2103,8 +2115,12 @@ private:
         QString details = QString("Dataset: %1 · %2 entries · %3 train / validation\nTotal Steps: %4 · %5 images per epoch · %6 image gradients per update.")
             .arg(item->text(0), item->text(1), item->text(2)).arg(plannedTrainingSteps()).arg(trainingImageCount()).arg(stepsPerUpdate_->value());
         details += epochMode ? QString(" Stop after %1 epochs.").arg(epochs_->value()) : " Stop at the exact Total Steps limit.";
-        details += QString(displayStudent() ? "\nDisplay tiles: %1 × %1 (all supported target pixels) · %2 RAFT iterations · %3. Validation: %4; %5." : "\nNative crops: %1 × %1 · %2 RAFT iterations · %3. Validation: %4; %5.")
-            .arg(patch_->value()).arg(iterations_->value()).arg(scope_->currentText(), validationSchedule_->currentText(), validationSamples_->value() == 0 ? QString("all held-out images") : QString("%1 random held-out images").arg(validationSamples_->value()));
+        const int validationCount = validationImageCount();
+        const QString validationPlan = validationSamples_->value() == 0 || validationSamples_->value() >= validationCount
+            ? QString("all %1 held-out %2").arg(validationCount).arg(validationCount == 1 ? "image" : "images")
+            : QString("%1 random %2 of %3 held-out images").arg(validationSamples_->value()).arg(validationSamples_->value() == 1 ? "image" : "images").arg(validationCount);
+        details += QString(displayStudent() ? "\nDisplay tiles: up to %1 × %1 pixels, portions of one map · %2 RAFT iterations · %3. Validation: %4; %5." : "\nNative crops: %1 × %1 · %2 RAFT iterations · %3. Validation: %4; %5.")
+            .arg(patch_->value()).arg(iterations_->value()).arg(scope_->currentText(), validationSchedule_->currentText(), validationPlan);
         if (earlyStop_->isChecked()) details += displayStudent() ? QString(" Full-set early-stop goal: %1% mean relative depth error.").arg(earlyStopError_->value() * 100) : QString(" Full-set early-stop goal: %1 px flow MAE.").arg(earlyStopError_->value());
         if (displayStudent() && eligibility.value("units").isString()) {
             const QString units = eligibility.value("units").toString();
@@ -2138,7 +2154,7 @@ private:
         else if (stage == "filtering_targets") message = QString("Selecting usable targets; %1 invalid targets skipped. Dataset files remain unchanged.").arg(event.value("excluded_count").toInt());
         else if (stage == "skipped_sample") message = "Skipping unusable target: " + QFileInfo(event.value("source_path").toString(event.value("sample_id").toString())).fileName() + " · " + event.value("reason").toString();
         else if (stage == "preparing_targets") message = QString("Preparing %1 targets · %2 / %3").arg(event.value("role").toString()).arg(processed).arg(samples);
-        else if (stage == "model_setup") message = displayStudent() ? "Loading the experimental display student model and native RAFT context." : "Loading the RAFT model and preparing the training device.";
+        else if (stage == "model_setup") message = displayStudent() ? "Loading the RAFT depth model and stereo correspondence context." : "Loading the RAFT model and preparing the training device.";
         else if (stage == "baseline_validation") message = QString("Checking baseline validation · %1 / %2 photos").arg(processed).arg(samples);
         else if (stage == "epoch_step") message = QString("Epoch %1 / %2 · step %3 / %4").arg(epoch).arg(epochs).arg(step).arg(steps);
         else if (stage == "display_tile") message = event.value("validation").toBool()

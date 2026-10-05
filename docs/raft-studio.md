@@ -128,7 +128,7 @@ Native teacher predictions, confidence and unrelated auxiliary planes are omitte
 by default; Advanced can retain them explicitly. Equivalent positive-finite masks
 are derived from depth, while restrictive masks stay stored. Source photos stay
 unchanged. The detail preset leaves metric anchoring off because relative labels
-can train the display student directly; extra teacher and scale maps add storage.
+can train the display depth model directly; extra teacher and scale maps add storage.
 Prepared training sets retain the original scientific files byte-for-byte through
 shared storage. Their array paths stay inside the new set, so removing the source
 directory does not break the set. Hard-linked payloads must remain immutable;
@@ -181,7 +181,7 @@ image or text datasets cannot directly supervise calibrated RAFT. See
 ## Model and precision background
 
 Dataset Studio is the Qt app for creating and managing spatial-photo datasets.
-Trainer learns full display teacher targets with an experimental stereo-to-display student, or runs an explicitly selected stock RAFT native-left experiment, and exports checkpoints.
+Trainer learns full display teacher targets with an RAFT stereo-to-display depth model, or runs an explicitly selected stock RAFT native-left experiment, and exports checkpoints.
 IPDE remains the extraction app: choose an exported checkpoint in its existing
 **RAFT model** field and continue extracting images and depth maps.
 
@@ -329,7 +329,7 @@ RGB reference from its own grid. In an explicit native-stereo experiment,
 use. The label selector exposes available raw, native-model and anchored maps
 so you can inspect the source of a problem. Viewing another label does not
 change which target training uses. A visually plausible map is not enough to
-establish its calibration or its compatibility with a student's output grid.
+establish its calibration or its compatibility with a model's output grid.
 
 The grayscale depth preview uses **near = white, far = black**. **Magenta** marks
 invalid or unsupported values. Each preview uses its own display range, so
@@ -367,13 +367,12 @@ They do not change the default full-display teacher workflow.
 Stock RAFT-Stereo's existing decoder predicts on its left input grid. Full display
 teacher maps can be useful for direct effects/export/comparison, but cannot by
 themselves train that decoder to produce a separate full display grid from native
-stereo inputs. The default **Experimental stereo → display depth** student adds stereo encoders
-and a learned query decoder. It receives only whole native left/right RGB and
-predicts directly on the full display grid. Training compares every supported
-output pixel with the original unregistered display teacher; no fixed camera
+stereo inputs. The default **RAFT depth on the display grid** model adds stereo encoders
+and a learned query decoder. It receives whole native left/right RGB and predicts one map on the full display grid. Right-view content is correspondence-aligned to the left reference before fusion; one shared query decoder replaces the previous independent camera queries. Training uses the reference depth map as labels and compares every supported
+output pixel with the original display teacher depth; no fixed camera
 warp or stereo-teacher fallback is imposed. Its new head needs training, and
 full-sized output is not a guarantee of accurate fine detail. See the bundled
-[architecture note](manual/index.html#experimental-stereo-to-display-model).
+[architecture note](manual/index.html#raft-stereo-to-display-depth-model).
 The following native-stereo target formula applies only to
 explicitly compatible experiments with aligned metric labels.
 
@@ -397,11 +396,11 @@ read-only [IMG_1689 investigation](alignment-and-checkpoints-2026-10-04.md).
 
 ## Train and export
 
-Select a dataset and the visible **Student model** first. The default display
-student uses full-display labels, whole native stereo inputs and one unchanged
+Select a dataset and the visible **Model output** first. The default display
+model uses full-display labels, whole native stereo inputs and one unchanged
 unit convention per run. The stock RAFT picker instead requires calibrated
 native-left labels. Eligibility, counts, Total Steps and error units follow both
-the chosen student and label mode. Configure the initial RAFT checkpoint/source
+the chosen model output and label mode. Configure the initial RAFT checkpoint/source
 and select **Start model training**.
 
 Display limited scope trains its added encoders/query decoder with RAFT frozen.
@@ -411,7 +410,7 @@ least 500 entries, medium/high quality and recorded native inputs no larger than
 scope changes its refinement block, with optional full fine-tuning. Large native
 full-network display training remains an explicit memory experiment.
 
-An epoch visits every eligible image/teacher entry once. The display student
+An epoch visits every eligible image/teacher entry once. The display depth model
 uses every supported positive finite full-display target pixel in decoder tiles;
 stock RAFT draws native-resolution crops. **Steps Per Update** accumulates image
 gradients before an optimizer update. Partial groups flush at epoch end. With T
@@ -419,8 +418,8 @@ entries and accumulation A, an epoch has `ceil(T / A)` optimizer updates.
 **Total Steps** counts these updates, not tiles. Choose complete epochs or an
 exact update budget; the latter can stop partway through an epoch.
 
-**Display decoder tile pixels** controls temporary query-decoder memory/dispatch
-overhead without resizing inputs or targets. In stock mode, **Native stereo
+**Depth tile side length (pixels)** controls temporary query-decoder memory/dispatch
+overhead without resizing inputs or targets. The value 768 means at most 768 × 768 pixels per tile. For a 5712 × 4284 map, 8 columns × 6 rows = 48 portions cover one map, with smaller edge tiles; the output is still 5712 × 4284. In stock mode, **Native stereo
 patch pixels** specifies original-pixel crop size, a multiple of 32. **RAFT
 iterations** controls correspondence refinement work. Simple Quality adjusts
 256/512/768 pixel tiles (stock crops), 16/24/32 added feature channels and
@@ -428,7 +427,7 @@ iterations** controls correspondence refinement work. Simple Quality adjusts
 Initial display learning rate is `1e-4`; stock is `1e-5`.
 
 Validation can run each epoch or with saved checkpoints. Zero validation samples
-uses the whole set; N chooses a fresh random subset. Display scores are mean
+uses the whole set; N chooses a fresh random subset capped at the eligible validation count. The default of up to 16 uses all three when only three held-out entries exist. The plan follows manual changes to iterations, tile size and validation settings immediately. Display scores are mean
 `abs(prediction-target)/target`, a fraction (0.10 = 10% average relative error),
 plus raw MAE in declared meters/relative/inverse units. Stock scores are flow
 MAE in pixels. A passing subsample early-stop goal requires full-set confirmation.

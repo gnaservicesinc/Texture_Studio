@@ -4,7 +4,6 @@
 /opt/ipde/ipde/build/CMakeFiles/ipde_studio.dir
 /opt/ipde/ipde/build/CMakeFiles/photo_studio.dir
 /opt/ipde/ipde/build/CMakeFiles/raw_studio.dir
-/opt/ipde/ipde/build/CMakeFiles/ipde_studio_bundle.dir
 /opt/ipde/ipde/build/CMakeFiles/ipde_icon_builder.dir
 /opt/ipde/ipde/build/CMakeFiles/ipde_icon_assets.dir
 /opt/ipde/ipde/build/CMakeFiles/ipde_media_bridge.dir
@@ -44,7 +43,10 @@
 /opt/ipde/ipde/build/CMakeFiles/studio_routing_regression.dir
 /opt/ipde/ipde/build/CMakeFiles/help_server_regression.dir
 /opt/ipde/ipde/build/CMakeFiles/extractor_model_regression.dir
+/opt/ipde/ipde/build/CMakeFiles/ipde_studio_bundle.dir
+/opt/ipde/ipde/build/CMakeFiles/ipde_runtime_inputs.dir
 /opt/ipde/ipde/build/CMakeFiles/distribution.dir
+/opt/ipde/ipde/build/CMakeFiles/release-check.dir
 /opt/ipde/ipde/build/CMakeFiles/test.dir
 /opt/ipde/ipde/build/CMakeFiles/edit_cache.dir
 /opt/ipde/ipde/build/CMakeFiles/rebuild_cache.dir

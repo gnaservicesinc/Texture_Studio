@@ -34,16 +34,16 @@ from .formats import (
 from .libheif_aux import HighBitAuxiliaryError, decode_high_bit_auxiliary
 from .learned_depth import LearnedDepthConfig, LearnedDepthError, infer_learned_depth
 from .spatial import (
+    _checkpoint_bytes,
     ColorMatchingError,
     DisplacementMappingError,
     RaftStereoError,
     RaftStereoOptions,
     SpatialPhotoError,
-    StereoMatchingError,
-    StereoMatchingOptions,
     analyze_spatial_photo,
     derive_raft_height_and_depth,
     histogram_match_stereo_pair,
+    inspect_raft_checkpoint,
     linear_depth_displacement,
     run_raft_stereo,
     run_stereo_matching,
@@ -948,81 +948,6 @@ def _raft_pending_outputs(
     return pending
 
 
-def _stereo_matching_pending_outputs(
-    output_dir: Path,
-    discovery: Discovery,
-    asset_index: int,
-    result: Any,
-    *,
-    write_npy_companions: bool,
-    color_matched: bool,
-) -> list[PendingOutput]:
-    color_suffix = "_color_matched" if color_matched else ""
-    path_base = (
-        output_dir
-        / f"{discovery.source.stem}_spatial_stereo_matching{color_suffix}_height"
-    )
-    array = result.height_disparity_pixels
-    role = "derived_stereo_matching_height_map"
-    details = _inference_output_details(
-        array,
-        result.details,
-        name=role,
-        units="pixels",
-        value_direction="larger values generally indicate nearer geometry; NaN means unmatched",
-    )
-    color_matching = details.get("derivation", {}).get("input_color_matching", {})
-    color_matching_description = (
-        f"per-channel uint8 CDF; Hero {color_matching.get('hero_side', 'unspecified')}"
-        if color_matching.get("applied")
-        else "disabled"
-    )
-    pending = [
-        PendingOutput(
-            final_path=Path(f"{path_base}.exr"),
-            role=role,
-            asset_index=asset_index,
-            write=lambda temp, a=array: write_exr(
-                temp,
-                a,
-                storage_description=(
-                    "Full-resolution OpenCV StereoSGBM float32 height estimate; no display "
-                    "normalization, gamma correction, tone mapping, resizing, or hole filling applied"
-                ),
-                attributes={
-                    "ipdeUnits": "pixels",
-                    "ipdeSemantic": (
-                        "classical stereo-matching disparity height; near is generally high; "
-                        "NaN is unmatched"
-                    ),
-                    "ipdeTransform": (
-                        "(StereoSGBM fixed disparity / 16) + (cx_right-cx_left); negative/unmatched is NaN"
-                    ),
-                    "ipdePrecision": (
-                        "classical 1/16-pixel inferred estimate; not measured source depth"
-                    ),
-                    "ipdeColorMatching": color_matching_description,
-                    "ipdeDerivation": json.dumps(details["derivation"], sort_keys=True, allow_nan=False),
-                },
-            ),
-            verify=lambda temp, a=array: verify_exr(temp, a),
-            details=details,
-        )
-    ]
-    if write_npy_companions:
-        pending.append(
-            PendingOutput(
-                final_path=Path(f"{path_base}.npy"),
-                role=f"{role}_exact_array",
-                asset_index=asset_index,
-                write=lambda temp, a=array: write_npy(temp, a),
-                verify=lambda temp, a=array: verify_npy(temp, a),
-                details=details,
-            )
-        )
-    return pending
-
-
 def _displacement_pending_outputs(
     output_dir: Path,
     discovery: Discovery,
@@ -1035,11 +960,7 @@ def _displacement_pending_outputs(
     color_matched: bool,
     write_npy_companions: bool,
 ) -> list[PendingOutput]:
-    if engine_name == "stereo_matching":
-        filename_engine = "stereo_matching"
-        role = "derived_stereo_matching_displacement_0_to_1"
-        semantic_engine = "classical StereoSGBM"
-    elif engine_name == "raft_stereo":
+    if engine_name == "raft_stereo":
         filename_engine = "raft_stereo"
         role = "derived_raft_stereo_displacement_0_to_1"
         semantic_engine = "RAFT-Stereo"
@@ -1117,24 +1038,20 @@ def _displacement_pending_outputs(
     return pending
 
 
-def _stereo_review_outputs(
+def _raft_review_outputs(
     output_dir: Path, discovery: Discovery, asset_index: int,
-    engine: str, disparity: np.ndarray, support: np.ndarray | None,
+    disparity: np.ndarray, support: np.ndarray | None,
     inference: Mapping[str, Any], selected: set[str] | None, *,
     color_matched: bool, write_npy_companions: bool,
 ) -> list[PendingOutput]:
     """Explicit review products; never silently normalize a scientific export."""
     if selected is None:
         return []
-    filename_engine = "raft_stereo" if engine == "raft" else "stereo_matching"
+    filename_engine = "raft_stereo"
     color_suffix = "_color_matched" if color_matched else ""
     stem = output_dir / f"{discovery.source.stem}_spatial_{filename_engine}{color_suffix}"
     pending: list[PendingOutput] = []
-    products = [f"{engine}-support", f"{engine}-preview", f"{engine}-supported-depth"]
-    if engine == "raft":
-        products.extend(("raft-display-depth", "raft-display-preview"))
-    if engine == "stereo":
-        products.append("stereo-depth")
+    products = ["raft-support", "raft-preview", "raft-supported-depth", "raft-display-depth", "raft-display-preview"]
     display_depth = None
     registration = None
     if selected.intersection({"raft-display-depth", "raft-display-preview"}):
@@ -1173,7 +1090,7 @@ def _stereo_review_outputs(
             display_product = product == "raft-display-depth"
             semantic = ("approximate registered RAFT camera-axis depth on the display grid; supported regions only; NaN is unknown" if display_product else
                         "camera-axis depth restricted to supported correspondences; NaN is unknown" if masked else
-                        "classical camera-axis depth estimate; local support exported separately; NaN is unmatched")
+                        "stereo camera-axis depth estimate; local support exported separately; NaN is unmatched")
             transform = "Z = float32(focal_px) * float32(baseline_m) / disparity" + (
                 "; project supported left depth to the display grid using empirical registration; unsupported = NaN" if display_product else
                 "; unsupported = NaN" if masked else "")
@@ -1190,21 +1107,20 @@ def _stereo_review_outputs(
                 try:
                     mapped, mapping = linear_depth_displacement(disparity, discovery.spatial_photo)
                 except DisplacementMappingError:
-                # An entirely unmatched classical result has a useful empty preview.
+                    # A map without finite depth still has a useful empty preview.
                     mapped = np.full(disparity.shape, np.nan, np.float32)
                     mapping = {"empty_map": True, "formula": "no finite positive depth"}
             finite = np.isfinite(mapped)
             gray = np.rint(np.where(finite, mapped, 0).astype(np.float64) * 65535).astype(np.uint16)
-            array = np.stack((gray, np.where(finite, 65535, 0).astype(np.uint16)), axis=-1)
+            array = gray
             suffix, units = "display_depth_preview" if product == "raft-display-preview" else "depth_preview", "16-bit display codes, not scientific data"
-            semantic = "linear camera-axis depth preview; near white, far black; unknown pixels transparent"
-            transform = "round(65535 * (far_m - Z) / (far_m - near_m)); alpha = finite depth"
+            semantic = "linear camera-axis depth preview; near white, far black; unknown pixels black; validity in separate support map"
+            transform = "round(65535 * (far_m - Z) / (far_m - near_m)); missing pixels = 0; single channel"
             inference_details.update({
                 "preview_only": True, "normalization": True, "displacement_mapping": mapping,
                 "quantization": "nearest uint16 code; use float32 EXR for displacement",
                 "gamma_correction": False, "tone_mapping": False,
-                "alpha_semantics": ("finite supported registered depth; not a calibrated confidence probability" if product == "raft-display-preview" else
-                                    "finite estimate, not correspondence support; see separate support map"),
+                "missing_pixels": "black; use the separate support product for correspondence validity",
             })
         role = _SPATIAL_PRODUCTS[product][1]
         details = _inference_output_details(array, inference_details, name=role, units=units, value_direction=semantic)
@@ -1344,28 +1260,31 @@ def _learned_reference_outputs(output_dir: Path, discovery: Discovery, config: E
 
 
 _SPATIAL_PRODUCTS = {
-    "student-display-depth": ("Experimental student — direct display-grid depth, checkpoint units", "derived_student_display_depth"),
-    "student-display-displacement": ("Experimental student — display-grid 0–1 height map", "derived_student_display_displacement"),
-    "student-display-preview": ("Experimental student — display-grid preview, view only", "derived_student_display_preview"),
-    "raft-display-depth": ("RAFT registered display depth — supported meters, partial coverage", "derived_raft_display_metric_depth"),
-    "raft-display-preview": ("RAFT registered display preview — partial coverage, view only", "derived_raft_display_preview"),
-    "raft-displacement": ("RAFT dense estimate — linear depth 0–1 displacement", "derived_raft_stereo_displacement_0_to_1"),
-    "raft-preview": ("RAFT depth preview — view only, near white", "derived_raft_stereo_depth_preview"),
-    "raft-depth": ("RAFT dense estimate — camera-axis depth in meters", "derived_raft_stereo_metric_depth"),
-    "raft-support": ("RAFT support mask — white supported, black unknown", "derived_raft_stereo_support"),
-    "raft-supported-depth": ("RAFT supported depth — meters, unknown is NaN", "derived_raft_stereo_supported_depth"),
-    "raft-height": ("RAFT disparity diagnostic — pixels, inverse depth", "derived_raft_stereo_height_map"),
-    "raft-flow": ("RAFT signed flow diagnostic — negative pixels", "derived_raft_stereo_signed_flow"),
-    "stereo-displacement": ("Classical estimate — linear depth 0–1 displacement", "derived_stereo_matching_displacement_0_to_1"),
-    "stereo-preview": ("Classical depth preview — view only, near white", "derived_stereo_matching_depth_preview"),
-    "stereo-depth": ("Classical estimate — camera-axis depth in meters", "derived_stereo_matching_metric_depth"),
-    "stereo-supported-depth": ("Classical supported depth — meters, unknown is NaN", "derived_stereo_matching_supported_depth"),
-    "stereo-support": ("Classical support mask — white supported, black unknown", "derived_stereo_matching_support"),
-    "stereo-height": ("Classical disparity diagnostic — pixels, inverse depth", "derived_stereo_matching_height_map"),
+    "raft-display-depth": ("RAFT depth — display image grid, selected model", "derived_raft_display_metric_depth"),
+    "raft-display-preview": ("RAFT depth preview — display image grid, view only", "derived_raft_display_preview"),
+    "raft-displacement": ("RAFT height map — 0–1 displacement", "derived_raft_stereo_displacement_0_to_1"),
+    "raft-preview": ("RAFT depth preview — selected model, near white", "derived_raft_stereo_depth_preview"),
+    "raft-depth": ("RAFT depth — selected model, declared units", "derived_raft_stereo_metric_depth"),
+    "raft-support": ("RAFT native stereo support mask — white supported, black unknown", "derived_raft_stereo_support"),
+    "raft-supported-depth": ("RAFT native stereo supported depth — meters, unknown is NaN", "derived_raft_stereo_supported_depth"),
+    "raft-height": ("RAFT native stereo disparity diagnostic — pixels, inverse depth", "derived_raft_stereo_height_map"),
+    "raft-flow": ("RAFT native stereo signed flow diagnostic — pixels", "derived_raft_stereo_signed_flow"),
 }
 
+# Read older saved selections without presenting training terminology in exports.
+_LEGACY_PRODUCT_ALIASES = {
+    "student-display-depth": "raft-display-depth",
+    "student-display-displacement": "raft-displacement",
+    "student-display-preview": "raft-display-preview",
+}
+_DISPLAY_DECODER_PRODUCTS = {
+    "raft-depth", "raft-display-depth", "raft-displacement", "raft-preview", "raft-display-preview",
+}
+_NATIVE_RAFT_PRODUCTS = {"raft-height", "raft-flow", "raft-support", "raft-supported-depth"}
 
-def _available_products(discovery: Discovery, *, include_learned: bool = False) -> list[dict[str, Any]]:
+
+def _available_products(discovery: Discovery, *, include_learned: bool = False,
+                        selected_model: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
     products = []
     for index, asset in enumerate(discovery.assets):
         common = {"asset_index": index, "width": asset.array.shape[1], "height": asset.array.shape[0],
@@ -1412,36 +1331,41 @@ def _available_products(discovery: Discovery, *, include_learned: bool = False) 
                              "Preview and 0–1 displacement are separate explicit derivatives; raw decoded arrays stay untouched."})
     if discovery.spatial_photo and discovery.spatial_photo.get("rectified_stereo_ready"):
         camera = discovery.spatial_photo["left_camera"]
+        display_model = bool(selected_model and selected_model["kind"] == "display_student")
         for key, (label, _) in _SPATIAL_PRODUCTS.items():
-            description = "Computed on the left-view grid; inferred, not measured source depth. "
+            description = "Selected model's stereo component, computed on the native left-view grid. Inferred, not measured source depth. "
             product_camera = camera
-            if "-display-" in key:
+            uses_display_decoder = display_model and key in _DISPLAY_DECODER_PRODUCTS
+            if "-display-" in key or uses_display_decoder:
                 display_reference = _learned_reference(discovery, display=True)
                 if display_reference is None:
                     continue
                 product_camera = {"width": display_reference[1].array.shape[1], "height": display_reference[1].array.shape[0]}
-                description = "Reprojected supported RAFT depth onto the display grid using evidence-checked same-camera registration. Approximate derived grid; unknown regions stay NaN. Registration can be rejected per photo. "
-            if key.startswith("student-"):
-                description = ("Requires an ipde-display-depth-v1 checkpoint. Native left/right RGB provide input; the learned decoder predicts at every display pixel without teacher registration or output resizing. Units come from training: meters, relative depth or relative inverse depth. Experimental estimates require comparison on unseen scenes. ")
+                if uses_display_decoder:
+                    description = ("Selected model's depth decoder produces one depth map on the display image grid from the stereo pair. "
+                                   "The depth target is used during training; export uses the two RGB views. "
+                                   "Raw depth retains the checkpoint's declared units (meters, relative depth or relative inverse depth). ")
+                else:
+                    description = ("Selected model's supported stereo depth is reprojected onto the display image grid using same-camera registration. "
+                                   "Approximate derived grid; unknown regions stay NaN. Registration can be rejected per photo. ")
+            elif key == "raft-depth":
+                description += "Camera-axis depth in meters, calculated from stereo disparity and source calibration. "
             if key.endswith("-preview"):
-                description += ("Viewable PNG with explicit linear depth mapping and transparent missing pixels. "
-                                "Quantized for viewing only; use the 0–1 float EXR for displacement.")
+                description += ("Single-channel 16-bit PNG with explicit linear depth mapping; missing pixels are black. "
+                                "Quantized for viewing only; use the 0–1 float EXR for displacement and the separate support map for validity.")
             elif key.endswith("-support"):
-                description += "Binary support evidence, not depth or a calibrated probability."
+                description += "Binary correspondence support evidence, not depth or a calibrated probability."
             elif key.endswith("-height") or key.endswith("-flow"):
-                description += ("Pixel units are not brightness. Signed flow can be negative and disparity can exceed 1; "
-                                "direct PNG conversion clips them. Choose Depth preview for viewing.")
+                description += ("Native pixel disparity/flow diagnostic, separate from the depth decoder's height map. "
+                                "Pixel units are not brightness. Choose Depth preview for viewing.")
             elif key.endswith("-supported-depth"):
-                description += "Unsupported pixels remain NaN. Do not turn them into zero displacement."
-            elif key.startswith("stereo-"):
-                description += ("Regularized estimate with visibility and reverse-match checks; smooth surfaces can lack local texture support. "
-                                "Export the separate support mask to identify them. Unmatched pixels remain NaN; no hole filling.")
-            elif not key.startswith("student-"):
+                description += "Stereo-component depth in meters; unsupported pixels remain NaN. Do not turn them into zero displacement."
+            elif not uses_display_decoder:
                 description += ("Dense forward estimate, including unverified occluded regions. "
                                 "Export the support mask to identify them; no hole filling or confidence masking.")
             products.append({"id": key, "name": label, "width": product_camera["width"],
-                             "height": product_camera["height"],
-                             "precision": "16-bit PNG + alpha (view only)" if key.endswith("-preview") else "32-bit float EXR",
+                             "height": product_camera["height"], "channels": 1,
+                             "precision": "16-bit PNG (view only)" if key.endswith("-preview") else "32-bit float EXR",
                              "source_precision": "Generated estimate", "origin": "Inferred",
                              "description": description})
     return products
@@ -1456,35 +1380,40 @@ def _product_id(output: PendingOutput) -> str:
     return f"{prefix}:{output.asset_index}"
 
 
-def _student_display_outputs(output_dir: Path, discovery: Discovery, config: ExtractOptions,
+def _selected_model_depth_outputs(output_dir: Path, discovery: Discovery, config: ExtractOptions,
                              selected: set[str], left: Asset, right: Asset) -> list[PendingOutput]:
     from .display_student import DisplayStudentError, predict_display_depth
     reference = _learned_reference(discovery, display=True)
     if reference is None:
-        raise ExtractionError("The display student requires the full display image dimensions")
-    if config.raft_model is None or config.raft_model_member:
-        raise ExtractionError("Choose an exported display-model.pth checkpoint for the display student")
+        raise ExtractionError("The selected depth model requires the full display image dimensions")
+    if config.raft_model is None:
+        raise ExtractionError("Choose an exported depth checkpoint")
     if config.histogram_color_matching:
-        raise ExtractionError("Disable Color Matching for the display student; its training uses the original native stereo RGB")
+        raise ExtractionError("Disable Color Matching for this depth checkpoint; its training uses the original stereo RGB")
     index, display = reference
     try:
         depth, metadata = predict_display_depth(left.array, right.array, display.array.shape[:2], config.raft_model,
             raft_root=config.raft_root, device=config.raft_device,
+            checkpoint_member=config.raft_model_member,
             left_record={"source_bit_depth": left.source_bit_depth or left.array.dtype.itemsize * 8},
             right_record={"source_bit_depth": right.source_bit_depth or right.array.dtype.itemsize * 8})
     except (DisplayStudentError, RuntimeError, ValueError, OSError) as exc:
         raise ExtractionError(str(exc)) from exc
     if depth.dtype != np.float32 or depth.shape != display.array.shape[:2] or not np.isfinite(depth).all() or np.any(depth <= 0):
-        raise ExtractionError("Display student returned invalid depth or the wrong display grid")
-    metadata = {**metadata, "checkpoint_sha256": hashlib.sha256(config.raft_model.read_bytes()).hexdigest(),
+        raise ExtractionError("The selected model returned invalid depth or the wrong display grid")
+    checkpoint_data, checkpoint_name = _checkpoint_bytes(config.raft_model, config.raft_model_member)
+    metadata = {**metadata, "checkpoint_sha256": hashlib.sha256(checkpoint_data).hexdigest(),
+        "checkpoint_path": str(config.raft_model), "checkpoint_name": checkpoint_name,
+        "checkpoint_member": config.raft_model_member if config.raft_model.suffix.lower() == ".zip" else None,
         "source_heic_sha256": discovery.source_sha256, "left_rgb_sha256": sha256_array(left.array),
         "right_rgb_sha256": sha256_array(right.array), "display_rgb_used_for_inference": False,
+        "reference_image": "display", "model_component": "depth_decoder",
         "normalization": False, "gamma_correction": False, "tone_mapping": False}
     inverse = metadata["units"] == "relative_inverse_depth"
     pending = []
-    for product in sorted(selected & {key for key in _SPATIAL_PRODUCTS if key.startswith("student-")}):
+    for product in sorted(selected & _DISPLAY_DECODER_PRODUCTS):
         array, details_metadata, units = depth, dict(metadata), metadata["units"]
-        suffix = "depth"
+        suffix = "display_depth" if product == "raft-display-depth" else "depth"
         direction = "larger values are nearer" if inverse else "smaller values are nearer"
         if not product.endswith("-depth"):
             near, far = np.float32(depth.min()), np.float32(depth.max())
@@ -1496,13 +1425,13 @@ def _student_display_outputs(output_dir: Path, discovery: Discovery, config: Ext
                 "mapping_domain": metadata["units"], "formula": "(inverse_depth-min)/(max-min)" if inverse else "(far-depth)/(far-near)"})
             if product.endswith("-preview"):
                 array = np.rint(mapped.astype(np.float64) * 65535).astype(np.uint16)
-                units, suffix = "16-bit display codes (view only)", "depth_preview"
+                units, suffix = "16-bit display codes (view only)", "display_depth_preview" if product == "raft-display-preview" else "depth_preview"
                 details_metadata["preview_only"] = True
         role = _SPATIAL_PRODUCTS[product][1]
         details = _inference_output_details(array, details_metadata, name=role, units=units, value_direction=direction)
         attrs = {"ipdeUnits": units, "ipdeSemantic": direction,
                  "ipdeDerivation": json.dumps(details["derivation"], sort_keys=True, allow_nan=False)}
-        base = output_dir / f"{discovery.source.stem}_spatial_student_display_{suffix}"
+        base = output_dir / f"{discovery.source.stem}_spatial_raft_{suffix}"
         paths = [Path(f"{base}.png")] if product.endswith("-preview") else [Path(f"{base}.exr")] + ([Path(f"{base}.npy")] if config.write_npy else [])
         for path in paths:
             writer, verifier = (write_png, verify_png) if path.suffix == ".png" else (write_npy, verify_npy) if path.suffix == ".npy" else (write_exr, verify_exr)
@@ -1512,7 +1441,8 @@ def _student_display_outputs(output_dir: Path, discovery: Discovery, config: Ext
     return pending
 
 
-def _build_manifest(discovery: Discovery, asset_records: list[dict[str, Any]], warnings: list[str], *, include_learned: bool = False) -> dict[str, Any]:
+def _build_manifest(discovery: Discovery, asset_records: list[dict[str, Any]], warnings: list[str], *,
+                    include_learned: bool = False, selected_model: Mapping[str, Any] | None = None) -> dict[str, Any]:
     try:
         numpy_version = version("numpy")
     except PackageNotFoundError:
@@ -1550,11 +1480,12 @@ def _build_manifest(discovery: Discovery, asset_records: list[dict[str, Any]], w
             "Derived physical disparity and metric depth outputs, when present, are explicitly "
             "documented float32 calibrations of a raw uint8 uniform-disparity plane. Float32 changes "
             "the numeric representation and units, not the source quantization or amount of captured "
-            "scene information. Classical StereoSGBM and RAFT-Stereo outputs, when requested, are "
+            "scene information. RAFT outputs, when requested, are "
             "explicitly identified inferred float32 estimates derived from the preserved stereo views. "
             "No output can restore information lost when the source HEIF was encoded."
         ),
-        "available_products": _available_products(discovery, include_learned=include_learned),
+        "selected_model": selected_model,
+        "available_products": _available_products(discovery, include_learned=include_learned, selected_model=selected_model),
         "asset_count": len(asset_records),
         "assets": asset_records,
         "warnings": warnings,
@@ -1577,18 +1508,24 @@ def _discovery_warnings(discovery: Discovery) -> list[str]:
     return warnings
 
 
-def _report(discovery: Discovery, *, include_learned: bool = False) -> dict[str, Any]:
+def _report(discovery: Discovery, *, include_learned: bool = False,
+            selected_model: Mapping[str, Any] | None = None) -> dict[str, Any]:
     records = [_asset_record(asset) for asset in discovery.assets]
     warnings = _discovery_warnings(discovery)
     if not records:
         warnings.append(
             "No depth, non-alpha auxiliary, alpha, or spatial-view planes were exposed."
         )
-    return _build_manifest(discovery, records, warnings, include_learned=include_learned)
+    return _build_manifest(discovery, records, warnings, include_learned=include_learned, selected_model=selected_model)
 
 
-def inspect_file(source: Path | str, *, include_learned: bool = False) -> dict[str, Any]:
-    return _report(discover_file(Path(source)), include_learned=include_learned)
+def inspect_file(source: Path | str, *, include_learned: bool = False,
+                 raft_options: RaftStereoOptions | None = None) -> dict[str, Any]:
+    try:
+        selected_model = inspect_raft_checkpoint(raft_options or RaftStereoOptions())
+    except RaftStereoError as exc:
+        raise ExtractionError(str(exc)) from exc
+    return _report(discover_file(Path(source)), include_learned=include_learned, selected_model=selected_model)
 
 
 def _temporary_path(final_path: Path) -> Path:
@@ -1676,16 +1613,39 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
     config = options or ExtractOptions()
     discovery = discover_file(Path(source))
     selected = None if config.selected_products is None else set(config.selected_products)
+    requested_products = None if selected is None else set(selected)
+    remapping: dict[str, str] = {}
+    decoder_products: set[str] = set()
+    selected_model = None
+    if config.write_stereo_matching or (selected and any(key.startswith("stereo-") for key in selected)):
+        raise ExtractionError("Classical stereo generation has been removed. Select a RAFT export and model.")
     if selected is not None:
-        available = {product["id"] for product in _available_products(discovery, include_learned=True)}
+        remapping = {key: _LEGACY_PRODUCT_ALIASES[key] for key in selected if key in _LEGACY_PRODUCT_ALIASES}
+        selected = {remapping.get(key, key) for key in selected}
+    requests_raft = (bool(selected and any(key.startswith("raft-") for key in selected)) if selected is not None
+                     else config.write_raft_stereo or config.write_raft_diagnostics)
+    if requests_raft and config.raft_model is None and os.environ.get("IPDE_RAFT_MODEL"):
+        config = replace(config, raft_model=Path(os.environ["IPDE_RAFT_MODEL"]))
+    if requests_raft:
+        try:
+            selected_model = inspect_raft_checkpoint(RaftStereoOptions(
+                model=config.raft_model, model_member=config.raft_model_member))
+        except RaftStereoError as exc:
+            raise ExtractionError(str(exc)) from exc
+        if selected_model and selected_model["kind"] == "display_student":
+            decoder_products = (selected & _DISPLAY_DECODER_PRODUCTS) if selected is not None else {"raft-depth"}
+            if selected is None and config.write_displacement_maps:
+                decoder_products.add("raft-displacement")
+    if selected is not None:
+        available = {product["id"] for product in _available_products(discovery, include_learned=True, selected_model=selected_model)}
         if not selected or selected - available:
             raise ExtractionError(f"Select available products from --inspect; unavailable selection: {sorted(selected - available)}")
         config = replace(
             config,
-            write_stereo_matching=any(key.startswith("stereo-") for key in selected),
-            write_raft_stereo=any(key.startswith("raft-") for key in selected),
+            write_stereo_matching=False,
+            write_raft_stereo=bool(selected & (_NATIVE_RAFT_PRODUCTS if selected_model and selected_model["kind"] == "display_student" else set(_SPATIAL_PRODUCTS))),
             write_raft_diagnostics=bool(selected & {"raft-flow", "raft-depth"}),
-            write_displacement_maps=bool(selected & {"raft-displacement", "stereo-displacement"}),
+            write_displacement_maps="raft-displacement" in selected,
             write_metric_depth=any(key.startswith("meters:") for key in selected),
             write_physical_disparity=any(key.startswith("disparity:") for key in selected),
             write_learned_depth=any(key in _LEARNED_PRODUCTS for key in selected),
@@ -1701,6 +1661,8 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
     names = _base_names(discovery)
     records = [_asset_record(asset) for asset in discovery.assets]
     warnings = _discovery_warnings(discovery)
+    if remapping:
+        warnings.append("Loaded the saved export selection using current RAFT product names.")
     if not records:
         warnings.append(
             "No depth, non-alpha auxiliary, alpha, or spatial-view planes were exposed."
@@ -1772,13 +1734,13 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
             predicted.extend(_learned_paths(output_dir, discovery, config, reference[1], product))
         _check_output_paths([item.final_path for item in pending] + predicted + manifest_paths, overwrite=config.overwrite)
         pending.extend(_learned_pending_outputs(output_dir, discovery, config, selected))
-    write_raft = config.write_raft_stereo or config.write_raft_diagnostics
-    write_student = bool(selected and any(key.startswith("student-") for key in selected))
-    write_spatial_height = config.write_stereo_matching or write_raft or write_student
+    display_model = bool(selected_model and selected_model["kind"] == "display_student")
+    write_raft = bool(selected & _NATIVE_RAFT_PRODUCTS) if selected is not None and display_model else (
+        config.write_raft_diagnostics if display_model else config.write_raft_stereo or config.write_raft_diagnostics)
+    write_decoder = bool(decoder_products)
+    write_spatial_height = write_raft or write_decoder
     if config.write_displacement_maps and not write_spatial_height:
-        raise ExtractionError(
-            "0..1 displacement maps require --stereo-matching, --raft-stereo, or --stereo-comparison"
-        )
+        raise ExtractionError("0..1 displacement maps require --raft-stereo")
     if write_spatial_height and discovery.spatial_photo is None:
         warnings.append(
             "Spatial stereo height maps were requested, but this HEIF has no Apple stereo-pair group."
@@ -1786,22 +1748,12 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
     elif write_spatial_height:
         predicted_bases: list[Path] = []
         color_suffix = "_color_matched" if config.histogram_color_matching else ""
-        if config.write_stereo_matching:
-            predicted_bases.append(
-                output_dir
-                / f"{discovery.source.stem}_spatial_stereo_matching{color_suffix}_height"
-            )
-            if config.write_displacement_maps:
-                predicted_bases.append(
-                    output_dir
-                    / f"{discovery.source.stem}_spatial_stereo_matching{color_suffix}_displacement_0_to_1"
-                )
         if write_raft:
             predicted_bases.append(
                 output_dir
                 / f"{discovery.source.stem}_spatial_raft_stereo{color_suffix}_height"
             )
-            if config.write_displacement_maps:
+            if config.write_displacement_maps and not display_model:
                 predicted_bases.append(
                     output_dir
                     / f"{discovery.source.stem}_spatial_raft_stereo{color_suffix}_displacement_0_to_1"
@@ -1810,29 +1762,31 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
                 predicted_bases.extend(
                     output_dir
                     / f"{discovery.source.stem}_spatial_raft_stereo{color_suffix}_{suffix}"
-                    for suffix in ("signed_flow", "depth_meters")
+                    for suffix in (("signed_flow",) if display_model else ("signed_flow", "depth_meters"))
                 )
         if selected is not None:
             suffixes = {
-                "student-display-depth": "student_display_depth",
-                "student-display-displacement": "student_display_displacement_0_to_1",
-                "student-display-preview": "student_display_depth_preview",
                 "raft-height": f"raft_stereo{color_suffix}_height",
                 "raft-displacement": f"raft_stereo{color_suffix}_displacement_0_to_1",
                 "raft-flow": f"raft_stereo{color_suffix}_signed_flow",
                 "raft-depth": f"raft_stereo{color_suffix}_depth_meters",
                 "raft-display-depth": f"raft_stereo{color_suffix}_display_depth_meters",
                 "raft-display-preview": f"raft_stereo{color_suffix}_display_depth_preview",
-                "stereo-height": f"stereo_matching{color_suffix}_height",
-                "stereo-depth": f"stereo_matching{color_suffix}_depth_meters",
-                "stereo-displacement": f"stereo_matching{color_suffix}_displacement_0_to_1",
+                "raft-support": f"raft_stereo{color_suffix}_support",
+                "raft-supported-depth": f"raft_stereo{color_suffix}_supported_depth_meters",
+                "raft-preview": f"raft_stereo{color_suffix}_depth_preview",
             }
-            for engine, filename in (("raft", "raft_stereo"), ("stereo", "stereo_matching")):
-                for key, suffix in (("support", "support"), ("supported-depth", "supported_depth_meters"),
-                                    ("preview", "depth_preview")):
-                    suffixes[f"{engine}-{key}"] = f"{filename}{color_suffix}_{suffix}"
+            if display_model:
+                suffixes.update({"raft-depth": "raft_depth", "raft-display-depth": "raft_display_depth",
+                    "raft-displacement": "raft_displacement_0_to_1", "raft-preview": "raft_depth_preview",
+                    "raft-display-preview": "raft_display_depth_preview"})
             predicted_bases = [output_dir / f"{discovery.source.stem}_spatial_{suffix}"
                                for key, suffix in suffixes.items() if key in selected]
+        elif write_decoder:
+            predicted_bases.extend(output_dir / f"{discovery.source.stem}_spatial_raft_{suffix}"
+                                   for product, suffix in (("raft-depth", "depth"),
+                                                           ("raft-displacement", "displacement_0_to_1"))
+                                   if product in decoder_products)
         predicted_paths = [Path(f"{base}.png" if str(base).endswith("_depth_preview") else f"{base}.exr")
                            for base in predicted_bases]
         if config.write_npy:
@@ -1866,8 +1820,8 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
             raise ExtractionError("spatial-photo left/right decoded assets are missing")
         left_array = discovery.assets[left_asset_index].array
         right_array = discovery.assets[right_asset_index].array
-        if write_student:
-            pending.extend(_student_display_outputs(output_dir, discovery, config, selected,
+        if write_decoder:
+            pending.extend(_selected_model_depth_outputs(output_dir, discovery, config, decoder_products,
                 discovery.assets[left_asset_index], discovery.assets[right_asset_index]))
         color_matching_details: dict[str, Any] = {
             "applied": False,
@@ -1890,43 +1844,6 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
             inference_left = matched_pair.left
             inference_right = matched_pair.right
             color_matching_details = matched_pair.details
-        if config.write_stereo_matching:
-            try:
-                stereo_result = run_stereo_matching(
-                    inference_left,
-                    inference_right,
-                    discovery.spatial_photo,
-                    StereoMatchingOptions(
-                        maximum_disparity=config.stereo_maximum_disparity,
-                        noise_sigma_pixels=config.stereo_noise_sigma_pixels,
-                    ),
-                )
-            except StereoMatchingError as exc:
-                raise ExtractionError(str(exc)) from exc
-            stereo_result.details = {
-                **stereo_result.details,
-                "input_color_matching": color_matching_details,
-            }
-            height_maps["stereo_matching"] = stereo_result.height_disparity_pixels
-            inference_details["stereo_matching"] = stereo_result.details
-            pending.extend(
-                _stereo_matching_pending_outputs(
-                    output_dir,
-                    discovery,
-                    left_asset_index,
-                    stereo_result,
-                    write_npy_companions=config.write_npy,
-                    color_matched=config.histogram_color_matching,
-                )
-            )
-            if selected and selected & {"stereo-support", "stereo-supported-depth", "stereo-preview", "stereo-depth"}:
-                if stereo_result.support_mask is None and selected & {"stereo-support", "stereo-supported-depth"}:
-                    raise ExtractionError("Classical inference did not return correspondence support")
-                pending.extend(_stereo_review_outputs(
-                    output_dir, discovery, left_asset_index, "stereo", stereo_result.height_disparity_pixels,
-                    stereo_result.support_mask, stereo_result.details, selected,
-                    color_matched=config.histogram_color_matching, write_npy_companions=config.write_npy,
-                ))
         if write_raft:
             try:
                 raft_result = run_raft_stereo(
@@ -1939,6 +1856,7 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
                         model_member=config.raft_model_member,
                         device=config.raft_device,
                         iterations=config.raft_iterations,
+                        allow_display_checkpoint=display_model,
                     ),
                 )
             except RaftStereoError as exc:
@@ -1949,23 +1867,20 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
             }
             height_maps["raft_stereo"] = raft_result.height_disparity_pixels
             inference_details["raft_stereo"] = raft_result.details
-            pending.extend(
-                _raft_pending_outputs(
-                    output_dir,
-                    discovery,
-                    left_asset_index,
-                    raft_result,
-                    write_npy_companions=config.write_npy,
-                    include_diagnostics=config.write_raft_diagnostics,
-                    color_matched=config.histogram_color_matching,
-                )
+            native_outputs = _raft_pending_outputs(
+                output_dir, discovery, left_asset_index, raft_result,
+                write_npy_companions=config.write_npy,
+                include_diagnostics=config.write_raft_diagnostics,
+                color_matched=config.histogram_color_matching,
             )
-            if selected and selected & {"raft-support", "raft-supported-depth", "raft-preview", "raft-display-depth", "raft-display-preview"}:
+            pending.extend(item for item in native_outputs if not (display_model and _product_id(item) in _DISPLAY_DECODER_PRODUCTS))
+            review_products = (selected or set()) - decoder_products
+            if review_products & {"raft-support", "raft-supported-depth", "raft-preview", "raft-display-depth", "raft-display-preview"}:
                 if raft_result.support_mask is None:
                     raise ExtractionError("RAFT inference did not return correspondence support")
-                pending.extend(_stereo_review_outputs(
-                    output_dir, discovery, left_asset_index, "raft", raft_result.height_disparity_pixels,
-                    raft_result.support_mask, raft_result.details, selected,
+                pending.extend(_raft_review_outputs(
+                    output_dir, discovery, left_asset_index, raft_result.height_disparity_pixels,
+                    raft_result.support_mask, raft_result.details, review_products,
                     color_matched=config.histogram_color_matching, write_npy_companions=config.write_npy,
                 ))
             support_fraction = raft_result.details.get("support_pixel_fraction")
@@ -1977,8 +1892,8 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
                 )
         if config.write_displacement_maps:
             for engine_name, height_map in height_maps.items():
-                product = "raft-displacement" if engine_name == "raft_stereo" else "stereo-displacement"
-                if selected is not None and product not in selected:
+                product = "raft-displacement"
+                if product in decoder_products or (selected is not None and product not in selected):
                     continue
                 try:
                     displacement, mapping_details = linear_depth_displacement(height_map, discovery.spatial_photo)
@@ -2029,8 +1944,12 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
             if item.asset_index is not None:
                 records[item.asset_index]["outputs"].append(output_record)
 
-        manifest = _build_manifest(discovery, records, warnings, include_learned=config.write_learned_depth)
+        manifest = _build_manifest(discovery, records, warnings, include_learned=config.write_learned_depth,
+                                   selected_model=selected_model)
         manifest["selected_products"] = sorted(selected) if selected is not None else None
+        if remapping:
+            manifest["requested_products"] = sorted(requested_products)
+            manifest["product_remapping"] = remapping
         manifest["manifest_path"] = str(manifest_path) if config.write_manifest else None
 
         installs: list[tuple[Path, Path]] = []

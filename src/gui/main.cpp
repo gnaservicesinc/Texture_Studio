@@ -191,19 +191,6 @@ public:
         spatialOptions->addStretch();
         advancedLayout->addLayout(spatialOptions);
 
-        auto *classicalOptions = new QHBoxLayout;
-        classicalOptions->addWidget(new QLabel(QStringLiteral("Classical matching:"), central));
-        stereoSharedDetail_ = new QCheckBox(QStringLiteral("Tolerate camera detail differences"), central);
-        stereoSharedDetail_->setChecked(true);
-        stereoSharedDetail_->setToolTip(QStringLiteral(
-            "Compare mildly smoothed inference copies and validate at native and shared detail scales. "
-            "This accommodates different camera noise and sharpening. Raw images stay unchanged; "
-            "the left view remains the reference, and no image texture is copied into depth. "
-            "Disable to match original code values without this preprocessing."));
-        classicalOptions->addWidget(stereoSharedDetail_);
-        classicalOptions->addStretch();
-        advancedLayout->addLayout(classicalOptions);
-
         auto addPathRow = [this, advancedLayout, central](const QString &label, const QString &key,
                                                 bool directory) {
             auto *row = new QHBoxLayout;
@@ -246,7 +233,8 @@ public:
         connect(raftMember_, &QLineEdit::editingFinished, this, [this] { modelSelectionChanged(); });
         auto *help = new QLabel(QStringLiteral(
             "Check individual outputs, then Export checked. Or select one row and click Export this map. "
-            "Stereo outputs use the left view's pixel grid; the separate display image can have different framing. "
+            "The selected model supplies depth, displacement and previews; each row states its output grid. "
+            "Native correspondence diagnostics use the left view's pixel grid. "
             "For displacement, choose linear depth 0–1 and import the EXR as non-color data. "
             "For viewing, choose Depth preview. Signed flow and pixel disparity are diagnostics, not brightness. "
             "Stereo estimates can lack local evidence on smooth or occluded surfaces; export the support mask to check them. "
@@ -430,8 +418,8 @@ private:
         if (updateSelections) {
             advancedToggle_->setChecked(goal == "manual"); advanced_->setVisible(advancedToggle_->isChecked());
         }
-        if (goal == "effect/map") goalHint_->setText(displayStudentSelected() ? "Suggested output: experimental student display height map. Native stereo inputs predict the display grid directly; compare with the display teacher on unseen scenes." : "Suggested output: selected RAFT model displacement on the left stereo grid. Select a trained display checkpoint for direct display-grid height maps.");
-        else if (goal == "depth-estimation") goalHint_->setText(displayStudentSelected() ? "Suggested output: experimental student display depth. Units follow its training labels; relative outputs are not meter distances." : "Suggested output: calibrated RAFT meter depth plus its support mask. Unknown or unsupported values need review.");
+        if (goal == "effect/map") goalHint_->setText(displayStudentSelected() ? "Suggested output: selected RAFT model height map on the display grid. The stereo pair produces one map; compare it with held-out reference depth." : "Suggested output: selected RAFT model displacement on the left stereo grid. All RAFT export choices remain available when you change models.");
+        else if (goal == "depth-estimation") goalHint_->setText(displayStudentSelected() ? "Suggested output: selected RAFT model depth. Units follow its training labels; relative outputs are not meter distances. All RAFT export choices remain available." : "Suggested output: calibrated RAFT meter depth plus its support mask. Unknown or unsupported values need review.");
         else if (goal == "photo-effects") goalHint_->setText("Suggested outputs: embedded Apple depth and mattes from portrait photos. Original depth values are preserved.");
         else goalHint_->setText("Choose individual products and override any inference settings.");
         if (updateSelections && goal != "manual" && !running_) {
@@ -444,8 +432,8 @@ private:
     }
     bool suggestedProduct(const QString &id, const QString &kind) const {
         const QString goal = goal_->currentData().toString();
-        if (goal == "effect/map") return id == (displayStudentSelected() ? "student-display-displacement" : "raft-displacement");
-        if (goal == "depth-estimation") return displayStudentSelected() ? id == "student-display-depth" : id == "raft-depth" || id == "raft-support";
+        if (goal == "effect/map") return id == "raft-displacement";
+        if (goal == "depth-estimation") return id == "raft-depth" || (!displayStudentSelected() && id == "raft-support");
         if (goal == "photo-effects") return id.startsWith("raw:") && (kind.contains("depth") || kind.contains("matte"));
         return false;
     }
@@ -466,15 +454,9 @@ private:
         if (!sources_.isEmpty()) beginQueue(true);
     }
     QString productForSelectedModel(const QString &id) const {
-        if (displayStudentSelected()) {
-            if (id == "raft-depth" || id == "raft-display-depth") return "student-display-depth";
-            if (id == "raft-displacement") return "student-display-displacement";
-            if (id == "raft-preview" || id == "raft-display-preview") return "student-display-preview";
-        } else {
-            if (id == "student-display-depth") return "raft-depth";
-            if (id == "student-display-displacement") return "raft-displacement";
-            if (id == "student-display-preview") return "raft-preview";
-        }
+        if (id == "student-display-depth") return "raft-display-depth";
+        if (id == "student-display-displacement") return "raft-displacement";
+        if (id == "student-display-preview") return "raft-display-preview";
         return id;
     }
     void addFiles(const QStringList &paths) {
@@ -596,8 +578,6 @@ private:
             for (const auto &id : selectedProducts_.value(current_))
                 arguments << QStringLiteral("--select") << id;
             arguments << QStringLiteral("--raft-device") << raftDevice_->currentData().toString();
-            arguments << QStringLiteral("--stereo-noise-sigma")
-                      << (stereoSharedDetail_->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
             if (colorMatching_->isChecked()) {
                 arguments << QStringLiteral("--color-matching") << QStringLiteral("--color-hero")
                           << colorHero_->currentData().toString();
@@ -668,12 +648,10 @@ private:
                         log_->append(entry.toObject().value(QStringLiteral("path")).toString().toHtmlEscaped());
                 }
                 const auto products = object.value(QStringLiteral("available_products")).toArray();
-                const bool displayModel = displayStudentSelected();
-                const bool nativeModel = selectedModelKind_ == "raft_stereo" && resolvedModelSelection_ == selection;
                 for (const auto &entry : products) {
                     const auto product = entry.toObject();
                     const auto id = product.value(QStringLiteral("id")).toString();
-                    if ((displayModel && id.startsWith("raft-")) || (nativeModel && id.startsWith("student-"))) continue;
+                    if (id.startsWith("stereo-") || id.startsWith("student-")) continue;
                     auto *child = new QTreeWidgetItem(root);
                     child->setText(0, product.value(QStringLiteral("name")).toString());
                     child->setText(1, dimensionText(product));
@@ -736,7 +714,6 @@ private:
         exactNpy_->setEnabled(!running_);
         manifest_->setEnabled(!running_);
         colorMatching_->setEnabled(!running_);
-        stereoSharedDetail_->setEnabled(!running_);
         colorHero_->setEnabled(!running_ && colorMatching_->isChecked());
         raftDevice_->setEnabled(!running_);
         raftModel_->setEnabled(!running_);
@@ -768,7 +745,6 @@ private:
     QCheckBox *exactNpy_ = nullptr;
     QCheckBox *manifest_ = nullptr;
     QCheckBox *colorMatching_ = nullptr;
-    QCheckBox *stereoSharedDetail_ = nullptr;
     QComboBox *colorHero_ = nullptr;
     QComboBox *raftDevice_ = nullptr;
     QCheckBox *overwrite_ = nullptr;

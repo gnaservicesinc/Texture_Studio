@@ -31,7 +31,12 @@ set(IPDE_PRERELEASE 0)
 if(PROJECT_VERSION VERSION_LESS "1.0.0")
     set(IPDE_PRERELEASE 1)
 endif()
-string(TIMESTAMP IPDE_BUILD_DATE "%Y-%m-%dT%H:%M:%SZ" UTC)
+# Preserve the build's configure date across automatic CMake regeneration.
+# A wall-clock value generated on every configure forced every GUI to recompile.
+if(NOT IPDE_BUILD_DATE)
+    string(TIMESTAMP IPDE_BUILD_DATE "%Y-%m-%dT%H:%M:%SZ" UTC)
+    set(IPDE_BUILD_DATE "${IPDE_BUILD_DATE}" CACHE STRING "Date this build directory was configured")
+endif()
 execute_process(COMMAND git rev-parse --short=12 HEAD
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     OUTPUT_VARIABLE IPDE_BUILD_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
@@ -154,7 +159,6 @@ target_compile_definitions(ipde_gui PRIVATE
     IPDE_SOURCE_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/ipde_extract.py"
     IPDE_PYTHON_EXECUTABLE="${IPDE_PYTHON_EXECUTABLE}"
 )
-set_property(TARGET ipde_gui APPEND PROPERTY LINK_DEPENDS "${IPDE_PYTHON_SOURCES}")
 set(RAFT_STUDIO_PYTHON_SOURCES ${IPDE_PYTHON_SOURCES})
 list(REMOVE_ITEM RAFT_STUDIO_PYTHON_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/ipde_extract.py")
 list(APPEND RAFT_STUDIO_PYTHON_SOURCES
@@ -174,10 +178,6 @@ list(APPEND RAFT_STUDIO_PYTHON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/model_comparison.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/huggingface_datasets.py"
 )
-set_property(TARGET raft_studio APPEND PROPERTY LINK_DEPENDS
-    "${RAFT_STUDIO_PYTHON_SOURCES}" "${CMAKE_CURRENT_SOURCE_DIR}/raft_studio.py")
-set_property(TARGET dataset_studio APPEND PROPERTY LINK_DEPENDS
-    "${RAFT_STUDIO_PYTHON_SOURCES}" "${CMAKE_CURRENT_SOURCE_DIR}/raft_studio.py")
 
 set_target_properties(ipde_gui PROPERTIES
     OUTPUT_NAME "IPDE"
@@ -187,77 +187,11 @@ set_target_properties(ipde_gui PROPERTIES
     MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
 )
 
-if(APPLE)
-    set(resource_root "$<TARGET_BUNDLE_DIR:ipde_gui>/Contents/Resources")
-    add_custom_command(TARGET ipde_gui POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E remove_directory "${resource_root}/src/ipde"
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${resource_root}/src/ipde"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/ipde_extract.py" "${resource_root}/ipde_extract.py"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/__init__.py" "${resource_root}/src/ipde/__init__.py"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/__main__.py" "${resource_root}/src/ipde/__main__.py"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/apple_imageio.py" "${resource_root}/src/ipde/apple_imageio.py"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/cli.py" "${resource_root}/src/ipde/cli.py"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/extractor.py" "${resource_root}/src/ipde/extractor.py"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/formats.py" "${resource_root}/src/ipde/formats.py"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/libheif_aux.py" "${resource_root}/src/ipde/libheif_aux.py"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/spatial.py" "${resource_root}/src/ipde/spatial.py"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/learned_depth.py" "${resource_root}/src/ipde/learned_depth.py"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/registration.py" "${resource_root}/src/ipde/registration.py"
-        COMMENT "Embedding the Python extraction engine in IPDE.app"
-    )
-endif()
-
-if(APPLE)
-    add_dependencies(ipde_studio ipde_gui raft_studio dataset_studio photo_studio raw_studio)
-    set(studio_apps "$<TARGET_BUNDLE_DIR:ipde_studio>/Contents/Applications")
-    add_custom_target(ipde_studio_bundle ALL
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${studio_apps}"
-        COMMAND ${CMAKE_COMMAND} -E remove_directory "${studio_apps}/IPDE.app"
-        COMMAND /usr/bin/ditto "$<TARGET_BUNDLE_DIR:ipde_gui>" "${studio_apps}/IPDE.app"
-        COMMAND ${CMAKE_COMMAND} -E remove_directory "${studio_apps}/RAFT Studio.app"
-        COMMAND /usr/bin/ditto "$<TARGET_BUNDLE_DIR:raft_studio>" "${studio_apps}/RAFT Studio.app"
-        COMMAND ${CMAKE_COMMAND} -E remove_directory "${studio_apps}/Dataset Studio.app"
-        COMMAND /usr/bin/ditto "$<TARGET_BUNDLE_DIR:dataset_studio>" "${studio_apps}/Dataset Studio.app"
-        COMMAND ${CMAKE_COMMAND} -E remove_directory "${studio_apps}/Photo Studio.app"
-        COMMAND /usr/bin/ditto "$<TARGET_BUNDLE_DIR:photo_studio>" "${studio_apps}/Photo Studio.app"
-        COMMAND ${CMAKE_COMMAND} -E remove_directory "${studio_apps}/Raw Studio.app"
-        COMMAND /usr/bin/ditto "$<TARGET_BUNDLE_DIR:raw_studio>" "${studio_apps}/Raw Studio.app"
-        DEPENDS ipde_studio ipde_gui raft_studio dataset_studio photo_studio raw_studio
-        COMMAND "${IPDE_PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos.py"
-            "$<TARGET_BUNDLE_DIR:ipde_studio>"
-        COMMENT "Packing IPDE subapps into IPDE Studio and auditing portable Qt dependencies"
-    )
-endif()
-
 set(MEDIA_STUDIO_PYTHON_SOURCES ${RAFT_STUDIO_PYTHON_SOURCES}
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/photo_workflow.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/raw_workflow.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/heif_privacy.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/media_cli.py")
-foreach(media_target IN ITEMS photo_studio raw_studio)
-    set_property(TARGET ${media_target} APPEND PROPERTY LINK_DEPENDS
-        "${MEDIA_STUDIO_PYTHON_SOURCES}" "${CMAKE_CURRENT_SOURCE_DIR}/media_studio.py")
-    if(APPLE)
-        set(media_resources "$<TARGET_BUNDLE_DIR:${media_target}>/Contents/Resources")
-        add_custom_command(TARGET ${media_target} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E remove_directory "${media_resources}/src/ipde"
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${media_resources}/src/ipde"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/media_studio.py" "${media_resources}/media_studio.py"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${MEDIA_STUDIO_PYTHON_SOURCES} "${media_resources}/src/ipde"
-            COMMENT "Embedding precision photo and RAW workflows")
-    endif()
-endforeach()
 
 if(APPLE)
     # Draw the same vector symbols for Qt controls and the native macOS bundles.
@@ -335,20 +269,6 @@ if(BUILD_TESTING)
     endforeach()
 endif()
 
-if(APPLE)
-    foreach(trainer_target IN ITEMS raft_studio dataset_studio)
-    set(trainer_resources "$<TARGET_BUNDLE_DIR:${trainer_target}>/Contents/Resources")
-    add_custom_command(TARGET ${trainer_target} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E remove_directory "${trainer_resources}/src/ipde"
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${trainer_resources}/src/ipde"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/raft_studio.py" "${trainer_resources}/raft_studio.py"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${RAFT_STUDIO_PYTHON_SOURCES} "${trainer_resources}/src/ipde"
-        COMMENT "Embedding the separate RAFT Studio workflow"
-    )
-    endforeach()
-endif()
-
-
 # Every native app carries the Qt libraries/plugins it uses, so replacing the
 # development Qt installation cannot prevent an existing bundle from opening.
 if(APPLE)
@@ -364,32 +284,102 @@ if(APPLE)
         HINTS "${Qt6_DIR}/../../../plugins/platforms" REQUIRED)
     file(GLOB_RECURSE IPDE_DOCUMENTATION CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/docs/*")
     file(GLOB IPDE_BACKEND_MODULES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/*.py")
+    # A removed help file disappears from DEPENDS after regeneration. Track
+    # the inventory too so resource copies remove obsolete files in that case.
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/resource-inventory.txt"
+        CONTENT "${IPDE_DOCUMENTATION}\n${IPDE_BACKEND_MODULES}\n")
+    set(IPDE_APP_RESOURCE_STAMPS)
+    set(IPDE_APP_DEPLOY_STAMPS)
     foreach(app_target IN ITEMS ipde_gui raft_studio dataset_studio ipde_studio photo_studio raw_studio)
         set_target_properties(${app_target} PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Info.plist.in")
         target_sources(${app_target} PRIVATE src/gui/python_runtime.h)
-        set_property(TARGET ${app_target} APPEND PROPERTY LINK_DEPENDS "${IPDE_DOCUMENTATION}" "${IPDE_BACKEND_MODULES}")
-        add_custom_command(TARGET ${app_target} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E remove_directory "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/Resources/src/ipde"
-            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/Resources/src/ipde"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${IPDE_BACKEND_MODULES}
-                "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/Resources/src/ipde"
-            COMMAND ${CMAKE_COMMAND} -E remove_directory "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/Resources/docs"
-            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/docs"
-                "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/Resources/docs"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
-                "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/Resources/LICENSE"
+        set(app_resources "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/Resources")
+        set(resource_stamp "${CMAKE_CURRENT_BINARY_DIR}/stamps/${app_target}-resources.stamp")
+        set(deploy_stamp "${CMAKE_CURRENT_BINARY_DIR}/stamps/${app_target}-qt.stamp")
+        set(entrypoints)
+        if(app_target STREQUAL "ipde_gui")
+            list(APPEND entrypoints "${CMAKE_CURRENT_SOURCE_DIR}/ipde_extract.py")
+        elseif(app_target STREQUAL "raft_studio" OR app_target STREQUAL "dataset_studio")
+            list(APPEND entrypoints "${CMAKE_CURRENT_SOURCE_DIR}/raft_studio.py")
+        elseif(app_target STREQUAL "photo_studio" OR app_target STREQUAL "raw_studio")
+            list(APPEND entrypoints "${CMAKE_CURRENT_SOURCE_DIR}/media_studio.py")
+        endif()
+        set(copy_entrypoints)
+        if(entrypoints)
+            list(APPEND copy_entrypoints COMMAND ${CMAKE_COMMAND} -E copy_if_different ${entrypoints} "${app_resources}")
+        endif()
+        # Python and documentation are resources, not link inputs. Updating them
+        # must refresh the bundle without relinking six unchanged native apps.
+        add_custom_command(OUTPUT "${resource_stamp}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/stamps"
+            COMMAND ${CMAKE_COMMAND} -E remove_directory "${app_resources}/src/ipde"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${app_resources}/src/ipde"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${IPDE_BACKEND_MODULES} "${app_resources}/src/ipde"
+            ${copy_entrypoints}
+            COMMAND ${CMAKE_COMMAND} -E remove_directory "${app_resources}/docs"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/docs" "${app_resources}/docs"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE" "${app_resources}/LICENSE"
+            COMMAND ${CMAKE_COMMAND} -E touch "${resource_stamp}"
+            DEPENDS ${app_target} "${deploy_stamp}" ${IPDE_BACKEND_MODULES} ${IPDE_DOCUMENTATION} ${entrypoints}
+                "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+                "${CMAKE_CURRENT_BINARY_DIR}/generated/resource-inventory.txt"
+            COMMENT "Updating Python and documentation resources in ${app_target}")
+        add_custom_command(OUTPUT "${deploy_stamp}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/stamps"
             COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/PlugIns/platforms"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${IPDE_QT_OFFSCREEN}"
                 "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/PlugIns/platforms/libqoffscreen.dylib"
             COMMAND "${IPDE_MACDEPLOYQT}" "$<TARGET_BUNDLE_DIR:${app_target}>"
                 -always-overwrite -no-strip -no-codesign -verbose=0
-            COMMENT "Bundling documentation and Qt dependencies in ${app_target}")
+            COMMAND ${CMAKE_COMMAND} -E touch "${deploy_stamp}"
+            DEPENDS ${app_target} "${IPDE_QT_OFFSCREEN}" "${IPDE_MACDEPLOYQT}"
+            COMMENT "Deploying changed Qt dependencies in ${app_target}")
+        list(APPEND IPDE_APP_RESOURCE_STAMPS "${resource_stamp}")
+        list(APPEND IPDE_APP_DEPLOY_STAMPS "${deploy_stamp}")
     endforeach()
-    add_custom_target(distribution
+    set(studio_stamp "${CMAKE_CURRENT_BINARY_DIR}/stamps/ipde-studio-suite.stamp")
+    add_custom_command(OUTPUT "${studio_stamp}"
         COMMAND "${IPDE_PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos.py"
-            "$<TARGET_BUNDLE_DIR:ipde_studio>"
-            --output "${CMAKE_CURRENT_BINARY_DIR}/dist/IPDE Studio.app" --bundle-python
-        DEPENDS ipde_studio_bundle
-        COMMENT "Creating the standalone IPDE Studio suite with its shared Python runtime")
+            "$<TARGET_BUNDLE_DIR:ipde_studio>" --assemble
+            "$<TARGET_BUNDLE_DIR:ipde_gui>" "$<TARGET_BUNDLE_DIR:raft_studio>"
+            "$<TARGET_BUNDLE_DIR:dataset_studio>" "$<TARGET_BUNDLE_DIR:photo_studio>"
+            "$<TARGET_BUNDLE_DIR:raw_studio>" --skip-audit
+        COMMAND ${CMAKE_COMMAND} -E touch "${studio_stamp}"
+        DEPENDS ${IPDE_APP_RESOURCE_STAMPS} ${IPDE_APP_DEPLOY_STAMPS}
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos.py"
+        COMMENT "Updating changed IPDE Studio subapps and signatures")
+    add_custom_target(ipde_studio_bundle ALL DEPENDS "${studio_stamp}")
+
+    set(distribution_bundle "${CMAKE_CURRENT_BINARY_DIR}/dist/IPDE Studio.app")
+    set(runtime_stamp "${CMAKE_CURRENT_BINARY_DIR}/stamps/python-runtime-inputs.json")
+    # This cheap input scan detects changes to the interpreter, locked package
+    # files or external native runtime dependencies without importing models.
+    add_custom_target(ipde_runtime_inputs
+        COMMAND "${IPDE_PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos.py"
+            "${distribution_bundle}" --runtime-inputs "${runtime_stamp}"
+        BYPRODUCTS "${runtime_stamp}"
+        COMMENT "Checking packaged Python input versions and file changes")
+    set(distribution_stamp "${CMAKE_CURRENT_BINARY_DIR}/stamps/ipde-distribution.stamp")
+    add_custom_command(OUTPUT "${distribution_stamp}"
+        COMMAND "${IPDE_PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos.py"
+            "$<TARGET_BUNDLE_DIR:ipde_studio>" --output "${distribution_bundle}"
+            --bundle-python --skip-audit
+        COMMAND "${IPDE_PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos.py"
+            "${distribution_bundle}" --runtime-inputs "${runtime_stamp}"
+        COMMAND ${CMAKE_COMMAND} -E touch "${distribution_stamp}"
+        BYPRODUCTS "${distribution_bundle}/Contents/Info.plist"
+            "${distribution_bundle}/Contents/Resources/runtime-build.json"
+            "${distribution_bundle}/Contents/Resources/python/bin/python3"
+        DEPENDS "${studio_stamp}" "${runtime_stamp}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/requirements-release-macos.txt"
+        COMMENT "Updating standalone suite; reusing unchanged packaged Python")
+    add_custom_target(distribution DEPENDS "${distribution_stamp}")
+    add_dependencies(distribution ipde_runtime_inputs)
+    add_custom_target(release-check
+        COMMAND "${IPDE_PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos.py"
+            "${distribution_bundle}" --release-check
+        DEPENDS distribution
+        COMMENT "Auditing all native dependencies and bundled Python imports")
 endif()

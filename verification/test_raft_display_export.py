@@ -81,12 +81,13 @@ class RaftDisplayExportTests(unittest.TestCase):
                         metadata = json.loads(header["ipdeDerivation"])
                 else:
                     preview = read_png_exact(path)
-                    self.assertEqual(preview.shape, (*self.registered.shape, 2))
-                    np.testing.assert_array_equal(preview[..., 1], np.where(np.isfinite(self.registered), 65535, 0))
-                    self.assertEqual(int(preview[0, 0, 0]), 0)
-                    self.assertEqual(int(preview[-1, -1, 0]), 65535)
+                    self.assertEqual(preview.shape, self.registered.shape)
+                    np.testing.assert_array_equal(preview[~np.isfinite(self.registered)], 0)
+                    self.assertEqual(int(preview[0, 0]), 0)
+                    self.assertEqual(int(preview[-1, -1]), 65535)
                     metadata = report["assets"][1]["outputs"][0]["derivation"]
-                    self.assertIn("supported registered depth", metadata["alpha_semantics"])
+                    self.assertIn("separate support", metadata["missing_pixels"])
+                    self.assertNotIn("alpha_semantics", metadata)
                 self.assertEqual(metadata["reference_image"], "display")
                 self.assertTrue(metadata["resampled_derivative"])
                 self.assertTrue(metadata["depth_filtered_by_support"])
@@ -95,6 +96,32 @@ class RaftDisplayExportTests(unittest.TestCase):
         for array, original in zip((self.left, self.right, self.display,
                                     self.flow, self.height, self.depth, self.support), originals):
             np.testing.assert_array_equal(array, original)
+
+    def test_all_products_use_selected_stock_checkpoint_and_preview_is_single_channel(self):
+        import torch
+        from ipde.extractor import _SPATIAL_PRODUCTS
+        checkpoint = self.directory / "any-stock-checkpoint.pth"
+        torch.save({"fixture": True}, checkpoint)
+        output = self.directory / "all-stock"
+        originals = [array.copy() for array in (self.left, self.right, self.display, self.height, self.depth)]
+        with patch("ipde.extractor.discover_file", return_value=self.discovery), \
+             patch("ipde.extractor.run_raft_stereo", return_value=self.raft) as raft, \
+             patch("ipde.extractor.run_stereo_matching") as classical, \
+             patch("ipde.registration.estimate_display_registration", return_value={"accepted": True}), \
+             patch("ipde.registration.project_left_depth_to_display", return_value=self.registered.copy()):
+            report = extract_file(self.source, ExtractOptions(output_dir=output,
+                selected_products=tuple(_SPATIAL_PRODUCTS), raft_model=checkpoint, write_npy=False))
+        raft.assert_called_once(); classical.assert_not_called()
+        self.assertEqual(raft.call_args.args[3].model, checkpoint)
+        self.assertFalse(raft.call_args.args[3].allow_display_checkpoint)
+        self.assertEqual(len(list(output.iterdir())), len(_SPATIAL_PRODUCTS))
+        for path in output.glob("*.png"):
+            self.assertEqual(read_png_exact(path).ndim, 2)
+        for key in ("raft-preview", "raft-display-preview"):
+            product = next(item for item in report["available_products"] if item["id"] == key)
+            self.assertEqual(product["precision"], "16-bit PNG (view only)")
+        for array, original in zip((self.left, self.right, self.display, self.height, self.depth), originals):
+            np.testing.assert_array_equal(array.view(np.uint8), original.view(np.uint8))
 
 
 if __name__ == "__main__":

@@ -5,13 +5,14 @@ BUILD_DIR ?= build
 BUILD_TYPE ?= Release
 DESTDIR ?= /
 CMAKE_ARGS ?=
+.DEFAULT_GOAL := build
 ifeq ($(shell uname -s),Darwin)
 # Reset the previous kit's default on every configure. CMAKE_ARGS follows this
 # option so an explicit deployment target still takes precedence.
 MACOS_CMAKE_ARGS = -DCMAKE_OSX_DEPLOYMENT_TARGET="$(MACOSX_DEPLOYMENT_TARGET)"
 endif
 
-.PHONY: setup configure build package install gui studio test smoke clean
+.PHONY: setup configure build package install release-check gui studio test smoke clean
 
 setup:
 	$(PYTHON_BASE) -m venv .venv
@@ -22,20 +23,31 @@ setup:
 	.venv/bin/python -m pip install --no-deps -e .
 
 configure:
-	cmake -S . -B $(BUILD_DIR) -G Ninja \
+	"$(PYTHON)" scripts/configure_build.py --force --build-dir "$(BUILD_DIR)" -- \
+	cmake -S . -B "$(BUILD_DIR)" -G Ninja \
 		-U 'Qt6*_DIR' -U IPDE_QT_OFFSCREEN -U IPDE_MACDEPLOYQT \
 		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
 		-DCMAKE_PREFIX_PATH="$(QT_CMAKE)" \
 		-DIPDE_PYTHON_EXECUTABLE="$(PYTHON)" $(MACOS_CMAKE_ARGS) $(CMAKE_ARGS)
 
-build: configure
-	cmake --build $(BUILD_DIR)
+build:
+	"$(PYTHON)" scripts/configure_build.py --build-dir "$(BUILD_DIR)" -- \
+	cmake -S . -B "$(BUILD_DIR)" -G Ninja \
+		-U 'Qt6*_DIR' -U IPDE_QT_OFFSCREEN -U IPDE_MACDEPLOYQT \
+		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+		-DCMAKE_PREFIX_PATH="$(QT_CMAKE)" \
+		-DIPDE_PYTHON_EXECUTABLE="$(PYTHON)" $(MACOS_CMAKE_ARGS) $(CMAKE_ARGS)
+	cmake --build "$(BUILD_DIR)"
 
 package: build
-	cmake --build $(BUILD_DIR) --target distribution
+	cmake --build "$(BUILD_DIR)" --target distribution
 
 install: package
 	"$(PYTHON)" scripts/install_macos.py "$(BUILD_DIR)/dist/IPDE Studio.app" --destdir "$(DESTDIR)"
+
+release-check: package
+	"$(PYTHON)" scripts/check_release_version.py
+	cmake --build "$(BUILD_DIR)" --target release-check
 
 gui: build
 	open "$(CURDIR)/$(BUILD_DIR)/IPDE.app"

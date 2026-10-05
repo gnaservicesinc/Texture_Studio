@@ -11,7 +11,7 @@ const format = value => value.toLocaleString();
 const goals = {
   extractor: 'Open Extractor and choose only the original products you need. You can do this without training.',
   photo: 'Open Photo Studio. Review its person layers, then export the cutout or chosen map.',
-  datasets: 'Open Dataset Studio. Teachers use the full display photo. Review their full display maps, then train the experimental display student with consistent units. Stock RAFT is a separate left-grid experiment.',
+  datasets: 'Open Dataset Studio. Teachers use the full display photo. Review their full display maps, then choose Model output in Trainer: RAFT depth on the display grid or RAFT disparity on the left camera grid. The reference depth map supplies the training loss; keep units consistent.',
   trainer: 'Open Trainer. Check the data and baseline, then start with a short run.',
   raw: 'Open Raw Studio. Inspect the stored samples and calibration before making derived depth.'
 };
@@ -23,16 +23,16 @@ function updateMap() {
 }
 ['map-width', 'map-height'].forEach(id => $(id).addEventListener('input', updateMap)); updateMap();
 const qualities = [
-  ['Low', '256-pixel output tiles, 16-channel added features and 8 RAFT iterations. Every usable display target pixel is still trained.'],
-  ['Medium', '512-pixel output tiles, 24-channel added features and 16 RAFT iterations. Native stereo inputs stay whole. More work and memory.'],
-  ['High', '768-pixel output tiles, 32-channel added features and 24 RAFT iterations. Highest cost here, without guaranteed accuracy or memory fit. Stock mode uses these tile sizes as native crops.']
+  ['Low', 'Simple preset: up to 256 × 256 pixels per output tile, 16-channel features and 8 RAFT iterations. Every usable reference-depth pixel is used. Advanced mode follows the values shown in its controls.'],
+  ['Medium', 'Simple preset: up to 512 × 512 pixels per output tile, 24-channel features and 16 RAFT iterations. Native stereo inputs stay whole. Advanced mode follows the current control values.'],
+  ['High', 'Simple preset: up to 768 × 768 pixels per tile, 32-channel features and 24 RAFT iterations. A 5712 × 4284 map uses 8 columns × 6 rows = 48 portions, with smaller boundary tiles, and remains one map. Advanced iterations set to 4 use 4. Left-camera disparity mode uses native crops.']
 ];
 function updateQuality() { const quality = qualities[Number($('quality').value)]; $('quality-name').textContent = quality[0]; $('quality-answer').textContent = quality[1]; }
 $('quality').addEventListener('input', updateQuality); updateQuality();
 const modes = {
-  distillation: 'The display student learns from original full-display teacher estimates. It can learn blur, wrong scale and mistakes too. Each run keeps one unit convention; no warp or stereo-teacher fallback is used.',
-  supervised: 'The student learns from declared measured references on its own output grid. Display references belong on the full display grid; stock references belong on the native left grid. A teacher prediction is not a measurement.',
-  mixed: 'The selected student uses eligible reference targets where present and compatible teacher targets for other entries. Check which kind each sample uses.'
+  distillation: 'The model learns from the original full-display teacher depth map: its loss compares each predicted pixel with that reference pixel. It can learn blur, wrong scale and mistakes too. Each run keeps one unit convention; no warp or stereo-teacher fallback is used.',
+  supervised: 'The model learns by comparing its depth prediction with declared measured references on its output grid. Display references belong on the full display grid; stock references belong on the native left grid. A teacher prediction is not a measurement.',
+  mixed: 'The selected model uses eligible reference targets where present and compatible teacher targets for other entries. Check which kind each sample uses.'
 };
 function updateMode() { $('mode-answer').textContent = modes[$('training-mode').value]; }
 $('training-mode').addEventListener('change', updateMode); updateMode();

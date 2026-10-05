@@ -295,6 +295,9 @@ GITCOMMAND:FILEPATH=/usr/bin/git
 //Value Computed by CMake
 IPDE_BINARY_DIR:STATIC=/opt/ipde/ipde/build
 
+//Date this build directory was configured
+IPDE_BUILD_DATE:STRING=2026-10-05T10:56:59Z
+
 //Value Computed by CMake
 IPDE_IS_TOP_LEVEL:STATIC=ON
 

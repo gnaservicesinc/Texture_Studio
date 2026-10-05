@@ -21,6 +21,8 @@ make package
 make install
 # For a staging directory instead of the system Applications folder:
 make DESTDIR=/path/to/staging/dir install
+# Full native dependency audit, packaged Python imports and version checks:
+make release-check
 ```
 
 `make build` embeds the Qt frameworks and plugins in every native application,
@@ -28,7 +30,17 @@ including the nested applications in IPDE Studio. `make package` creates
 `build/dist/IPDE Studio.app`, adding a single shared Python runtime and the
 runtime dependency closure pinned in `requirements-release-macos.txt`.
 It requires the versions in that file; unrelated installed packages are omitted.
-Its dependency audit rejects
+Bare `make` builds the apps. Only `make setup` creates the developer environment
+and installs dependencies. Repeated builds reuse the CMake configuration and
+skip unchanged native apps, Qt deployment and bundled resources. Python and
+documentation changes refresh resources without relinking the apps. A current
+portable package is reused by `make install`; after app-only changes,
+packaging reuses the already relocated Python runtime. Changes to the selected
+interpreter, the release dependency lock or actual installed package files
+invalidate that runtime. A new runtime receives an import check once.
+
+`make release-check` performs the full dependency audit, packaged imports and
+source-version checks. It rejects
 references to an external Qt, Python, Homebrew, or development library. Native
 code is ad-hoc signed and verified after deployment. The recursive audit also
 reads each native binary's required macOS version and rejects one newer than
@@ -47,8 +59,11 @@ destination Mac before using model-based operations.
 `DESTDIR` is a staging **root**, so the example above produces
 `/path/to/staging/dir/Applications/IPDE Studio.app`. Installation refuses to
 replace a running installed app or one of its subapps. It copies and verifies a
-temporary replacement before removing the old app. System Applications may
+temporary replacement before swapping it with the old app, retaining the old
+app if the swap fails. On APFS, packaging and installation use file cloning to
+avoid recopying unchanged runtime bytes. System Applications may
 require an account with permission to write there.
+An identical, valid installed build is verified and retained without copying.
 
 `PYTHON`, `PYTHON_BASE`, `QT_CMAKE`, `BUILD_DIR`, `BUILD_TYPE`, and `CMAKE_ARGS`
 can be overridden for another development installation. Qt is otherwise
@@ -61,7 +76,8 @@ and the automatic target when selecting another installed kit. The compiler,
 Swift helper, About information and app plists use the same selected target.
 An explicit `CMAKE_ARGS=-DCMAKE_OSX_DEPLOYMENT_TARGET=14.4` overrides automatic
 selection; an incompatible target is rejected during configuration. The release
-workflow retains Qt 6.11.1 and its explicit 14.0 target. Direct CMake users can
+workflow retains Qt 6.11.1 and its explicit 14.0 target. `make configure`
+explicitly regenerates the selected configuration. Direct CMake users can
 reset a cached automatic target with `-DCMAKE_OSX_DEPLOYMENT_TARGET=`. The audit deliberately rejects a bundle claiming an older minimum
 than one of its libraries supports.
 

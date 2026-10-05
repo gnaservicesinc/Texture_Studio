@@ -57,6 +57,9 @@ void response(MainWindow &window, const QString &source, const QString &path,
 void checkpointRouting(const QString &directory) {
     MainWindow window;
     const QString source = QDir(directory).filePath("sample.HEIC");
+    const QStringList raftProducts{"raft-depth", "raft-displacement", "raft-preview", "raft-display-depth",
+        "raft-display-preview", "raft-flow", "raft-height", "raft-support", "raft-supported-depth"};
+    const QStringList inventory = QStringList{"raw:0"} + raftProducts;
     window.raftModel_->setText(QDir(directory).filePath("renamed-checkpoint.pth"));
     window.raftRoot_->setText(" /fixture/RAFT-Stereo ");
     window.raftMember_->setText(" models/display.pth ");
@@ -73,47 +76,47 @@ void checkpointRouting(const QString &directory) {
     auto *oldMap = addProduct(root, "raft-displacement"); addProduct(root, "raw:0"); addProduct(root, "raft-support");
     window.files_->setCurrentItem(oldMap); window.sources_ = {source};
     window.advancedToggle_->setChecked(true);
-    response(window, source, QDir(directory).filePath("display-response.json"), "display_student",
-        {"raw:0", "student-display-depth", "student-display-displacement", "student-display-preview"});
+    response(window, source, QDir(directory).filePath("display-response.json"), "display_student", inventory);
     require(window.displayStudentSelected(), "renamed display checkpoint was ignored despite its reported schema");
     require(window.advancedToggle_->isChecked(), "model inspection closed the selected model controls");
-    auto *displayMap = product(root, "student-display-displacement");
+    auto *displayMap = product(root, "raft-displacement");
     require(displayMap && displayMap->checkState(0) == Qt::Checked && window.files_->currentItem() == displayMap,
         "switching to a display checkpoint lost the checked or current displacement output");
-    require(product(root, "raw:0")->checkState(0) == Qt::Checked, "model refresh lost an unrelated raw output selection");
-    require(!product(root, "raft-displacement") && !product(root, "raft-support") && displayMap->text(1) == "6 × 4",
-        "display-model inventory retained a native disparity output or wrong grid dimensions");
+    for (const auto &id : raftProducts)
+        require(product(root, id) && product(root, id)->text(1) == "6 × 4", "display checkpoint hid a RAFT export choice");
+    require(product(root, "raw:0")->checkState(0) == Qt::Checked && product(root, "raft-support")->checkState(0) == Qt::Checked,
+        "model refresh lost a checked raw or RAFT diagnostic selection");
     window.goal_->setCurrentIndex(window.goal_->findData("depth-estimation"));
-    require(product(root, "student-display-depth")->checkState(0) == Qt::Checked,
+    require(product(root, "raft-depth")->checkState(0) == Qt::Checked,
         "depth preset ignored the selected display checkpoint");
+    require(!window.goalHint_->text().contains("student", Qt::CaseInsensitive)
+        && !window.goalHint_->text().contains("experimental", Qt::CaseInsensitive), "export hint retained training jargon");
     product(root, "raw:0")->setCheckState(0, Qt::Checked);
     window.files_->setCurrentItem(product(root, "raw:0"));
-    response(window, source, QDir(directory).filePath("display-raw-export-response.json"), {},
-        {"raw:0", "student-display-depth", "student-display-displacement", "student-display-preview",
-         "raft-depth", "raft-displacement", "raft-preview", "raft-flow", "raft-support"}, false);
-    require(window.displayStudentSelected() && product(root, "student-display-depth")->checkState(0) == Qt::Checked,
+    response(window, source, QDir(directory).filePath("display-raw-export-response.json"), {}, inventory, false);
+    require(window.displayStudentSelected() && product(root, "raft-depth")->checkState(0) == Qt::Checked,
         "raw-only export discarded the inspected display checkpoint or its depth selection");
-    require(!product(root, "raft-depth") && !product(root, "raft-displacement") && !product(root, "raft-preview")
-        && !product(root, "raft-flow") && !product(root, "raft-support"),
-        "raw-only export exposed outputs incompatible with the selected display checkpoint");
+    for (const auto &id : raftProducts) require(product(root, id), "raw export hid a RAFT product for the selected model");
     require(window.files_->currentItem() == product(root, "raw:0") && product(root, "raw:0")->checkState(0) == Qt::Checked,
         "raw-only export lost its current or checked raw output");
-    window.files_->setCurrentItem(product(root, "student-display-depth"));
+    window.files_->setCurrentItem(product(root, "raft-depth"));
     window.sources_.clear();
     window.raftModel_->setText(QDir(directory).filePath("display-model.pth"));
     window.modelSelectionChanged();
     require(!window.displayStudentSelected(), "checkpoint basename overrode backend model identification");
     window.sources_ = {source};
-    response(window, source, QDir(directory).filePath("raft-response.json"), "raft_stereo",
-        {"raw:0", "raft-depth", "raft-displacement", "raft-preview", "raft-support"});
+    response(window, source, QDir(directory).filePath("raft-response.json"), "raft_stereo", inventory);
     auto *nativeDepth = product(root, "raft-depth");
     require(!window.displayStudentSelected() && nativeDepth && nativeDepth->checkState(0) == Qt::Checked
-        && window.files_->currentItem() == nativeDepth, "changing back to RAFT lost the selected depth product");
+        && window.files_->currentItem() == nativeDepth, "changing RAFT models lost the selected depth product");
+    for (const auto &id : raftProducts) require(product(root, id), "native checkpoint hid a RAFT export choice");
+    auto *legacy = addProduct(root, "student-display-depth"); window.files_->setCurrentItem(legacy);
     response(window, source, QDir(directory).filePath("raft-raw-export-response.json"), {},
-        {"raw:0", "raft-depth", "raft-displacement", "raft-preview", "raft-support", "student-display-depth"}, false);
-    require(window.selectedModelKind_ == "raft_stereo" && !product(root, "student-display-depth")
-        && product(root, "raft-depth")->checkState(0) == Qt::Checked,
-        "raw-only export discarded the inspected native checkpoint or exposed display-student products");
+        inventory + QStringList{"student-display-depth", "stereo-depth"}, false);
+    require(window.selectedModelKind_ == "raft_stereo" && !product(root, "student-display-depth") && !product(root, "stereo-depth")
+        && product(root, "raft-display-depth")->checkState(0) == Qt::Checked
+        && window.files_->currentItem() == product(root, "raft-display-depth"),
+        "legacy product selection was lost or removed generation choices reappeared");
     QSettings().setValue("raft/model", QDir(directory).filePath("shared-checkpoint.pth"));
     window.reloadProjectSettings();
     require(window.running_ && window.inspectOnly_ && window.process_->arguments().contains("--inspect")

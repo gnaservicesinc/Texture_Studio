@@ -230,6 +230,12 @@ void trainingControls(TrainerWindow &window, const QString &workspace) {
     require(window.earlyStopError_->suffix().contains("fraction") && window.learningRate_->value() == .0001, "display errors or new-head learning rate retained native RAFT units/defaults");
     window.populateLibrary({{"datasets", QJsonArray{dataset(QDir(workspace).filePath("datasets/control-fixture"))}}});
     window.advanced_->setChecked(true); window.epochs_->setValue(4); window.stepsPerUpdate_->setValue(1);
+    window.iterations_->setValue(4); window.patch_->setValue(768);
+    require(window.trainingDataset_->text().contains("4 RAFT iterations") && !window.trainingDataset_->text().contains("24 RAFT iterations"), "manual refinement changes left the plan summary stale");
+    require(window.trainingDataset_->text().contains("768 × 768 pixels") && window.patch_->toolTip().contains("8 columns × 6 rows = 48 tiles"), "tile side length or one-map coverage was unclear");
+    require(window.trainingLabelHelp_->text().contains("reference depth pixel") && window.trainingLabelHelp_->text().contains("calculate the loss"), "training explanation omitted the reference depth labels");
+    window.validationSamples_->setValue(16);
+    require(window.validationSamples_->value() == 1 && window.trainingDataset_->text().contains("all 1 held-out image"), "validation plan requested more held-out images than exist");
     require(window.plannedTrainingSteps() == 12 && window.steps_->value() == 12, "epochs did not visit every training image");
     window.stepsPerUpdate_->setValue(2);
     require(window.plannedTrainingSteps() == 8 && window.steps_->value() == 8, "gradient accumulation did not update Total Steps immediately");
@@ -239,6 +245,16 @@ void trainingControls(TrainerWindow &window, const QString &workspace) {
     window.quality_->setValue(0); const int lowPatch = window.patch_->value(), lowIterations = window.iterations_->value();
     window.quality_->setValue(2);
     require(window.patch_->value() > lowPatch && window.iterations_->value() > lowIterations, "quality did not increase decoder tile size and refinement");
+    QJsonObject limitedValidation = dataset(QDir(workspace).filePath("datasets/three-validation"));
+    limitedValidation.insert("sample_count", 160); limitedValidation.insert("train_count", 157); limitedValidation.insert("validation_count", 3);
+    window.populateLibrary({{"datasets", QJsonArray{limitedValidation}}});
+    require(window.validationSamples_->maximum() == 3 && window.validationSamples_->value() == 3
+        && window.trainingDataset_->text().contains("all 3 held-out images") && !window.trainingDataset_->text().contains("16 random"), "large-training preset ignored the small validation set");
+    window.advanced_->setChecked(true); window.validationSamples_->setValue(1);
+    require(window.trainingDataset_->text().contains("1 random image of 3 held-out images"), "manual validation count did not immediately update the plan");
+    window.validationSchedule_->setCurrentIndex(window.validationSchedule_->findData("epoch"));
+    require(window.trainingDataset_->text().contains("Validation: Every epoch"), "manual validation schedule left the plan stale");
+    window.advanced_->setChecked(false);
     window.length_->setValue(0); const int fastEpochs = window.epochs_->value(); window.length_->setValue(2);
     require(window.epochs_->value() > fastEpochs && window.scope_->currentData() == "update", "duration or small-dataset scope preset ignored dataset size");
     window.teacher_->setCurrentIndex(window.teacher_->findData("depthpro"));
