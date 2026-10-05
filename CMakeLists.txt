@@ -165,6 +165,7 @@ list(APPEND RAFT_STUDIO_PYTHON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/trainer_cli.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/dataset.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/dataset_review.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/dataset_recovery.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/dataset_edit.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/dataset_teachers.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/training.py"

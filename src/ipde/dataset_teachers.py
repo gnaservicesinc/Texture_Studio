@@ -79,7 +79,7 @@ def generate_teacher(
     concurrent edits cause a clean refusal, leaving existing work untouched.
     """
     from .display_training import display_target_eligibility
-    from .learned_depth import LearnedDepthPredictor
+    from .learned_depth import LearnedDepthPredictor, validate_learned_depth_input
     from .pseudo_calibration import PseudoCalibrationError, anchor_relative_depth
 
     if teacher.model not in {"depthpro", "depth-anything-v2", "depth-anything-3"}:
@@ -149,6 +149,10 @@ def generate_teacher(
                 cached_anchors[key] = anchor
         if not missing and not reenabled:
             return report(original, initial_digest)
+        # Stored shapes permit admission checks before model loading, RGB reads
+        # or staging files, leaving an existing dataset untouched on refusal.
+        for sample in missing:
+            validate_learned_depth_input(sample["display_rgb"]["shape"], teacher)
         manifest = copy.deepcopy(original)
         for sample in manifest["samples"]:
             if sample["id"] in reenabled:

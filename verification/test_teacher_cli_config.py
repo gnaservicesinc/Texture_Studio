@@ -22,6 +22,37 @@ class TeacherCLIConfigTests(unittest.TestCase):
         self.assertEqual(status, 0, output.getvalue())
         return build.call_args.args[2]
 
+    def test_default_processing_size_reaches_primary_and_additional_da3_teachers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for teachers in ([{"model": "depth-anything-3"}],
+                             [{"model": "depthpro"}, {"model": "depth-anything-3"}]):
+                with self.subTest(models=[teacher["model"] for teacher in teachers]):
+                    options = self.call_dataset(root, teachers)
+                    da3 = next(config for config in (options.teacher, *options.additional_teachers)
+                               if config.model == "depth-anything-3")
+                    self.assertEqual(da3.input_size, 1036)
+            explicit = self.call_dataset(root, [{"model": "depth-anything-3", "input_size": 0}])
+            self.assertEqual(explicit.teacher.input_size, 0)
+            custom = self.call_dataset(root, [{"model": "depth-anything-3", "input_size": 728}])
+            self.assertEqual(custom.teacher.input_size, 728)
+
+    def test_single_model_dataset_and_per_photo_generation_default_to_bounded_processing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = io.StringIO()
+            with patch("ipde.dataset.build_dataset", return_value={}) as build, \
+                    redirect_stdout(output), redirect_stderr(io.StringIO()):
+                self.assertEqual(main(["--json", "dataset", str(root / "source.heic"),
+                    "--output-dir", str(root / "dataset"), "--model", "depth-anything-3"]), 0)
+                self.assertEqual(build.call_args.args[2].teacher.input_size, 1036)
+            for extra, expected in (([], 1036), (["--input-size", "0"], 0), (["--input-size", "728"], 728)):
+                with self.subTest(size=expected), patch("ipde.dataset_teachers.generate_teacher", return_value={}) as generate, \
+                        redirect_stdout(output), redirect_stderr(io.StringIO()):
+                    self.assertEqual(main(["--json", "generate-teacher", str(root / "dataset"),
+                        "--sample-id", "photo", "--model", "depth-anything-3", *extra]), 0)
+                    self.assertEqual(generate.call_args.args[2].input_size, expected)
+
     def test_default_anchor_reuses_complete_selected_depthpro_json_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

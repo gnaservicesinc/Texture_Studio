@@ -1,3 +1,4 @@
+#define IPDE_STUDIO_REGRESSION
 #define main ipdeStudioApplicationMain
 #include "../src/gui/trainer.cpp"
 #undef main
@@ -104,6 +105,41 @@ void reviewCaptionsHaveSpace(const QString &imagePath) {
     require(bounds(stats).top() > bounds(depth).bottom() && bounds(legend).top() > bounds(stats).bottom(),
         "review captions overlap when gallery is compressed");
 }
+
+void datasetReviewUsesAvailableWidth(const QString &imagePath) {
+    TrainerWindow window(true); window.autosavePaused_ = true; window.requestedReviewOpen_ = false;
+    { QSignalBlocker blocker(window.tabs_); window.tabs_->setCurrentIndex(0); }
+    window.requestedReviewPath_ = "/fixture/review-layout";
+    window.populateReview({{"dataset_path", window.requestedReviewPath_}, {"samples", QJsonArray{
+        QJsonObject{{"id", "photo-depthpro"}, {"source_id", "photo"}, {"source_path", "/fixture/IMG_1829_full_display.HEIC"},
+            {"teacher_id", "depthpro"}, {"teacher_model", "depthpro"}, {"split", "train"}, {"included", true}, {"group_id", "room"}}}}});
+    { QSignalBlocker blocker(window.tabs_); window.tabs_->setCurrentIndex(1); }
+    window.show(); settle(); window.resize(1250, 850);
+    auto *scroll = window.findChild<QScrollArea *>("reviewPreviewScroll");
+    auto *content = window.findChild<QWidget *>("reviewPreviewContent");
+    auto *split = window.findChild<QSplitter *>("datasetReviewSplit");
+    require(scroll && content && split && split->orientation() == Qt::Vertical, "dataset photo list still competes horizontally with preview columns");
+    for (auto *image : window.depthPreviews_) { image->load(imagePath); image->show(); }
+    window.rgbPreview_->load(imagePath);
+    for (auto *title : window.depthTitles_) { title->setText("Teacher target with full processing provenance and an intentionally long descriptive caption"); title->show(); }
+    window.previewStats_->setText(QString("Full display teacher · 5712 × 4284 · relative_depth · model input 1036 × 770. Source: ") + QString(300, 'x') + ".HEIC\nGeometry must be checked beside its own display photograph.");
+    window.reviewCount_->setText("Included 400 teacher entries · Training 320 · Validation 80 · changes saved. Set aside independent scenes before training.");
+    settle();
+    auto *photo = window.reviewSamples_->topLevelItem(0);
+    for (int column : {6, 7, 8}) {
+        auto *button = qobject_cast<QPushButton *>(window.reviewSamples_->itemWidget(photo, column));
+        require(button && button->width() >= button->sizeHint().width() && window.reviewSamples_->viewport()->rect().contains(button->geometry()),
+                "teacher button text is clipped or requires horizontal scrolling at a normal window size");
+    }
+    require(window.reviewSamples_->columnWidth(0) >= 180, "photo names retained a cramped fixed column despite available width");
+    require(content->width() <= scroll->viewport()->width() && scroll->horizontalScrollBar()->maximum() == 0,
+            "long review metadata forced horizontal preview overflow");
+    auto bounds = [content](QWidget *widget) { return QRect(widget->mapTo(content, QPoint()), widget->size()); };
+    for (auto *image : window.depthPreviews_) require(bounds(window.previewStats_).top() > bounds(image).bottom(), "review metadata overlaps a comparison image");
+    require(window.depthPreviews_[1]->width() >= content->width() / 3 && window.depthPreviews_[2]->width() >= content->width() / 3,
+            "comparison images were squeezed into four narrow columns");
+    require(window.previewStats_->height() >= window.previewStats_->heightForWidth(window.previewStats_->width()), "long review information was clipped vertically");
+}
 }
 
 int main(int argc, char **argv) {
@@ -119,6 +155,7 @@ int main(int argc, char **argv) {
         require(image.save(path), "could not save preview fixture");
         nativePreviewInteraction(path);
         reviewCaptionsHaveSpace(path);
+        datasetReviewUsesAvailableWidth(path);
         std::cout << "Native preview interaction and review caption layout passed.\n";
         return 0;
     } catch (const std::exception &error) {

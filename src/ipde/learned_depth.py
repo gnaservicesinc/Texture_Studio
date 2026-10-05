@@ -73,6 +73,52 @@ _ENV_NAMES = {
     "depth-anything-3": ("IPDE_DA3_MODEL_DIR", "IPDE_DA3_DIR"),
 }
 _IMPORT_LOCK = threading.RLock()
+# DA3's global FP32 attention grows quadratically with the number of patches.
+# Bound the supported single-view workload before allocating weights/tensors.
+# This is an admission limit, not a guarantee that every device has enough RAM.
+DA3_MAX_PATCH_TOKENS = 8192
+
+
+def validate_learned_depth_input(shape: Any, config: LearnedDepthConfig) -> tuple[int, int] | None:
+    """Reject unsupported DA3 workloads without decoding RGB or loading a model.
+
+    Match the upstream longest-side resize and nearest-14 rounding, including
+    its upward tie break. Never silently reduce a requested processing grid.
+    """
+    if config.model != "depth-anything-3":
+        return None
+    if len(shape) != 3 or shape[2] != 3 or any(
+        isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value <= 0
+        for value in shape
+    ):
+        raise LearnedDepthError("DA3 requires a nonempty HxWx3 RGB reference image")
+    if isinstance(config.input_size, bool) or not isinstance(config.input_size, int) or (
+        config.input_size != 0 and not 14 <= config.input_size <= 8192
+    ):
+        raise LearnedDepthError("model input_size must be 0 (native source size) or an integer in [14, 8192]")
+    height, width = map(int, shape[:2])
+    requested = config.input_size or max(height, width)
+    scale = requested / max(height, width)
+
+    def patch_dimension(value: int) -> int:
+        resized = max(1, int(round(value * scale)))
+        down = resized // 14 * 14
+        rounded = down + 14 if resized - down >= 7 else down
+        return max(1, rounded)
+
+    processed = patch_dimension(height), patch_dimension(width)
+    if min(processed) < 14:
+        raise LearnedDepthError("DA3 processing grid is too narrow for a 14-pixel patch; choose a less extreme image aspect ratio")
+    tokens = (processed[0] // 14) * (processed[1] // 14)
+    if tokens > DA3_MAX_PATCH_TOKENS:
+        raise LearnedDepthError(
+            f"DA3 FP32 processing would use {processed[1]} x {processed[0]} pixels "
+            f"({tokens:,} transformer patches), exceeding the supported {DA3_MAX_PATCH_TOKENS:,}-patch limit. "
+            "Native photo resolution can exhaust memory and stall global attention. "
+            "Set teacher input_size to 1036 or smaller. The original RGB remains untouched; "
+            "the full photo-size float depth is a separately recorded interpolation of the model output."
+        )
+    return processed
 
 
 @contextmanager
@@ -202,7 +248,7 @@ def _select_device(torch: Any, requested: str) -> str:
     return requested
 
 
-def _prepare_rgb(rgb: np.ndarray, config: LearnedDepthConfig) -> tuple[np.ndarray, float]:
+def _validate_rgb(rgb: np.ndarray, config: LearnedDepthConfig) -> tuple[np.ndarray, float]:
     array = np.asarray(rgb)
     if array.ndim != 3 or array.shape[2] != 3 or not array.size:
         raise LearnedDepthError("learned depth requires a nonempty HxWx3 RGB reference image")
@@ -215,6 +261,11 @@ def _prepare_rgb(rgb: np.ndarray, config: LearnedDepthConfig) -> tuple[np.ndarra
         raise LearnedDepthError("input_max_value must be a finite positive nominal RGB code-value limit")
     if not np.isfinite(array).all() or np.any(array < 0) or np.any(array > limit):
         raise LearnedDepthError("reference RGB values must be finite and within their nominal code-value range")
+    return array, limit
+
+
+def _prepare_rgb(rgb: np.ndarray, config: LearnedDepthConfig) -> tuple[np.ndarray, float]:
+    array, limit = _validate_rgb(rgb, config)
     return np.ascontiguousarray(array, dtype=np.float32) / np.float32(limit), limit
 
 
@@ -334,7 +385,13 @@ class LearnedDepthPredictor:
     def __call__(self, rgb: np.ndarray, *, focal_pixels: float | None = None, reference_label: str | None = None) -> LearnedDepthResult:
         if self.model is None:
             raise LearnedDepthError("This depth predictor has been closed; load a new predictor before inference")
-        normalized, nominal_limit = _prepare_rgb(rgb, self.config)
+        validate_learned_depth_input(np.shape(rgb), self.config)
+        # DA3 consumes the uint8 input directly. Avoid an unused full-resolution
+        # float RGB copy (~280 MiB for an iPhone display photo) and division.
+        if self.config.model == "depth-anything-3":
+            normalized, nominal_limit = _validate_rgb(rgb, self.config)
+        else:
+            normalized, nominal_limit = _prepare_rgb(rgb, self.config)
         if focal_pixels is not None and (not math.isfinite(focal_pixels) or focal_pixels <= 0):
             raise LearnedDepthError("focal_pixels must be finite and positive in the supplied reference image grid")
         metadata = dict(self.base_metadata)
@@ -436,11 +493,18 @@ class LearnedDepthPredictor:
         if rgb.dtype != np.uint8 or nominal_limit != 255:
             raise LearnedDepthError("DA3 upstream RGB processor supports uint8 RGB only; choose DepthPro/V2 to avoid reducing higher-bit RGB")
         torch = self.torch
+        expected_shape = validate_learned_depth_input(rgb.shape, self.config)
         input_size = self.config.input_size or max(rgb.shape[:2])
         imgs, _, _ = self.model.input_processor(
             [rgb.copy()], process_res=input_size,
             process_res_method="upper_bound_resize", sequential=True,
         )
+        # Check the real processor result too, in case configured local source
+        # code changes its resize policy. Never dispatch oversized attention.
+        actual_shape = tuple(imgs.shape[-2:])
+        tokens = math.prod(dimension // 14 for dimension in actual_shape)
+        if tokens > DA3_MAX_PATCH_TOKENS:
+            raise LearnedDepthError("DA3 processor exceeded the supported patch budget; choose input_size=1036 or smaller")
         tensor = imgs[None].to(device=self.device, dtype=torch.float32)
         # The public DA3 wrapper enables FP16/BF16 autocast unconditionally.
         # Call its underlying network to honor IPDE's FP32 inference contract.
@@ -457,6 +521,8 @@ class LearnedDepthPredictor:
             "requested_input_size": self.config.input_size, "input_size_policy": "native source longest side" if not self.config.input_size else "configured longest side",
             "native_grid": "network output at processed RGB grid covering the full reference extent",
             "confidence_semantics": "unmodified DA3 depth_conf scores; not calibrated probabilities",
+            "processing_patch_tokens": tokens, "processing_patch_limit": DA3_MAX_PATCH_TOKENS,
+            "expected_model_input_shape": list(expected_shape),
         }, confidence
 
 
@@ -501,7 +567,8 @@ def infer_learned_depth(rgb: np.ndarray, config: LearnedDepthConfig | None = Non
     """Infer locally; preserve native values and separately identify source resampling."""
     configuration = config or LearnedDepthConfig()
     # Validate RGB and configuration before an expensive model load.
-    _prepare_rgb(rgb, configuration)
+    validate_learned_depth_input(np.shape(rgb), configuration)
+    _validate_rgb(rgb, configuration)
     path, source = resolve_learned_depth_resources(configuration)
     configuration = replace(configuration, model_path=path, source_dir=source)
     checkpoint = path / "model.safetensors" if configuration.model == "depth-anything-3" else path

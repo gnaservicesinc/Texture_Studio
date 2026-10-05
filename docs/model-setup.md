@@ -24,7 +24,15 @@ IPDE's NumPy or replace the installed Torch are not applied.
 | `depth-anything-3` | `/opt/ipde/models/DA3-GIANT-1.1/` | `/opt/ipde/Depth-Anything-3` | Relative depth; smaller values are nearer |
 
 Configure `LearnedDepthConfig(model, model_path, source_dir, device, input_size)`
-or use RAFT Studio's CLI/GUI model controls. Device choices are `auto`, `mps`, `cuda`, and
+or choose **Depth method** in Extractor or use RAFT Studio's model controls. Extractor defaults to direct DepthPro full-display depth; V2 Large and DA3 are selectable without using a trained RAFT checkpoint. Its normal CLI accepts `--learned-depth --learned-model depthpro`, `--learned-model-path`, `--learned-source-dir`, `--learned-device`, and `--learned-input-size`. Select `learned-display-depth` for full-photo float32 EXR, `learned-display-native` for the model grid, and `learned-display-preview` for the separate PNG. For example:
+
+```sh
+PYTHONPATH=src .venv/bin/python -m ipde --learned-depth --learned-model depthpro \
+  --select learned-display-depth --select learned-display-native --manifest \
+  --output-dir /path/to/new/exports /path/to/photo.HEIC
+```
+
+Device choices are `auto`, `mps`, `cuda`, and
 `cpu`; `auto` prefers CUDA, then Apple Metal, then CPU. A missing explicitly
 selected file produces an actionable error; another checkpoint is never silently
 substituted.
@@ -34,6 +42,14 @@ DepthPro uses a fixed 1536×1536 internal prediction. For Depth Anything V2,
 it preserves aspect ratio and rounds to multiples of 14. This costs more memory
 and compute and does not guarantee more accurate geometry. DA3 uses this option
 as the longest-side processing bound, while V2 uses the shortest-side bound.
+RAFT Studio's GUI and CLI default to 1036. The GUI migrates an older saved zero
+to 1036 once when DA3 is selected, including as an additional teacher or for
+per-photo generation. An explicitly chosen custom size remains available.
+Zero requests native processing; DA3 rejects a resulting grid above 8192
+14×14 patches before loading weights or running inference. Use 1036 or smaller
+if the grid is rejected. Original RGB and full-size float depth results remain
+retained, but interpolating model output to full photo dimensions does not add
+independently predicted detail.
 DA3's model directory must include its `config.json` and `model.safetensors`.
 IPDE constructs exactly the network serialized in that config and bypasses the
 public API's forced mixed precision. Its unrelated web/export/CUDA packages are

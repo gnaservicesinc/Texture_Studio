@@ -200,19 +200,29 @@ void modelTrainingProgress(TrainerWindow &window, const QString &workspace) {
     event("final_validation", 4, 3, 12, {{"processed", 1}, {"total", 2}, {"status", "running"}});
     require(window.progress_->value() == 12 && window.trainingStatus_->text().contains("validation", Qt::CaseInsensitive) && window.busy_, "final validation hid its stage or reported process completion early");
     const QString checkpoint = QDir(workspace).filePath("runs/progress-fixture/checkpoint.pth");
+    const QString bestCheckpoint = QDir(workspace).filePath("runs/progress-fixture/checkpoint-best-step-00000003.pth");
+    QDir().mkpath(QFileInfo(bestCheckpoint).absolutePath()); QFile bestFixture(bestCheckpoint);
+    require(bestFixture.open(QIODevice::WriteOnly), "could not write best checkpoint fixture"); bestFixture.close();
     event("completed", 4, 3, 12, {{"checkpoint_path", checkpoint}, {"best_epoch", 1}, {"status", "finished"}});
     require(window.busy_ && !window.train_->isEnabled() && window.cancel_->isEnabled(), "checkpoint publication allowed another run before process exit");
     require(!window.trainingStatus_->text().contains("Training complete", Qt::CaseInsensitive), "structured completion claimed process success before exit");
-    window.stdout_ = QJsonDocument(QJsonObject{{"checkpoint_path", checkpoint}, {"best_epoch", 1}, {"epochs_completed", 4}, {"total_steps", 12},
+    window.stdout_ = QJsonDocument(QJsonObject{{"checkpoint_path", checkpoint}, {"best_checkpoint_path", bestCheckpoint}, {"best_epoch", 1}, {"epochs_completed", 4}, {"total_steps", 12},
         {"history", QJsonArray{QJsonObject{{"epoch", 1}}, QJsonObject{{"epoch", 2}}, QJsonObject{{"epoch", 3}}, QJsonObject{{"epoch", 4}}}},
+        {"quality_assessment", QJsonObject{{"status", "not_improved_full_validation"}, {"warnings", QJsonArray{"Final model did not improve full held-out validation. Review the best checkpoint."}}}},
+        {"best_validation", QJsonObject{{"mean_absolute_flow_error_pixels", 1.0}, {"full_validation", true}}},
         {"validation", QJsonObject{{"mean_absolute_flow_error_pixels", 1.25}}}}).toJson();
     window.processFinished(0, QProcess::NormalExit);
     require(window.train_->isEnabled() && !window.cancel_->isEnabled() && window.trainingStatus_->text().contains("finished", Qt::CaseInsensitive), "successful training did not report a completed model and restore controls");
+    require(window.trainingStatus_->text().contains("did not improve full held-out validation") && window.trainingStatus_->text().contains(bestCheckpoint), "training summary hid checkpoint quality warnings or immutable best checkpoint path");
+    require(!window.bestCheckpoint_->isHidden(), "training result did not offer the best checkpoint");
+    const QString initialModel = window.raftModel_->text(); window.bestCheckpoint_->clicked();
+    require(TrainerWindow::selectedPath(window.runs_) == bestCheckpoint && window.raftModel_->text() == initialModel, "explicit best checkpoint action failed selection or changed the initial model default");
     const QString completedStatus = window.trainingStatus_->text();
     window.job_ = "Refresh library"; window.stdout_ = QJsonDocument(QJsonObject{{"datasets", QJsonArray{dataset(selectedDataset)}}, {"runs", QJsonArray{}}}).toJson(); window.setBusy(true);
     window.processFinished(0, QProcess::NormalExit);
     require(window.trainingStatus_->text() == completedStatus, "automatic library refresh erased the training result");
     window.job_ = "Train RAFT-Stereo"; window.setBusy(true); event("epoch_step", 2, 1, 3, {{"status", "started"}});
+    require(window.bestCheckpoint_->isHidden(), "new training run retained a stale best checkpoint action");
     window.stdout_ = "{\"error\":\"optimizer fixture failure\"}"; window.processFinished(2, QProcess::NormalExit);
     require(window.train_->isEnabled() && !window.cancel_->isEnabled() && window.trainingStatus_->text().contains("failed", Qt::CaseInsensitive), "failed training retained a running or completed status");
     require(window.trainingStatus_->text().contains("optimizer fixture failure"), "training failure reason was hidden from the training step");
@@ -225,7 +235,7 @@ void modelTrainingProgress(TrainerWindow &window, const QString &workspace) {
 }
 
 void trainingControls(TrainerWindow &window, const QString &workspace) {
-    require(window.inputSize_->value() == 0, "fresh configurable teachers did not default to native full-display processing");
+    require(window.inputSize_->value() == 1036, "fresh configurable teachers did not default to bounded 1036-pixel processing");
     require(window.student_->currentData() == "display" && window.patchLabel_->text().contains("tile"), "display student was not the default visible architecture");
     require(window.earlyStopError_->suffix().contains("fraction") && window.learningRate_->value() == .0001, "display errors or new-head learning rate retained native RAFT units/defaults");
     window.populateLibrary({{"datasets", QJsonArray{dataset(QDir(workspace).filePath("datasets/control-fixture"))}}});
@@ -298,6 +308,51 @@ void trainingControls(TrainerWindow &window, const QString &workspace) {
     window.epochs_->setValue(3); window.populateLibrary({{"datasets", QJsonArray{dataset(QDir(workspace).filePath("datasets/control-fixture"))}}});
 }
 
+void da3TeacherSizeMigration(const QString &project) {
+    QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "IPDE", "RAFTStudio");
+    QSettings projectSettings(QDir(project).filePath("project.ini"), QSettings::IniFormat);
+    projectSettings.setValue("goal", "manual"); projectSettings.sync();
+    const auto legacy = [&](const QString &primary) {
+        settings.clear(); settings.setValue("teacher_model", primary); settings.setValue("teacher_input_size", 0); settings.sync();
+    };
+    legacy("depth-anything-3");
+    {
+        TrainerWindow window(true); window.autosavePaused_ = true;
+        require(window.inputSize_->value() == 1036 && settings.value("teacher_da3_size_default_migrated").toBool(), "saved native DA3 primary was not migrated once");
+        window.inputSize_->setValue(728);
+        window.teacher_->setCurrentIndex(window.teacher_->findData("depthpro"));
+        window.teacher_->setCurrentIndex(window.teacher_->findData("depth-anything-3"));
+        require(window.inputSize_->value() == 728, "DA3 selection discarded an explicit custom processing size");
+        window.inputSize_->setValue(0); window.settings_.sync();
+    }
+    {
+        TrainerWindow window(true); window.autosavePaused_ = true;
+        require(window.inputSize_->value() == 0, "a later explicit native-size choice was migrated again on restart");
+    }
+    legacy("depthpro");
+    {
+        TrainerWindow window(true); window.autosavePaused_ = true;
+        require(window.inputSize_->value() == 0, "DA3 migration altered an existing native setting without DA3 selection");
+        for (auto *check : window.teacherChecks_) if (check->property("model") == "depth-anything-3") check->setChecked(true);
+        require(window.inputSize_->value() == 1036, "saved native additional DA3 teacher was not migrated");
+    }
+    legacy("depthpro");
+    {
+        TrainerWindow window(true); window.autosavePaused_ = true;
+        window.reviewedDataset_ = QDir(project).filePath("dataset"); window.requestedReviewPath_ = window.reviewedDataset_;
+        auto *photo = new QTreeWidgetItem(window.reviewSamples_, {"photo"});
+        auto *entry = new QTreeWidgetItem(photo, {"teacher"});
+        entry->setData(0, Qt::UserRole, QJsonObject{{"id", "photo"}, {"source_id", "source"}});
+        window.busy_ = true; window.activeOperation_ = "generate-teacher";
+        window.queuePhotoTeacher("generate-teacher", "depth-anything-3", {entry});
+        require(window.pendingTeacherJobs_.size() == 1, "per-photo DA3 migration fixture did not queue generation");
+        const auto args = window.pendingTeacherJobs_.first();
+        require(args.value(args.indexOf("--input-size") + 1) == "1036", "per-photo DA3 generation retained the old unsafe native-size setting");
+        window.pendingTeacherJobs_.clear(); window.busy_ = false; window.activeOperation_.clear();
+    }
+    settings.clear(); settings.sync(); projectSettings.remove("goal"); projectSettings.sync();
+}
+
 void checkpointExportLifetime(TrainerWindow &window) {
     window.configureExportProcess();
     window.exportProcess_->setProgram("/bin/sleep"); window.exportProcess_->setArguments({"0.1"}); window.exportProcess_->start();
@@ -361,6 +416,7 @@ int main(int argc, char **argv) {
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, temporary.path());
     try {
+        da3TeacherSizeMigration(temporary.path());
         TrainerWindow window(true), trainer(false); window.autosavePaused_ = true; trainer.autosavePaused_ = true;
         const QString workspace = QDir(temporary.path()).filePath("workspace"); QDir().mkpath(workspace);
         trainingSetReadiness(window, workspace);

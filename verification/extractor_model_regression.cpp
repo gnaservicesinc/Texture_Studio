@@ -5,6 +5,7 @@
 #undef main
 
 #include <QElapsedTimer>
+#include <QKeyEvent>
 #include <QTemporaryDir>
 #include <QThread>
 #include <iostream>
@@ -40,12 +41,12 @@ QTreeWidgetItem *addProduct(QTreeWidgetItem *root, const QString &id) {
 }
 
 void response(MainWindow &window, const QString &source, const QString &path,
-              const QString &kind, const QStringList &products, bool inspectOnly = true) {
+              const QString &kind, const QStringList &products, bool inspectOnly = true, const QJsonObject &quality = {}) {
     QJsonArray catalogue;
     for (const auto &id : products)
         catalogue.append(QJsonObject{{"id", id}, {"name", id}, {"width", 6}, {"height", 4}});
     QFile file(path); require(file.open(QIODevice::WriteOnly), "cannot create process response fixture");
-    file.write(QJsonDocument(QJsonObject{{"selected_model", kind.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(QJsonObject{{"kind", kind}})},
+    file.write(QJsonDocument(QJsonObject{{"selected_model", kind.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(QJsonObject{{"kind", kind}, {"quality_assessment", quality}})},
         {"available_products", catalogue}, {"assets", QJsonArray{}}, {"source", QJsonObject{}}}).toJson());
     file.close();
     window.current_ = source; window.inspectOnly_ = inspectOnly; window.running_ = true;
@@ -56,6 +57,8 @@ void response(MainWindow &window, const QString &source, const QString &path,
 
 void checkpointRouting(const QString &directory) {
     MainWindow window;
+    window.depthMethod_->setCurrentIndex(window.depthMethod_->findData("raft"));
+    window.goal_->setCurrentIndex(window.goal_->findData("effect/map"));
     const QString source = QDir(directory).filePath("sample.HEIC");
     const QStringList raftProducts{"raft-depth", "raft-displacement", "raft-preview", "raft-display-depth",
         "raft-display-preview", "raft-flow", "raft-height", "raft-support", "raft-supported-depth"};
@@ -76,8 +79,11 @@ void checkpointRouting(const QString &directory) {
     auto *oldMap = addProduct(root, "raft-displacement"); addProduct(root, "raw:0"); addProduct(root, "raft-support");
     window.files_->setCurrentItem(oldMap); window.sources_ = {source};
     window.advancedToggle_->setChecked(true);
-    response(window, source, QDir(directory).filePath("display-response.json"), "display_student", inventory);
+    response(window, source, QDir(directory).filePath("display-response.json"), "display_student", inventory, true,
+        QJsonObject{{"warnings", QJsonArray{"Reference agreement has not improved. Start a new training run for finer detail."}}});
     require(window.displayStudentSelected(), "renamed display checkpoint was ignored despite its reported schema");
+    require(!window.modelQuality_->isHidden() && window.modelQuality_->text().contains("finer detail"),
+        "selected checkpoint quality warning was hidden");
     require(window.advancedToggle_->isChecked(), "model inspection closed the selected model controls");
     auto *displayMap = product(root, "raft-displacement");
     require(displayMap && displayMap->checkState(0) == Qt::Checked && window.files_->currentItem() == displayMap,
@@ -96,6 +102,7 @@ void checkpointRouting(const QString &directory) {
     response(window, source, QDir(directory).filePath("display-raw-export-response.json"), {}, inventory, false);
     require(window.displayStudentSelected() && product(root, "raft-depth")->checkState(0) == Qt::Checked,
         "raw-only export discarded the inspected display checkpoint or its depth selection");
+    require(!window.modelQuality_->isHidden(), "raw-only export discarded the selected model quality warning");
     for (const auto &id : raftProducts) require(product(root, id), "raw export hid a RAFT product for the selected model");
     require(window.files_->currentItem() == product(root, "raw:0") && product(root, "raw:0")->checkState(0) == Qt::Checked,
         "raw-only export lost its current or checked raw output");
@@ -103,6 +110,7 @@ void checkpointRouting(const QString &directory) {
     window.sources_.clear();
     window.raftModel_->setText(QDir(directory).filePath("display-model.pth"));
     window.modelSelectionChanged();
+    require(window.modelQuality_->isHidden(), "changing the model retained another checkpoint's quality warning");
     require(!window.displayStudentSelected(), "checkpoint basename overrode backend model identification");
     window.sources_ = {source};
     response(window, source, QDir(directory).filePath("raft-response.json"), "raft_stereo", inventory);
@@ -125,6 +133,60 @@ void checkpointRouting(const QString &directory) {
     window.cancelled_ = true; window.queue_.clear(); window.process_->kill();
     require(await([&] { return !window.running_; }), "cancelled inspection left the extractor busy");
 }
+
+void directDepthRouting(const QString &directory) {
+    QSettings().clear();
+    MainWindow window;
+    require(window.depthMethod_->currentData() == "depthpro", "new extractor does not default to direct DepthPro");
+    require(!window.learnedInputSize_->isEnabled(), "DepthPro offered an ineffective processing size");
+    window.raftModel_->setText("/missing/stale-raft.pth");
+    window.learnedModel_->setText(" /fixture/depth_pro.pt ");
+    window.learnedSource_->setText(" /fixture/ml-depth-pro ");
+    window.current_ = QDir(directory).filePath("ai.HEIC");
+    const auto arguments = window.processArguments();
+    require(arguments.contains("--learned-depth") && arguments.contains("--learned-model")
+        && arguments.contains("depthpro") && arguments.contains("/fixture/depth_pro.pt")
+        && !arguments.contains("--raft-model"), "direct AI inspection uses a stale RAFT checkpoint or omits AI configuration");
+    auto *root = new QTreeWidgetItem(window.files_, {"ai.HEIC"}); root->setData(0, Qt::UserRole, window.current_);
+    const QString source = window.current_;
+    const QStringList inventory{"raw:0", "learned-display-depth", "learned-display-displacement", "learned-display-native", "raft-depth"};
+    response(window, source, QDir(directory).filePath("ai-response.json"), {}, inventory);
+    require(product(root, "learned-display-depth") && product(root, "learned-display-depth")->checkState(0) == Qt::Checked
+        && !product(root, "raft-depth"), "direct depth preset did not select full-display AI depth");
+    require(window.goalHint_->text().contains("float32") && window.goalHint_->text().contains("estimated meters"),
+        "DepthPro precision and units were omitted");
+    require(dimensionText(QJsonObject{{"width", 0}, {"height", 0}}) == "Model prediction grid",
+        "unknown native prediction grid is shown as zero size");
+    product(root, "raw:0")->setCheckState(0, Qt::Checked);
+    for (const auto &method : {QString("depth-anything-v2"), QString("depth-anything-3")}) {
+        window.sources_.clear(); window.depthMethod_->setCurrentIndex(window.depthMethod_->findData(method));
+        window.current_ = source;
+        const auto args = window.processArguments();
+        require(args.contains(method) && args.contains("1036") && !args.contains("/fixture/depth_pro.pt"),
+            "switching AI models retained the prior model checkpoint or unsafe native size");
+        response(window, source, QDir(directory).filePath(method + ".json"), {}, inventory);
+        require(product(root, "raw:0")->checkState(0) == Qt::Checked && product(root, "learned-display-depth")->checkState(0) == Qt::Checked,
+            "switching AI models lost checked raw or full-display outputs");
+        require(window.goalHint_->text().contains("relative units"), "relative model was described as meter depth");
+    }
+    window.inspectOnly_ = false; window.selectedProducts_[source] = {"learned-display-depth"};
+    const auto exports = window.processArguments();
+    require(exports.contains("--select") && exports.contains("learned-display-depth") && exports.contains("--learned-depth"),
+        "AI export discarded the selected full-display depth product");
+    window.inspectOnly_ = true; window.sources_ = {source};
+    auto *sizeEdit = window.learnedInputSize_->findChild<QLineEdit *>();
+    require(sizeEdit, "processing size has no text editor"); sizeEdit->selectAll();
+    for (const auto &digit : QString("518")) {
+        QKeyEvent key(QEvent::KeyPress, Qt::Key_0 + digit.digitValue(), Qt::NoModifier, QString(digit));
+        QApplication::sendEvent(window.learnedInputSize_, &key);
+        require(!window.running_ && window.learnedInputSize_->isEnabled(), "typing a size started inference before committing all digits");
+    }
+    QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+    QApplication::sendEvent(window.learnedInputSize_, &enter);
+    require(window.running_ && window.process_->arguments().contains("518"), "committing the size did not inspect with the complete value");
+    window.cancelled_ = true; window.queue_.clear(); window.process_->kill();
+    require(await([&] { return !window.running_; }), "cancelled processing-size inspection left the extractor busy");
+}
 }
 
 int main(int argc, char **argv) {
@@ -135,6 +197,7 @@ int main(int argc, char **argv) {
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, temporary.path());
     try {
         checkpointRouting(temporary.path());
+        directDepthRouting(temporary.path());
         std::cout << "Extractor: checkpoint schema, inspection arguments, product selection and shared-model refresh passed\n";
         return 0;
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
 import hashlib
 import importlib.metadata
 import json
@@ -21,6 +22,7 @@ import subprocess
 import sys
 import sysconfig
 import tempfile
+import time
 
 
 MACHO_MAGICS = {b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe",
@@ -530,13 +532,28 @@ def check_runtime_imports(bundle: Path) -> None:
                    cwd="/", env={"PATH": "/usr/bin:/bin", "HOME": str(Path.home())}, check=True)
 
 
+def remove_package_staging(staging: Path) -> None:
+    """Retry directory recreation races without suppressing cleanup failures."""
+    for attempt in range(4):
+        try:
+            shutil.rmtree(staging)
+            return
+        except OSError as error:
+            # Finder can recreate .DS_Store between scandir and the final rmdir.
+            # A new traversal removes it; other failures need immediate attention.
+            if error.errno != errno.ENOTEMPTY or attempt == 3:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 def package(source: Path, output: Path, *, bundle_python: bool, skip_audit: bool, macdeployqt: Path | None = None) -> None:
     """Stage and sign a replacement, retaining the previous package on failure."""
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".ipde-package-", dir=output.parent))
     staged = staging / output.name
-    previous = runtime_metadata(output)
+    preserve_staging = False
     try:
+        previous = runtime_metadata(output)
         shutil.copytree(source, staged, symlinks=True, copy_function=clone_or_copy)
         if macdeployqt:
             for application in apps(staged):
@@ -579,10 +596,18 @@ def package(source: Path, output: Path, *, bundle_python: bool, skip_audit: bool
             staged.rename(output)
         except BaseException:
             if backup.exists():
-                backup.rename(output)
+                # A failed rollback leaves the only prior package in staging.
+                # Keep it, together with the staged replacement, for recovery.
+                preserve_staging = True
+                try:
+                    backup.rename(output)
+                except BaseException as error:
+                    raise RuntimeError(f"Package rollback failed; previous package retained at {backup}") from error
+                preserve_staging = False
             raise
     finally:
-        shutil.rmtree(staging)
+        if not preserve_staging:
+            remove_package_staging(staging)
 
 
 def main() -> None:

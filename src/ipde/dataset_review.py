@@ -203,6 +203,7 @@ def review_dataset(directory: Path | str) -> dict[str, Any]:
     from .dataset_edit import review_split_components
     from .training import training_target_eligibility
     from .display_training import _display_exclusion, display_target_eligibility
+    from .dataset_recovery import generation_status
     management_groups = review_split_components(root, manifest)
     samples = []
     for sample in manifest["samples"]:
@@ -264,7 +265,8 @@ def review_dataset(directory: Path | str) -> dict[str, Any]:
             "raft_training_eligibility": training_target_eligibility(manifest),
             "training_eligibility_by_mode": {mode: display_target_eligibility(manifest, mode) for mode in ("auto", "distillation", "supervised", "mixed")},
             "raft_training_eligibility_by_mode": {mode: training_target_eligibility(manifest, mode) for mode in ("auto", "distillation", "supervised", "mixed")},
-            "generation_state": manifest.get("generation_state", "complete"), "splits_provisional": bool(manifest.get("splits_provisional", False))}
+            "generation_state": manifest.get("generation_state", "complete"), "splits_provisional": bool(manifest.get("splits_provisional", False)),
+            "generation_status": generation_status(root, manifest)}
 
 
 def _verified_array(root: Path, record: dict[str, Any]) -> np.ndarray:

@@ -30,6 +30,8 @@
 #include <QPushButton>
 #include <QSet>
 #include <QSettings>
+#include <QScrollArea>
+#include <QSpinBox>
 #include <QMap>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -53,6 +55,8 @@
 namespace {
 
 QString dimensionText(const QJsonObject &asset) {
+    if (asset.value("width").toInt() <= 0 || asset.value("height").toInt() <= 0)
+        return QStringLiteral("Model prediction grid");
     QString value = QStringLiteral("%1 × %2")
                         .arg(asset.value(QStringLiteral("width")).toInt())
                         .arg(asset.value(QStringLiteral("height")).toInt());
@@ -113,7 +117,18 @@ public:
         goalRow->addWidget(goal_, 1);
         advancedToggle_ = new QCheckBox("Advanced settings", central); goalRow->addWidget(advancedToggle_);
         root->addLayout(goalRow);
+        auto *methodRow = new QHBoxLayout;
+        methodRow->addWidget(new QLabel("Depth method", central));
+        depthMethod_ = new QComboBox(central); depthMethod_->setObjectName("depthMethod");
+        depthMethod_->addItem("DepthPro · estimated meters", "depthpro");
+        depthMethod_->addItem("Depth Anything V2 Large · relative inverse depth", "depth-anything-v2");
+        depthMethod_->addItem("Depth Anything 3 · relative depth", "depth-anything-3");
+        depthMethod_->addItem("Selected RAFT model", "raft");
+        methodRow->addWidget(depthMethod_, 1); root->addLayout(methodRow);
         goalHint_ = new QLabel(central); goalHint_->setWordWrap(true); root->addWidget(goalHint_);
+        modelQuality_ = new QLabel(central); modelQuality_->setWordWrap(true);
+        modelQuality_->setTextFormat(Qt::PlainText); modelQuality_->setObjectName("modelQuality");
+        modelQuality_->hide(); root->addWidget(modelQuality_);
 
         files_ = new QTreeWidget(central);
         files_->setColumnCount(4);
@@ -182,7 +197,39 @@ public:
 
         advanced_ = new QWidget(central);
         auto *advancedLayout = new QVBoxLayout(advanced_); advancedLayout->setContentsMargins(0, 0, 0, 0);
-        root->addWidget(advanced_);
+        advancedScroll_ = new QScrollArea(central); advancedScroll_->setWidgetResizable(true);
+        advancedScroll_->setFrameShape(QFrame::NoFrame); advancedScroll_->setMaximumHeight(240);
+        advancedScroll_->setWidget(advanced_); root->addWidget(advancedScroll_);
+        auto *learnedOptions = new QHBoxLayout;
+        learnedDevice_ = new QComboBox(central);
+        for (const auto &device : {QString("auto"), QString("mps"), QString("cpu"), QString("cuda")})
+            learnedDevice_->addItem(device == "auto" ? "AI device: Automatic" : "AI device: " + device, device);
+        learnedInputSize_ = new QSpinBox(central); learnedInputSize_->setRange(0, 4096); learnedInputSize_->setValue(1036);
+        learnedInputSize_->setKeyboardTracking(false);
+        learnedInputSize_->setSpecialValueText("Native processing");
+        learnedInputSize_->setToolTip("V2 shortest-side bound; DA3 longest-side bound. DA3 rejects unsafe native grids. DepthPro always predicts at 1536 × 1536.");
+        learnedOptions->addWidget(learnedDevice_); learnedOptions->addWidget(new QLabel("AI processing size", central));
+        learnedOptions->addWidget(learnedInputSize_); learnedOptions->addStretch(); advancedLayout->addLayout(learnedOptions);
+        auto addLearnedPath = [this, central, advancedLayout](const QString &label, bool source) {
+            auto *row = new QHBoxLayout; row->addWidget(new QLabel(label, central));
+            auto *edit = new QLineEdit(central); edit->setPlaceholderText("Automatic local model lookup");
+            auto *choose = new QPushButton("Choose…", central); row->addWidget(edit, 1); row->addWidget(choose);
+            choose->setProperty("depthFamily", "ai");
+            advancedLayout->addLayout(row);
+            connect(edit, &QLineEdit::textChanged, this, [this, source](const QString &value) {
+                setSharedValue("learned/" + depthMethod_->currentData().toString() + (source ? "/source" : "/model"), value);
+            });
+            connect(edit, &QLineEdit::editingFinished, this, [this] { modelSelectionChanged(); });
+            connect(choose, &QPushButton::clicked, this, [this, edit, source] {
+                if (running_) return;
+                const bool directory = source || depthMethod_->currentData().toString() == "depth-anything-3";
+                const QString path = directory ? QFileDialog::getExistingDirectory(this, source ? "Choose model source folder" : "Choose DA3 model directory", edit->text())
+                    : QFileDialog::getOpenFileName(this, "Choose depth checkpoint", edit->text(), "Checkpoints (*.pt *.pth);;All files (*)");
+                if (!path.isEmpty()) { edit->setText(path); modelSelectionChanged(); }
+            });
+            return edit;
+        };
+        learnedModel_ = addLearnedPath("AI checkpoint:", false); learnedSource_ = addLearnedPath("AI source folder:", true);
         auto *spatialOptions = new QHBoxLayout;
         spatialOptions->addWidget(new QLabel(QStringLiteral("Spatial Photo:"), central));
         spatialOptions->addWidget(colorMatching_);
@@ -198,6 +245,7 @@ public:
             auto *edit = new QLineEdit(sharedValue(key).toString(), central);
             edit->setPlaceholderText(QStringLiteral("Automatic lookup (or choose a path)"));
             auto *choose = new QPushButton(QStringLiteral("Choose…"), central);
+            choose->setProperty("depthFamily", "raft");
             row->addWidget(edit, 1);
             row->addWidget(choose);
             advancedLayout->addLayout(row);
@@ -207,8 +255,8 @@ public:
             connect(choose, &QPushButton::clicked, this, [this, edit, directory] {
                 if (running_) return;
                 const QString chosen = directory
-                    ? QFileDialog::getExistingDirectory(this, QStringLiteral("Choose RAFT-Stereo source folder"), edit->text())
-                    : QFileDialog::getOpenFileName(this, QStringLiteral("Choose RAFT-Stereo model"), edit->text(),
+                    ? QFileDialog::getExistingDirectory(this, QStringLiteral("Choose RAFT source folder"), edit->text())
+                    : QFileDialog::getOpenFileName(this, QStringLiteral("Choose RAFT model"), edit->text(),
                           QStringLiteral("Model checkpoints (*.pth *.pt *.zip);;All files (*)"));
                 if (!chosen.isEmpty()) {
                     edit->setText(chosen);
@@ -233,12 +281,10 @@ public:
         connect(raftMember_, &QLineEdit::editingFinished, this, [this] { modelSelectionChanged(); });
         auto *help = new QLabel(QStringLiteral(
             "Check individual outputs, then Export checked. Or select one row and click Export this map. "
-            "The selected model supplies depth, displacement and previews; each row states its output grid. "
-            "Native correspondence diagnostics use the left view's pixel grid. "
+            "AI depth runs directly on the full display photo and retains float32 predictions and recorded resampling. "
             "For displacement, choose linear depth 0–1 and import the EXR as non-color data. "
-            "For viewing, choose Depth preview. Signed flow and pixel disparity are diagnostics, not brightness. "
-            "Stereo estimates can lack local evidence on smooth or occluded surfaces; export the support mask to check them. "
-            "Supported depth applies that mask. Missing values are NaN, not zero depth."), central);
+            "For viewing, choose Depth preview. RAFT uses the stereo pair; its support mask describes local correspondence evidence. "
+            "Raw depth, previews and normalized displacement are distinct products."), central);
         help->setWordWrap(true);
         root->addWidget(help);
 
@@ -344,7 +390,18 @@ public:
             }
         });
 
-        connect(advancedToggle_, &QCheckBox::toggled, advanced_, &QWidget::setVisible);
+        connect(advancedToggle_, &QCheckBox::toggled, advancedScroll_, &QWidget::setVisible);
+        connect(depthMethod_, &QComboBox::currentIndexChanged, this, [this] {
+            setSharedValue("learned/method", depthMethod_->currentData()); loadLearnedSettings();
+            applyGoal(false); modelSelectionChanged(); updateButtons();
+        });
+        connect(learnedDevice_, &QComboBox::currentIndexChanged, this, [this] {
+            setSharedValue("learned/device", learnedDevice_->currentData()); modelSelectionChanged();
+        });
+        connect(learnedInputSize_, &QSpinBox::valueChanged, this, [this](int value) {
+            setSharedValue("learned/input_size", value);
+        });
+        connect(learnedInputSize_, &QSpinBox::editingFinished, this, [this] { modelSelectionChanged(); });
         connect(goal_, &QComboBox::currentIndexChanged, this, [this] {
             setSharedValue("goal", goal_->currentData()); applyGoal();
         });
@@ -371,14 +428,18 @@ public:
         for (auto pair : {qMakePair(raftRoot_, QString("raft/root")), qMakePair(raftModel_, QString("raft/model")), qMakePair(raftMember_, QString("raft/member"))}) {
             const QSignalBlocker block(pair.first); pair.first->setText(sharedValue(pair.second).toString());
         }
+        { const QSignalBlocker block(depthMethod_);
+          depthMethod_->setCurrentIndex(qMax(0, depthMethod_->findData(sharedValue("learned/method", "depthpro")))); }
+        loadLearnedSettings();
         const QSignalBlocker block(goal_);
-        const int index = goal_->findData(sharedValue("goal", "effect/map").toString()); const bool changed = goal_->currentIndex() != qMax(0, index);
+        const int index = goal_->findData(sharedValue("goal", "depth-estimation").toString()); const bool changed = goal_->currentIndex() != qMax(0, index);
         goal_->setCurrentIndex(qMax(0, index)); if (changed || !settingsLoaded_) applyGoal(); settingsLoaded_ = true;
         if (!IPDE::projectRoot().isEmpty()) {
             if (output_->text().isEmpty()) output_->setText(QDir(IPDE::projectRoot()).filePath("exports"));
             setWindowTitle("IPDE Extractor — " + sharedValue("name", QFileInfo(IPDE::projectRoot()).fileName()).toString());
         }
         modelSelectionChanged();
+        updateButtons();
     }
 
 protected:
@@ -413,12 +474,28 @@ private:
         if (IPDE::projectRoot().isEmpty()) { QSettings().setValue(key, value); return; }
         QSettings settings(QDir(IPDE::projectRoot()).filePath("project.ini"), QSettings::IniFormat); settings.setValue(key, value); settings.sync();
     }
+    bool directDepthSelected() const { return depthMethod_->currentData().toString() != "raft"; }
+    void loadLearnedSettings() {
+        const QString key = "learned/" + depthMethod_->currentData().toString();
+        for (auto pair : {qMakePair(learnedModel_, key + "/model"), qMakePair(learnedSource_, key + "/source")}) {
+            const QSignalBlocker block(pair.first); pair.first->setText(sharedValue(pair.second).toString());
+        }
+        const QSignalBlocker deviceBlock(learnedDevice_), sizeBlock(learnedInputSize_);
+        learnedDevice_->setCurrentIndex(qMax(0, learnedDevice_->findData(sharedValue("learned/device", "auto"))));
+        learnedInputSize_->setValue(sharedValue("learned/input_size", 1036).toInt());
+    }
     void applyGoal(bool updateSelections = true) {
         const QString goal = goal_->currentData().toString();
         if (updateSelections) {
-            advancedToggle_->setChecked(goal == "manual"); advanced_->setVisible(advancedToggle_->isChecked());
+            advancedToggle_->setChecked(goal == "manual"); advancedScroll_->setVisible(advancedToggle_->isChecked());
         }
-        if (goal == "effect/map") goalHint_->setText(displayStudentSelected() ? "Suggested output: selected RAFT model height map on the display grid. The stereo pair produces one map; compare it with held-out reference depth." : "Suggested output: selected RAFT model displacement on the left stereo grid. All RAFT export choices remain available when you change models.");
+        if (directDepthSelected() && (goal == "depth-estimation" || goal == "effect/map")) {
+            const QString units = depthMethod_->currentData().toString() == "depthpro" ? "estimated meters" : "relative units, not meter distances";
+            goalHint_->setText(goal == "effect/map"
+                ? "Suggested output: linear depth 0–1 displacement from the selected AI model on the full display photo. This is a separate normalized derivative; raw depth remains available."
+                : "Suggested output: " + units + " on the full display photo, stored as float32 EXR. Native prediction is also available. Resizing to the photo grid adds samples, not independently predicted detail.");
+        }
+        else if (goal == "effect/map") goalHint_->setText(displayStudentSelected() ? "Suggested output: selected RAFT model height map on the display grid. The stereo pair produces one map; compare it with held-out reference depth." : "Suggested output: selected RAFT model displacement on the left stereo grid. All RAFT export choices remain available when you change models.");
         else if (goal == "depth-estimation") goalHint_->setText(displayStudentSelected() ? "Suggested output: selected RAFT model depth. Units follow its training labels; relative outputs are not meter distances. All RAFT export choices remain available." : "Suggested output: calibrated RAFT meter depth plus its support mask. Unknown or unsupported values need review.");
         else if (goal == "photo-effects") goalHint_->setText("Suggested outputs: embedded Apple depth and mattes from portrait photos. Original depth values are preserved.");
         else goalHint_->setText("Choose individual products and override any inference settings.");
@@ -432,16 +509,19 @@ private:
     }
     bool suggestedProduct(const QString &id, const QString &kind) const {
         const QString goal = goal_->currentData().toString();
-        if (goal == "effect/map") return id == "raft-displacement";
-        if (goal == "depth-estimation") return id == "raft-depth" || (!displayStudentSelected() && id == "raft-support");
+        if (goal == "effect/map") return id == (directDepthSelected() ? "learned-display-displacement" : "raft-displacement");
+        if (goal == "depth-estimation") return directDepthSelected() ? id == "learned-display-depth"
+            : id == "raft-depth" || (!displayStudentSelected() && id == "raft-support");
         if (goal == "photo-effects") return id.startsWith("raw:") && (kind.contains("depth") || kind.contains("matte"));
         return false;
     }
     bool displayStudentSelected() const {
-        return selectedModelKind_ == "display_student" && resolvedModelSelection_ == modelSelectionKey();
+        return !directDepthSelected() && selectedModelKind_ == "display_student" && resolvedModelSelection_ == modelSelectionKey();
     }
     QStringList modelSelectionKey() const {
-        return {raftModel_->text().trimmed(), raftRoot_->text().trimmed(), raftMember_->text().trimmed()};
+        if (directDepthSelected()) return {depthMethod_->currentData().toString(), learnedModel_->text().trimmed(),
+            learnedSource_->text().trimmed(), learnedDevice_->currentData().toString(), QString::number(learnedInputSize_->value())};
+        return {QString("raft"), raftModel_->text().trimmed(), raftRoot_->text().trimmed(), raftMember_->text().trimmed()};
     }
     void modelSelectionChanged() {
         if (running_ || !raftModel_ || !raftRoot_ || !raftMember_) return;
@@ -450,10 +530,20 @@ private:
         lastModelSelection_ = selection;
         selectedModelKind_.clear();
         resolvedModelSelection_.clear();
+        modelQuality_->clear(); modelQuality_->hide();
         applyGoal(false);
         if (!sources_.isEmpty()) beginQueue(true);
     }
     QString productForSelectedModel(const QString &id) const {
+        if (directDepthSelected()) {
+            if (id == "raft-depth" || id == "raft-display-depth" || id == "student-display-depth") return "learned-display-depth";
+            if (id == "raft-displacement" || id == "student-display-displacement") return "learned-display-displacement";
+            if (id == "raft-preview" || id == "raft-display-preview" || id == "student-display-preview") return "learned-display-preview";
+        } else {
+            if (id == "learned-display-depth") return "raft-depth";
+            if (id == "learned-display-displacement") return "raft-displacement";
+            if (id == "learned-display-preview") return "raft-preview";
+        }
         if (id == "student-display-depth") return "raft-display-depth";
         if (id == "student-display-displacement") return "raft-displacement";
         if (id == "student-display-preview") return "raft-display-preview";
@@ -577,18 +667,23 @@ private:
             if (manifest_->isChecked()) arguments << QStringLiteral("--manifest");
             for (const auto &id : selectedProducts_.value(current_))
                 arguments << QStringLiteral("--select") << id;
-            arguments << QStringLiteral("--raft-device") << raftDevice_->currentData().toString();
-            if (colorMatching_->isChecked()) {
+            if (!directDepthSelected()) arguments << QStringLiteral("--raft-device") << raftDevice_->currentData().toString();
+            if (!directDepthSelected() && colorMatching_->isChecked()) {
                 arguments << QStringLiteral("--color-matching") << QStringLiteral("--color-hero")
                           << colorHero_->currentData().toString();
             }
         }
-        if (!raftModel_->text().trimmed().isEmpty())
-            arguments << QStringLiteral("--raft-model") << raftModel_->text().trimmed();
-        if (!raftRoot_->text().trimmed().isEmpty())
-            arguments << QStringLiteral("--raft-root") << raftRoot_->text().trimmed();
-        if (!raftMember_->text().trimmed().isEmpty())
-            arguments << QStringLiteral("--raft-model-member") << raftMember_->text().trimmed();
+        if (directDepthSelected()) {
+            arguments << "--learned-depth" << "--learned-model" << depthMethod_->currentData().toString()
+                << "--learned-device" << learnedDevice_->currentData().toString()
+                << "--learned-input-size" << QString::number(learnedInputSize_->value());
+            if (!learnedModel_->text().trimmed().isEmpty()) arguments << "--learned-model-path" << learnedModel_->text().trimmed();
+            if (!learnedSource_->text().trimmed().isEmpty()) arguments << "--learned-source-dir" << learnedSource_->text().trimmed();
+        } else {
+            if (!raftModel_->text().trimmed().isEmpty()) arguments << "--raft-model" << raftModel_->text().trimmed();
+            if (!raftRoot_->text().trimmed().isEmpty()) arguments << "--raft-root" << raftRoot_->text().trimmed();
+            if (!raftMember_->text().trimmed().isEmpty()) arguments << "--raft-model-member" << raftMember_->text().trimmed();
+        }
         arguments << current_;
         return arguments;
     }
@@ -612,12 +707,19 @@ private:
                 }
             } else if (root) {
                 const auto selection = modelSelectionKey();
-                const auto reportedKind = object.value(QStringLiteral("selected_model")).toObject().value(QStringLiteral("kind")).toString();
+                const auto selectedModel = object.value(QStringLiteral("selected_model")).toObject();
+                const auto reportedKind = selectedModel.value(QStringLiteral("kind")).toString();
                 // Raw-only exports do not inspect their unused model. Keep the
                 // previous inspection valid when its selection still matches.
                 if (inspectOnly_ || !reportedKind.isEmpty() || resolvedModelSelection_ != selection) {
                     selectedModelKind_ = reportedKind;
                     resolvedModelSelection_ = selection;
+                    QStringList warnings;
+                    for (const auto &warning : selectedModel.value("quality_assessment").toObject().value("warnings").toArray()) {
+                        if (warning.isString()) warnings << warning.toString();
+                    }
+                    modelQuality_->setText(warnings.join('\n'));
+                    modelQuality_->setVisible(!warnings.isEmpty());
                 }
                 lastModelSelection_ = selection;
                 applyGoal(false);
@@ -652,8 +754,9 @@ private:
                     const auto product = entry.toObject();
                     const auto id = product.value(QStringLiteral("id")).toString();
                     if (id.startsWith("stereo-") || id.startsWith("student-")) continue;
+                    if ((directDepthSelected() && id.startsWith("raft-")) || (!directDepthSelected() && id.startsWith("learned-"))) continue;
                     auto *child = new QTreeWidgetItem(root);
-                    child->setText(0, product.value(QStringLiteral("name")).toString());
+                    child->setText(0, id.startsWith("learned-") ? depthMethod_->currentText().section(" · ", 0, 0) + " — " + product.value("name").toString() : product.value("name").toString());
                     child->setText(1, dimensionText(product));
                     child->setText(2, product.value(QStringLiteral("source_precision")).toString());
                     child->setText(3, product.value(QStringLiteral("precision")).toString());
@@ -713,12 +816,20 @@ private:
         output_->setEnabled(!running_);
         exactNpy_->setEnabled(!running_);
         manifest_->setEnabled(!running_);
-        colorMatching_->setEnabled(!running_);
-        colorHero_->setEnabled(!running_ && colorMatching_->isChecked());
-        raftDevice_->setEnabled(!running_);
-        raftModel_->setEnabled(!running_);
-        raftRoot_->setEnabled(!running_);
-        raftMember_->setEnabled(!running_);
+        goal_->setEnabled(!running_); depthMethod_->setEnabled(!running_);
+        learnedDevice_->setEnabled(!running_ && directDepthSelected());
+        learnedInputSize_->setEnabled(!running_ && directDepthSelected() && depthMethod_->currentData().toString() != "depthpro");
+        learnedModel_->setEnabled(!running_ && directDepthSelected()); learnedSource_->setEnabled(!running_ && directDepthSelected());
+        colorMatching_->setEnabled(!running_ && !directDepthSelected());
+        colorHero_->setEnabled(!running_ && !directDepthSelected() && colorMatching_->isChecked());
+        raftDevice_->setEnabled(!running_ && !directDepthSelected());
+        raftModel_->setEnabled(!running_ && !directDepthSelected());
+        raftRoot_->setEnabled(!running_ && !directDepthSelected());
+        raftMember_->setEnabled(!running_ && !directDepthSelected());
+        for (auto *button : findChildren<QPushButton *>()) {
+            const QString family = button->property("depthFamily").toString();
+            if (!family.isEmpty()) button->setEnabled(!running_ && (family == "ai" ? directDepthSelected() : !directDepthSelected()));
+        }
         files_->setEnabled(!running_);
         const auto *item = files_->currentItem();
         exportOne_->setEnabled(!running_ && item && !item->data(0, Qt::UserRole + 1).toString().isEmpty());
@@ -726,9 +837,14 @@ private:
     }
 
     QWidget *advanced_ = nullptr;
+    QScrollArea *advancedScroll_ = nullptr;
+    QComboBox *depthMethod_ = nullptr, *learnedDevice_ = nullptr;
+    QSpinBox *learnedInputSize_ = nullptr;
+    QLineEdit *learnedModel_ = nullptr, *learnedSource_ = nullptr;
     QCheckBox *advancedToggle_ = nullptr;
     QComboBox *goal_ = nullptr;
     QLabel *goalHint_ = nullptr;
+    QLabel *modelQuality_ = nullptr;
     bool reloadPending_ = false, settingsLoaded_ = false;
     QTreeWidget *files_ = nullptr;
     QLineEdit *output_ = nullptr;

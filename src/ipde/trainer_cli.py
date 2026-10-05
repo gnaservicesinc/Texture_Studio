@@ -33,7 +33,8 @@ def _model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model-path", type=Path)
     parser.add_argument("--source-dir", type=Path)
     parser.add_argument("--device", choices=("auto", "mps", "cpu", "cuda"), default="auto")
-    parser.add_argument("--input-size", type=int, default=0, help="0 requests native display dimensions; DepthPro retains its fixed internal grid")
+    parser.add_argument("--input-size", type=int, default=1036,
+                        help="processing size (default 1036): V2 shortest side / DA3 longest side; 0 requests native dimensions. DA3 rejects grids above 8192 patches before model loading; DepthPro retains its fixed internal grid")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -50,6 +51,10 @@ def _parser() -> argparse.ArgumentParser:
     inspect.add_argument("dataset", type=Path)
     review = commands.add_parser("review-dataset", help="list samples and depth labels for visual review")
     review.add_argument("dataset", type=Path)
+    recover = commands.add_parser("recover-dataset", help="verify and finalize completed labels after a dataset producer exits")
+    recover.add_argument("dataset", type=Path)
+    recover.add_argument("--expected-manifest-sha256", required=True, help="SHA-256 digest from the loaded dataset review")
+    recover.add_argument("--keep-staging", action="store_true", help="finalize in place without publishing to the recorded output directory")
     preview = commands.add_parser("preview-sample", help="render disposable RGB/depth previews without changing dataset arrays")
     preview.add_argument("dataset", type=Path)
     preview.add_argument("--sample", required=True)
@@ -204,7 +209,7 @@ def _parser() -> argparse.ArgumentParser:
         cleanup.add_argument("dataset" if command == "cleanup-dataset" else "checkpoint", type=Path)
         cleanup.add_argument("--workspace", required=True, type=Path)
         cleanup.add_argument("--confirm", action="store_true", help="explicitly confirm permanent removal")
-    for command in (inspect, scan, compose, compact, hf, curate, edit, dataset, generate, train):
+    for command in (inspect, recover, scan, compose, compact, hf, curate, edit, dataset, generate, train):
         command.add_argument("--workers", type=int, default=0,
                              help="CPU file/preparation workers; 0 uses available cores (default)")
     return parser
@@ -340,7 +345,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Third-party model imports/loggers must not corrupt the GUI JSON protocol.
         with redirect_stdout(sys.stderr), ExitStack() as locks:
             from .resource_lock import resource_lock
-            if args.command in {"edit-dataset", "update-dataset", "generate-teacher", "disable-teacher"}:
+            if args.command in {"edit-dataset", "update-dataset", "generate-teacher", "disable-teacher", "recover-dataset"}:
                 locks.enter_context(_edit_cancellation())
             if args.command in {"inspect-dataset", "review-dataset", "preview-sample", "compare-samples", "compose-datasets", "compact-dataset", "curate-dataset", "edit-dataset", "train"}:
                 inputs = [*args.datasets, *args.validation_dataset] if args.command == "compose-datasets" else [args.dataset, *args.add_dataset] if args.command == "edit-dataset" else [args.dataset]
@@ -367,6 +372,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             elif args.command == "review-dataset":
                 from .dataset_review import review_dataset
                 report = review_dataset(args.dataset)
+            elif args.command == "recover-dataset":
+                from .dataset_recovery import recover_dataset
+                report = recover_dataset(args.dataset, expected_manifest_sha256=args.expected_manifest_sha256,
+                                         promote=not args.keep_staging, workers=args.workers)
             elif args.command == "preview-sample":
                 from .dataset_review import preview_sample
                 report = preview_sample(args.dataset, args.sample, args.label, args.output_dir, max_dimension=args.max_dimension)

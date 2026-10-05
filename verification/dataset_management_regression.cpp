@@ -413,6 +413,86 @@ void streamingAndUngroupedPhotos(TrainerWindow &window, const QString &workspace
             "moving an ungrouped photo changed another unrelated photo with an empty group ID");
 }
 
+bool dropFiles(QTreeWidget *tree, const QList<QUrl> &urls) {
+    QMimeData mime; mime.setUrls(urls);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 12, 0)
+    QDragEnterEvent enter(QPointF(8, 8), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+#else
+    QDragEnterEvent enter(QPoint(8, 8), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+#endif
+    QApplication::sendEvent(tree->viewport(), &enter);
+    if (!enter.isAccepted()) return false;
+    QDropEvent drop(QPointF(8, 8), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(tree->viewport(), &drop);
+    return drop.isAccepted();
+}
+
+void photoDragAndDrop(TrainerWindow &window, const QString &workspace) {
+    clearPendingFixtureEdits(window); window.sources_->clear(); window.appendBase_.clear();
+    const QString first = QDir(workspace).filePath("drop-first.HEIC"), second = QDir(workspace).filePath("drop-second.heif"), text = QDir(workspace).filePath("ignored.txt");
+    for (const auto &path : {first, second, text}) { QFile file(path); require(file.open(QIODevice::WriteOnly), "cannot create photo drop fixture"); }
+    const QString firstCanonical = QFileInfo(first).canonicalFilePath(), secondCanonical = QFileInfo(second).canonicalFilePath();
+    { QSignalBlocker blocker(window.tabs_); window.tabs_->setCurrentIndex(0); }
+    window.show(); QApplication::processEvents();
+    require(dropFiles(window.sources_, {QUrl::fromLocalFile(first), QUrl::fromLocalFile(first), QUrl::fromLocalFile(text), QUrl("https://example.com/photo.HEIC")}),
+            "import photo list did not accept a local HEIC drop");
+    require(window.sources_->topLevelItemCount() == 1 && window.sources_->topLevelItem(0)->data(0, Qt::UserRole).toString() == firstCanonical,
+            "import drop duplicated a photo or accepted unrelated/remote files");
+    window.busy_ = true;
+    require(!dropFiles(window.sources_, {QUrl::fromLocalFile(second)}) && window.sources_->topLevelItemCount() == 1,
+            "running generation accepted a source drop"); window.busy_ = false;
+    const QString base = QDir(workspace).filePath("datasets/drop-existing"); writeFixtureManifest(base, review(base));
+    populateFixtureReview(window, review(base));
+    {
+        // Hold the save worker busy so assertions inspect queued edits without
+        // launching scientific-array processing against this metadata fixture.
+        QSignalBlocker edits(window.editProcess_); window.editProcess_->setProgram("/bin/sleep"); window.editProcess_->setArguments({"5"}); window.editProcess_->start();
+        require(window.editProcess_->waitForStarted(), "cannot hold drop fixture save worker");
+        { QSignalBlocker blocker(window.tabs_); window.tabs_->setCurrentIndex(1); } QApplication::processEvents();
+        require(dropFiles(window.reviewSamples_, {QUrl::fromLocalFile(first)}), "selected dataset photo list did not accept dropped additions");
+        require(window.appendBase_ == base && window.tabs_->currentIndex() == 0 && window.sources_->topLevelItemCount() == 1,
+                "selected dataset drop did not open its existing Add Photos workflow");
+        require(dropFiles(window.sources_, {QUrl::fromLocalFile(second), QUrl::fromLocalFile(first)}), "existing-dataset import continuation rejected additional photo drops");
+        const auto pending = window.reviewDrafts_.value(base).value("pending_photos").toArray();
+        require(pending.size() == 2 && pending.contains(firstCanonical) && pending.contains(secondCanonical) && window.sources_->topLevelItemCount() == 2,
+                "creator drops lost the selected destination, duplicated a photo, or failed to register pending additions");
+        stopEditProcess(window);
+    }
+    clearPendingFixtureEdits(window); window.appendBase_.clear(); window.sources_->clear();
+}
+
+void interruptedGenerationRecoveryControls(TrainerWindow &window, const QString &workspace) {
+    clearPendingFixtureEdits(window);
+    const QString staging = QDir(workspace).filePath("datasets/.interrupted-fixture"), completed = QDir(workspace).filePath("datasets/recovered-fixture");
+    auto partial = review(staging); partial.insert("generation_state", "generating"); partial.insert("splits_provisional", true);
+    partial.insert("generation_status", QJsonObject{{"active", true}, {"recoverable", false}, {"status", "active"}, {"reason", "Teacher inference is still active."}});
+    writeFixtureManifest(staging, partial); populateFixtureReview(window, partial);
+    auto *button = qobject_cast<QPushButton *>(window.reviewSamples_->itemWidget(window.reviewSamples_->topLevelItem(0), 7));
+    require(button && !button->isEnabled() && window.recoverDataset_->isHidden() && !window.addPhotos_->isEnabled(), "live partial generation enabled mutation or recovery");
+    require(window.findChild<QPushButton *>("reloadDatasetState")->isEnabled(), "live generation disabled the safe read-only reload action");
+    window.recoverInterruptedDataset(); require(!window.busy_, "direct recovery signal bypassed active-generation guard");
+    partial.insert("generation_status", QJsonObject{{"active", false}, {"recoverable", true}, {"status", "interrupted"}, {"reason", "Generation ended before publication. Completed arrays can be recovered."}});
+    writeFixtureManifest(staging, partial); populateFixtureReview(window, partial);
+    require(window.reviewPath_->text().startsWith("Generation interrupted") && !window.recoverDataset_->isHidden() && window.recoverDataset_->isEnabled(), "abandoned partial dataset remained permanently marked as live generation");
+    button = qobject_cast<QPushButton *>(window.reviewSamples_->itemWidget(window.reviewSamples_->topLevelItem(0), 7));
+    require(button && !button->isEnabled(), "interrupted generation was editable before backend recovery finalized splits");
+    {
+        QSignalBlocker process(window.process_); window.recoverDataset_->click();
+        const auto arguments = window.process_->arguments();
+        require(arguments.contains("recover-dataset") && arguments.contains(staging) && arguments.contains("--expected-manifest-sha256") && window.busy_,
+                "recovery did not route through the locked backend with manifest identity");
+        if (window.process_->state() != QProcess::NotRunning) { window.process_->kill(); window.process_->waitForFinished(1500); }
+        window.refreshAfter_ = false;
+        window.stdout_ = QJsonDocument(QJsonObject{{"dataset_path", completed}, {"recovered_samples", 4}, {"generation_state", "complete"}, {"splits_provisional", false}}).toJson();
+        window.processFinished(0, QProcess::NormalExit);
+        require(window.pendingReview_ == completed && window.reviewedDataset_.isEmpty(), "recovery success kept the stale staging path or enabled its partial manifest");
+    }
+    auto recovered = review(completed); writeFixtureManifest(completed, recovered); populateFixtureReview(window, recovered);
+    button = qobject_cast<QPushButton *>(window.reviewSamples_->itemWidget(window.reviewSamples_->topLevelItem(0), 7));
+    require(button && button->isEnabled() && !window.reviewGenerating_ && window.recoverDataset_->isHidden(), "completed recovered dataset did not restore per-photo teacher actions");
+    window.pendingReview_.clear(); window.activeOperation_.clear();
+}
+
 void asynchronousDatasetSwitch(TrainerWindow &window, const QString &workspace) {
     const QString first = QDir(workspace).filePath("datasets/async-first");
     const QString second = QDir(workspace).filePath("datasets/async-second");
@@ -854,6 +934,8 @@ int main(int argc, char **argv) {
         perPhotoTeacherControls(window, workspace);
         filteredNavigation(window, workspace);
         streamingAndUngroupedPhotos(window, workspace);
+        photoDragAndDrop(window, workspace);
+        interruptedGenerationRecoveryControls(window, workspace);
         asynchronousDatasetSwitch(window, workspace);
         addedPhotoContinuationAndRetry(window, workspace);
         explicitSameSplitChoice(window, workspace);

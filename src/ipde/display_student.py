@@ -19,13 +19,82 @@ import warnings
 import numpy as np
 
 SCHEMA = "ipde-display-depth-v1"
-ARCHITECTURE = "stereo-display-query-v2"
+ARCHITECTURE = "stereo-display-query-v3"
+ALIGNED_ARCHITECTURE = "stereo-display-query-v2"
 LEGACY_ARCHITECTURE = "stereo-display-query-v1"
 UNITS = {"meters", "relative_depth", "relative_inverse_depth"}
 
 
 class DisplayStudentError(RuntimeError):
     pass
+
+
+def checkpoint_quality(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Describe recorded agreement without certifying depth or changing weights."""
+    training = payload.get("ipde_training", {})
+    training = training if isinstance(training, Mapping) else {}
+    validation, baseline = training.get("validation", {}), training.get("baseline_validation", {})
+    validation = validation if isinstance(validation, Mapping) else {}
+    baseline = baseline if isinstance(baseline, Mapping) else {}
+    metric = "mean_absolute_fractional_depth_error"
+    error, initial = validation.get(metric), baseline.get(metric)
+    finite = lambda value: isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+    indices = validation.get("sample_indices")
+    complete_indices = (isinstance(indices, list) and bool(indices)
+                        and all(type(index) is int and index >= 0 for index in indices)
+                        and len(indices) == len(set(indices))
+                        and type(validation.get("sample_count")) is int and validation["sample_count"] == len(indices)
+                        and type(baseline.get("sample_count")) is int and baseline["sample_count"] == len(indices))
+    evaluated_step, current_step = training.get("validation_completed_steps"), training.get("total_steps")
+    current_weights = type(evaluated_step) is int and type(current_step) is int and evaluated_step == current_step and current_step >= 0
+    comparable = (validation.get("full_validation") is True and baseline.get("full_validation") is True
+                  and validation.get("sample_indices") == baseline.get("sample_indices")
+                  and isinstance(validation.get("units"), str) and validation.get("units") in UNITS
+                  and validation.get("units") == baseline.get("units")
+                  and complete_indices and current_weights and finite(error) and finite(initial))
+    warnings = ["Experimental display-depth student: its decoder has no calibrated display-camera geometry or pretrained depth semantics. Positive meter-labelled output can still have incorrect foreground ordering and shape; use direct pretrained depth or calibrated stereo for the preferred depth route."]
+    diagnostic_flags = []
+    if not comparable:
+        warnings.append("Full matching baseline and final validation are unavailable; subset scores cannot establish improvement.")
+        if not current_weights and finite(error):
+            warnings.append("The recorded validation does not identify an evaluation of these checkpoint weights.")
+    elif error >= initial:
+        warnings.append("This checkpoint did not improve the initial model on full held-out validation; inspect targets and retrain before relying on it.")
+    architecture = payload.get("architecture", payload.get("ipde_configuration", {}))
+    if isinstance(architecture, Mapping) and architecture.get("architecture") in {LEGACY_ARCHITECTURE, ALIGNED_ARCHITECTURE}:
+        warnings.append("This checkpoint uses the older stride-eight depth decoder. New detail features and depth-edge supervision require a new training run.")
+    diagnostics = validation.get("depth_diagnostics", {})
+    diagnostics = diagnostics if isinstance(diagnostics, Mapping) else {}
+    diagnostic_coverage = (current_weights and validation.get("full_validation") is True and complete_indices
+                           and diagnostics.get("sample_count") == validation.get("sample_count")
+                           and type(diagnostics.get("supported_probe_pixels")) is int and diagnostics["supported_probe_pixels"] > 0
+                           and finite(diagnostics.get("mean_fractional_depth_change_under_photometric_probe")))
+    if diagnostic_coverage:
+        constant_error = diagnostics.get("constant_depth_reference_fractional_error")
+        if (isinstance(diagnostics.get("ordering_pair_count"), int) and diagnostics["ordering_pair_count"] > 0
+                and finite(constant_error) and finite(error) and error >= constant_error):
+            diagnostic_flags.append("inferior_to_constant_depth_reference")
+            warnings.append("This checkpoint does not outperform a flat depth value per image against its references; useful depth structure has not been demonstrated.")
+        if isinstance(diagnostics.get("collapsed_sample_count"), int) and diagnostics["collapsed_sample_count"] > 0:
+            diagnostic_flags.append("collapsed_depth_range")
+            warnings.append("Some held-out predictions suppress at least 90% of their reference depth range, indicating nearly flat depth structure.")
+        if isinstance(diagnostics.get("appearance_sensitive_sample_count"), int) and diagnostics["appearance_sensitive_sample_count"] > 0:
+            diagnostic_flags.append("appearance_sensitive")
+            warnings.append("A geometry-preserving brightness/contrast change alters some predicted depths by more than 10% on average; the model is sensitive to appearance.")
+        ordering = diagnostics.get("reference_ordering_agreement")
+        if finite(ordering) and ordering < .9:
+            diagnostic_flags.append("reference_ordering_errors")
+            warnings.append("Predicted foreground/background ordering agrees with fewer than 90% of separated held-out reference pairs.")
+    else:
+        warnings.append("This checkpoint lacks complete depth-ordering, constant-depth and brightness-sensitivity diagnostics for its current weights.")
+    return {"status": "improved_full_validation" if comparable and error < initial else "not_improved_full_validation" if comparable else "validation_incomplete",
+            "scientific_status": "experimental_unconstrained_display_depth",
+            "geometry_assessment": "reference_diagnostic_flags" if diagnostic_flags else "reference_diagnostics_recorded" if diagnostic_coverage else "geometry_unvalidated",
+            "diagnostic_flags": diagnostic_flags,
+            "validation_error": float(error) if finite(error) else None,
+            "baseline_error": float(initial) if finite(initial) else None,
+            "comparison_scope": "matching full held-out set" if comparable else "unavailable",
+            "reference": "Teacher agreement, not measured depth accuracy", "warnings": warnings}
 
 
 def rgb_tensor(array: np.ndarray, record: Mapping[str, Any], torch: Any, device: str):
@@ -107,11 +176,17 @@ def _model(configuration: Mapping[str, Any], raft_root: Path):
 
     fields = {"architecture", "units", "channels", "decoder_channels", "iterations", "raft_configuration",
               "input_reference", "output_reference", "teacher_transport", "original_raft_checkpoint_sha256"}
-    aligned = configuration.get("architecture") == ARCHITECTURE
+    detailed = configuration.get("architecture") == ARCHITECTURE
+    aligned = configuration.get("architecture") in {ARCHITECTURE, ALIGNED_ARCHITECTURE}
     if aligned:
         fields |= {"stereo_alignment", "query_reference"}
-    if set(configuration) != fields or configuration.get("architecture") not in {ARCHITECTURE, LEGACY_ARCHITECTURE} or configuration.get("units") not in UNITS:
+    if detailed:
+        fields |= {"detail_channels", "detail_stride", "detail_reference"}
+    if set(configuration) != fields or configuration.get("architecture") not in {ARCHITECTURE, ALIGNED_ARCHITECTURE, LEGACY_ARCHITECTURE} or configuration.get("units") not in UNITS:
         raise DisplayStudentError("Unsupported display-depth model architecture or units")
+    if detailed and (configuration.get("detail_channels") != 8 or configuration.get("detail_stride") != 2
+                     or configuration.get("detail_reference") != "same_fused_left_query"):
+        raise DisplayStudentError("Unsupported native detail-feature configuration")
     if aligned and (configuration.get("stereo_alignment") != "right_to_left_raft_reverse_consistency"
                     or configuration.get("query_reference") != "single_fused_left_field"):
         raise DisplayStudentError("Model contradicts the single-reference stereo alignment contract")
@@ -148,9 +223,17 @@ def _model(configuration: Mapping[str, Any], raft_root: Path):
             if aligned:
                 self.fusion = nn.Sequential(nn.Conv2d(2 * channels + 9, channels, 3, padding=1), nn.SiLU(),
                                             nn.Conv2d(channels, channels, 3, padding=1), nn.SiLU())
+            if detailed:
+                # Preserve a learned finer field alongside the stride-eight scene
+                # field. There is no direct RGB summand, but learned appearance
+                # shortcuts still require ordering/photometric validation.
+                self.detail_encoder = nn.Sequential(nn.Conv2d(3, 8, 3, stride=2, padding=1),
+                    nn.GroupNorm(2, 8), nn.SiLU(), nn.Conv2d(8, 8, 3, padding=1), nn.SiLU())
+                self.detail_fusion = nn.Sequential(nn.Conv2d(18, 8, 3, padding=1), nn.SiLU(),
+                                                  nn.Conv2d(8, 8, 3, padding=1), nn.SiLU())
             context_channels = channels if aligned else 2 * channels + 8
             self.global_encoder = nn.Linear(context_channels, channels)
-            query_channels = context_channels + channels + 4
+            query_channels = context_channels + channels + 4 + (8 if detailed else 0)
             self.offset = nn.Sequential(nn.Conv2d(query_channels, hidden, 1), nn.SiLU(), nn.Conv2d(hidden, 2 if aligned else 4, 1))
             self.depth = nn.Sequential(nn.Conv2d(query_channels, hidden, 1), nn.SiLU(),
                 nn.Conv2d(hidden, hidden, 1), nn.SiLU(), nn.Conv2d(hidden, 1, 1))
@@ -203,8 +286,15 @@ def _model(configuration: Mapping[str, Any], raft_root: Path):
                 coverage = F.adaptive_avg_pool2d(support.to(left.dtype), left_features.shape[-2:])
                 right_features = self.encoder(right_aligned / 127.5 - 1.0) * coverage
                 fused = self.fusion(torch.cat((left_features, right_features, flow_features, coverage), dim=1))
-                return {"fused": fused, "global": self.global_encoder(fused.mean(dim=(2, 3))),
-                        "input_shape": tuple(left.shape[-2:]), "stereo_support": support}
+                context = {"fused": fused, "global": self.global_encoder(fused.mean(dim=(2, 3))),
+                           "input_shape": tuple(left.shape[-2:]), "stereo_support": support}
+                if detailed:
+                    left_detail = self.detail_encoder(left / 127.5 - 1.0)
+                    detail_coverage = F.adaptive_avg_pool2d(support.to(left.dtype), left_detail.shape[-2:])
+                    right_detail = self.detail_encoder(right_aligned / 127.5 - 1.0) * detail_coverage
+                    detail_flow = F.adaptive_avg_pool2d(flow / float(left.shape[-1]), left_detail.shape[-2:])
+                    context["detail"] = self.detail_fusion(torch.cat((left_detail, right_detail, detail_flow, detail_coverage), dim=1))
+                return context
             right_features = self.encoder(right / 127.5 - 1.0)
             pooled = torch.cat([item.mean(dim=(2, 3)) for item in (left_features, right_features, flow_features)], dim=1)
             return {"left": left_features, "right": right_features, "flow": flow_features,
@@ -227,13 +317,18 @@ def _model(configuration: Mapping[str, Any], raft_root: Path):
             def sample(value, where):
                 return F.grid_sample(value, where, mode="bilinear", padding_mode="border", align_corners=False)
             initial = [sample(context[key], grid) for key in (("fused",) if aligned else ("left", "right", "flow"))]
+            if detailed:
+                initial.append(sample(context["detail"], grid))
             descriptor = torch.cat([*initial, global_features, coordinates, ratios], dim=1)
             displacement = (.25 if aligned else 1.5) * torch.tanh(self.offset(descriptor)).permute(0, 2, 3, 1)
             if aligned:
                 # One query coordinate samples one fused left-reference field;
                 # no independent per-camera offsets can split an object edge.
                 refined = sample(context["fused"], grid + displacement)
-                return F.softplus(self.depth(torch.cat([refined, global_features, coordinates, ratios], dim=1))) + 1e-6
+                refined_fields = [refined]
+                if detailed:
+                    refined_fields.append(sample(context["detail"], grid + displacement))
+                return F.softplus(self.depth(torch.cat([*refined_fields, global_features, coordinates, ratios], dim=1))) + 1e-6
             # These learned per-query offsets are not an imposed homography or
             # teacher transport; output loss remains on the untouched display grid.
             refined = [sample(context["left"], grid + displacement[..., :2]),
@@ -261,6 +356,7 @@ def create_student(*, raft_root: Path | None, raft_model: Path | None, device: s
         "raft_configuration": raft_configuration, "input_reference": "native_stereo_pair",
         "output_reference": "display", "teacher_transport": "none",
         "stereo_alignment": "right_to_left_raft_reverse_consistency", "query_reference": "single_fused_left_field",
+        "detail_channels": 8, "detail_stride": 2, "detail_reference": "same_fused_left_query",
         "original_raft_checkpoint_sha256": hashlib.sha256(data).hexdigest()}
     torch.manual_seed(seed)
     model = _model(configuration, root)
@@ -348,5 +444,9 @@ def predict_display_depth(left: np.ndarray, right: np.ndarray, output_shape: tup
         "native_stereo_shape": list(np.shape(left)[:2]), "output_shape": list(output_shape), "device": selected,
         "input_resize": "none; native RGB copied into model tensors", "teacher_transport": "none",
         "output_resampling": "none; learned decoder evaluated at each display pixel", "tile_size": tile_size,
-        "stereo_fusion": ("right aligned to left using RAFT correspondence and reverse-consistency masking; one fused field and one shared query" if configuration["architecture"] == ARCHITECTURE else "legacy independent left/right query features"),
+        "stereo_fusion": ("right aligned to left using RAFT correspondence and reverse-consistency masking; one fused reference and one shared query" if configuration["architecture"] in {ARCHITECTURE, ALIGNED_ARCHITECTURE} else "legacy independent left/right query features"),
+        "feature_strides": [2, 8] if configuration["architecture"] == ARCHITECTURE else [8],
+        "scientific_status": "experimental_unconstrained_display_depth",
+        "geometry_contract": "Learned different-camera display queries; no calibrated display-camera reprojection or native focal/baseline depth formula",
+        "depth_semantics_initialization": "Added RGB/flow encoders and depth head start without pretrained semantic-depth weights",
         "accuracy_note": "Estimated teacher distillation; no measured accuracy or recovered missing detail claim"}

@@ -1521,10 +1521,12 @@ def _report(discovery: Discovery, *, include_learned: bool = False,
 
 def inspect_file(source: Path | str, *, include_learned: bool = False,
                  raft_options: RaftStereoOptions | None = None) -> dict[str, Any]:
-    try:
-        selected_model = inspect_raft_checkpoint(raft_options or RaftStereoOptions())
-    except RaftStereoError as exc:
-        raise ExtractionError(str(exc)) from exc
+    selected_model = None
+    if not include_learned or raft_options is not None:
+        try:
+            selected_model = inspect_raft_checkpoint(raft_options or RaftStereoOptions())
+        except RaftStereoError as exc:
+            raise ExtractionError(str(exc)) from exc
     return _report(discover_file(Path(source)), include_learned=include_learned, selected_model=selected_model)
 
 

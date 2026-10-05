@@ -55,6 +55,12 @@ project's workspace or generated dataset folder. Validated photos appear in the
 list as the scan runs; cancelling keeps the photos already found. Scanning and
 manual addition share the same duplicate handling.
 
+Drop local HEIC, HEIF or HIF files onto the import photo list to add them.
+Duplicate paths are kept once. In **Photos and depth**, dropping files onto the
+selected dataset's photo list opens its **Add photos** workflow. Further drops
+onto that import list stay assigned to the same dataset and are recorded as
+pending additions before their depth is generated.
+
 Use the teacher buttons to turn one to three teachers **On**. Each teacher creates
 an independently reviewable entry for a photo, sharing its raw data and validation
 split. Select a poor teacher result and choose **Remove selected** without dropping
@@ -63,6 +69,15 @@ completed entries as it runs; review and preview jobs use a separate background
 process. Interim split assignments remain provisional and cannot be trained,
 composed or curated until generation finishes. A bad photo/result is recorded
 and skipped; a filesystem failure stops safely.
+
+An active generation keeps teacher and photo edits disabled. If its process
+ends before completion, **Photos and depth** identifies **Generation interrupted**
+and offers **Recover interrupted dataset** when the backend can safely recover
+it. Recovery checks that generation is no longer running, verifies the completed
+payloads, finalizes their splits and reloads the completed dataset. It preserves
+the generated arrays; missing teacher maps can then be generated with the photo's
+model buttons. A hidden staging dataset may move to its originally requested
+destination when that destination is available.
 
 Hover for a synchronized **1:1 magnifier**, or click for a floating pixel-size
 preview centered on the clicked image point. Drag to pan; right-click, click
@@ -263,15 +278,20 @@ or surfaces.
 **Input size** controls a configurable teacher's effective processing resolution,
 not the full reference-photo dimensions or saved output size. Teachers receive
 the complete display photo. V2 uses the configured shortest side; DA3 uses the
-longest side. The GUI begins at zero, requesting native source size with
-14-pixel divisibility processing. The field also applies to a configurable
-secondary teacher. DepthPro always resizes internally to 1536×1536 and uses its
+longest side. The GUI and CLI begin at 1036. The GUI changes an older saved zero
+to 1036 once when DA3 is selected, including an additional teacher or per-photo
+generation, to avoid excessive memory use. Advanced settings still allow an
+explicit custom size or zero for native 14-pixel divisibility processing. The
+field also applies to a configurable secondary teacher. DepthPro always resizes
+internally to 1536×1536 and uses its
 fixed pyramid/decoder, regardless of this configurable-teacher field.
 Requested and actual processing dimensions are recorded. DA3's current adapter
-evaluates single views independently. Native GIANT processing at 5712×4284 on
-64 GB memory is unverified and can require very large working arrays. Compare
-reviewed results and consult the [manual's memory discussion](manual/index.html#full-display-teacher-memory)
-before assuming native processing fits.
+evaluates single views independently. DA3 rejects processing grids above 8192
+14×14 patches before loading weights or running inference; choose 1036 or smaller
+if rejected. Original RGB and full-size float results are retained. Interpolating
+the prediction back to the photo dimensions does not add independently predicted
+detail. Review geometry and processing dimensions together and consult the
+[manual's memory discussion](manual/index.html#full-display-teacher-memory).
 
 **Inference device** chooses where the model runs. **auto** selects an available
 accelerator, falling back to CPU; **mps** uses supported Apple GPU hardware,
@@ -403,6 +423,21 @@ native-left labels. Eligibility, counts, Total Steps and error units follow both
 the chosen model output and label mode. Configure the initial RAFT checkpoint/source
 and select **Start model training**.
 
+New display runs use `stereo-display-query-v3`: a stride-two learned detail field
+alongside the stride-eight coarse field, sampled with the same shared query.
+New training combines symmetric log-depth point error with target-supervised
+log-depth neighbor differences at 1, 4 and 16 output pixels (weight 0.5) and
+bounded reference-ordering/separation supervision on at most 256 spatial probes
+(weight 0.25, margins capped at log(2)). These terms reduce asymmetric near-depth
+weighting and discourage collapsed or reversed reference depth. They do not
+normalize or change stored arrays, supply missing display-camera calibration,
+or establish measured accuracy. Fractional error remains the reported and
+end-condition metric. Previously saved v3 runs retain their recorded objective.
+V1/V2 checkpoints retain their
+existing inference; compatible V2 resumable runs keep the older fractional-only
+objective. Start a fresh run to use the new detail layers and edge supervision.
+Improvement on real photos still requires independent held-out comparison.
+
 Display limited scope trains its added encoders/query decoder with RAFT frozen.
 Full scope adapts RAFT too. Automatic display full scope additionally needs at
 least 500 entries, medium/high quality and recorded native inputs no larger than
@@ -432,6 +467,15 @@ uses the whole set; N chooses a fresh random subset capped at the eligible valid
 plus raw MAE in declared meters/relative/inverse units. Stock scores are flow
 MAE in pixels. A passing subsample early-stop goal requires full-set confirmation.
 Do not compare different unit conventions or camera grids pointwise.
+
+New display runs use full held-out baseline and final checks with matching
+coverage. Intermediate subsets monitor progress; only full held-out scores
+rank the best model. Improved full-set snapshots have immutable
+`checkpoint-best-step-########.pth` names, and `best_checkpoint_path` in the
+report identifies the chosen file. The final checkpoint may score worse.
+Trainer displays quality warnings and offers **Select best checkpoint for
+comparison / export**. Review independent photos and explicitly choose the
+checkpoint before using it.
 
 Save intermediates each epoch, every N epochs/steps or only at the end. **Save
 checkpoint now** queues a safe update-boundary save, available for export while

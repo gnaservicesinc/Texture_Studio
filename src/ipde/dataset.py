@@ -202,6 +202,17 @@ def assign_grouped_splits(samples: list[dict[str, Any]], fraction: float, seed: 
 
 
 def build_dataset(
+    sources: Sequence[Path | str], output_dir: Path | str, options: DatasetOptions,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Hold generation ownership for CLI and direct Python callers alike."""
+    from .resource_lock import resource_lock
+    destination = Path(output_dir).expanduser().resolve()
+    with resource_lock(destination / ".ipde-generation-owner"):
+        return _build_dataset(sources, destination, options, **kwargs)
+
+
+def _build_dataset(
     sources: Sequence[Path | str],
     output_dir: Path | str,
     options: DatasetOptions,
@@ -335,11 +346,13 @@ def build_dataset(
 
     def predict(array: np.ndarray, *, anchor: bool = False, teacher_index: int = 0, **kwargs: Any) -> LearnedDepthResult:
         name = "metric_anchor" if anchor else teacher_ids[teacher_index]
+        from .learned_depth import validate_learned_depth_input
+        config = options.metric_anchor if anchor else teachers[teacher_index]
+        validate_learned_depth_input(array.shape, config)
         if name not in predictors:
             if predictors:
                 raise DatasetError("The previous teacher must be released before loading another model")
             from .learned_depth import LearnedDepthPredictor
-            config = options.metric_anchor if anchor else teachers[teacher_index]
             emit("model_loading", dataset_dir=str(temporary), teacher_id=name,
                  model=getattr(config, "model", None), device=getattr(config, "device", None))
             try:

@@ -394,9 +394,11 @@ def inspect_raft_checkpoint(options: RaftStereoOptions) -> dict[str, Any] | None
               "kind": "display_student" if student else "raft_stereo",
               "schema": schema, "checkpoint_sha256": hashlib.sha256(data).hexdigest()}
     if student:
+        from .display_student import checkpoint_quality
         architecture = checkpoint.get("architecture", checkpoint.get("ipde_configuration", {}))
         units = architecture.get("units") if isinstance(architecture, Mapping) else None
         result["units"] = units if isinstance(units, str) else None
+        result["quality_assessment"] = checkpoint_quality(checkpoint)
     return result
 
 

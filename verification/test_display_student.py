@@ -135,6 +135,8 @@ class DisplayStudentTests(unittest.TestCase):
         legacy_configuration["architecture"] = student.LEGACY_ARCHITECTURE
         legacy_configuration.pop("stereo_alignment")
         legacy_configuration.pop("query_reference")
+        for field in ("detail_channels", "detail_stride", "detail_reference"):
+            legacy_configuration.pop(field)
         legacy = student._model(legacy_configuration, self.root)
         legacy.raft.load_state_dict(torch.load(self.original, weights_only=True))
         checkpoint = self.root / "previous-model.pth"
@@ -169,7 +171,9 @@ class DisplayStudentTests(unittest.TestCase):
         torch.testing.assert_close(padder.unpad(FixtureRAFT.calls[-2][0]), left.detach(), rtol=0, atol=0)
         torch.testing.assert_close(padder.unpad(FixtureRAFT.calls[-2][1]), right.detach(), rtol=0, atol=0)
         torch.testing.assert_close(padder.unpad(FixtureRAFT.calls[-1][0]), torch.flip(right.detach(), [3]), rtol=0, atol=0)
-        self.assertEqual(set(context), {"fused", "global", "input_shape", "stereo_support"})
+        self.assertEqual(set(context), {"fused", "detail", "global", "input_shape", "stereo_support"})
+        self.assertEqual(tuple(context["detail"].shape[-2:]), (18, 24))
+        self.assertEqual(tuple(context["fused"].shape[-2:]), (5, 6))
         self.assertEqual(model.offset[-1].out_channels, 2)
         self.assertEqual(model.depth[-1].out_channels, 1)
         prediction = model.render(context, (83, 109), (0, 83, 0, 109))

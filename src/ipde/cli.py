@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
 import json
 import sys
 from pathlib import Path
@@ -29,6 +30,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--overwrite", action="store_true", help="replace colliding outputs after verification")
     parser.add_argument("--no-npy", action="store_true", help="omit exact NumPy array companions")
     parser.add_argument("--manifest", action="store_true", help="also write a provenance JSON manifest (off by default)")
+    parser.add_argument("--learned-depth", action="store_true",
+                        help="include AI depth in inspection; without --select export full display and native model predictions as float32 EXR")
+    parser.add_argument("--learned-model", choices=("depthpro", "depth-anything-v2", "depth-anything-3"), default="depthpro")
+    parser.add_argument("--learned-model-path", type=Path)
+    parser.add_argument("--learned-source-dir", type=Path)
+    parser.add_argument("--learned-device", choices=("auto", "cpu", "mps", "cuda"), default="auto")
+    parser.add_argument("--learned-input-size", type=int, default=1036,
+                        help="V2 shortest side / DA3 longest side (default 1036); 0 requests native input, subject to DA3's patch limit")
     parser.add_argument(
         "--no-metric-depth",
         action="store_true",
@@ -134,19 +143,32 @@ def _human_report(report: dict, inspected: bool) -> str:
     return "\n".join(lines)
 
 
+def _backend_response(operation, *args, **kwargs):
+    # Third-party model constructors may print to stdout. Reserve stdout for
+    # the one JSON result consumed by the GUI and command-line clients.
+    with redirect_stdout(sys.stderr):
+        return operation(*args, **kwargs)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    selections = tuple(args.select) if args.select is not None else (
+        ("learned-display-depth", "learned-display-native") if args.learned_depth else None)
+    include_learned = args.learned_depth or bool(selections and any(key.startswith("learned-") for key in selections))
     failed = False
     for source in args.sources:
         try:
             if args.inspect:
-                report = inspect_file(source, raft_options=RaftStereoOptions(
-                    root=args.raft_root, model=args.raft_model, model_member=args.raft_model_member))
+                # Direct AI inventory does not depend on a stale RAFT selection
+                # or IPDE_RAFT_MODEL environment setting.
+                raft_options = None if include_learned else RaftStereoOptions(
+                    root=args.raft_root, model=args.raft_model, model_member=args.raft_model_member)
+                report = _backend_response(inspect_file, source, include_learned=include_learned, raft_options=raft_options)
             else:
-                report = extract_file(
+                report = _backend_response(extract_file,
                     source,
                     ExtractOptions(
-                        selected_products=tuple(args.select) if args.select is not None else None,
+                        selected_products=selections,
                         output_dir=args.output_dir,
                         write_npy=not args.no_npy,
                         write_manifest=args.manifest,
@@ -165,6 +187,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                         raft_model_member=args.raft_model_member,
                         raft_device=args.raft_device,
                         raft_iterations=args.raft_iterations,
+                        learned_model=args.learned_model,
+                        learned_model_path=args.learned_model_path,
+                        learned_source_dir=args.learned_source_dir,
+                        learned_device=args.learned_device,
+                        learned_input_size=args.learned_input_size,
+                        write_learned_depth=args.learned_depth,
                         overwrite=args.overwrite,
                     ),
                 )
