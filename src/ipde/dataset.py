@@ -44,6 +44,7 @@ class DatasetOptions:
     reference_paths: Mapping[str, Path] | None = None
     include_display_teacher: bool = True
     prefer_registered_display_teacher: bool = False
+    teacher_view: str = "display"
     grouping_semantics: str = "capture"
     metric_anchor: LearnedDepthConfig | None = None
     additional_teachers: tuple[LearnedDepthConfig, ...] = ()
@@ -231,6 +232,8 @@ def build_dataset(
         raise DatasetError("A source path was selected more than once")
     if options.grouping_semantics not in {"capture", "scene", "none"}:
         raise DatasetError("grouping_semantics must be capture, scene or none")
+    if options.teacher_view not in {"display", "stereo-left"}:
+        raise DatasetError("teacher_view must be display or stereo-left")
     teachers = (options.teacher, *options.additional_teachers)
     if len(teachers) > 3:
         raise DatasetError("Choose one, two or three teachers")
@@ -396,6 +399,7 @@ def build_dataset(
             "precision_policy": "Raw samples/auxiliaries preserved bit-for-bit in NPY/NPZ; no normalization, gamma, or resampling",
             "array_storage": "npz_deflate" if options.compress_arrays else "npy",
             "file_workers": worker_count,
+            "teacher_view": options.teacher_view,
             "generation_state": state,
             "generation_output_dir": str(destination),
             "splits_provisional": state != "complete",
@@ -441,25 +445,37 @@ def build_dataset(
         spatial = discovery.spatial_photo
         teacher_id = teacher_ids[teacher_index]
         sample_id = source_id if len(teachers) == 1 else f"{source_id}-teacher-{teacher_index + 1}"
-        prediction = _lookup(teacher_results_by_id.get(teacher_id), source)
+        display_indices = [i for i, asset in enumerate(discovery.assets) if asset.kind == "display_view"]
+        display_mode = options.teacher_view == "display"
+        if display_mode and len(display_indices) != 1:
+            raise DatasetError("Display-teacher datasets require exactly one full display image; stereo-view fallback is disabled")
+        teacher_rgb = discovery.assets[display_indices[0]].array if display_mode else left.array
+        prediction = _lookup((display_teacher_results_by_id if display_mode else teacher_results_by_id).get(teacher_id), source)
         if prediction is None and teacher_index == 0:
-            prediction = _lookup(teacher_results, source)
+            prediction = _lookup(display_teacher_results if display_mode else teacher_results, source)
         if prediction is None:
-            print("  Running selected teacher on the calibrated LEFT view", file=sys.stderr, flush=True)
+            print("  Running selected teacher on the full display image" if display_mode else
+                  "  Running selected teacher on the calibrated LEFT view (explicit legacy workflow)", file=sys.stderr, flush=True)
             prediction = predict(
-                left.array, teacher_index=teacher_index,
-                focal_pixels=spatial["left_camera"]["focal_length_x_pixels"],
-                reference_label="spatial_left",
+                teacher_rgb, teacher_index=teacher_index,
+                focal_pixels=None if display_mode else spatial["left_camera"]["focal_length_x_pixels"],
+                reference_label="display" if display_mode else "spatial_left",
             )
         target = np.asarray(prediction.source_depth)
         native = np.asarray(prediction.native_depth)
-        if target.shape != left.array.shape[:2] or target.dtype != np.float32:
-            raise DatasetError("Teacher output must be float32 on the exact left-view HxW grid")
+        if target.shape != teacher_rgb.shape[:2] or target.dtype != np.float32:
+            raise DatasetError("Teacher output must be float32 on the exact selected RGB HxW grid")
         if native.ndim != 2 or native.dtype != np.float32:
             raise DatasetError("Teacher native output must be a float32 HxW plane")
         metadata = dict(prediction.metadata)
-        if metadata.get("input_rgb_sha256") != sha256_array(left.array):
-            raise DatasetError("Teacher RGB provenance does not match the extracted left view")
+        if metadata.get("input_rgb_sha256") != sha256_array(teacher_rgb):
+            raise DatasetError("Teacher RGB provenance does not match the extracted display image" if display_mode else
+                               "Teacher RGB provenance does not match the extracted left view")
+        metadata.update({"dataset_teacher_view": options.teacher_view,
+                         "reference_label": "display" if display_mode else "spatial_left",
+                         "input_rgb_shape": list(teacher_rgb.shape),
+                         "stored_target_shape": list(target.shape),
+                         "native_prediction_shape": list(native.shape)})
         units = metadata.get("units")
         if units not in {"meters", "relative_inverse_depth", "relative_depth"}:
             raise DatasetError(f"Unknown teacher output units: {units!r}")
@@ -474,6 +490,7 @@ def build_dataset(
             "source_photo_id": source_id,
             "teacher_id": teacher_id,
             "teacher_model": getattr(teachers[teacher_index], "model", metadata.get("model_id")),
+            "teacher_view": options.teacher_view,
             "photo_metadata": photo_metadata,
             "source_path": str(source),
             "source_sha256": discovery.source_sha256,
@@ -494,9 +511,10 @@ def build_dataset(
                 "native_target": dataset_array_record(temporary, folder / "teacher-native.npy", native),
                 "valid_mask": dataset_array_record(temporary, folder / "teacher-valid.npy", valid),
                 "valid_pixel_count": int(valid.sum()),
+                "coordinate_reference": "display; separate from RAFT's spatial_left reference" if display_mode else "spatial_left",
             },
         }
-        anchor_record, anchored_record, pseudo_calibration = anchored_label(
+        anchor_record, anchored_record, pseudo_calibration = (None, None, None) if display_mode else anchored_label(
             source, left.array, prediction, folder, display=False,
             focal_pixels=spatial["left_camera"]["focal_length_x_pixels"],
         )
@@ -506,7 +524,7 @@ def build_dataset(
         if anchored_record is not None:
             sample["anchored_teacher"] = anchored_record
             sample["training_target_choice"] = "anchored_teacher"
-        training_target = target if units == "meters" else read_array(temporary / anchored_record["target"]["path"]) if anchored_record else None
+        training_target = None if display_mode else target if units == "meters" else read_array(temporary / anchored_record["target"]["path"]) if anchored_record else None
         if training_target is not None and spatial.get("raft_stereo_ready"):
             flow, flow_valid, flow_details = teacher_depth_to_flow(training_target, spatial)
             sample["raft_target"] = {
@@ -515,13 +533,12 @@ def build_dataset(
                 "valid_mask": dataset_array_record(temporary, folder / "raft-teacher-valid.npy", flow_valid),
                 "metadata": flow_details,
             }
-        display_indices = [i for i, asset in enumerate(discovery.assets) if asset.kind == "display_view"]
         if display_indices:
             display_index = display_indices[0]
             display = discovery.assets[display_index]
             sample["display_rgb"] = {**raw[display_index]["storage"], "source_bit_depth": display.source_bit_depth}
             sample["display_note"] = "Separate display camera/framing; never resized onto the left/right stereo grid"
-            display_prediction = _lookup(display_teacher_results_by_id.get(teacher_id), source)
+            display_prediction = prediction if display_mode else _lookup(display_teacher_results_by_id.get(teacher_id), source)
             if display_prediction is None and teacher_index == 0:
                 display_prediction = _lookup(display_teacher_results, source)
             if display_prediction is None and options.include_display_teacher:
@@ -533,7 +550,10 @@ def build_dataset(
                     raise DatasetError("Display teacher must use the exact display grid")
                 if display_prediction.metadata.get("input_rgb_sha256") != sha256_array(display.array):
                     raise DatasetError("Display teacher provenance does not match the display image")
-                display_metadata = display_prediction.metadata
+                display_metadata = {**display_prediction.metadata, "dataset_teacher_view": "display",
+                    "reference_label": "display", "input_rgb_shape": list(display.array.shape),
+                    "stored_target_shape": list(display_target.shape),
+                    "native_prediction_shape": list(np.shape(display_prediction.native_depth))}
                 if display_metadata.get("units") not in {"meters", "relative_inverse_depth", "relative_depth"}:
                     raise DatasetError("Display teacher has unsupported units")
                 if not isinstance(display_metadata.get("checkpoint_sha256"), str) or not display_metadata["checkpoint_sha256"]:
@@ -545,53 +565,81 @@ def build_dataset(
                 sample["display_teacher"] = {
                     "label_kind": "pseudo_label",
                     "units": display_prediction.metadata["units"],
-                    "metadata": _jsonable(display_prediction.metadata),
+                    "metadata": _jsonable(display_metadata),
                     "target": dataset_array_record(temporary, folder / "display-teacher.npy", display_target),
                     "native_target": dataset_array_record(temporary, folder / "display-teacher-native.npy", display_prediction.native_depth),
+                    "valid_mask": dataset_array_record(temporary, folder / "display-teacher-valid.npy", np.isfinite(display_target) & (display_target > 0)),
                     "coordinate_reference": "display; separate from RAFT's spatial_left reference",
                 }
                 display_anchor, anchored_display, display_calibration = anchored_label(
                     source, display.array, display_prediction, folder, display=True, focal_pixels=None,
                 )
                 if display_anchor is not None:
+                    display_anchor["coordinate_reference"] = "display"
                     sample["display_metric_anchor"] = display_anchor
                     sample["display_pseudo_calibration"] = display_calibration
                 if anchored_display is not None:
+                    anchored_display["coordinate_reference"] = "display"
                     sample["anchored_display_teacher"] = anchored_display
-                display_training_target = display_target if display_metadata["units"] == "meters" else read_array(temporary / anchored_display["target"]["path"]) if anchored_display else None
-                from .registration import estimate_display_registration, register_display_depth
-                registration = estimate_display_registration(discovery)
-                print(f"  Display registration: {registration.get('reason')}", file=sys.stderr, flush=True)
-                sample["display_registration"] = _jsonable(registration)
-                if registration.get("accepted") and display_training_target is not None:
-                    registered, registered_valid = register_display_depth(display_training_target, discovery, registration)
-                    sample["registered_display_teacher"] = {
-                        "label_kind": "registered_display_teacher_pseudo_label",
-                        "units": "meters",
-                        "target": dataset_array_record(temporary, folder / "registered-display-teacher.npy", registered),
-                        "valid_mask": dataset_array_record(temporary, folder / "registered-display-valid.npy", registered_valid),
-                        "reference_role": registration["reference_role"],
-                        "metadata": anchored_display["metadata"] if anchored_display else _jsonable(display_prediction.metadata),
-                        "registration": _jsonable(registration),
-                        "precision_note": "Approximate same-camera depth transport only inside independently validated registration cells",
-                    }
-                use_display = (options.prefer_registered_display_teacher and registration.get("accepted")
-                               and registration.get("reference_role") == "left" and display_training_target is not None)
-                sample["training_target_choice"] = "registered_display_teacher" if use_display else "anchored_teacher" if anchored_record else "teacher"
-                sample["training_target_choice_note"] = (
-                    "Use registered display teacher only where its empirical LEFT-camera registration is supported; holes stay excluded"
-                    if use_display else "Use separate LEFT-grid supervision; display registration/metric anchoring is unavailable, rejected, or belongs to the RIGHT camera")
+                if display_mode:
+                    # The display camera/framing is an independent grid. A
+                    # distance-dependent stereo projection is not a fixed image
+                    # registration, and cannot become a stock LEFT-flow label.
+                    sample["teacher"] = copy.deepcopy(sample["display_teacher"])
+                    sample["teacher"]["alias_of"] = "display_teacher"
+                    sample["teacher"]["valid_pixel_count"] = int(valid.sum())
+                    sample["training_target_choice"] = "anchored_display_teacher" if anchored_display else "display_teacher"
+                    sample["training_target_choice_note"] = (
+                        "Full display-grid labels are preserved without camera registration. Stock RAFT predicts native LEFT-grid flow; "
+                        "these targets require a display-grid student. Native-stereo teacher fallback is disabled.")
+                    sample["display_grid_policy"] = "Preserve full display coordinates; no automatic fixed registration or stereo-view inference"
+                else:
+                    display_training_target = display_target if display_metadata["units"] == "meters" else read_array(temporary / anchored_display["target"]["path"]) if anchored_display else None
+                    from .registration import RegistrationError, estimate_display_registration, register_display_depth
+                    try:
+                        registration = estimate_display_registration(discovery)
+                    except RegistrationError as exc:
+                        registration = {"accepted": False, "reason": str(exc), "source_sha256": discovery.source_sha256}
+                    print(f"  Display registration (legacy diagnostic): {registration.get('reason')}", file=sys.stderr, flush=True)
+                    sample["display_registration"] = _jsonable(registration)
+                    if registration.get("accepted") and display_training_target is not None:
+                        try:
+                            registered, registered_valid = register_display_depth(display_training_target, discovery, registration)
+                        except RegistrationError as exc:
+                            registration = {**registration, "accepted": False, "reason": str(exc)}
+                            sample["display_registration"] = _jsonable(registration)
+                        else:
+                            sample["registered_display_teacher"] = {
+                                "label_kind": "registered_display_teacher_pseudo_label",
+                                "units": "meters",
+                                "target": dataset_array_record(temporary, folder / "registered-display-teacher.npy", registered),
+                                "valid_mask": dataset_array_record(temporary, folder / "registered-display-valid.npy", registered_valid),
+                                "reference_role": registration["reference_role"],
+                                "coordinate_reference": "spatial_left" if registration["reference_role"] == "left" else "spatial_right",
+                                "metadata": {**(anchored_display["metadata"] if anchored_display else _jsonable(display_metadata)),
+                                             "dataset_teacher_view": "display", "reference_label": "display"},
+                                "registration": _jsonable(registration),
+                                "precision_note": "Approximate same-camera depth transport only inside independently validated registration cells",
+                            }
+                    use_display = options.prefer_registered_display_teacher and "registered_display_teacher" in sample and registration.get("reference_role") == "left"
+                    sample["training_target_choice"] = "registered_display_teacher" if use_display else "anchored_teacher" if anchored_record else "teacher"
+                    sample["training_target_choice_note"] = (
+                        "Explicit legacy supervision uses empirically registered LEFT-camera display labels; holes stay excluded"
+                        if use_display else "Explicit legacy supervision uses the separate LEFT-grid teacher; display diagnostics are not selected")
         if getattr(prediction, "confidence", None) is not None:
             confidence = np.asarray(prediction.confidence)
             sample["teacher"]["confidence"] = dataset_array_record(temporary, folder / "teacher-confidence.npy", confidence)
             sample["teacher"]["confidence_note"] = "Model confidence is not a measured error bound"
+            if display_mode:
+                sample["display_teacher"]["confidence"] = dict(sample["teacher"]["confidence"])
+                sample["display_teacher"]["confidence_note"] = sample["teacher"]["confidence_note"]
         reference_path = _lookup(references, source)
         if reference_path is not None:
             try:
                 reference = np.load(reference_path, allow_pickle=False)
             except (ValueError, OSError) as exc:
                 raise DatasetError(f"Cannot read measured reference NPY: {reference_path}: {exc}") from exc
-            if reference.shape != target.shape or reference.dtype.kind != "f":
+            if reference.shape != left.array.shape[:2] or reference.dtype.kind != "f":
                 raise DatasetError("Measured reference must be a floating-point meter-depth NPY on the exact left grid")
             reference_valid = np.isfinite(reference) & (reference > 0)
             if not reference_valid.any():

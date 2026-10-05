@@ -19,8 +19,8 @@ from test_training_progress import _dataset
 
 
 class DisplayAlignmentTests(unittest.TestCase):
-    def test_native_left_teacher_is_the_default_even_with_display_diagnostics(self):
-        self.assertFalse(DatasetOptions(teacher=None).prefer_registered_display_teacher)
+    def test_full_display_teacher_is_the_default(self):
+        self.assertEqual(DatasetOptions(teacher=None).teacher_view, "display")
 
     def test_multiple_feature_orientations_do_not_inflate_independent_evidence(self):
         positions = np.random.default_rng(3).uniform([0, 0], [799, 599], (24, 2))
@@ -97,7 +97,7 @@ class DisplayAlignmentTests(unittest.TestCase):
             report = review_dataset(dataset)
             sample = report["samples"][0]
             self.assertEqual(sample["training_target_choice"], "teacher")
-            self.assertTrue(sample["training_ready"])
+            self.assertFalse(sample["training_ready"])
             self.assertEqual(sample["rgb_reference"], "spatial_left")
             self.assertEqual(sample["display_registration"], registration)
             self.assertTrue(any("Display alignment was rejected" in warning and "13.20 px" in warning for warning in sample["warnings"]))

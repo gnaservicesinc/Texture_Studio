@@ -1,5 +1,15 @@
 # IPDE — Image Precision Data Extractor
 
+The 0.9.x series is in development and releases are marked **pre-release** until
+1.0.0. Project, dataset and save formats may change during this period. Preserve
+original sources and backups of important work.
+
+The bundled [interactive help](docs/help/index.html) explains the workflow in
+plain language with diagrams and settings calculators. The professional
+[user manual](docs/manual/index.html) is available as printable HTML and
+[editable Markdown](docs/manual/manual.md). Every app's **Help** menu opens these
+documents offline and provides GitHub, Report Bug and About build information.
+
 IPDE extracts depth images, HDR gain maps, portrait/semantic mattes, Apple
 Spatial Photo stereo views, and other HEIF auxiliary images without
 display-oriented processing. The project has two parts:
@@ -36,9 +46,13 @@ reads those datasets, trains and exports models, and compares a project model wi
 baseline. [Dataset library and import details](docs/dataset-library.md).
 
 New GUI datasets use verified lossless compressed NumPy arrays and deduplicate
-identical arrays. Existing datasets can be compacted into new copies. Extra
-full-display teacher predictions are optional because their full-resolution depth
-and anchor planes can dominate storage. Scientific arrays retain their exact
+identical arrays. Existing datasets can be compacted into new copies. Teachers and
+metric anchors use only the full display RGB photo; full-display and native model
+predictions are retained separately. The experimental stereo-to-display student
+learns directly from full unregistered display targets with native stereo inputs.
+Its query decoder produces the requested display grid without resizing teacher
+labels. Stock RAFT's native-left correspondence and metric products remain a
+separate baseline/experiment. Scientific arrays retain their exact
 dtype and sample bits; display previews are separate temporary visualizations.
 
 Projects can override **File processing threads**; automatic uses available
@@ -486,8 +500,17 @@ Build without launching:
 make build
 ```
 
-The app bundle is `build/IPDE.app`. The Python extractor and package are copied
-into the bundle resources, while the configured Python runtime remains external.
+The source-build application is `build/IPDE Studio.app`, containing the project
+apps, deployed Qt frameworks and bundled documentation. `make package` creates
+the finished `build/dist/IPDE Studio.app` with a shared packaged Python runtime.
+Source builds use the configured developer interpreter when no packaged runtime
+is present. See [release policy](docs/releasing.md) for version/tag
+and distribution details.
+
+On macOS, `make install` installs the finished bundle into `/Applications`.
+Close IPDE Studio and its project apps first. `make DESTDIR=/path/to/staging/dir
+install` stages it under that root's `Applications` directory. Projects and
+datasets should be stored outside the app bundle.
 
 ## Validation
 

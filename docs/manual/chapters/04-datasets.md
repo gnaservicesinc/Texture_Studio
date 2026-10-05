@@ -1,0 +1,33 @@
+# Datasets, teachers and validation splits
+
+## Build and review
+
+Dataset Studio discovers compatible calibrated Spatial Photos, generates one to three teacher targets, records skipped files, and keeps existing arrays separate from previews. A teacher is a local depth model that creates estimated labels. Select a model/checkpoint, its processing size and device. New datasets use the **full display RGB photo** as the teacher reference. The metric-anchor model also uses that display photo. Teachers do not run on stereo-left or stereo-right as a fallback. Both the full display-sized target and the native model prediction are retained with their grid and provenance; they can account for substantial storage.
+
+DepthPro produces an estimated metric scale. Depth Anything V2 and the current DA3 configuration produce relative depth. **Relative teacher scale** can add an explicitly anchored estimated-meter map when meter scale is needed. DepthPro anchoring fits estimates made from the same full display photo; it is not measured camera calibration or proof of true distances. Relative maps remain useful for visual review/effects without that conversion. Inspect anchored results, and do not add an unnecessary second anchor to an already metric teacher. Anchoring does not by itself solve the display/stereo grid difference.
+
+The experimental **stereo-to-display student** uses these full display targets directly. Targets are not resized or registered into stereo-left coordinates; stereo RGB remains at its native dimensions. Each selected label must match its display RGB provenance and exact H×W grid. Positive finite pixels, restricted by any recorded validity mask, contribute to training. Targets retain their stated units: a run must use one convention throughout, either meters, relative depth or relative inverse depth. Separate incompatible teacher-unit runs or choose an explicitly anchored meter-scale target; no silent reciprocal/scale conversion is applied.
+
+Stock RAFT is a separate native-left experiment. Display-to-stereo alignment can vary with scene distance when camera viewpoints differ; a fixed warp does not generally solve that geometry. Native-left teachers, registered display-to-left targets and left-grid measured references are excluded from the display student. An independently measured **display-grid** reference can support supervised display training when its grid/provenance is declared correctly. Older native-left datasets need regenerated full display teachers for this architecture.
+
+In **Photos and depth**, inspect the full display teacher beside its display RGB reference. If reviewing an explicit native-stereo experiment, inspect its left-grid target beside stereo-left RGB and check its stated provenance. Use native pixels, overlays and the lit surface preview. Review large flat surfaces, silhouettes, thin features, repeated textures and reflective areas. Remove a bad teacher target while retaining useful variants, or exclude the entire photo. Removed entries remain restorable. Membership and split changes save in the manifest; source arrays are preserved.
+
+**Add photos** registers new captures and then generates missing targets. **Add from dataset** reuses prepared arrays. **Link dataset** references an existing directory; keep that directory available. **Compact** writes a new verified lossless copy and deduplicates identical arrays. Archive/cleanup is a separate storage action; verify paths and backups before deletion.
+
+## What independence means
+
+Validation tests whether a model works on examples withheld from training. Use different scenes or captures, not alternate teachers of the same photo. Category names such as "rooms" are organizational labels. They do not establish scene independence.
+
+An **independent scenes** declaration records your knowledge of scene groups; it does not verify the photos automatically. Keep related burst/capture/scene components on one side of the split. Known duplicate identities and teacher variants are protected, but unknown related photographs can still leak into validation. A low score on leaked validation data is misleading.
+
+Choose **Global random**, **Equal per dataset**, or **Separate validation datasets** according to the experiment. The seed makes the split repeatable. Percentage applies to independent components, so the number of teacher-entry samples can differ. Training requires eligible training and validation examples. A 0% or 100% split normally cannot provide both.
+
+Training directly from a suitable dataset avoids unnecessary collection preparation. Prepare a collection to combine datasets, change splitting strategy or make a portable reviewed snapshot. Same-filesystem shared storage avoids redundant copies; use an explicit copied output for migration across volumes. Inspect the manifest and keep source hashes/provenance.
+
+## Integrity checking
+
+Full verification checks array content, expected hashes, shapes, calibration and known split overlap. It can be costly on large compressed datasets because arrays must be read and decoded. For supported IPDE-native datasets, training checks metadata and the split at startup, then verifies each RGB, target and mask array's checksum and geometry when that sample is first consumed. Generated native sets and their app-composed, curated, compacted or edited descendants qualify when every retained sample preserves its native stereo and calibration provenance. This avoids rereading the entire payload before the first update, including for supported existing native datasets. Corruption aborts training instead of silently dropping a sample.
+
+External or unknown datasets receive a full scientific-array preflight. Training does not write a trust receipt into an input dataset, and no folder name exempts data from checking. Deferred integrity checks do not prove labels are accurate, independent or appropriate for your task. Review the actual targets. Dataset fingerprints and hashes establish identity and detectable change, not truthful measurements.
+
+External imports require explicit left/right arrays, registered meter-depth, calibration and source/teacher identity mappings. Generic pictures, screen-rendered depth or unanchored relative estimates cannot be substituted for calibrated stereo labels. Optional Hugging Face import requires its dependency to be installed and uses data-only loading. See the [official Datasets loading guide](https://huggingface.co/docs/datasets/loading).

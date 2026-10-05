@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.24)
-project(IPDE VERSION 0.1.0 LANGUAGES CXX)
+if(CMAKE_HOST_APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum supported macOS version" FORCE)
+endif()
+project(IPDE VERSION 0.9.0 LANGUAGES CXX)
+if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "14.0")
+    message(FATAL_ERROR "The bundled PyTorch runtime requires macOS 14.0 or later")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,6 +13,32 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS Widgets Network)
 qt_standard_project_setup()
+
+# Development formats may change until 1.0.0. This same version is used in
+# Python, About windows, native bundle metadata and tag release checks.
+set(IPDE_PRERELEASE 0)
+if(PROJECT_VERSION VERSION_LESS "1.0.0")
+    set(IPDE_PRERELEASE 1)
+endif()
+string(TIMESTAMP IPDE_BUILD_DATE "%Y-%m-%dT%H:%M:%SZ" UTC)
+execute_process(COMMAND git rev-parse --short=12 HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE IPDE_BUILD_REVISION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT IPDE_BUILD_REVISION)
+    set(IPDE_BUILD_REVISION "unknown")
+endif()
+execute_process(COMMAND git diff-index --quiet HEAD -- . ":(exclude)build" ":(exclude)out"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" RESULT_VARIABLE IPDE_SOURCE_DIRTY ERROR_QUIET)
+if(IPDE_SOURCE_DIRTY EQUAL 1)
+    string(APPEND IPDE_BUILD_REVISION "-dirty")
+endif()
+string(TOUPPER "${CMAKE_BUILD_TYPE}" IPDE_BUILD_TYPE_UPPER)
+set(IPDE_BUILD_FLAGS "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${IPDE_BUILD_TYPE_UPPER}}; C++${CMAKE_CXX_STANDARD}; architectures=${CMAKE_OSX_ARCHITECTURES}; deployment=${CMAKE_OSX_DEPLOYMENT_TARGET}; ad-hoc signed; not notarized")
+string(REPLACE "\\" "\\\\" IPDE_BUILD_FLAGS "${IPDE_BUILD_FLAGS}")
+string(REPLACE "\"" "\\\"" IPDE_BUILD_FLAGS "${IPDE_BUILD_FLAGS}")
+configure_file(cmake/ipde_build_info.h.in generated/ipde_build_info.h @ONLY)
+include_directories("${CMAKE_CURRENT_BINARY_DIR}/generated")
+add_compile_definitions(IPDE_DOCS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/docs")
 
 set(IPDE_PYTHON_EXECUTABLE
     "/Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14"
@@ -178,13 +210,20 @@ if(APPLE)
     set(studio_apps "$<TARGET_BUNDLE_DIR:ipde_studio>/Contents/Applications")
     add_custom_target(ipde_studio_bundle ALL
         COMMAND ${CMAKE_COMMAND} -E make_directory "${studio_apps}"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:ipde_gui>" "${studio_apps}/IPDE.app"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:raft_studio>" "${studio_apps}/RAFT Studio.app"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:dataset_studio>" "${studio_apps}/Dataset Studio.app"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:photo_studio>" "${studio_apps}/Photo Studio.app"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:raw_studio>" "${studio_apps}/Raw Studio.app"
+        COMMAND ${CMAKE_COMMAND} -E remove_directory "${studio_apps}/IPDE.app"
+        COMMAND /usr/bin/ditto "$<TARGET_BUNDLE_DIR:ipde_gui>" "${studio_apps}/IPDE.app"
+        COMMAND ${CMAKE_COMMAND} -E remove_directory "${studio_apps}/RAFT Studio.app"
+        COMMAND /usr/bin/ditto "$<TARGET_BUNDLE_DIR:raft_studio>" "${studio_apps}/RAFT Studio.app"
+        COMMAND ${CMAKE_COMMAND} -E remove_directory "${studio_apps}/Dataset Studio.app"
+        COMMAND /usr/bin/ditto "$<TARGET_BUNDLE_DIR:dataset_studio>" "${studio_apps}/Dataset Studio.app"
+        COMMAND ${CMAKE_COMMAND} -E remove_directory "${studio_apps}/Photo Studio.app"
+        COMMAND /usr/bin/ditto "$<TARGET_BUNDLE_DIR:photo_studio>" "${studio_apps}/Photo Studio.app"
+        COMMAND ${CMAKE_COMMAND} -E remove_directory "${studio_apps}/Raw Studio.app"
+        COMMAND /usr/bin/ditto "$<TARGET_BUNDLE_DIR:raw_studio>" "${studio_apps}/Raw Studio.app"
         DEPENDS ipde_studio ipde_gui raft_studio dataset_studio photo_studio raw_studio
-        COMMENT "Packing IPDE subapps into IPDE Studio"
+        COMMAND "${IPDE_PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos.py"
+            "$<TARGET_BUNDLE_DIR:ipde_studio>"
+        COMMENT "Packing IPDE subapps into IPDE Studio and auditing portable Qt dependencies"
     )
 endif()
 
@@ -236,8 +275,14 @@ if(APPLE)
     endforeach()
 
     set(media_bridge "${CMAKE_CURRENT_BINARY_DIR}/media-bridge")
+    if(CMAKE_OSX_ARCHITECTURES)
+        list(GET CMAKE_OSX_ARCHITECTURES 0 IPDE_SWIFT_ARCH)
+    else()
+        set(IPDE_SWIFT_ARCH "${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
     add_custom_command(OUTPUT "${media_bridge}"
         COMMAND xcrun swiftc "${CMAKE_CURRENT_SOURCE_DIR}/native/media_bridge.swift" -o "${media_bridge}"
+            -target "${IPDE_SWIFT_ARCH}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
             -framework Foundation -framework ImageIO -framework Vision -framework CoreImage -framework CoreGraphics
         DEPENDS native/media_bridge.swift COMMENT "Compiling native HEIC and RAW support")
     add_custom_target(ipde_media_bridge DEPENDS "${media_bridge}")
@@ -260,7 +305,7 @@ if(BUILD_TESTING)
     add_test(NAME project_session_lifetime COMMAND project_session_regression)
     set_tests_properties(project_session_lifetime PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-    foreach(regression IN ITEMS window_layout_regression studio_preview_regression trainer_workflow_regression dataset_management_regression studio_routing_regression)
+    foreach(regression IN ITEMS window_layout_regression studio_preview_regression trainer_workflow_regression dataset_management_regression studio_routing_regression help_server_regression)
         qt_add_executable(${regression} "${CMAKE_CURRENT_SOURCE_DIR}/verification/${regression}.cpp")
         target_include_directories(${regression} PRIVATE src/gui)
         target_link_libraries(${regression} PRIVATE Qt6::Widgets Qt6::Network)
@@ -287,4 +332,50 @@ if(APPLE)
         COMMENT "Embedding the separate RAFT Studio workflow"
     )
     endforeach()
+endif()
+
+
+# Every native app carries the Qt libraries/plugins it uses, so replacing the
+# development Qt installation cannot prevent an existing bundle from opening.
+if(APPLE)
+    if(TARGET Qt6::macdeployqt)
+        set(IPDE_MACDEPLOYQT "$<TARGET_FILE:Qt6::macdeployqt>")
+    else()
+        find_program(IPDE_MACDEPLOYQT NAMES macdeployqt
+            HINTS "${Qt6_DIR}/../../../bin" REQUIRED)
+    endif()
+    # Qt's deployer selects Cocoa for macOS. Keep offscreen as well for the
+    # suite's noninteractive startup checks, previews and release validation.
+    find_file(IPDE_QT_OFFSCREEN NAMES libqoffscreen.dylib
+        HINTS "${Qt6_DIR}/../../../plugins/platforms" REQUIRED)
+    file(GLOB_RECURSE IPDE_DOCUMENTATION CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/docs/*")
+    file(GLOB IPDE_BACKEND_MODULES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/*.py")
+    foreach(app_target IN ITEMS ipde_gui raft_studio dataset_studio ipde_studio photo_studio raw_studio)
+        set_target_properties(${app_target} PROPERTIES
+            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/cmake/Info.plist.in")
+        target_sources(${app_target} PRIVATE src/gui/python_runtime.h)
+        set_property(TARGET ${app_target} APPEND PROPERTY LINK_DEPENDS "${IPDE_DOCUMENTATION}" "${IPDE_BACKEND_MODULES}")
+        add_custom_command(TARGET ${app_target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E remove_directory "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/Resources/src/ipde"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/Resources/src/ipde"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${IPDE_BACKEND_MODULES}
+                "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/Resources/src/ipde"
+            COMMAND ${CMAKE_COMMAND} -E remove_directory "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/Resources/docs"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/docs"
+                "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/Resources/docs"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+                "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/Resources/LICENSE"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/PlugIns/platforms"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${IPDE_QT_OFFSCREEN}"
+                "$<TARGET_BUNDLE_DIR:${app_target}>/Contents/PlugIns/platforms/libqoffscreen.dylib"
+            COMMAND "${IPDE_MACDEPLOYQT}" "$<TARGET_BUNDLE_DIR:${app_target}>"
+                -always-overwrite -no-strip -no-codesign -verbose=0
+            COMMENT "Bundling documentation and Qt dependencies in ${app_target}")
+    endforeach()
+    add_custom_target(distribution
+        COMMAND "${IPDE_PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bundle_macos.py"
+            "$<TARGET_BUNDLE_DIR:ipde_studio>"
+            --output "${CMAKE_CURRENT_BINARY_DIR}/dist/IPDE Studio.app" --bundle-python
+        DEPENDS ipde_studio_bundle
+        COMMENT "Creating the standalone IPDE Studio suite with its shared Python runtime")
 endif()

@@ -39,9 +39,15 @@ LABEL_TITLES = {
     "reference": "Supplied measured reference",
 }
 PREVIEW_LABELS = tuple(LABEL_TITLES)
-_TRAINING_LABELS = {"teacher", "anchored_teacher", "registered_display_teacher", "reference"}
+_TRAINING_LABELS = {"teacher", "anchored_teacher", "registered_display_teacher", "reference", "display_teacher", "anchored_display_teacher"}
 _DEPTH_UNITS = {"meters", "relative_depth", "relative_inverse_depth"}
 _ARRAY_FIELDS = {"path", "shape", "dtype", "array_sha256", "file_sha256"}
+
+
+def _label_title(key: str, label: dict[str, Any]) -> str:
+    if key == "teacher" and str(label.get("coordinate_reference", "")).startswith("display"):
+        return LABEL_TITLES["display_teacher"]
+    return LABEL_TITLES[key]
 
 
 def _array_records(value: Any) -> Iterator[dict[str, Any]]:
@@ -185,11 +191,12 @@ def review_dataset(directory: Path | str) -> dict[str, Any]:
     root, manifest, digest = _read_manifest_snapshot(directory, validate_files=False)
     from .dataset_edit import review_split_components
     from .training import training_target_eligibility
+    from .display_training import _display_exclusion, display_target_eligibility
     management_groups = review_split_components(root, manifest)
     samples = []
     for sample in manifest["samples"]:
         chosen, training_label = _label(sample, "training")
-        labels = [{"key": "training", "title": f"Selected training target: {LABEL_TITLES[chosen]}", "units": training_label["units"]}]
+        labels = [{"key": "training", "title": f"Selected training target: {_label_title(chosen, training_label)}", "units": training_label["units"]}]
         # The training choice is an alias, not another prediction. Identical
         # target/mask records do not deserve indistinguishable menu entries.
         seen = {(training_label["target"]["array_sha256"], json.dumps(training_label.get("valid_mask"), sort_keys=True), training_label["units"])}
@@ -201,10 +208,10 @@ def review_dataset(directory: Path | str) -> dict[str, Any]:
             if signature in seen:
                 continue
             seen.add(signature)
-            labels.append({"key": key, "title": title, "units": record["units"]})
+            labels.append({"key": key, "title": _label_title(key, record), "units": record["units"]})
         warnings = []
         if training_label["units"] != "meters":
-            warnings.append("This relative target cannot train metric RAFT flow. Use a metric teacher or an accepted meter-scale anchor.")
+            warnings.append("This target keeps its relative units; a display student trained on it cannot claim meter depth. Metric RAFT flow needs a separately accepted meter scale.")
         calibration = sample.get("pseudo_calibration")
         if isinstance(calibration, dict) and not calibration.get("accepted"):
             warnings.append(f"Meter-scale anchor was rejected: {calibration.get('reason', 'fit was not accepted')}")
@@ -215,7 +222,10 @@ def review_dataset(directory: Path | str) -> dict[str, Any]:
         display_registration = _registration_summary(sample)
         if display_registration is not None and not display_registration.get("accepted"):
             warnings.append(f"Display alignment was rejected: {display_registration.get('reason', 'registration was not accepted')}. "
-                            "The display image stays on its separate grid; direct stereo-left labels remain aligned to the training image.")
+                            "The display image stays on its separate grid.")
+        rejection = _display_exclusion(sample, "mixed")
+        if rejection is not None:
+            warnings.append(rejection["reason"])
         if not sample.get("calibration", {}).get("raft_stereo_ready"):
             warnings.append("Stereo calibration is not ready for RAFT training.")
         samples.append({
@@ -227,16 +237,19 @@ def review_dataset(directory: Path | str) -> dict[str, Any]:
             "source_id": sample.get("source_id", sample.get("source_sha256", sample["source_path"])),
             "teacher_id": sample.get("teacher_id", sample.get("teacher_model", sample.get("teacher", {}).get("metadata", {}).get("model_id", "Teacher"))),
             "photo_metadata": sample.get("photo_metadata", {}),
-            "rgb_reference": "spatial_left", "display_registration": display_registration,
-            "training_ready": training_label["units"] == "meters" and bool(sample.get("calibration", {}).get("raft_stereo_ready"))
-                and (chosen != "registered_display_teacher" or training_label.get("reference_role") == "left"),
+            "rgb_reference": "display" if str(training_label.get("coordinate_reference", "")).startswith("display") else "spatial_left", "display_registration": display_registration,
+            "training_ready": rejection is None and bool(sample.get("calibration", {}).get("raft_stereo_ready")),
         })
     return {"dataset_path": str(root), "samples": samples, "summary": _summary(manifest["samples"]), "warnings": _warnings(manifest),
+            "max_native_stereo_pixels": max((math.prod(sample["rgb"]["shape"][:2]) for sample in manifest["samples"]), default=0),
             "excluded_samples": sum(sample.get("excluded", False) for sample in manifest["samples"]),
             "manifest_sha256": digest, "edit_revision": manifest.get("edit_revision", 0),
             "pending_photos": manifest.get("pending_photos", []),
             "validation_fraction": manifest.get("validation_fraction"),
-            "training_eligibility": training_target_eligibility(manifest),
+            "training_eligibility": display_target_eligibility(manifest),
+            "raft_training_eligibility": training_target_eligibility(manifest),
+            "training_eligibility_by_mode": {mode: display_target_eligibility(manifest, mode) for mode in ("auto", "distillation", "supervised", "mixed")},
+            "raft_training_eligibility_by_mode": {mode: training_target_eligibility(manifest, mode) for mode in ("auto", "distillation", "supervised", "mixed")},
             "generation_state": manifest.get("generation_state", "complete"), "splits_provisional": bool(manifest.get("splits_provisional", False))}
 
 
@@ -285,7 +298,7 @@ def preview_sample(
     if sample is None:
         raise DatasetError(f"Unknown dataset sample ID: {sample_id}")
     resolved, target = _label(sample, label)
-    rgb_key = "display_rgb" if resolved in {"display_teacher", "anchored_display_teacher", "display_metric_anchor"} else "right_rgb" if resolved == "registered_display_teacher" and target.get("reference_role") == "right" else "rgb"
+    rgb_key = "display_rgb" if resolved in {"display_teacher", "anchored_display_teacher", "display_metric_anchor"} or str(target.get("coordinate_reference", "")).startswith("display") else "right_rgb" if resolved == "registered_display_teacher" and target.get("reference_role") == "right" else "rgb"
     if rgb_key not in sample:
         raise DatasetError(f"Sample {sample_id} has no RGB image for {resolved}")
     depth = _verified_array(root, target["target"])
@@ -333,7 +346,7 @@ def preview_sample(
         raise
     return {
         "sample_id": sample_id, "label": label, "resolved_label": resolved,
-        "label_title": f"Selected training target: {LABEL_TITLES[resolved]}" if label == "training" else LABEL_TITLES[resolved],
+        "label_title": f"Selected training target: {_label_title(resolved, target)}" if label == "training" else _label_title(resolved, target),
         "units": target["units"], "rgb_preview_path": str(rgb_path), "depth_preview_path": str(depth_path),
         "width": width, "height": height, "preview_width": preview_width, "preview_height": preview_height,
         "valid_fraction": float(valid.mean()), "min": minimum, "max": maximum,

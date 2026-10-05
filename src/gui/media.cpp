@@ -1,6 +1,8 @@
 #include "project_session.h"
 #include "studio_icons.h"
 #include "window_layout.h"
+#include "help_support.h"
+#include "python_runtime.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
@@ -81,6 +83,7 @@ class MediaWindow final : public QMainWindow {
 public:
     MediaWindow() {
         setWindowTitle(appName()); setWindowIcon(IPDE::appIcon(role())); setAcceptDrops(true);
+        IPDE::installHelpMenu(this, appName(), role());
         previews_ = std::make_unique<QTemporaryDir>();
         auto *central = new QWidget(this); auto *layout = new QVBoxLayout(central); layout->setContentsMargins(24, 20, 24, 20); layout->setSpacing(12);
         auto *heading = new QHBoxLayout;
@@ -227,7 +230,7 @@ private:
     }
     void run(QStringList args, const QString &job) {
         if (busy_) return; busy_ = true; cancelled_ = false; job_ = job; stdout_.clear(); stderr_.clear();
-        process_->setProgram(QString::fromUtf8(IPDE_PYTHON_EXECUTABLE)); process_->setArguments(QStringList{scriptPath()} + args);
+        process_->setProgram(IPDE::pythonExecutable()); process_->setArguments(QStringList{scriptPath()} + args);
         auto env = QProcessEnvironment::systemEnvironment(); const QString helper = QDir(QCoreApplication::applicationDirPath()).filePath("../Resources/media-bridge"); if (QFileInfo::exists(helper)) env.insert("IPDE_MEDIA_BRIDGE", QDir::cleanPath(helper)); process_->setProcessEnvironment(env);
         updateEnabled(); statusBar()->showMessage(job + "…"); process_->start();
     }

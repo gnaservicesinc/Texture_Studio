@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager, redirect_stdout
 import json
 import sys
@@ -32,11 +33,13 @@ def _model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model-path", type=Path)
     parser.add_argument("--source-dir", type=Path)
     parser.add_argument("--device", choices=("auto", "mps", "cpu", "cuda"), default="auto")
-    parser.add_argument("--input-size", type=int, default=1036)
+    parser.add_argument("--input-size", type=int, default=0, help="0 requests native display dimensions; DepthPro retains its fixed internal grid")
 
 
 def _parser() -> argparse.ArgumentParser:
+    from . import __version__
     parser = argparse.ArgumentParser(prog="raft-studio", description="Manage local teacher datasets and distill RAFT models for IPDE.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--json", action="store_true", help="one structured JSON response; logs go to stderr")
     commands = parser.add_subparsers(dest="command", required=True)
     workspace = commands.add_parser("workspace", help="list datasets and training runs")
@@ -118,7 +121,9 @@ def _parser() -> argparse.ArgumentParser:
     dataset.add_argument("--name", default="")
     dataset.add_argument("--category", default="")
     dataset.add_argument("--teachers-json", type=Path, help="array of 1-3 model configs; each produces a separately reviewed entry")
-    dataset.add_argument("--include-display-teacher", action="store_true", help="also infer the separate display-camera grid (large storage cost)")
+    dataset.add_argument("--teacher-view", choices=("display", "stereo-left"), default="display",
+                         help="teacher input is the full display photo by default; stereo-left is an explicit legacy experiment")
+    dataset.add_argument("--include-display-teacher", action="store_true", help="also retain display teachers in explicit stereo-left experiments; display mode always retains them")
     dataset.add_argument("--uncompressed", action="store_true", help="store NPY instead of lossless NPZ")
     dataset.add_argument("--validation-fraction", type=float, default=.2)
     dataset.add_argument("--seed", type=int, default=0)
@@ -132,22 +137,42 @@ def _parser() -> argparse.ArgumentParser:
     teacher.add_argument("--select", action="append", help="learned-depth/native/preview or learned-display-depth/native/preview")
     teacher.add_argument("--overwrite", action="store_true")
     _model_arguments(teacher)
-    train = commands.add_parser("train", help="fine-tune a real RAFT checkpoint on teacher-generated flow targets")
+    train = commands.add_parser("train", help="train the experimental display-depth student or explicit stock RAFT")
     train.add_argument("dataset", type=Path)
+    train.add_argument("--student", choices=("display", "raft"), default="display",
+                       help="display predicts directly on the full display grid; raft uses legacy native-left flow labels")
     train.add_argument("--mode", choices=("auto", "distillation", "supervised", "mixed"), default="distillation")
     train.add_argument("--checkpoint", required=True, type=Path)
     train.add_argument("--raft-root", type=Path)
     train.add_argument("--raft-model", type=Path)
     train.add_argument("--raft-model-member")
     train.add_argument("--epochs", type=int, default=10)
-    train.add_argument("--steps", type=int, default=16)
-    train.add_argument("--patch-size", type=int, default=256)
-    train.add_argument("--iterations", type=int, default=4)
+    train.add_argument("--steps", type=int, help=argparse.SUPPRESS)
+    train.add_argument("--limit-mode", choices=("epochs", "steps"), default="epochs")
+    train.add_argument("--total-steps", type=int, default=1000, help="exact optimizer-update limit in steps mode")
+    train.add_argument("--steps-per-update", type=int, default=1, help="native image/crop gradients accumulated per optimizer update")
+    train.add_argument("--patch-size", type=int, default=512)
+    train.add_argument("--iterations", type=int, default=12)
     train.add_argument("--scope", choices=("update", "full"), default="update")
     train.add_argument("--device", choices=("auto", "mps", "cpu", "cuda"), default="auto")
     train.add_argument("--photometric-support", action="store_true")
+    train.add_argument("--require-display-teacher", action="store_true",
+                       help="distillation must use registered labels from the display photo; measured references remain eligible")
+    train.add_argument("--learning-rate", type=float, default=1e-5)
+    train.add_argument("--seed", type=int, default=0)
+    train.add_argument("--validation-schedule", choices=("epoch", "checkpoint"), default="epoch")
+    train.add_argument("--validation-samples", type=int, default=0, help="random held-out images per validation; 0 uses all")
+    train.add_argument("--checkpoint-schedule", choices=("epoch", "epochs", "steps", "end"), default="epoch")
+    train.add_argument("--checkpoint-every", type=int, default=1)
+    train.add_argument("--early-stop-error", type=float, help="full-set error cutoff: fractional depth error for display student, pixel flow MAE for stock RAFT")
+    train.add_argument("--max-loss", type=float, default=1000.0)
+    train.add_argument("--cache-samples", type=int, default=4)
+    train.add_argument("--prefetch-samples", type=int, default=2)
+    train.add_argument("--control-file", type=Path, help="JSON save/stop commands with unique request_id values")
+    train.add_argument("--resume", type=Path, help="resume an IPDE checkpoint into a new output checkpoint path")
     export = commands.add_parser("export", help="verify and export a RAFT checkpoint ready to select in IPDE")
     export.add_argument("checkpoint", type=Path)
+    export.add_argument("--raft-root", type=Path, help="compatible RAFT-Stereo source folder used for architecture verification")
     export.add_argument("--output", required=True, type=Path, help="new export directory for raft-model.pth and provenance")
     archive = commands.add_parser("archive-dataset", help="move an owned dataset out of the library without deleting files")
     archive.add_argument("dataset", type=Path)
@@ -166,6 +191,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def workspace_report(workspace: Path, linked_datasets: Sequence[Path] = ()) -> dict:
     from .training import training_target_eligibility
+    from .display_training import display_target_eligibility
     root = workspace.expanduser().resolve()
     if root.exists() and not root.is_dir():
         raise ValueError("workspace path is not a directory")
@@ -212,7 +238,12 @@ def workspace_report(workspace: Path, linked_datasets: Sequence[Path] = ()) -> d
                 "category": data.get("category", ""), "generation_state": data.get("generation_state", "complete"),
                 "storage_bytes": stored_bytes + path.stat().st_size if storage_known else None,
                 "storage_bytes_known": storage_known,
-                "storage": storage, "training_eligibility": training_target_eligibility(data),
+                "max_native_stereo_pixels": max((int(shape[0]) * int(shape[1]) for sample in samples
+                    if isinstance(shape := sample.get("rgb", {}).get("shape"), list) and len(shape) >= 2), default=0),
+                "storage": storage, "training_eligibility": display_target_eligibility(data),
+                "raft_training_eligibility": training_target_eligibility(data),
+                "training_eligibility_by_mode": {mode: display_target_eligibility(data, mode) for mode in ("auto", "distillation", "supervised", "mixed")},
+                "raft_training_eligibility_by_mode": {mode: training_target_eligibility(data, mode) for mode in ("auto", "distillation", "supervised", "mixed")},
                 "teacher": ", ".join(sorted({s.get("teacher", {}).get("metadata", {}).get("model_id", "") for s in samples} - {""})),
                 "train_count": sum(s.get("split") == "train" for s in samples),
                 "validation_count": sum(s.get("split") == "validation" for s in samples)})
@@ -275,11 +306,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for path in sorted({path.expanduser().resolve() for path in inputs}):
                     locks.enter_context(resource_lock(path, shared=True))
             if args.command == "train":
-                locks.enter_context(resource_lock(args.checkpoint.expanduser().resolve().parent))
+                run = args.checkpoint.expanduser().resolve().parent
+                # Readers can export an atomically published immutable
+                # checkpoint while its trainer continues. Cleanup still needs
+                # an exclusive run-folder lock, and a distinct owner lock
+                # prevents two trainers writing into this same run.
+                locks.enter_context(resource_lock(run, shared=True))
+                locks.enter_context(resource_lock(run / ".ipde-training-owner"))
             if args.command in {"dataset", "compose-datasets", "compact-dataset", "curate-dataset", "edit-dataset", "import-hf"}:
                 locks.enter_context(resource_lock(args.output_dir))
             if args.command == "export":
                 locks.enter_context(resource_lock(args.checkpoint.expanduser().resolve().parent, shared=True))
+                locks.enter_context(resource_lock(args.output))
             if args.command == "workspace":
                 report = workspace_report(args.workspace, args.linked_dataset)
             elif args.command == "inspect-dataset":
@@ -335,7 +373,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 teacher_configs, teacher_ids = _teacher_configs(args)
                 report = build_dataset(args.sources, args.output_dir,
                     DatasetOptions(teacher=teacher_configs[0], additional_teachers=tuple(teacher_configs[1:]), teacher_ids=tuple(teacher_ids),
-                        group_ids=groups, include_display_teacher=args.include_display_teacher, grouping_semantics=args.grouping,
+                        group_ids=groups, teacher_view=args.teacher_view,
+                        include_display_teacher=args.teacher_view == "display" or args.include_display_teacher, grouping_semantics=args.grouping,
                         name=args.name, category=args.category, compress_arrays=not args.uncompressed, require_apple_camera=True,
                         validation_fraction=args.validation_fraction, split_seed=args.seed, workers=args.workers,
                         metric_anchor=LearnedDepthConfig(model="depthpro", model_path=args.anchor_model_path,
@@ -343,8 +382,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 report = {"dataset_path": str(args.output_dir.expanduser().resolve()), **report}
             elif args.command == "teacher":
                 from .extractor import ExtractOptions, extract_file
-                selections = tuple(args.select or ("learned-depth", "learned-native", "learned-preview",
-                    "learned-display-depth", "learned-display-native", "learned-display-preview"))
+                selections = tuple(args.select or ("learned-display-depth", "learned-display-native", "learned-display-preview"))
                 if any(not product.startswith("learned-") for product in selections):
                     raise ValueError("teacher exports accept learned-* products; use IPDE for embedded/stereo products")
                 report = {"sources": [extract_file(source, ExtractOptions(
@@ -355,11 +393,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )) for source in args.sources]}
             elif args.command == "train":
                 from .training import TrainingOptions, train_dataset
+                if args.student == "display":
+                    from .display_training import train_display_dataset
+                    train_dataset = train_display_dataset
                 report = train_dataset(args.dataset, args.checkpoint, TrainingOptions(
                     epochs=args.epochs, steps_per_epoch=args.steps, patch_size=args.patch_size, mode=args.mode,
+                    limit_mode=args.limit_mode, total_steps=args.total_steps, steps_per_update=args.steps_per_update,
                     iterations=args.iterations, train_scope=args.scope, device=args.device,
                     raft_root=args.raft_root, raft_model=args.raft_model, raft_model_member=args.raft_model_member,
-                    require_photometric_support=args.photometric_support, workers=args.workers,
+                    require_photometric_support=args.photometric_support, require_display_teacher=args.require_display_teacher, workers=args.workers,
+                    learning_rate=args.learning_rate, seed=args.seed, validation_schedule=args.validation_schedule,
+                    validation_samples=args.validation_samples, checkpoint_schedule=args.checkpoint_schedule,
+                    checkpoint_every=args.checkpoint_every, early_stop_error=args.early_stop_error, max_loss=args.max_loss,
+                    cache_samples=args.cache_samples, prefetch_samples=args.prefetch_samples,
+                    control_file=args.control_file, resume_from=args.resume,
                 ), progress_callback=_progress)
             elif args.command == "cleanup-dataset":
                 from .workspace_cleanup import cleanup_dataset
@@ -372,7 +419,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 report = cleanup_run(args.checkpoint, args.workspace, confirm=args.confirm)
             else:
                 from .training import export_raft_checkpoint
-                report = export_raft_checkpoint(args.checkpoint, args.output)
+                import torch
+                payload = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+                display_student = isinstance(payload, Mapping) and payload.get("schema") == "ipde-display-depth-v1"
+                del payload
+                if display_student:
+                    from .display_training import export_display_checkpoint
+                    export_raft_checkpoint = export_display_checkpoint
+                report = export_raft_checkpoint(args.checkpoint, args.output, raft_root=args.raft_root)
         print(json.dumps(report, sort_keys=True, ensure_ascii=False, allow_nan=False, indent=None if args.json else 2))
         return 0
     except (RuntimeError, ValueError, OSError, KeyError) as exc:

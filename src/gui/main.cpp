@@ -1,6 +1,8 @@
 #include "project_session.h"
 #include "studio_icons.h"
 #include "window_layout.h"
+#include "help_support.h"
+#include "python_runtime.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -9,6 +11,7 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
+#include <QFile>
 #include <QFileInfo>
 #include <QFont>
 #include <QHBoxLayout>
@@ -72,18 +75,14 @@ QString bundledScriptPath() {
 }
 
 QString configuredPython() {
-    const QString value = QString::fromUtf8(IPDE_PYTHON_EXECUTABLE);
-    if (QFileInfo::exists(value)) {
-        return value;
-    }
-    const QString found = QStandardPaths::findExecutable(QStringLiteral("python3"));
-    return found.isEmpty() ? value : found;
+    return IPDE::pythonExecutable();
 }
 
 class MainWindow final : public QMainWindow {
 public:
     MainWindow() {
         setWindowTitle(QStringLiteral("IPDE — Precision HEIF Auxiliary Extractor"));
+        IPDE::installHelpMenu(this, "IPDE Extractor", "extractor");
         setAcceptDrops(true);
 
         auto *central = new QWidget(this);
@@ -229,6 +228,7 @@ public:
             return edit;
         };
         raftModel_ = addPathRow(QStringLiteral("RAFT model:"), QStringLiteral("raft/model"), false);
+        connect(raftModel_, &QLineEdit::editingFinished, this, [this] { if (!running_) applyGoal(); });
         raftRoot_ = addPathRow(QStringLiteral("RAFT source folder:"), QStringLiteral("raft/root"), true);
         auto *memberRow = new QHBoxLayout;
         memberRow->addWidget(new QLabel(QStringLiteral("Model inside ZIP:"), central));
@@ -418,8 +418,8 @@ private:
     void applyGoal() {
         const QString goal = goal_->currentData().toString();
         advancedToggle_->setChecked(goal == "manual"); advanced_->setVisible(advancedToggle_->isChecked());
-        if (goal == "effect/map") goalHint_->setText("Suggested output: RAFT displacement. This estimates detailed stereo geometry; compare models before adopting a project model.");
-        else if (goal == "depth-estimation") goalHint_->setText("Suggested output: calibrated RAFT meter depth plus its support mask. Unknown or unsupported values need review.");
+        if (goal == "effect/map") goalHint_->setText(displayStudentSelected() ? "Suggested output: experimental student display height map. Native stereo inputs predict the display grid directly; compare with the display teacher on unseen scenes." : "Suggested output: stock RAFT displacement on the left stereo grid. Select a trained display-model.pth for direct display-grid height maps.");
+        else if (goal == "depth-estimation") goalHint_->setText(displayStudentSelected() ? "Suggested output: experimental student display depth. Units follow its training labels; relative outputs are not meter distances." : "Suggested output: calibrated RAFT meter depth plus its support mask. Unknown or unsupported values need review.");
         else if (goal == "photo-effects") goalHint_->setText("Suggested outputs: embedded Apple depth and mattes from portrait photos. Original depth values are preserved.");
         else goalHint_->setText("Choose individual products and override any inference settings.");
         if (goal != "manual" && !running_) {
@@ -432,10 +432,18 @@ private:
     }
     bool suggestedProduct(const QString &id, const QString &kind) const {
         const QString goal = goal_->currentData().toString();
-        if (goal == "effect/map") return id == "raft-displacement";
-        if (goal == "depth-estimation") return id == "raft-depth" || id == "raft-support";
+        if (goal == "effect/map") return id == (displayStudentSelected() ? "student-display-displacement" : "raft-displacement");
+        if (goal == "depth-estimation") return displayStudentSelected() ? id == "student-display-depth" : id == "raft-depth" || id == "raft-support";
         if (goal == "photo-effects") return id.startsWith("raw:") && (kind.contains("depth") || kind.contains("matte"));
         return false;
+    }
+    bool displayStudentSelected() const {
+        if (!raftModel_) return false;
+        const QString path = raftModel_->text().trimmed();
+        if (QFileInfo(path).fileName() == "display-model.pth") return true;
+        QFile file(path + ".json");
+        if (!file.open(QIODevice::ReadOnly)) return false;
+        return QJsonDocument::fromJson(file.readAll()).object().value("schema").toString() == "ipde-display-training-report-v1";
     }
     void addFiles(const QStringList &paths) {
         if (running_) return;

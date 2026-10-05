@@ -285,6 +285,9 @@ class TrainingProgressTests(unittest.TestCase):
 
             class MissEveryRandomCrop:
                 calls = 0
+                bit_generator = np.random.default_rng(99).bit_generator
+                def permutation(self, values):
+                    return np.array(values)
                 def integers(self, _maximum):
                     self.calls += 1
                     return 0
@@ -297,7 +300,7 @@ class TrainingProgressTests(unittest.TestCase):
                  patch("ipde.training.np.random.default_rng", side_effect=random_factory), redirect_stderr(io.StringIO()):
                 report = train_dataset(dataset, root / "sparse.pth", TrainingOptions(
                     epochs=1, steps_per_epoch=1, patch_size=64, iterations=1, device="cpu", seed=99))
-            self.assertEqual(misses.calls, 1 + 2 * 128)
+            self.assertEqual(misses.calls, 2 * 128)
             self.assertEqual((report["total_steps"], report["fallback_training_crops"], report["excluded_count"]), (1, 1, 0))
             self.assertEqual(report["train_sample_ids"], ["sample-0"])
             self.assertTrue((root / "sparse.pth").is_file())
@@ -324,7 +327,7 @@ class TrainingProgressTests(unittest.TestCase):
         fixture, modules = _fake_raft_modules(torch)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            dataset = _dataset(root)
+            dataset = _dataset(root, count=4)
             original_data = {path: path.read_bytes() for path in dataset.iterdir()}
             original = root / "original.pth"
             torch.save(fixture(None).state_dict(), original)
@@ -349,11 +352,12 @@ class TrainingProgressTests(unittest.TestCase):
             self.assertIn("Epoch 1/2: loss", logs.getvalue())
             self.assertIn("Epoch 2/2: loss", logs.getvalue())
             self.assertTrue(all(event["phase"] == "training_progress" for event in events))
-            self.assertTrue(all(event["total_steps"] == 4 for event in events))
+            self.assertTrue(all(event["total_steps"] == 4 for event in events if event["stage"] not in
+                {"checking_dataset", "filtering_targets", "preparing_targets"}))
             json.dumps(events, allow_nan=False)
             stages = list(dict.fromkeys(event["stage"] for event in events))
             self.assertEqual(stages, ["checking_dataset", "filtering_targets", "preparing_targets", "model_setup",
-                "baseline_validation", "epoch_step", "epoch_validation", "final_validation", "writing_checkpoint", "completed"])
+                "baseline_validation", "epoch_step", "epoch_validation", "writing_checkpoint", "checkpoint_saved", "completed"])
             started = [event for event in events if event["stage"] == "epoch_step" and event["status"] == "started"]
             finished = [event for event in events if event["stage"] == "epoch_step" and event["status"] == "finished"]
             self.assertEqual([(event["epoch"], event["step"], event["completed_steps"]) for event in started],
@@ -361,11 +365,11 @@ class TrainingProgressTests(unittest.TestCase):
             self.assertEqual([event["completed_steps"] for event in finished], [1, 2, 3, 4])
             self.assertTrue(all(np.isfinite(event["loss"]) for event in finished))
             prepared = [event for event in events if event["stage"] == "preparing_targets"]
-            self.assertEqual((prepared[0]["processed"], prepared[-1]["processed"], prepared[-1]["total"]), (0, 2, 2))
+            self.assertEqual((prepared[0]["processed"], prepared[-1]["processed"], prepared[-1]["total"]), (0, 4, 4))
             validations = [event for event in events if event["stage"] in {"baseline_validation", "epoch_validation", "final_validation"}
                 and event["status"] == "finished"]
-            self.assertEqual(len(validations), 4)
-            self.assertTrue(all(event["evaluated_patches"] == 3 for event in validations))
+            self.assertEqual(len(validations), 3)
+            self.assertTrue(all(event["evaluated_patches"] == 6 for event in validations))
             self.assertEqual(events[-1]["completed_steps"], 4)
             self.assertEqual(events[-1]["checkpoint_path"], str((root / "progress.pth").resolve()))
             self.assertTrue((root / "progress.pth.json").is_file())
@@ -383,15 +387,18 @@ class TrainingProgressTests(unittest.TestCase):
                  patch("ipde.training.resolve_raft_resources", return_value=(root, original, None)), \
                  patch("ipde.training.sequence_loss", return_value=torch.tensor(float("nan"))), \
                  redirect_stderr(io.StringIO()):
-                with self.assertRaisesRegex(TrainingError, "loss became nonfinite"):
-                    train_dataset(dataset, root / "failed.pth", TrainingOptions(
-                        epochs=1, steps_per_epoch=1, patch_size=64, iterations=1, device="cpu"),
-                        progress_callback=events.append)
-            self.assertEqual(events[-1]["stage"], "epoch_step")
-            self.assertEqual(events[-1]["status"], "started")
+                report = train_dataset(dataset, root / "failed.pth", TrainingOptions(
+                    epochs=1, steps_per_epoch=1, patch_size=64, iterations=1, device="cpu"),
+                    progress_callback=events.append)
+            self.assertEqual(events[-1]["stage"], "completed")
+            self.assertEqual(events[-1]["status"], "finished")
             self.assertTrue(all(event["completed_steps"] == 0 for event in events))
-            self.assertFalse((root / "failed.pth").exists())
-            self.assertFalse((root / "failed.pth.json").exists())
+            self.assertEqual(report["stop_reason"], "nonfinite_loss")
+            saved = torch.load(root / "failed.pth", weights_only=True)
+            self.assertEqual(saved["ipde_resume"]["completed_steps"], 0)
+            for value in saved["state_dict"].values():
+                self.assertTrue(bool(torch.isfinite(value).all()))
+            self.assertTrue((root / "failed.pth.json").exists())
 
     def test_checking_stage_precedes_expensive_verification_and_failure_never_completes(self):
         events = []
@@ -413,7 +420,7 @@ class TrainingProgressTests(unittest.TestCase):
             progress_callback(event)
             return {"total_steps": 12, "best_epoch": 2}
         with patch("ipde.training.train_dataset", side_effect=training), redirect_stdout(stdout), redirect_stderr(stderr):
-            result = trainer_cli.main(["--json", "train", "dataset", "--checkpoint", "output.pth"])
+            result = trainer_cli.main(["--json", "train", "dataset", "--checkpoint", "output.pth", "--student", "raft"])
         self.assertEqual(result, 0)
         self.assertEqual(json.loads(stdout.getvalue()), {"total_steps": 12, "best_epoch": 2})
         self.assertEqual(json.loads(stderr.getvalue().removeprefix("IPDE_EVENT ")), event)

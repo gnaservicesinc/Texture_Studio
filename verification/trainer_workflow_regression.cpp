@@ -195,6 +195,8 @@ void modelTrainingProgress(TrainerWindow &window, const QString &workspace) {
     require(window.progress_->value() == 3 && window.trainingStatus_->text().contains("validation", Qt::CaseInsensitive), "held-out validation reset the update count or was not explained");
     event("writing_checkpoint", 1, 3, 3, {{"best_epoch", 1}, {"status", "started"}});
     require(window.progress_->value() == 3 && window.trainingStatus_->text().contains("checkpoint", Qt::CaseInsensitive), "checkpoint saving was reported as another optimizer update");
+    event("training_stopped", 1, 3, 3, {{"stop_reason", "loss exceeded guard"}});
+    require(window.trainingStatus_->text().contains("loss exceeded guard"), "loss safeguard stop reason was hidden");
     event("final_validation", 4, 3, 12, {{"processed", 1}, {"total", 2}, {"status", "running"}});
     require(window.progress_->value() == 12 && window.trainingStatus_->text().contains("validation", Qt::CaseInsensitive) && window.busy_, "final validation hid its stage or reported process completion early");
     const QString checkpoint = QDir(workspace).filePath("runs/progress-fixture/checkpoint.pth");
@@ -205,7 +207,7 @@ void modelTrainingProgress(TrainerWindow &window, const QString &workspace) {
         {"history", QJsonArray{QJsonObject{{"epoch", 1}}, QJsonObject{{"epoch", 2}}, QJsonObject{{"epoch", 3}}, QJsonObject{{"epoch", 4}}}},
         {"validation", QJsonObject{{"mean_absolute_flow_error_pixels", 1.25}}}}).toJson();
     window.processFinished(0, QProcess::NormalExit);
-    require(window.train_->isEnabled() && !window.cancel_->isEnabled() && window.trainingStatus_->text().contains("complete", Qt::CaseInsensitive), "successful training did not report a completed model and restore controls");
+    require(window.train_->isEnabled() && !window.cancel_->isEnabled() && window.trainingStatus_->text().contains("finished", Qt::CaseInsensitive), "successful training did not report a completed model and restore controls");
     const QString completedStatus = window.trainingStatus_->text();
     window.job_ = "Refresh library"; window.stdout_ = QJsonDocument(QJsonObject{{"datasets", QJsonArray{dataset(selectedDataset)}}, {"runs", QJsonArray{}}}).toJson(); window.setBusy(true);
     window.processFinished(0, QProcess::NormalExit);
@@ -220,6 +222,75 @@ void modelTrainingProgress(TrainerWindow &window, const QString &workspace) {
     window.job_ = "Train RAFT-Stereo"; window.setBusy(true); window.process_->setProgram("/missing/ipde-training-python"); window.process_->start();
     require(await([&] { return !window.busy_; }), "failed training launch left the interface busy");
     require(window.trainingStatus_->text().contains("failed", Qt::CaseInsensitive), "failed training launch hid its result from the training step");
+}
+
+void trainingControls(TrainerWindow &window, const QString &workspace) {
+    require(window.inputSize_->value() == 0, "fresh configurable teachers did not default to native full-display processing");
+    require(window.student_->currentData() == "display" && window.patchLabel_->text().contains("tile"), "display student was not the default visible architecture");
+    require(window.earlyStopError_->suffix().contains("fraction") && window.learningRate_->value() == .0001, "display errors or new-head learning rate retained native RAFT units/defaults");
+    window.populateLibrary({{"datasets", QJsonArray{dataset(QDir(workspace).filePath("datasets/control-fixture"))}}});
+    window.advanced_->setChecked(true); window.epochs_->setValue(4); window.stepsPerUpdate_->setValue(1);
+    require(window.plannedTrainingSteps() == 12 && window.steps_->value() == 12, "epochs did not visit every training image");
+    window.stepsPerUpdate_->setValue(2);
+    require(window.plannedTrainingSteps() == 8 && window.steps_->value() == 8, "gradient accumulation did not update Total Steps immediately");
+    window.limitMode_->setCurrentIndex(window.limitMode_->findData("steps")); window.steps_->setValue(7);
+    require(window.plannedTrainingSteps() == 7 && !window.epochs_->isEnabled() && window.steps_->isEnabled(), "exact Total Steps mode retained epoch controls");
+    window.limitMode_->setCurrentIndex(0); window.advanced_->setChecked(false);
+    window.quality_->setValue(0); const int lowPatch = window.patch_->value(), lowIterations = window.iterations_->value();
+    window.quality_->setValue(2);
+    require(window.patch_->value() > lowPatch && window.iterations_->value() > lowIterations, "quality did not increase decoder tile size and refinement");
+    window.length_->setValue(0); const int fastEpochs = window.epochs_->value(); window.length_->setValue(2);
+    require(window.epochs_->value() > fastEpochs && window.scope_->currentData() == "update", "duration or small-dataset scope preset ignored dataset size");
+    window.teacher_->setCurrentIndex(window.teacher_->findData("depthpro"));
+    for (auto *check : window.teacherChecks_) check->setChecked(check->property("model") == "depthpro");
+    require(!window.inputSize_->isEnabled(), "fixed-size DepthPro exposed an ineffective custom size");
+    for (auto *check : window.teacherChecks_) if (check->property("model") == "depth-anything-3") check->setChecked(true);
+    require(window.inputSize_->isEnabled(), "selected DA3 teacher could not use custom input size with DepthPro primary");
+    window.inputSize_->setValue(0); require(window.inputSize_->value() == 0, "native teacher size was silently clamped");
+    window.inputSize_->setValue(1036);
+    window.goal_->setCurrentIndex(window.goal_->findData("effect/map")); window.applyGoal(false);
+    require(window.inputSize_->value() == 1036, "effect preset discarded an explicit teacher size override");
+    require(window.settings_.value("teacher_input_size").toInt() == 1036, "teacher size override was not persisted");
+    window.advanced_->setChecked(true);
+    QJsonObject models = dataset(QDir(workspace).filePath("datasets/model-eligibility"));
+    models.insert("training_eligibility", QJsonObject{{"trainable", true}, {"train_count", 5}, {"eligible_count", 6}, {"excluded_count", 0}, {"units", "relative_depth"}});
+    models.insert("raft_training_eligibility", QJsonObject{{"trainable", false}, {"train_count", 2}, {"reason", "Native left-grid targets unavailable"}});
+    window.populateLibrary({{"datasets", QJsonArray{models}}});
+    window.epochs_->setValue(3); window.stepsPerUpdate_->setValue(1);
+    require(window.train_->isEnabled() && window.trainingImageCount() == 5 && window.plannedTrainingSteps() == 15, "display selection ignored display target eligibility/counts");
+    require(window.trainingDataset_->text().contains("relative_depth") && window.trainingDataset_->text().contains("No automatic meter conversion"), "display training concealed the relative checkpoint unit convention");
+    models.insert("training_eligibility_by_mode", QJsonObject{{"supervised", QJsonObject{{"trainable", false}, {"train_count", 1}, {"reason", "Only one display-grid reference"}}}, {"distillation", models.value("training_eligibility")}});
+    window.populateLibrary({{"datasets", QJsonArray{models}}});
+    window.trainingMode_->setCurrentIndex(window.trainingMode_->findData("supervised"));
+    require(!window.train_->isEnabled() && window.trainingImageCount() == 1 && window.plannedTrainingSteps() == 3, "label mode reused automatic eligibility and step counts");
+    window.trainingMode_->setCurrentIndex(window.trainingMode_->findData("distillation"));
+    require(window.train_->isEnabled() && window.trainingImageCount() == 5 && window.plannedTrainingSteps() == 15, "distillation did not restore matching target counts");
+    window.student_->setCurrentIndex(window.student_->findData("raft"));
+    require(!window.train_->isEnabled() && window.trainingImageCount() == 2 && window.plannedTrainingSteps() == 6, "stock selection reused display eligibility/counts");
+    require(window.patchLabel_->text().contains("Native stereo") && window.earlyStopError_->suffix().contains("px") && window.learningRate_->value() == .00001, "stock selection retained display settings semantics");
+    window.student_->setCurrentIndex(window.student_->findData("display"));
+    require(window.train_->isEnabled() && window.trainingDataset_->text().contains("Display tiles") && !window.trainingDataset_->text().contains("px MAE"), "switching back failed to restore display readiness/units");
+    require(TrainerWindow::validationDescription({{"mean_relative_depth_error", .125}, {"mean_absolute_depth_error", 2.0}, {"units", "meters"}}).contains("12.50%"), "display report was presented as pixel error");
+    window.exportDestination_ = QDir(workspace).filePath("exports/fixture");
+    require(window.exportedCheckpointPath({{"schema", "ipde-display-model-export-v1"}, {"checkpoint", "display-model.pth"}}).endsWith("/display-model.pth"), "display export filename was forced to stock RAFT");
+    require(window.exportedCheckpointPath({{"checkpoint", "raft-model.pth"}}).endsWith("/raft-model.pth"), "stock export filename was lost");
+    window.updateTrainingProgress({{"stage", "display_tile"}, {"epoch", 1}, {"epochs", 3}, {"step", 0}, {"steps_per_epoch", 5}, {"tile", 2}, {"tiles", 10}, {"completed_steps", 0}, {"total_steps", 15}});
+    require(window.trainingStatus_->text().contains("display tile 2 / 10"), "display training hid full-grid tile progress");
+    models.insert("training_eligibility", QJsonObject{{"trainable", true}, {"train_count", 1000000}}); models.remove("training_eligibility_by_mode");
+    window.populateLibrary({{"datasets", QJsonArray{models}}}); window.epochs_->setValue(10000);
+    require(window.plannedTrainingSteps() == qint64(10000000000LL) && !window.train_->isEnabled() && window.trainingDataset_->text().contains("10000000000"), "large epoch plans overflowed or silently launched with a clamped step display");
+    window.epochs_->setValue(3); window.populateLibrary({{"datasets", QJsonArray{dataset(QDir(workspace).filePath("datasets/control-fixture"))}}});
+}
+
+void checkpointExportLifetime(TrainerWindow &window) {
+    window.configureExportProcess();
+    window.exportProcess_->setProgram("/bin/sleep"); window.exportProcess_->setArguments({"0.1"}); window.exportProcess_->start();
+    require(window.exportProcess_->waitForStarted(), "checkpoint export lifetime fixture failed to start");
+    require(window.taskRunning(), "independent checkpoint export was omitted from task lifetime");
+    QCloseEvent close; QApplication::sendEvent(&window, &close);
+    require(!close.isAccepted() && window.closeAfterTraining_, "closing terminated an unfinished checkpoint export");
+    require(await([&] { return !window.exportRunning() && !window.closeAfterTraining_; }), "completed export did not release pending close");
+    require(window.exportProcess_->exitStatus() == QProcess::NormalExit && window.exportProcess_->exitCode() == 0, "pending close killed the checkpoint export");
 }
 
 void applicationResponsibilities(TrainerWindow &trainer, TrainerWindow &datasets, const QString &workspace) {
@@ -280,8 +351,10 @@ int main(int argc, char **argv) {
         streamedFolderImport(window, workspace);
         failedGenerationStreaming(window, workspace);
         trainer.workspace_->setText(workspace); modelTrainingProgress(trainer, workspace);
+        trainingControls(trainer, workspace);
         applicationResponsibilities(trainer, window, workspace);
         visibleDisplayRegistration(window, workspace);
+        checkpointExportLifetime(trainer);
         std::cout << "Dataset Studio / Trainer: exclusive dataset management, cross-app continuation, cleanup guards, worker override, readiness, review, retry, scan, and training progress passed\n";
         return 0;
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }

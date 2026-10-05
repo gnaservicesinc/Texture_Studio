@@ -154,7 +154,7 @@ class ParallelDatasetTests(unittest.TestCase):
                 events.append(event)
             with patch("ipde.dataset.discover_file", side_effect=discover), redirect_stderr(io.StringIO()):
                 manifest = build_dataset(sources, root / "generated", DatasetOptions(
-                    teacher=LearnedDepthConfig(), include_display_teacher=False, workers=3),
+                    teacher=LearnedDepthConfig(), teacher_view="stereo-left", include_display_teacher=False, workers=3),
                     teacher_results=predictions, progress_callback=callback)
             self.assertEqual([event["sequence"] for event in events], list(range(1, len(events) + 1)))
             self.assertEqual([sample["source_path"] for sample in manifest["samples"]], [str(source.resolve()) for source in sources])

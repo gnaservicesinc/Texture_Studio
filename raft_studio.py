@@ -2,6 +2,7 @@
 """Standalone RAFT Studio entry point for the source tree and app bundle."""
 from pathlib import Path
 import sys
+sys.dont_write_bytecode = True
 
 source = Path(__file__).resolve().parent / "src"
 if source.is_dir():

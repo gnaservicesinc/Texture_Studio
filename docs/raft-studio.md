@@ -1,5 +1,9 @@
 # IPDE Studio
 
+For the current 0.9 training controls, see the bundled
+[user manual](manual/index.html) and [interactive guide](help/index.html).
+Development save and dataset formats may change before 1.0.0.
+
 Launch `make studio` (or `build/IPDE Studio.app`). Open/create a project, then
 choose **Effect / map**, **Depth estimation**, **Photo effects / masking**, or
 **Manual**. Guided modes hide technical controls; **Advanced settings** exposes
@@ -143,9 +147,12 @@ have no MPS filesystem interface. Teacher inference remains serialized to bound
 GPU memory use; training uses MPS when **Device** is `auto` on a supported Mac
 or explicitly `mps`, preserving FP32 rather than adding mixed precision.
 
-**Include display-camera teacher** is an advanced opt-in. It retains extra full
-resolution predictions/anchors that may be useful for registration diagnostics
-but can add hundreds of MiB per photo. The original display RGB remains lossless.
+New GUI datasets run teachers and optional metric anchors only on the full
+display RGB photo. Full-display targets and native model predictions are retained
+for review/export; they can add hundreds of MiB per photo. They are not
+automatically warped or selected for stock RAFT training. The original display
+RGB remains lossless. An explicit native-stereo experiment is a different output
+task and needs compatible left-grid labels.
 Training uses a bounded cache of decoded samples instead of loading the entire dataset into RAM.
 NPZ reads decompress a requested plane into memory; NPY remains available with
 `dataset --uncompressed` when memory mapping is preferable.
@@ -159,7 +166,7 @@ image or text datasets cannot directly supervise calibrated RAFT. See
 ## Model and precision background
 
 Dataset Studio is the Qt app for creating and managing spatial-photo datasets.
-RAFT Studio distills a depth teacher into RAFT-Stereo and exports checkpoints.
+Trainer learns full display teacher targets with an experimental stereo-to-display student, or runs an explicitly selected stock RAFT native-left experiment, and exports checkpoints.
 IPDE remains the extraction app: choose an exported checkpoint in its existing
 **RAFT model** field and continue extracting images and depth maps.
 
@@ -206,8 +213,8 @@ keep related captures in the same split when the option is **Off**.
 Choose the teacher and its local checkpoint/source directories:
 
 - **DepthPro** provides estimated meter depth and is the initial RAFT teacher.
-- **Depth Anything V2 Large** provides relative inverse depth. Input size 1036
-  offers a larger processing grid than its default 518.
+- **Depth Anything V2 Large** provides relative inverse depth. Its processing
+  size is configurable; the GUI begins at native input (zero).
 - **Depth Anything 3 GIANT 1.1** provides relative depth in the current adapter.
   The app does not claim that a larger model guarantees better geometry.
 
@@ -216,17 +223,16 @@ relative teacher's values into an
 estimated meter scale using DepthPro. V2 and the current DA3 adapter describe
 near/far relationships, but their values have an image-specific scale: a value
 of 2 does not mean 2 meters or necessarily the same distance in two photos.
-The anchor runs DepthPro on the same RGB image and fits a scale and offset in
+The anchor runs DepthPro on the same full display RGB image and fits a scale and offset in
 inverse depth. It creates a separate estimated-meter map from the relative
 prediction; the original teacher values remain unchanged.
 
-Use the anchor when you intend to train RAFT from **V2 or DA3** in this workflow:
-RAFT's physical stereo labels require meter-depth estimates and camera
-calibration. The option is disabled for **DepthPro**, which already estimates
-meters. You can leave it off when creating relative maps for visual review or
-teacher comparisons, or when you deliberately want to retain only the relative
-prediction. An unanchored V2/DA3 dataset cannot train RAFT through this
-distillation workflow. Independently measured meter-depth references are a
+Use the anchor when you need an estimated meter-scale display map from **V2 or
+DA3**. The option is disabled for **DepthPro**, which already estimates meters.
+You can leave it off when creating relative maps for visual review, effects or
+teacher comparisons. Meter scale alone does not align different camera grids or
+make a display target suitable for the unmodified RAFT decoder. Independently
+measured meter-depth references aligned to the native left grid remain a
 separate supervised-training alternative.
 
 The anchor is therefore useful for a specific purpose, not something to always
@@ -239,13 +245,18 @@ targets whose anchor was rejected, without changing their relative values or
 substituting another stored teacher. Anchoring cannot repair hallucinated objects
 or surfaces.
 
-**Input size** controls the teacher's processing resolution, not the stored raw
-photo quality. V2 uses it for the shortest side; DA3 uses it for the longest
-side. 1036 gives V2 a larger processing grid than 518, at a cost in time and
-memory, but does not guarantee better geometry. DepthPro uses a fixed native
-1536×1536 prediction grid, so this control is disabled for it. Compare results
-on your scenes before settling on a teacher and size. DA3's current Studio
-adapter evaluates single views independently.
+**Input size** controls a configurable teacher's effective processing resolution,
+not the full reference-photo dimensions or saved output size. Teachers receive
+the complete display photo. V2 uses the configured shortest side; DA3 uses the
+longest side. The GUI begins at zero, requesting native source size with
+14-pixel divisibility processing. The field also applies to a configurable
+secondary teacher. DepthPro always resizes internally to 1536×1536 and uses its
+fixed pyramid/decoder, regardless of this configurable-teacher field.
+Requested and actual processing dimensions are recorded. DA3's current adapter
+evaluates single views independently. Native GIANT processing at 5712×4284 on
+64 GB memory is unverified and can require very large working arrays. Compare
+reviewed results and consult the [manual's memory discussion](manual/index.html#full-display-teacher-memory)
+before assuming native processing fits.
 
 **Inference device** chooses where the model runs. **auto** selects an available
 accelerator, falling back to CPU; **mps** uses supported Apple GPU hardware,
@@ -296,15 +307,14 @@ prepared dataset using existing array storage, without
 running inference. Any conflict between existing split assignments for the same
 capture must be resolved by assigning its component one common split.
 
-Start with **Selected training target**, which shows the map this sample would
-actually use for distillation. Depending on the sample, that can be the direct left-view
-teacher, the accepted anchored teacher, or an explicitly selected registered
-display-image teacher in an older/advanced dataset. New datasets default to
-native left-view supervision even when display diagnostics are requested.
-The label selector also exposes the raw teacher and available anchor/display
-maps so you can inspect the source of a problem. Viewing another label does
-not change which target training uses. A relative or rejected-anchor target
-remains unsuitable for physical RAFT labels even if its preview looks good.
+New default datasets retain display teacher/anchor maps for review and export;
+they do not automatically supply stock RAFT labels. Check each map beside the
+RGB reference from its own grid. In an explicit native-stereo experiment,
+**Selected training target** shows the compatible map that distillation would
+use. The label selector exposes available raw, native-model and anchored maps
+so you can inspect the source of a problem. Viewing another label does not
+change which target training uses. A visually plausible map is not enough to
+establish its calibration or its compatibility with a student's output grid.
 
 The grayscale depth preview uses **near = white, far = black**. **Magenta** marks
 invalid or unsupported values. Each preview uses its own display range, so
@@ -331,14 +341,26 @@ resolution, framing, and processing. RAFT's native correspondence reference is
 the decoded left view. Scaling all three RGB images to the same size and
 overlaying them is a useful alignment diagnostic; it is not a depth registration.
 
-Dataset Studio can generate an independent display teacher and retain its grid. A
-same-camera feature registration uses held-out matches and spatial residual
-checks. Only validated regions can supply display-derived left-grid labels.
-Unsupported regions remain NaN. The direct left-view teacher is retained and is
-the default training target, including when display registration succeeds;
-no display depth is stretched
-into the left grid. A registered right-camera target needs additional stereo
-reprojection and is not silently treated as left-camera depth.
+Dataset Studio's default teachers and metric anchors use full display RGB only,
+and retain the full display grid plus each model's native prediction. They do
+not fall back to a stereo-left teacher or automatically choose a registered
+display-to-left training target. Camera viewpoint differences can cause
+distance-dependent alignment; a single fixed warp cannot generally correct it.
+Existing registration diagnostics are approximate and separately identified.
+They do not change the default full-display teacher workflow.
+
+Stock RAFT-Stereo's existing decoder predicts on its left input grid. Full display
+teacher maps can be useful for direct effects/export/comparison, but cannot by
+themselves train that decoder to produce a separate full display grid from native
+stereo inputs. The default **Experimental stereo → display depth** student adds stereo encoders
+and a learned query decoder. It receives only whole native left/right RGB and
+predicts directly on the full display grid. Training compares every supported
+output pixel with the original unregistered display teacher; no fixed camera
+warp or stereo-teacher fallback is imposed. Its new head needs training, and
+full-sized output is not a guarantee of accurate fine detail. See the bundled
+[architecture note](manual/index.html#experimental-stereo-to-display-model).
+The following native-stereo target formula applies only to
+explicitly compatible experiments with aligned metric labels.
 
 For a positive metric left-grid target, training uses:
 
@@ -360,59 +382,65 @@ read-only [IMG_1689 investigation](alignment-and-checkpoints-2026-10-04.md).
 
 ## Train and export
 
-Select a dataset from the library, choose the original RAFT checkpoint and
-source folder, and use **Start model training**. Update-block training is the initial
-setting; full-model fine-tuning is optional. Native crops preserve pixel units
-instead of downsizing disparity labels. Each epoch is evaluated on held-out
-groups, and the best checkpoint is retained, including the original baseline
-if every candidate becomes worse.
+Select a dataset and the visible **Student model** first. The default display
+student uses full-display labels, whole native stereo inputs and one unchanged
+unit convention per run. The stock RAFT picker instead requires calibrated
+native-left labels. Eligibility, counts, Total Steps and error units follow both
+the chosen student and label mode. Configure the initial RAFT checkpoint/source
+and select **Start model training**.
 
-Training reads dataset files without modifying them. Targets without an accepted
-meter scale or usable stereo correspondence support are automatically excluded
-from the run. The run report records their sample IDs and reasons, plus the
-actual training and validation samples. Usable samples retain their original
-splits. Dataset integrity and split leakage checks still apply, and training
-needs usable samples in both splits. Checkpoints and reports are written outside
-the input dataset, normally in the workspace's `runs` folder.
+Display limited scope trains its added encoders/query decoder with RAFT frozen.
+Full scope adapts RAFT too. Automatic display full scope additionally needs at
+least 500 entries, medium/high quality and recorded native inputs no larger than
+512 × 512; large or unknown input dimensions keep RAFT frozen. Stock limited
+scope changes its refinement block, with optional full fine-tuning. Large native
+full-network display training remains an explicit memory experiment.
 
-The status shows dataset checking, target preparation, model setup, baseline
-validation, the current epoch and step, held-out validation crops, and checkpoint
-writing. The update counter advances after each optimizer step; setup and
-validation do not count as model updates. Completion identifies the saved
-checkpoint and best epoch.
+An epoch visits every eligible image/teacher entry once. The display student
+uses every supported positive finite full-display target pixel in decoder tiles;
+stock RAFT draws native-resolution crops. **Steps Per Update** accumulates image
+gradients before an optimizer update. Partial groups flush at epoch end. With T
+entries and accumulation A, an epoch has `ceil(T / A)` optimizer updates.
+**Total Steps** counts these updates, not tiles. Choose complete epochs or an
+exact update budget; the latter can stop partway through an epoch.
 
-The training controls have these meanings:
+**Display decoder tile pixels** controls temporary query-decoder memory/dispatch
+overhead without resizing inputs or targets. In stock mode, **Native stereo
+patch pixels** specifies original-pixel crop size, a multiple of 32. **RAFT
+iterations** controls correspondence refinement work. Simple Quality adjusts
+256/512/768 pixel tiles (stock crops), 16/24/32 added feature channels and
+8/16/24 iterations. Length sets a capped dataset-aware duration and error goal.
+Initial display learning rate is `1e-4`; stock is `1e-5`.
 
-- **Train scope — Update block:** adjust only RAFT's iterative correction
-  component. This is the initial choice for a small experiment. **Full network**
-  adjusts all model weights, giving more freedom but requiring more resources
-  and greater care to avoid overfitting a small dataset.
-- **Epochs:** how many rounds of updates and held-out evaluation to run.
-- **Steps / epoch:** how many optimizer updates occur in each round. Each step
-  draws one random training image and a crop; an epoch is not necessarily a
-  pass through every image. Total updates are epochs × steps per epoch.
-- **Patch pixels:** the requested side length of a square crop at the original
-  stereo resolution. Larger crops provide more context and cost more memory. Use a
-  multiple of 32, at least 64; the labels are cropped rather than downsized.
-- **RAFT iterations:** how many successive correspondence refinements RAFT
-  makes for each crop during training and evaluation. More refinements cost
-  time and memory and are separate from optimizer steps or epochs.
-- **Device:** where training runs, with the same hardware meanings as the
-  inference-device control. Training memory needs can exceed inference needs.
+Validation can run each epoch or with saved checkpoints. Zero validation samples
+uses the whole set; N chooses a fresh random subset. Display scores are mean
+`abs(prediction-target)/target`, a fraction (0.10 = 10% average relative error),
+plus raw MAE in declared meters/relative/inverse units. Stock scores are flow
+MAE in pixels. A passing subsample early-stop goal requires full-set confirmation.
+Do not compare different unit conventions or camera grids pointwise.
 
-The validation score is agreement with teacher-derived flow on fixed crops.
-It is not an absolute accuracy measurement. Checkpoints remain experimental;
-evaluate full images and independent scenes before treating one as your device
-model. The same checkpoint can then be reused in IPDE. Training again is only
-needed when testing exposes a gap, the capture pipeline changes, or new useful
-data becomes available.
+Save intermediates each epoch, every N epochs/steps or only at the end. **Save
+checkpoint now** queues a safe update-boundary save, available for export while
+training continues. **Stop** saves recoverable training state. Resume into a new
+destination with the original manifest and compatible architecture/units, mode,
+scope, tile/crop size, iterations, accumulation, learning rate, seed and support.
+The safe-error guard stops nonfinite, zero or excessive fractional display error
+(stock: normalized pixel flow error), records why, and saves finite recoverable
+state. This state is not automatically a good model.
 
-**Export selected model** creates a new directory with `raft-model.pth` and
-`model.json`. Export verifies architecture loading and bit-exact weight
-preservation. Architecture metadata makes loading independent of the filename.
-The export excludes source photographs and never changes IPDE's active model.
+Training does not modify dataset arrays. Native datasets receive metadata/split
+checks first, then checksum/geometry checks as arrays are consumed. External or
+unknown datasets receive full preflight; corruption aborts. Distillation learns
+teacher estimates and their mistakes. Supervised references must be measured
+and declared on the selected model's output grid; mixed uses eligible kinds.
+No mode name or low teacher-agreement score proves physical accuracy.
 
-## Separate command-line interface
+Display checkpoints use `ipde-display-depth-v1`, reports
+`ipde-display-training-report-v1`, and exported inference models
+`display-model.pth`. Selecting one enables direct display prediction products;
+stock RAFT correspondence/depth products remain separate. Compare independent
+full images, each with its own RGB reference, and explicitly choose the model.
+Keep direct display AI as a separate practical comparison.
 
 ```sh
 .venv/bin/python raft_studio.py --json workspace /opt/ipde/raft-workspace
@@ -421,7 +449,7 @@ The export excludes source photographs and never changes IPDE's active model.
   --model depthpro --groups scene-groups.json
 .venv/bin/python raft_studio.py dataset photo-a.HEIC photo-b.HEIC \
   --output-dir /opt/ipde/raft-workspace/datasets/my-device-v2 \
-  --model depth-anything-v2 --input-size 1036 --metric-anchor depthpro \
+  --model depth-anything-v2 --input-size 0 --metric-anchor depthpro \
   --groups scene-groups.json
 .venv/bin/python raft_studio.py review-dataset \
   /opt/ipde/raft-workspace/datasets/my-device
@@ -436,7 +464,10 @@ The export excludes source photographs and never changes IPDE's active model.
   --checkpoint /opt/ipde/raft-workspace/runs/my-device/checkpoint.pth \
   --raft-root /opt/ipde/RAFT-Stereo \
   --raft-model /opt/ipde/models/raftstereo-middlebury.pth \
-  --epochs 10 --steps 16 --patch-size 256 --device mps
+  --student display --limit-mode epochs --epochs 10 --steps-per-update 1 \
+  --patch-size 512 --iterations 16 --device mps \
+  --validation-schedule checkpoint --validation-samples 16 \
+  --checkpoint-schedule epochs --checkpoint-every 2
 .venv/bin/python raft_studio.py export \
   /opt/ipde/raft-workspace/runs/my-device/checkpoint.pth \
   --output /opt/ipde/raft-workspace/exports/my-device

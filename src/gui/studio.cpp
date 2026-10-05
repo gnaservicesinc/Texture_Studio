@@ -1,6 +1,7 @@
 #include "project_session.h"
 #include "studio_icons.h"
 #include "window_layout.h"
+#include "help_support.h"
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
@@ -118,6 +119,7 @@ class StudioWindow final : public QMainWindow {
 public:
     StudioWindow() {
         setWindowTitle("IPDE Studio — Projects"); setWindowIcon(IPDE::appIcon("studio"));
+        IPDE::installHelpMenu(this, "IPDE Studio", "studio");
         auto *central = new QWidget(this); auto *layout = new QVBoxLayout(central);
         layout->setContentsMargins(24, 24, 24, 24); layout->setSpacing(12);
         auto *title = new QLabel("IPDE Studio", central);
@@ -300,11 +302,11 @@ private:
         while (reports.hasNext()) {
             const QString report = reports.next(), checkpoint = report.left(report.size() - 5);
             if (!QFileInfo(checkpoint).isFile()) continue;
-            const auto metadata = readJson(report); if (metadata.value("schema").toString() != "ipde-raft-training-report-v1") continue;
+            const auto metadata = readJson(report); if (!QStringList{"ipde-raft-training-report-v1", "ipde-raft-training-report-v2", "ipde-display-training-report-v1"}.contains(metadata.value("schema").toString())) continue;
             ++stats.models; if (!model.isEmpty() && QFileInfo(checkpoint).canonicalFilePath() == QFileInfo(model).canonicalFilePath()) stats.selectedCustomModel = true;
         }
         if (!model.isEmpty() && !QFileInfo::exists(model)) stats.warnings << "The selected RAFT checkpoint is unavailable: " + model;
-        if (QFileInfo(model).isFile() && readJson(model + ".json").value("schema").toString() == "ipde-raft-training-report-v1") stats.selectedCustomModel = true;
+        if (QFileInfo(model).isFile() && QStringList{"ipde-raft-training-report-v1", "ipde-raft-training-report-v2", "ipde-display-training-report-v1"}.contains(readJson(model + ".json").value("schema").toString())) stats.selectedCustomModel = true;
         return stats;
     }
     bool relevantRole(const QString &role) const {

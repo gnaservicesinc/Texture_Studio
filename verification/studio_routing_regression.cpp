@@ -54,6 +54,21 @@ void projectScopedRoutingAndBusy(StudioWindow &window, const QString &first, con
     require(hub->processes.isEmpty(), "rejected client launched a project app");
     datasets.disconnectFromServer(); require(await([&] { return hub->clients.isEmpty(); }), "fixture clients failed to close");
 }
+
+void currentTrainingReports(StudioWindow &window, const QString &project) {
+    const QString run = QDir(project).filePath("workspace/runs/report-fixture"); require(QDir().mkpath(run), "could not create training report fixture");
+    QString selected;
+    for (const int version : {1, 2}) {
+        const QString checkpoint = QDir(run).filePath(QString("checkpoint-v%1.pth").arg(version));
+        QFile weights(checkpoint); require(weights.open(QIODevice::WriteOnly), "could not create checkpoint fixture"); weights.write("fixture"); weights.close();
+        QFile report(checkpoint + ".json"); require(report.open(QIODevice::WriteOnly), "could not create report fixture");
+        report.write(QJsonDocument(QJsonObject{{"schema", QString("ipde-raft-training-report-v%1").arg(version)}}).toJson()); report.close();
+        selected = checkpoint;
+    }
+    QSettings(QDir(project).filePath("project.ini"), QSettings::IniFormat).setValue("raft/model", selected);
+    const auto stats = window.projectStats();
+    require(stats.models == 2 && stats.selectedCustomModel, "Studio did not recognize current and prior training reports or selected v2 checkpoint");
+}
 }
 
 int main(int argc, char **argv) {
@@ -64,6 +79,7 @@ int main(int argc, char **argv) {
     const QString first = QFileInfo(temporary.filePath("first")).canonicalFilePath(), second = QFileInfo(temporary.filePath("second")).canonicalFilePath();
     try {
         StudioWindow window; projectScopedRoutingAndBusy(window, first, second);
+        currentTrainingReports(window, second);
         std::cout << "Studio: authenticated project-scoped app activation, selection forwarding, duplicate prevention and busy state passed\n";
         return 0;
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }

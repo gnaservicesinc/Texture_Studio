@@ -111,7 +111,7 @@ def cleanup_run(checkpoint: Path | str, workspace: Path | str, *, confirm: bool 
         files = _files(directory)
         report = original.with_suffix(original.suffix + ".json")
         metadata = json.loads(report.read_text(encoding="utf-8"))
-        if not isinstance(metadata, dict) or metadata.get("schema") != "ipde-raft-training-report-v1" or metadata.get("checkpoint_sha256") != sha256_file(original):
+        if not isinstance(metadata, dict) or metadata.get("schema") not in {"ipde-raft-training-report-v1", "ipde-raft-training-report-v2", "ipde-display-training-report-v1"} or metadata.get("checkpoint_sha256") != sha256_file(original):
             raise ValueError("Checkpoint provenance/hash verification failed; no files were removed")
         if _contains_source(metadata, directory) or any(path.name == "dataset.json" or path.suffix.lower() in {".heic", ".heif", ".dng", ".raw"} for path in files):
             raise ValueError("Run contains source data; move it out before cleanup")

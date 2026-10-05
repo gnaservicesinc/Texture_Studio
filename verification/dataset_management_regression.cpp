@@ -191,7 +191,7 @@ void librarySelection(TrainerWindow &window, const QString &workspace) {
 
 void ordinaryGenerationButtonsAndLinks(TrainerWindow &window) {
     for (auto *button : {window.advanced_, window.useGroups_, window.verifiedScenes_,
-                         window.anchor_, window.compareTeachers_, window.includeDisplayTeacher_})
+                         window.anchor_, window.compareTeachers_})
         require(button && button->isCheckable(), "a generation or review option is no longer an ordinary toggle button");
     for (auto *button : window.teacherChecks_)
         require(button && button->isCheckable(), "teacher selection no longer uses ordinary toggle buttons");

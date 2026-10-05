@@ -1,6 +1,7 @@
 """Exercise the packaged subapps' real project registration and exit path."""
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -12,12 +13,12 @@ import threading
 import sys
 
 
-def backend_smoke(app_root: Path, project: Path) -> None:
+def backend_smoke(app_root: Path, project: Path, python: Path) -> None:
     """Exercise embedded Python modules, rather than just Qt startup/session IPC."""
     from test_collection_storage import _dataset
     workspace = project / "workspace"
     owner = workspace / "datasets"
-    owner.mkdir(parents=True)
+    owner.mkdir(parents=True, exist_ok=True)
     fixture, _ = _dataset(project)
     source = owner / "source"
     fixture.rename(source)
@@ -27,7 +28,7 @@ def backend_smoke(app_root: Path, project: Path) -> None:
         script = app_root / f"{name}.app/Contents/Resources/raft_studio.py"
         # -I prevents PYTHONPATH from hiding omitted bundle modules. The bundle
         # entrypoint explicitly selects its own Resources/src package.
-        result = subprocess.run([sys.executable, "-I", str(script), "--json", *arguments],
+        result = subprocess.run([str(python), "-B", "-I", str(script), "--json", *arguments],
                                 cwd=project, text=True, capture_output=True, timeout=30)
         if result.returncode:
             raise RuntimeError(f"{name} embedded backend failed: {result.stdout} {result.stderr}")
@@ -84,10 +85,22 @@ def backend_smoke(app_root: Path, project: Path) -> None:
 
 def main() -> None:
     repo = Path(__file__).resolve().parents[1]
-    app_root = repo / "build/IPDE Studio.app/Contents/Applications"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--bundle", type=Path, default=repo / "build/IPDE Studio.app")
+    parser.add_argument("--bundled-python", action="store_true", help="Exercise the standalone package's interpreter")
+    args = parser.parse_args()
+    bundle = args.bundle.resolve()
+    app_root = bundle / "Contents/Applications"
+    python = bundle / "Contents/Resources/python/bin/python3" if args.bundled_python else Path(sys.executable)
     with tempfile.TemporaryDirectory(prefix="ipde-session-smoke-") as folder:
         project = Path(folder).resolve()
         (project / "project.ini").write_text("[General]\nname=Session smoke\ngoal=manual\nschema=ipde-project-v1\n")
+        environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", IPDE_STUDIO_TOKEN="smoke-session-token")
+        hub = bundle / "Contents/MacOS/IPDE Studio"
+        startup = subprocess.run([str(hub), "--project", str(project), "--smoke-test"],
+                                 env=environment, text=True, capture_output=True, timeout=20)
+        if startup.returncode:
+            raise RuntimeError(f"IPDE Studio exited {startup.returncode}: {startup.stderr}")
         digest = hashlib.sha256(str(project).encode()).hexdigest()[:32]
         address = str(Path(tempfile.gettempdir()) / ("ipde-" + digest))
         roles = [("IPDE", "extractor"), ("Dataset Studio", "datasets"), ("RAFT Studio", "trainer"),
@@ -117,7 +130,6 @@ def main() -> None:
 
         worker = threading.Thread(target=serve, daemon=True); worker.start()
         try:
-            environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", IPDE_STUDIO_TOKEN="smoke-session-token")
             for name, role in roles:
                 executable = app_root / f"{name}.app/Contents/MacOS/{name}"
                 result = subprocess.run([str(executable), "--project", str(project), "--mode", role, "--smoke-test"],
@@ -129,8 +141,8 @@ def main() -> None:
             worker.join(5)
             if worker.is_alive() or errors or registered != [role for _, role in roles]:
                 raise RuntimeError(f"Hub registration failed: {registered}, {errors}")
-            print("Packaged extractor, datasets, trainer, photo and RAW: project registration and clean exit passed")
-            backend_smoke(app_root, project)
+            print("Packaged Studio hub, extractor, datasets, trainer, photo and RAW: startup, project registration and clean exit passed")
+            backend_smoke(app_root, project, python)
         finally:
             listener.close()
             Path(address).unlink(missing_ok=True)

@@ -150,8 +150,8 @@ def resolve_learned_depth_resources(config: LearnedDepthConfig) -> tuple[Path, P
         source = next((root / source_name for root in _local_roots() if (root / source_name).is_dir()), None)
     if config.device not in {"auto", "cpu", "mps", "cuda"}:
         raise LearnedDepthError(f"unsupported inference device {config.device!r}")
-    if isinstance(config.input_size, bool) or not isinstance(config.input_size, int) or not 14 <= config.input_size <= 4096:
-        raise LearnedDepthError("model input_size must be an integer in [14, 4096]")
+    if isinstance(config.input_size, bool) or not isinstance(config.input_size, int) or (config.input_size != 0 and not 14 <= config.input_size <= 8192):
+        raise LearnedDepthError("model input_size must be 0 (native source size) or an integer in [14, 8192]")
     return model_path.resolve(), source
 
 
@@ -391,14 +391,17 @@ class LearnedDepthPredictor:
             "source_grid_resampling": "bilinear inverse depth, align_corners=False, then reciprocal; no sharpening",
             "model_inverse_depth_guard": {"minimum": 1e-4, "maximum": 1e4, "source": "Apple DepthPro infer API"},
             "native_grid": "square network prediction covering full reference extent; source image is stretched for model input",
+            "model_input_shape": [native_size, native_size], "input_size": native_size,
+            "requested_input_size": self.config.input_size, "input_size_policy": "fixed DepthPro network; configurable input size does not apply",
         }
 
     def _depth_anything_v2(self, rgb: np.ndarray):
         torch = self.torch
         module = self.module
+        input_size = self.config.input_size or min(rgb.shape[:2])
         sample = {"image": rgb.copy()}
         sample = module.Resize(
-            width=self.config.input_size, height=self.config.input_size, resize_target=False,
+            width=input_size, height=input_size, resize_target=False,
             keep_aspect_ratio=True, ensure_multiple_of=14, resize_method="lower_bound",
             image_interpolation_method=2,  # OpenCV INTER_CUBIC used by upstream.
         )(sample)
@@ -411,7 +414,8 @@ class LearnedDepthPredictor:
             "units": "relative_inverse_depth", "quantity": "relative_inverse_depth", "metric_scale": "unavailable",
             "processing": "RGB / nominal limit; upstream aspect-preserving cubic Resize and ImageNet normalization on copy",
             "source_grid_resampling": "bilinear relative inverse depth, align_corners=True; no sharpening",
-            "model_input_shape": list(tensor.shape[-2:]), "input_size": self.config.input_size,
+            "model_input_shape": list(tensor.shape[-2:]), "input_size": input_size,
+            "requested_input_size": self.config.input_size, "input_size_policy": "native source shortest side" if not self.config.input_size else "configured shortest side",
             "native_grid": "network output at processed RGB grid covering the full reference extent",
         }
 
@@ -419,8 +423,9 @@ class LearnedDepthPredictor:
         if rgb.dtype != np.uint8 or nominal_limit != 255:
             raise LearnedDepthError("DA3 upstream RGB processor supports uint8 RGB only; choose DepthPro/V2 to avoid reducing higher-bit RGB")
         torch = self.torch
+        input_size = self.config.input_size or max(rgb.shape[:2])
         imgs, _, _ = self.model.input_processor(
-            [rgb.copy()], process_res=self.config.input_size,
+            [rgb.copy()], process_res=input_size,
             process_res_method="upper_bound_resize", sequential=True,
         )
         tensor = imgs[None].to(device=self.device, dtype=torch.float32)
@@ -435,7 +440,8 @@ class LearnedDepthPredictor:
             "units": "relative_depth", "quantity": "relative_camera_z_depth", "metric_scale": "unavailable",
             "processing": "upstream uint8 RGB aspect-preserving upper_bound_resize and ImageNet normalization; underlying network FP32",
             "source_grid_resampling": "bilinear relative depth, align_corners=False; no sharpening",
-            "model_input_shape": list(tensor.shape[-2:]), "input_size": self.config.input_size,
+            "model_input_shape": list(tensor.shape[-2:]), "input_size": input_size,
+            "requested_input_size": self.config.input_size, "input_size_policy": "native source longest side" if not self.config.input_size else "configured longest side",
             "native_grid": "network output at processed RGB grid covering the full reference extent",
             "confidence_semantics": "unmodified DA3 depth_conf scores; not calibrated probabilities",
         }, confidence

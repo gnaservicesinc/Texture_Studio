@@ -374,6 +374,8 @@ def checkpoint_model_configuration(checkpoint: Any, checkpoint_name: str) -> Sim
     IPDE-trained weights carry a bounded, strict whitelist of model fields so
     renaming a realtime/instance-normalized checkpoint cannot change its model.
     """
+    if isinstance(checkpoint, Mapping) and checkpoint.get("schema") == "ipde-display-depth-v1":
+        raise RaftStereoError("This checkpoint predicts display depth, not native-left disparity. Select a Student display depth/displacement product.")
     fallback = _model_configuration(checkpoint_name)
     if not isinstance(checkpoint, Mapping) or "ipde_configuration" not in checkpoint:
         return fallback

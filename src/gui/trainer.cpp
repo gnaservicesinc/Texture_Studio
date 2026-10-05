@@ -42,6 +42,7 @@
 #include <QScreen>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QSlider>
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -65,6 +66,8 @@
 #include "project_session.h"
 #include "studio_icons.h"
 #include "window_layout.h"
+#include "help_support.h"
+#include "python_runtime.h"
 
 #ifndef IPDE_DATASET_STUDIO
 #define IPDE_DATASET_STUDIO 0
@@ -89,10 +92,7 @@ QString scriptPath() {
 }
 
 QString pythonPath() {
-    const QString configured = QString::fromUtf8(IPDE_PYTHON_EXECUTABLE);
-    if (QFileInfo::exists(configured)) return configured;
-    const QString found = QStandardPaths::findExecutable(configured);
-    return found.isEmpty() ? configured : found;
+    return IPDE::pythonExecutable();
 }
 
 class GroupDelegate final : public QStyledItemDelegate {
@@ -344,6 +344,7 @@ public:
         projectRoot_ = IPDE::projectRoot();
         if (!projectRoot_.isEmpty()) projectSettings_ = std::make_unique<QSettings>(QDir(projectRoot_).filePath("project.ini"), QSettings::IniFormat);
         setWindowTitle(datasetMode_ ? "Dataset Studio" : "RAFT Studio");
+        IPDE::installHelpMenu(this, datasetMode_ ? "Dataset Studio" : "RAFT Studio", datasetMode_ ? "datasets" : "trainer");
         if (projectSettings_) setWindowTitle(windowTitle() + " — "
             + projectSettings_->value("name", QFileInfo(projectRoot_).fileName()).toString());
         auto *central = new QWidget(this);
@@ -527,6 +528,10 @@ public:
             }
         });
         connect(cancel_, &QPushButton::clicked, this, [this] {
+            if (job_ == "Train RAFT-Stereo") {
+                requestTrainingControl("stop");
+                return;
+            }
             cancelled_ = true;
             if (activeOperation_ == "edit-dataset") {
                 const auto pid = process_->processId(); process_->terminate();
@@ -587,14 +592,15 @@ public:
         settings_.setValue("workspace", workspace_->text());
         settings_.setValue("teacher_model", teacher_->currentData());
         settings_.setValue("raft_root", raftRoot_->text()); settings_.setValue("raft_model", raftModel_->text());
-        for (auto *process : {process_, previewProcess_, editProcess_}) {
-            if (process->state() != QProcess::NotRunning) {
+        for (auto *process : {process_, previewProcess_, editProcess_, exportProcess_}) {
+            if (process && process->state() != QProcess::NotRunning) {
                 process->kill(); process->waitForFinished(1500);
             }
         }
     }
 
-    bool taskRunning() const { return process_->state() != QProcess::NotRunning || previewProcess_->state() != QProcess::NotRunning || editProcess_->state() != QProcess::NotRunning; }
+    bool exportRunning() const { return exportProcess_ && exportProcess_->state() != QProcess::NotRunning; }
+    bool taskRunning() const { return process_->state() != QProcess::NotRunning || previewProcess_->state() != QProcess::NotRunning || editProcess_->state() != QProcess::NotRunning || exportRunning(); }
     void attachSession(IPDE::ProjectSession *session) {
         session_ = session;
         session_->setActivationHandler(this, [this](const QJsonObject &request) { activateRequested(request); });
@@ -629,6 +635,12 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event) override {
+        if (busy_ && job_ == "Train RAFT-Stereo") {
+            requestTrainingControl("stop"); closeAfterTraining_ = true; event->ignore(); return;
+        }
+        if (exportRunning()) {
+            closeAfterTraining_ = true; statusBar()->showMessage("Finishing checkpoint export before closing…"); event->ignore(); return;
+        }
         if (!datasetMode_ || !hasPendingDatasetEdits()) { QMainWindow::closeEvent(event); return; }
         const bool recoverable = persistReviewDrafts();
         QMessageBox dialog(QMessageBox::Warning, "Dataset changes are not saved yet",
@@ -865,8 +877,10 @@ private:
         left->addRow("Teacher checkpoint", pathRow(teacherPath_, "/opt/ipde/models/depth_pro.pt", false, "Choose teacher checkpoint", tab));
         right->addRow("Teacher source", pathRow(teacherSource_, "/opt/ipde/ml-depth-pro", true, "Choose model source", tab));
         auto *processing = new QWidget(tab); auto *processingLayout = new QHBoxLayout(processing); processingLayout->setContentsMargins(0, 0, 0, 0);
-        teacherDevice_ = deviceBox(processing); inputSize_ = spin(processing, 14, 4096, 1036); inputSize_->setSingleStep(14);
-        processingLayout->addWidget(teacherDevice_); processingLayout->addWidget(new QLabel("Input size", processing)); processingLayout->addWidget(inputSize_);
+        teacherDevice_ = deviceBox(processing); inputSize_ = spin(processing, 0, 8192, settings_.value("teacher_input_size", 0).toInt()); inputSize_->setSingleStep(14);
+        inputSize_->setObjectName("teacherInputSize"); inputSize_->setSpecialValueText("Native source size (V2 / DA3)");
+        connect(inputSize_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int value) { settings_.setValue("teacher_input_size", value); });
+        processingLayout->addWidget(teacherDevice_); processingLayout->addWidget(new QLabel("V2 / DA3 input size", processing)); processingLayout->addWidget(inputSize_);
         right->addRow("Inference device", processing);
         anchor_ = binaryButton("Estimate meters with DepthPro", tab);
         anchor_->setChecked(true);
@@ -883,12 +897,13 @@ private:
             modelPaths_.insert(model, modelEdit); modelSources_.insert(model, sourceEdit);
         }
         advancedLayout->addLayout(additionalForm);
-        includeDisplayTeacher_ = binaryButton("Full display camera teachers", datasetAdvanced_);
-        includeDisplayTeacher_->setChecked(false); advancedLayout->addWidget(includeDisplayTeacher_);
+        auto *teacherView = new QLabel("Teacher source: full display photo. Stereo left/right images are student inputs only.", datasetAdvanced_);
+        teacherView->setWordWrap(true); advancedLayout->addWidget(teacherView);
         scaleHelp_ = new QLabel(tab); scaleHelp_->setWordWrap(true); advancedLayout->addWidget(scaleHelp_);
-        auto *sizeHelp = new QLabel("Input size is the model's processing resolution, not the saved depth precision. A larger size costs time and memory and may still produce incorrect geometry. Auto device selects available hardware; MPS uses Apple GPU, CPU is slower, and CUDA requires an NVIDIA GPU.", tab);
+        auto *sizeHelp = new QLabel("Teachers receive the full display photo, never a stereo image. V2 uses the configured shortest side; DA3 uses the longest side. Set 0 to request native display dimensions on the required 14-pixel grid. The stored display map matches the display photo. DepthPro internally processes a fixed 1536-pixel grid and restores the source size; its model does not support a no-resize mode. Whether DA3 Giant at 5712×4284 fits in 64 GB is unverified: its decoder can hold several very large feature arrays. The experimental student learns these full, unregistered display labels from native stereo RGB. Stock RAFT remains a separate native-left experiment.", tab);
         sizeHelp->setWordWrap(true); advancedLayout->addWidget(sizeHelp); root->addWidget(datasetAdvanced_);
         connect(teacher_, &QComboBox::currentIndexChanged, this, [this] { teacherDefaults(); });
+        for (auto *check : teacherChecks_) connect(check, &QPushButton::toggled, this, [this] { updateTeacherSizeControl(); });
         connect(anchor_, &QPushButton::toggled, this, [this] { updateScaleHelp(); });
         teacher_->setCurrentIndex(qMax(0, teacher_->findData(settings_.value("teacher_model", "depthpro"))));
         teacherDefaults();
@@ -911,7 +926,7 @@ private:
             const QString preferred = goal == "effect/map" ? "depth-anything-3" : "depthpro";
             teacher_->setCurrentIndex(teacher_->findData(preferred));
             for (auto *check : teacherChecks_) check->setChecked(check->property("model").toString() == preferred);
-            goalHelp_->setText(goal == "effect/map" ? "Detail preset: Depth Anything 3 with DepthPro scale, native-resolution labels, and conservative RAFT fine-tuning. Compare teachers and the original RAFT model to decide which preserves useful detail." : goal == "depth-estimation" ? "Distance preset: DepthPro estimates meters directly. Independent photo groups stay together during validation; model estimates still require visual checking." : "Portrait preset: use Photo Studio for embedded depth and composited portrait mattes. Portraits do not have the calibrated stereo pair required for RAFT datasets; the scanner skips them.");
+            goalHelp_->setText(goal == "effect/map" ? "Detail preset: DA3 teacher on the full display photo, with optional DepthPro meter scale. Review direct display maps before training the experimental stereo-to-display student; output detail and accuracy are not guaranteed." : goal == "depth-estimation" ? "Distance preset: DepthPro estimates meters from the full display photo. Independent photo groups stay together during validation; model estimates still require visual checking." : "Portrait preset: use Photo Studio for embedded depth and composited portrait mattes. Portraits do not have the calibrated stereo pair required for stereo-student datasets; the scanner skips them.");
         }
         if (trainingAdvanced_) trainingAdvanced_->setVisible(advanced_->isChecked());
     }
@@ -921,7 +936,7 @@ private:
             scaleHelp_->setText("DepthPro already estimates distance in meters, so a second scale model is unnecessary. These are AI estimates; meter units do not establish physical accuracy.");
         } else {
             scaleHelp_->setText(QString("Relative depth tells you which surfaces are nearer or farther, with an arbitrary scale for each photo. %1 When enabled, DepthPro supplies an estimated meter scale while the selected teacher supplies detail. This adds inference time, inherits scale errors, and can be rejected when the models disagree. Original relative values are kept separately.")
-                .arg(anchor_->isChecked() ? "Keep this enabled to train RAFT with V2 or DA3." : "With this off you can compare relative predictions, but RAFT training requires an accepted meter-scale target."));
+                .arg(anchor_->isChecked() ? "Enable this when an estimated meter scale is useful; the anchor sees the same full display photo." : "With this off, the display student can learn relative labels directly; keep one unit convention per run. Meter scale is required only for physical native-stereo flow labels."));
         }
     }
 
@@ -938,10 +953,16 @@ private:
                 : QFileDialog::getOpenFileName(this, "Choose teacher checkpoint", teacherPath_->text(), "Checkpoints (*.pth *.pt);;All files (*)");
             if (!path.isEmpty()) teacherPath_->setText(path);
         });
-        inputSize_->setEnabled(model != "depthpro");
+        updateTeacherSizeControl();
         anchor_->setEnabled(model != "depthpro");
-        inputSize_->setToolTip(model == "depthpro" ? "DepthPro uses its fixed 1536×1536 native prediction grid." : "V2 uses the shortest side; DA3 uses the longest side. Higher values cost more memory and do not guarantee more accurate geometry.");
         updateScaleHelp();
+    }
+
+    void updateTeacherSizeControl() {
+        bool configurable = teacher_->currentData() != "depthpro";
+        for (auto *check : teacherChecks_) configurable |= check->isChecked() && check->property("model") != "depthpro";
+        inputSize_->setEnabled(configurable);
+        inputSize_->setToolTip("V2 shortest side / DA3 longest side. Zero uses the native source grid. DepthPro has a fixed 1536-pixel network regardless of this setting. Requested and actual model dimensions are recorded in the dataset.");
     }
 
     void buildReviewTab() {
@@ -1475,7 +1496,10 @@ private:
             auto *item = datasets_->topLevelItem(i); if (item->data(0, Qt::UserRole).toString() != path) continue;
             auto metadata = item->data(0, Qt::UserRole + 1).toJsonObject();
             for (const auto &pair : {qMakePair(QString("sample_count"), QString("samples")), qMakePair(QString("train_count"), QString("train_samples")), qMakePair(QString("validation_count"), QString("validation_samples"))}) if (summary.contains(pair.second)) metadata.insert(pair.first, summary.value(pair.second));
-            if (result.contains("training_eligibility")) metadata.insert("training_eligibility", result.value("training_eligibility")); else metadata.remove("training_eligibility"); item->setData(0, Qt::UserRole + 1, metadata); item->setText(1, QString::number(metadata.value("sample_count").toInt())); item->setText(2, QString("%1 / %2").arg(metadata.value("train_count").toInt()).arg(metadata.value("validation_count").toInt()));
+            for (const QString &key : {QString("training_eligibility"), QString("raft_training_eligibility"), QString("training_eligibility_by_mode"), QString("raft_training_eligibility_by_mode"), QString("max_native_stereo_pixels")}) {
+                if (result.contains(key)) metadata.insert(key, result.value(key)); else metadata.remove(key);
+            }
+            item->setData(0, Qt::UserRole + 1, metadata); item->setText(1, QString::number(metadata.value("sample_count").toInt())); item->setText(2, QString("%1 / %2").arg(metadata.value("train_count").toInt()).arg(metadata.value("validation_count").toInt()));
         }
         for (int i=0; i<collectionSources_->topLevelItemCount(); ++i) { auto *item = collectionSources_->topLevelItem(i); if (item->data(0, Qt::UserRole).toString() == path && summary.contains("samples")) item->setText(3, QString::number(summary.value("samples").toInt())); }
         persistReviewDrafts(); updateReviewCount(); updateTrainingSelection();
@@ -1742,7 +1766,7 @@ private:
     void buildTrainingTab() {
         auto *tab = new QWidget; auto *root = new QVBoxLayout(tab);
         auto *scroll = new QScrollArea; scroll->setWidgetResizable(true); scroll->setFrameShape(QFrame::NoFrame); scroll->setWidget(tab);
-        auto *instruction = new QLabel("Select an existing dataset above, then Start model training. Training reads its arrays, skips unusable targets, and saves RAFT weights in Trained models. Preparing another training set is optional.", tab);
+        auto *instruction = new QLabel("Select an existing dataset above and choose the student model, then Start model training. The experimental display student uses native stereo inputs and learns full, unregistered display targets. Stock RAFT is a separate native-left experiment. Preparing another training set is optional.", tab);
         instruction->setWordWrap(true); root->addWidget(instruction);
         trainingDataset_ = new QLabel("Select a dataset from the library above.", tab); trainingDataset_->setObjectName("trainingDataset");
         trainingDataset_->setWordWrap(true); trainingDataset_->setTextFormat(Qt::PlainText); root->addWidget(trainingDataset_);
@@ -1751,31 +1775,73 @@ private:
         auto *form = new QFormLayout;
         form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
         runName_ = new QLineEdit("run-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"), tab); form->addRow("New run", runName_);
+        student_ = new QComboBox(tab); student_->setObjectName("trainingStudent");
+        student_->addItem("Experimental stereo → display depth", "display");
+        student_->addItem("Stock RAFT native-left disparity", "raft");
+        student_->setToolTip("Display: native left/right inputs, full unregistered display target and learned display-grid output. Stock RAFT: calibrated native-left flow/disparity task. Their targets and error units differ.");
+        form->addRow("Student model", student_);
         form->addRow("RAFT source", pathRow(raftRoot_, projectSettings_ ? projectSettings_->value("raft/root", "/opt/ipde/RAFT-Stereo").toString() : settings_.value("raft_root", "/opt/ipde/RAFT-Stereo").toString(), true, "Choose RAFT-Stereo source", tab));
         form->addRow("Initial RAFT model", pathRow(raftModel_, projectSettings_ ? projectSettings_->value("raft/model", "/opt/ipde/models/raftstereo-middlebury.pth").toString() : settings_.value("raft_model", "/opt/ipde/models/raftstereo-middlebury.pth").toString(), false, "Choose original RAFT checkpoint", tab));
         connect(raftRoot_, &QLineEdit::editingFinished, this, [this] { saveSharedModelSettings(); }); connect(raftModel_, &QLineEdit::editingFinished, this, [this] { saveSharedModelSettings(); });
         root->addLayout(form);
-        trainingAdvanced_ = new QGroupBox("Advanced training settings", tab); auto *trainingAdvancedLayout = new QVBoxLayout(trainingAdvanced_); auto *options = new QHBoxLayout;
-        epochs_ = spin(tab, 1, 10000, 10); steps_ = spin(tab, 1, 10000, 16); patch_ = spin(tab, 64, 2048, 256); patch_->setSingleStep(32);
-        iterations_ = spin(tab, 1, 256, 4); scope_ = new QComboBox(tab); scope_->addItem("Update block", "update"); scope_->addItem("Full network", "full"); trainDevice_ = deviceBox(tab);
-        epochs_->setToolTip("Number of rounds of updates and held-out validation. More rounds can overfit the teacher's errors.");
-        steps_->setToolTip("Optimizer updates per epoch. Each update draws a photo and crop; an epoch is not necessarily a pass through all photos.");
-        patch_->setToolTip("Width and height of each native-resolution training crop. Must be a multiple of 32. Larger crops require more memory.");
-        iterations_->setToolTip("RAFT refinement passes per training update and validation prediction. More passes cost computation.");
-        scope_->setToolTip("Update block changes the refinement module, a useful starting point. Full network changes all weights and needs more memory and diverse data.");
-        trainDevice_->setToolTip("Auto selects available hardware. MPS is the Apple GPU; CUDA needs an NVIDIA GPU; CPU uses the processor.");
-        for (auto pair : {qMakePair(QString("Epochs"), epochs_), qMakePair(QString("Steps / epoch"), steps_), qMakePair(QString("Patch pixels"), patch_), qMakePair(QString("RAFT iterations"), iterations_)}) {
-            auto *group = new QFormLayout; group->addRow(pair.first, pair.second); options->addLayout(group);
-        }
-        auto *deviceForm = new QFormLayout; deviceForm->addRow("Train scope", scope_); deviceForm->addRow("Device", trainDevice_); options->addLayout(deviceForm);
-        trainingAdvancedLayout->addLayout(options);
-        trainingMode_ = new QComboBox(tab); trainingMode_->addItem("Automatic from dataset labels", "auto"); trainingMode_->addItem("Learn teacher estimates (distillation)", "distillation"); trainingMode_->addItem("Learn measured references (supervised)", "supervised");
-        auto *trainingModeForm = new QFormLayout; trainingModeForm->addRow("Training labels", trainingMode_); trainingAdvancedLayout->addLayout(trainingModeForm);
-        auto *trainingHelp = new QLabel("Epochs × steps sets the number of training updates. Each update uses a native-resolution crop (Patch pixels); RAFT iterations sets how often its prediction is refined. Update block is a useful starting scope; Full network adjusts all weights. More training can also learn the teacher's mistakes. Hover over a control for details.", tab);
-        trainingHelp->setWordWrap(true); trainingAdvancedLayout->addWidget(trainingHelp); root->addWidget(trainingAdvanced_); trainingAdvanced_->setVisible(advanced_->isChecked()); root->addStretch();
+        trainingSimple_ = new QWidget(tab); auto *simple = new QFormLayout(trainingSimple_);
+        quality_ = new QSlider(Qt::Horizontal, tab); quality_->setObjectName("trainingQuality"); quality_->setRange(0, 2); quality_->setValue(1); quality_->setTickPosition(QSlider::TicksBelow); quality_->setTickInterval(1);
+        length_ = new QSlider(Qt::Horizontal, tab); length_->setObjectName("trainingLength"); length_->setRange(0, 2); length_->setValue(1); length_->setTickPosition(QSlider::TicksBelow); length_->setTickInterval(1);
+        simple->addRow("Quality · Low → High", quality_); simple->addRow("Length · Fast → Slow", length_);
+        quality_->setToolTip("Larger native pixel crops and more RAFT refinement passes. This costs GPU memory and time; it cannot add detail missing from the teacher.");
+        length_->setToolTip("Dataset-aware training duration and validation error goal. The safety cap limits overfitting; inspect independent scenes before using a model.");
+        root->addWidget(trainingSimple_);
+        trainingAdvanced_ = new QGroupBox("Advanced training settings", tab); auto *trainingAdvancedLayout = new QFormLayout(trainingAdvanced_);
+        limitMode_ = new QComboBox(tab); limitMode_->setObjectName("trainingLimitMode"); limitMode_->addItem("Number of training epochs", "epochs"); limitMode_->addItem("Total number of training steps", "steps");
+        epochs_ = spin(tab, 1, 10000, 10); epochs_->setObjectName("trainingEpochs");
+        steps_ = spin(tab, 1, 100000000, 1000); steps_->setObjectName("trainingTotalSteps");
+        stepsPerUpdate_ = spin(tab, 1, 128, 1); stepsPerUpdate_->setObjectName("trainingStepsPerUpdate");
+        patch_ = spin(tab, 64, 2048, 512); patch_->setSingleStep(32);
+        iterations_ = spin(tab, 1, 256, 16); scope_ = new QComboBox(tab); scope_->addItem("Update block", "update"); scope_->addItem("Full network", "full"); trainDevice_ = deviceBox(tab);
+        epochs_->setToolTip("One epoch visits every eligible training image once in shuffled order, drawing one native-resolution crop per image.");
+        steps_->setToolTip("Total Steps counts optimizer updates. Step mode stops at exactly this cumulative update, saving the final checkpoint.");
+        stepsPerUpdate_->setToolTip("Accumulate this many image/crop gradients before one optimizer update. The last update of an epoch can contain fewer images. Total Steps changes immediately in epoch mode.");
+        patch_->setToolTip("Width and height of each native-resolution crop; a multiple of 32. Cropping preserves pixel scale. Larger crops give spatial context and require more memory.");
+        iterations_->setToolTip("RAFT refinement passes per crop and validation prediction. More passes cost computation.");
+        scope_->setToolTip("Update block changes the refinement module. Full network changes all weights and needs diverse data and more memory.");
+        trainingAdvancedLayout->addRow("Stop training by", limitMode_); trainingAdvancedLayout->addRow("Number of training epochs", epochs_);
+        trainingAdvancedLayout->addRow("Total Steps", steps_); trainingAdvancedLayout->addRow("Steps Per Update", stepsPerUpdate_);
+        patchLabel_ = new QLabel("Display decoder tile pixels", tab);
+        trainingAdvancedLayout->addRow(patchLabel_, patch_); trainingAdvancedLayout->addRow("RAFT iterations", iterations_);
+        trainingAdvancedLayout->addRow("Train scope", scope_); trainingAdvancedLayout->addRow("Device", trainDevice_);
+        learningRate_ = new QDoubleSpinBox(tab); learningRate_->setDecimals(9); learningRate_->setRange(0.000000001, 0.1); learningRate_->setValue(0.00001);
+        learningRate_->setToolTip("AdamW learning rate per optimizer update. Start conservatively; a larger rate can damage pretrained features or destabilize training.");
+        trainingAdvancedLayout->addRow("Learning rate", learningRate_);
+        trainingMode_ = new QComboBox(tab); trainingMode_->addItem("Automatic from dataset labels", "auto"); trainingMode_->addItem("Learn teacher estimates (distillation)", "distillation"); trainingMode_->addItem("Learn measured references (supervised)", "supervised"); trainingMode_->addItem("Use both eligible label kinds", "mixed");
+        trainingAdvancedLayout->addRow("Training labels", trainingMode_);
+        trainingLabelHelp_ = new QLabel(tab); trainingLabelHelp_->setWordWrap(true); trainingAdvancedLayout->addRow(trainingLabelHelp_);
+        validationSchedule_ = new QComboBox(tab); validationSchedule_->addItem("Every epoch", "epoch"); validationSchedule_->addItem("Only when saving a checkpoint", "checkpoint");
+        validationSamples_ = spin(tab, 0, 1000000, 0); validationSamples_->setSpecialValueText("All validation images"); validationSamples_->setToolTip("N selects fresh random validation images on each check. A passing early-stop threshold is confirmed with the full held-out set before stopping.");
+        checkpointSchedule_ = new QComboBox(tab); checkpointSchedule_->addItem("Each epoch", "epoch"); checkpointSchedule_->addItem("Every N epochs", "epochs"); checkpointSchedule_->addItem("Every N Total Steps", "steps"); checkpointSchedule_->addItem("Only at the end", "end");
+        checkpointEvery_ = spin(tab, 1, 1000000, 1);
+        earlyStop_ = binaryButton("Stop when validation error reaches goal", tab);
+        earlyStopError_ = new QDoubleSpinBox(tab); earlyStopError_->setDecimals(4); earlyStopError_->setRange(0.0001, 1000); earlyStopError_->setValue(1.0); earlyStopError_->setSuffix(" px MAE");
+        earlyStopError_->setToolTip("Mean absolute horizontal flow error against held-out labels, in native stereo pixels. This is teacher/reference agreement, not a percentage or proof of depth accuracy.");
+        maxLoss_ = new QDoubleSpinBox(tab); maxLoss_->setRange(1, 1000000); maxLoss_->setValue(1000); maxLoss_->setSuffix(" px"); maxLoss_->setToolTip("Stop if the weighted mean absolute flow error across refinement iterations reaches this limit, is zero, or is nonfinite. The optimizer's summed sequence loss is kept separately. The checkpoint retains finite weights and resume state.");
+        resumePath_ = new QLineEdit(tab); resumePath_->setPlaceholderText("Optional resumable .pth from an earlier run");
+        auto *resumeRow = new QWidget(tab); auto *resumeLayout = new QHBoxLayout(resumeRow); resumeLayout->setContentsMargins(0,0,0,0); resumeLayout->addWidget(resumePath_, 1);
+        auto *resumeBrowse = new QPushButton("Choose…", tab); resumeLayout->addWidget(resumeBrowse);
+        connect(resumeBrowse, &QPushButton::clicked, this, [this] { const QString path = QFileDialog::getOpenFileName(this, "Resume model training", workspace_->text(), "Checkpoints (*.pth *.pt)"); if (!path.isEmpty()) resumePath_->setText(path); });
+        trainingAdvancedLayout->addRow("Validation timing", validationSchedule_); trainingAdvancedLayout->addRow("Validation images per check", validationSamples_);
+        trainingAdvancedLayout->addRow("Save intermediate checkpoints", checkpointSchedule_); trainingAdvancedLayout->addRow("Checkpoint interval N", checkpointEvery_);
+        trainingAdvancedLayout->addRow(earlyStop_); trainingAdvancedLayout->addRow("Validation error goal", earlyStopError_); trainingAdvancedLayout->addRow("Maximum safe training error", maxLoss_); trainingAdvancedLayout->addRow("Resume checkpoint", resumeRow);
+        root->addWidget(trainingAdvanced_); trainingAdvanced_->setVisible(advanced_->isChecked()); trainingSimple_->setVisible(!advanced_->isChecked());
+        trainingHelp_ = new QLabel(tab); trainingHelp_->setWordWrap(true); root->addWidget(trainingHelp_);
         train_ = new QPushButton("Start model training", tab); root->addWidget(train_);
-        connect(epochs_, qOverload<int>(&QSpinBox::valueChanged), this, [this] { updateTrainingSelection(); });
-        connect(steps_, qOverload<int>(&QSpinBox::valueChanged), this, [this] { updateTrainingSelection(); });
+        saveCheckpoint_ = new QPushButton("Save checkpoint now", tab); saveCheckpoint_->setObjectName("saveCheckpointNow"); saveCheckpoint_->setEnabled(false); root->addWidget(saveCheckpoint_);
+        connect(saveCheckpoint_, &QPushButton::clicked, this, [this] { requestTrainingControl("save"); });
+        for (auto *control : {epochs_, steps_, stepsPerUpdate_}) connect(control, qOverload<int>(&QSpinBox::valueChanged), this, [this] { updateTrainingSelection(); });
+        connect(limitMode_, &QComboBox::currentIndexChanged, this, [this] { updateTrainingSelection(); });
+        connect(student_, &QComboBox::currentIndexChanged, this, [this] { updateStudentControls(true); updateTrainingSelection(); });
+        connect(trainingMode_, &QComboBox::currentIndexChanged, this, [this] { updateTrainingSelection(); });
+        connect(checkpointSchedule_, &QComboBox::currentIndexChanged, this, [this] { checkpointEvery_->setEnabled(!busy_ && (checkpointSchedule_->currentData() == "epochs" || checkpointSchedule_->currentData() == "steps")); });
+        for (auto *slider : {quality_, length_}) connect(slider, &QSlider::valueChanged, this, [this] { applySimpleTrainingSettings(); updateTrainingSelection(); });
+        connect(advanced_, &QPushButton::toggled, this, [this](bool visible) { trainingSimple_->setVisible(!visible); if (!visible) applySimpleTrainingSettings(); updateTrainingSelection(); });
         connect(train_, &QPushButton::clicked, this, [this] { trainDataset(); });
         compareBaseline_ = new QPushButton("Compare selected trained model with baseline on a photo…", tab); root->addWidget(compareBaseline_);
         connect(compareBaseline_, &QPushButton::clicked, this, [this] {
@@ -1786,23 +1852,120 @@ private:
             requestPreview("baseline", {"compare-models", photo, "--baseline-model", raftModel_->text(), "--candidate-model", candidate, "--raft-root", raftRoot_->text(), "--device", trainDevice_->currentText(), "--output-dir", comparisonOutput});
             tabs_->setCurrentIndex(1); previewStats_->setText("Comparing the baseline and trained model in the background…");
         });
+        updateStudentControls(true);
         tabs_->addTab(scroll, "4. Train model & compare");
     }
 
+    bool displayStudent() const { return !student_ || student_->currentData() == "display"; }
+    QJsonObject trainingEligibility(const QJsonObject &record) const {
+        const QString base = displayStudent() ? "training_eligibility" : "raft_training_eligibility";
+        const auto modes = record.value(base + "_by_mode").toObject();
+        const QString mode = trainingMode_ ? trainingMode_->currentData().toString() : "auto";
+        return modes.value(mode).isObject() ? modes.value(mode).toObject() : record.value(base).toObject();
+    }
+    static QJsonValue relativeDepthError(const QJsonObject &metrics) {
+        return metrics.contains("mean_relative_depth_error") ? metrics.value("mean_relative_depth_error") : metrics.value("mean_absolute_fractional_depth_error");
+    }
+    static QString validationDescription(const QJsonObject &metrics, const QString &units = {}) {
+        if (relativeDepthError(metrics).isDouble()) {
+            QString result = QString::number(relativeDepthError(metrics).toDouble() * 100, 'f', 2) + "% mean relative depth error";
+            if (metrics.value("mean_absolute_depth_error").isDouble()) result += " · MAE " + QString::number(metrics.value("mean_absolute_depth_error").toDouble(), 'g', 5) + " " + metrics.value("units").toString(units);
+            return result;
+        }
+        if (metrics.value("mean_absolute_flow_error_pixels").isDouble()) return QString::number(metrics.value("mean_absolute_flow_error_pixels").toDouble(), 'f', 3) + " px flow MAE";
+        return "See metrics";
+    }
+    void updateStudentControls(bool resetDefaults) {
+        if (!patchLabel_ || !trainingHelp_) return;
+        const bool display = displayStudent();
+        patchLabel_->setText(display ? "Display decoder tile pixels" : "Native stereo patch pixels");
+        patch_->setToolTip(display ? "Output-query tile side. Each image uses every supported full-display target pixel; native stereo RGB is encoded whole. Larger tiles reduce dispatch overhead and increase decoder memory, without adding source information." : "Width and height of a native stereo training crop; a multiple of 32. A crop preserves source pixel scale. Larger crops give more context and use more memory.");
+        epochs_->setToolTip(display ? "An epoch visits every eligible image/teacher entry once, using every supported display target pixel in bounded tiles." : "An epoch visits every eligible image/teacher entry once, drawing one native-resolution crop per image.");
+        stepsPerUpdate_->setToolTip("Accumulate this many image gradients before one optimizer update. The last update of an epoch may contain fewer images. Total Steps updates immediately in epoch mode.");
+        iterations_->setToolTip(display ? "RAFT refinement passes for whole-native-pair correspondence context; more passes cost time and memory." : "RAFT refinement passes for each native crop and validation prediction.");
+        scope_->setItemText(scope_->findData("update"), display ? "Added encoders + decoder (RAFT frozen)" : "RAFT update block");
+        scope_->setToolTip(display ? "Limited scope trains the added encoders and query decoder while freezing RAFT. Full network also adapts RAFT and costs more memory. Full-native encoding memory is not guaranteed by dataset size." : "Update block changes RAFT's refinement module. Full network changes all weights and needs diverse data and more memory.");
+        quality_->setToolTip(display ? "Larger output tiles, wider added student features/decoder, and more native RAFT iterations. All display target pixels are still used. Experimental: higher quality is not a guarantee of better geometry or 64 GB fit." : "Larger native pixel crops and more RAFT refinement passes; more memory and context, without repairing bad labels.");
+        earlyStopError_->setSuffix(display ? " fraction" : " px MAE");
+        earlyStopError_->setToolTip(display ? "Mean abs(prediction-target)/target over valid held-out display pixels. 0.10 is a 10% average relative difference. Subsample success is confirmed on the full validation set; teacher agreement is not physical accuracy." : "Mean absolute horizontal flow error against held-out labels, in native stereo pixels; not a percent or proof of accuracy.");
+        maxLoss_->setSuffix(display ? " fraction" : " px");
+        maxLoss_->setToolTip(display ? "Stop if mean fractional display error abs(prediction-target)/target reaches this limit, is zero or nonfinite. Saves finite model and resume state." : "Stop if weighted mean absolute flow error across refinement iterations reaches this pixel limit, is zero or nonfinite. Saves finite model and resume state.");
+        trainingLabelHelp_->setText(display ? "Distillation learns the full display teacher, including its blur, scale and mistakes. Relative depth or inverse depth can train directly; one run must retain one unit convention. Supervised requires an independently measured display-grid reference. The teacher and optional anchor see full display RGB; the student sees only native left/right RGB. No teacher warp or stereo-teacher fallback is used." : "Distillation learns compatible native-left teacher labels, including blur, scale and mistakes; physical flow labels require meter scale and calibration. Supervised uses measured references aligned with the native left camera. Display-grid teachers cannot directly train stock RAFT. Teacher agreement does not prove physical accuracy.");
+        trainingHelp_->setText(display ? "Total Steps = epochs × ceil(training entries ÷ Steps Per Update). Each entry visits all supported full-display target pixels in bounded decoder tiles. Native left/right RGB remains full size; output is predicted directly on the display grid. Stop saves resumable state at a safe update boundary. This student is experimental." : "Total Steps = epochs × ceil(training entries ÷ Steps Per Update). Each entry supplies a native stereo crop and the output stays on the left grid. Stop saves resumable state at a safe update boundary.");
+        if (resetDefaults) learningRate_->setValue(display ? .0001 : .00001);
+        if (resetDefaults) { earlyStopError_->setValue(display ? .10 : 1.0); maxLoss_->setValue(1000); }
+    }
+
+    int trainingImageCount() const {
+        auto *item = datasets_->currentItem(); if (!item) return 0;
+        const auto record = item->data(0, Qt::UserRole + 1).toJsonObject();
+        const auto eligibility = trainingEligibility(record);
+        return eligibility.value("train_count").toInt(record.value("train_count").toInt());
+    }
+    qint64 plannedTrainingSteps() const {
+        if (!limitMode_ || !stepsPerUpdate_) return 0;
+        if (limitMode_->currentData() == "steps") return steps_->value();
+        return qint64(epochs_->value()) * ((qint64(trainingImageCount()) + stepsPerUpdate_->value() - 1) / stepsPerUpdate_->value());
+    }
+    void applySimpleTrainingSettings() {
+        if (!quality_ || advanced_->isChecked() || busy_) return;
+        const int count = qMax(1, trainingImageCount()), quality = quality_->value(), length = length_->value();
+        QSignalBlocker e(epochs_), t(steps_), u(stepsPerUpdate_), m(limitMode_);
+        patch_->setValue(quality == 0 ? 256 : quality == 1 ? 512 : 768);
+        iterations_->setValue(quality == 0 ? 8 : quality == 1 ? 16 : 24);
+        const int budget = length == 0 ? 1000 : length == 1 ? 5000 : 15000;
+        const int cap = length == 0 ? 5 : length == 1 ? 20 : 50;
+        epochs_->setValue(qBound(1, (budget + count - 1) / count, cap)); limitMode_->setCurrentIndex(0); stepsPerUpdate_->setValue(1);
+        const auto record = datasets_->currentItem() ? datasets_->currentItem()->data(0, Qt::UserRole + 1).toJsonObject() : QJsonObject{};
+        const double nativePixels = record.value("max_native_stereo_pixels").toDouble();
+        const bool fullScope = count >= 500 && quality >= 1 && (!displayStudent() || (nativePixels > 0 && nativePixels <= 512 * 512));
+        scope_->setCurrentIndex(scope_->findData(fullScope ? "full" : "update"));
+        checkpointSchedule_->setCurrentIndex(checkpointSchedule_->findData("epochs")); checkpointEvery_->setValue(length == 0 ? 1 : length == 1 ? 2 : 5);
+        validationSchedule_->setCurrentIndex(validationSchedule_->findData("checkpoint")); validationSamples_->setValue(count >= 100 ? 16 : 0);
+        earlyStop_->setChecked(true); earlyStopError_->setValue(displayStudent() ? (length == 0 ? .20 : length == 1 ? .10 : .05) : (length == 0 ? 2.0 : length == 1 ? 1.0 : 0.5));
+        trainingMode_->setCurrentIndex(0); maxLoss_->setValue(1000);
+        learningRate_->setValue(displayStudent() ? .0001 : .00001);
+    }
     void updateTrainingSelection() {
         if (!trainingDataset_ || !train_) return;
         if (busy_ && job_ == "Train RAFT-Stereo") return;
+        applySimpleTrainingSettings();
         auto *item = datasets_->currentItem();
         train_->setEnabled(!datasetMode_ && !busy_ && item && projectOperations_.value("datasets").toString() != "cleanup-dataset");
+        const bool epochMode = limitMode_->currentData() == "epochs";
+        epochs_->setEnabled(!busy_ && epochMode); steps_->setEnabled(!busy_ && !epochMode);
+        const qint64 planned = plannedTrainingSteps();
+        if (epochMode) { QSignalBlocker blocker(steps_); steps_->setValue(int(qBound<qint64>(qint64(1), planned, qint64(steps_->maximum())))); }
+        steps_->setToolTip(planned > steps_->maximum() ? "This epoch plan exceeds the GUI's 100,000,000-update limit. Reduce epochs or increase Steps Per Update. The exact plan is shown above." : "Total Steps counts optimizer updates. Step mode stops at exactly this cumulative update, saving the final checkpoint.");
         if (!item) { trainingDataset_->setText("Select a dataset from the library above."); return; }
-        const auto eligibility = item->data(0, Qt::UserRole + 1).toJsonObject().value("training_eligibility").toObject();
+        const auto eligibility = trainingEligibility(item->data(0, Qt::UserRole + 1).toJsonObject());
         if ((eligibility.contains("trainable") && !eligibility.value("trainable").toBool()) || hasUnsavedReviewExclusions(item->data(0, Qt::UserRole).toString())) train_->setEnabled(false);
-        QString details = QString("Dataset: %1 · %2 entries · %3 train / validation\nPlanned training: %4 epochs × %5 steps = %6 optimizer updates.")
-            .arg(item->text(0), item->text(1), item->text(2)).arg(epochs_->value()).arg(steps_->value()).arg(epochs_->value() * steps_->value());
-        if (!eligibility.isEmpty()) details += QString("\n%1 usable targets; %2 unusable targets will be skipped automatically. Dataset files remain unchanged.")
+        if (planned > steps_->maximum()) train_->setEnabled(false);
+        QString details = QString("Dataset: %1 · %2 entries · %3 train / validation\nTotal Steps: %4 · %5 images per epoch · %6 image gradients per update.")
+            .arg(item->text(0), item->text(1), item->text(2)).arg(plannedTrainingSteps()).arg(trainingImageCount()).arg(stepsPerUpdate_->value());
+        details += epochMode ? QString(" Stop after %1 epochs.").arg(epochs_->value()) : " Stop at the exact Total Steps limit.";
+        details += QString(displayStudent() ? "\nDisplay tiles: %1 × %1 (all supported target pixels) · %2 RAFT iterations · %3. Validation: %4; %5." : "\nNative crops: %1 × %1 · %2 RAFT iterations · %3. Validation: %4; %5.")
+            .arg(patch_->value()).arg(iterations_->value()).arg(scope_->currentText(), validationSchedule_->currentText(), validationSamples_->value() == 0 ? QString("all held-out images") : QString("%1 random held-out images").arg(validationSamples_->value()));
+        if (earlyStop_->isChecked()) details += displayStudent() ? QString(" Full-set early-stop goal: %1% mean relative depth error.").arg(earlyStopError_->value() * 100) : QString(" Full-set early-stop goal: %1 px flow MAE.").arg(earlyStopError_->value());
+        if (displayStudent() && eligibility.value("units").isString()) {
+            const QString units = eligibility.value("units").toString();
+            details += "\nTarget/output units: " + units + (units == "meters" ? ". Learned meter estimates; units do not establish physical accuracy." : ". Relative values have no measured distance scale; inverse-depth remains inverse-depth. No automatic meter conversion.");
+        }
+        if (!eligibility.isEmpty()) details += QString("\n%1 usable targets; %2 unusable targets will be skipped automatically.")
             .arg(eligibility.value("eligible_count").toInt()).arg(eligibility.value("excluded_count").toInt());
         if (eligibility.contains("trainable") && !eligibility.value("trainable").toBool()) details += "\n" + eligibility.value("reason").toString();
+        if (planned > steps_->maximum()) details += "\nPlan exceeds the GUI's 100,000,000-update limit; reduce epochs or increase Steps Per Update.";
         trainingDataset_->setText(details); trainingDataset_->setToolTip(item->data(0, Qt::UserRole).toString());
+    }
+    void requestTrainingControl(const QString &command) {
+        if (trainingControlPath_.isEmpty() || process_->state() == QProcess::NotRunning) return;
+        QSaveFile file(trainingControlPath_);
+        const QByteArray request = QJsonDocument(QJsonObject{{"command", command}, {"request_id", QUuid::createUuid().toString(QUuid::WithoutBraces)}}).toJson();
+        if (!file.open(QIODevice::WriteOnly) || file.write(request) != request.size() || !file.commit()) {
+            log_->appendPlainText("Could not write training request: " + file.errorString()); return;
+        }
+        if (command == "stop") { trainingStopping_ = true; cancel_->setEnabled(false); saveCheckpoint_->setEnabled(false); }
+        trainingStatus_->setText(command == "stop" ? "Stop requested. Finishing the current update and saving a resumable checkpoint…" : "Checkpoint requested. Saving after the current update…");
     }
 
     void updateTrainingProgress(const QJsonObject &event) {
@@ -1812,26 +1975,43 @@ private:
         const int completed = event.value("completed_steps").toInt(), total = event.value("total_steps").toInt();
         const int processed = event.value("processed").toInt(), samples = event.value("total").toInt();
         QString message;
-        if (stage == "checking_dataset") message = "Checking dataset arrays before model training. Large datasets can take several minutes.";
+        if (stage == "checking_dataset" || stage == "dataset_preflight") message = "Checking dataset metadata; native dataset arrays are verified when used.";
         else if (stage == "filtering_targets") message = QString("Selecting usable targets; %1 invalid targets skipped. Dataset files remain unchanged.").arg(event.value("excluded_count").toInt());
         else if (stage == "skipped_sample") message = "Skipping unusable target: " + QFileInfo(event.value("source_path").toString(event.value("sample_id").toString())).fileName() + " · " + event.value("reason").toString();
         else if (stage == "preparing_targets") message = QString("Preparing %1 targets · %2 / %3").arg(event.value("role").toString()).arg(processed).arg(samples);
-        else if (stage == "model_setup") message = "Loading the RAFT model and preparing the training device.";
+        else if (stage == "model_setup") message = displayStudent() ? "Loading the experimental display student model and native RAFT context." : "Loading the RAFT model and preparing the training device.";
         else if (stage == "baseline_validation") message = QString("Checking baseline validation · %1 / %2 photos").arg(processed).arg(samples);
         else if (stage == "epoch_step") message = QString("Epoch %1 / %2 · step %3 / %4").arg(epoch).arg(epochs).arg(step).arg(steps);
+        else if (stage == "display_tile") message = event.value("validation").toBool()
+            ? QString("Validation · display tile %1 / %2").arg(event.value("tile").toInt()).arg(event.value("tiles").toInt())
+            : QString("Epoch %1 / %2 · image step %3 / %4 · display tile %5 / %6").arg(epoch).arg(epochs).arg(step + 1).arg(steps).arg(event.value("tile").toInt()).arg(event.value("tiles").toInt());
         else if (stage == "epoch_validation") message = QString("Epoch %1 / %2 · validation %3 / %4 photos").arg(epoch).arg(epochs).arg(processed).arg(samples);
+        else if (stage == "checkpoint_validation") message = QString("Checkpoint validation · %1 / %2 photos").arg(processed).arg(samples);
+        else if (stage == "resumed") message = QString("Resumed training at epoch %1 · Total Step %2").arg(epoch).arg(completed);
         else if (stage == "final_validation") message = QString("Final validation of the selected checkpoint · %1 / %2 photos").arg(processed).arg(samples);
-        else if (stage == "writing_checkpoint") message = "Saving and verifying the model checkpoint.";
+        else if (stage == "writing_checkpoint") message = "Saving and verifying a resumable model checkpoint.";
+        else if (stage == "checkpoint_saved") message = "Checkpoint ready: " + event.value("checkpoint_path").toString();
+        else if (stage == "early_stop_confirmation") message = "Confirming the error goal against the full validation set.";
+        else if (stage == "stopped" || stage == "training_stopped") message = "Training stopped: " + event.value("stop_reason").toString();
         else if (stage == "completed") message = "Model checkpoint saved. Finishing the training run.";
         if (message.isEmpty()) return;
+        if (stage == "checkpoint_saved") {
+            const QString path = event.value("checkpoint_path").toString();
+            bool listed = false;
+            for (int i = 0; i < runs_->topLevelItemCount(); ++i) listed |= runs_->topLevelItem(i)->data(0, Qt::UserRole).toString() == path;
+            if (!path.isEmpty() && !listed) { auto *item = new QTreeWidgetItem(runs_, {QFileInfo(path).fileName(), QString::number(epoch), "Saved during training"}); item->setData(0, Qt::UserRole, path); item->setToolTip(0, path); }
+        }
         if (event.value("sample_patches").toInt() > 0) message += QString(" · crop %1 / %2").arg(event.value("sample_patch").toInt()).arg(event.value("sample_patches").toInt());
-        message += QString(" · %1 / %2 updates").arg(completed).arg(total);
+        message += QString(" · Total Steps %1 / %2").arg(completed).arg(total);
         if (event.value("loss").isDouble()) message += " · loss " + QString::number(event.value("loss").toDouble(), 'g', 6);
+        if (event.value("guard_error_pixels").isDouble()) message += " · training error " + QString::number(event.value("guard_error_pixels").toDouble(), 'f', 2) + " px";
         if (event.value("mean_absolute_flow_error_pixels").isDouble()) message += " · held-out error " + QString::number(event.value("mean_absolute_flow_error_pixels").toDouble(), 'f', 3) + " px";
+        if (relativeDepthError(event).isDouble()) message += " · mean relative depth error " + QString::number(relativeDepthError(event).toDouble() * 100, 'f', 2) + "%";
+        if (event.value("mean_absolute_depth_error").isDouble()) message += " · depth MAE " + QString::number(event.value("mean_absolute_depth_error").toDouble(), 'g', 5) + " " + event.value("units").toString();
         trainingStatus_->setText(message); statusBar()->showMessage(message);
-        progress_->setTextVisible(true); progress_->setFormat("%v / %m updates");
+        progress_->setTextVisible(true); progress_->setFormat("%v / %m Total Steps");
         if (total > 0) { progress_->setRange(0, total); progress_->setValue(qBound(0, completed, total)); }
-        if (stage != "epoch_step" && stage != "preparing_targets" && stage != "skipped_sample"
+        if (stage != "epoch_step" && stage != "display_tile" && stage != "preparing_targets" && stage != "skipped_sample"
             && (event.value("status").toString() == "finished" || stage == "model_setup" || stage == "writing_checkpoint" || stage == "completed")) log_->appendPlainText(message);
     }
 
@@ -1844,6 +2024,7 @@ private:
         if (sources_->topLevelItemCount() == 0) { QMessageBox::information(this, "Add photos", "Add spatial HEIC photos before generating a dataset."); return; }
         const QString name = datasetName_->text().trimmed();
         if (!validName(name)) { QMessageBox::information(this, "Dataset name", "Use a folder name without path separators."); return; }
+        if (inputSize_->value() > 0 && inputSize_->value() < 14) { QMessageBox::information(this, "Teacher input size", "Use 0 for native source dimensions, or a custom input size of at least 14 pixels."); return; }
         QStringList args{"dataset"}; QJsonObject groups;
         for (int i = 0; i < sources_->topLevelItemCount(); ++i) {
             auto *item = sources_->topLevelItem(i); const QString group = item->text(1).trimmed();
@@ -1867,9 +2048,9 @@ private:
         if (!teachersFile_->open() || teachersFile_->write(QJsonDocument(teachers).toJson()) < 0 || !teachersFile_->flush()) { log_->appendPlainText("Could not create teacher configuration."); teachersFile_.reset(); return; }
         args << "--output-dir" << QDir(workspace_->text()).filePath("datasets/" + name)
              << "--teachers-json" << teachersFile_->fileName() << "--name" << name << "--category" << category_->text().trimmed()
+             << "--teacher-view" << "display"
              << "--grouping" << (useGroups_->isChecked() ? (verifiedScenes_->isChecked() ? "scene" : "capture") : "none");
         if (anchor_->isChecked()) args << "--metric-anchor" << "depthpro";
-        if (includeDisplayTeacher_->isChecked()) args << "--include-display-teacher";
         args << "--workers" << QString::number(workerCount()); refreshAfter_ = true; startJob("Generate dataset", args);
     }
 
@@ -1879,18 +2060,60 @@ private:
         const QString dataset = selectedPath(datasets_); const QString name = runName_->text().trimmed();
         if (dataset.isEmpty()) { QMessageBox::information(this, "Choose dataset", "Select a dataset from the library above."); return; }
         if (hasUnsavedReviewExclusions(dataset)) { statusBar()->showMessage("Finish saving the pending dataset edits before training."); return; }
-        const auto eligibility = datasets_->currentItem()->data(0, Qt::UserRole + 1).toJsonObject().value("training_eligibility").toObject();
+        const auto eligibility = trainingEligibility(datasets_->currentItem()->data(0, Qt::UserRole + 1).toJsonObject());
         if (eligibility.contains("trainable") && !eligibility.value("trainable").toBool()) { statusBar()->showMessage(eligibility.value("reason").toString()); return; }
         if (!validName(name)) { QMessageBox::information(this, "Run name", "Use a run folder name without path separators."); return; }
-        if (patch_->value() % 32) { QMessageBox::information(this, "Patch size", "RAFT patch size must be a multiple of 32 (for example 256 or 512)."); return; }
+        if (!displayStudent() && patch_->value() % 32) { QMessageBox::information(this, "Patch size", "Stock RAFT patch size must be a multiple of 32 (for example 256 or 512)."); return; }
         const QString checkpoint = QDir(workspace_->text()).filePath("runs/" + name + "/checkpoint.pth");
         saveSharedModelSettings();
         refreshAfter_ = true;
         QStringList args{"train", dataset, "--checkpoint", checkpoint, "--raft-root", raftRoot_->text(), "--raft-model", raftModel_->text(),
-            "--epochs", QString::number(epochs_->value()), "--steps", QString::number(steps_->value()), "--patch-size", QString::number(patch_->value()),
+            "--student", student_->currentData().toString(),
+            "--limit-mode", limitMode_->currentData().toString(), "--epochs", QString::number(epochs_->value()), "--total-steps", QString::number(steps_->value()),
+            "--steps-per-update", QString::number(stepsPerUpdate_->value()), "--patch-size", QString::number(patch_->value()),
+            "--validation-schedule", validationSchedule_->currentData().toString(), "--validation-samples", QString::number(validationSamples_->value()),
+            "--checkpoint-schedule", checkpointSchedule_->currentData().toString(), "--checkpoint-every", QString::number(checkpointEvery_->value()), "--max-loss", QString::number(maxLoss_->value()),
+            "--learning-rate", QString::number(learningRate_->value(), 'g', 10),
             "--iterations", QString::number(iterations_->value()), "--scope", scope_->currentData().toString(), "--device", trainDevice_->currentText(), "--mode", trainingMode_->currentData().toString(), "--workers", QString::number(workerCount())};
         const QString member = projectSettings_ ? projectSettings_->value("raft/member").toString() : QString(); if (!member.isEmpty()) args << "--raft-model-member" << member;
+        trainingControlPath_ = QFileInfo(checkpoint).absolutePath() + "/training-control.json";
+        QDir().mkpath(QFileInfo(checkpoint).absolutePath());
+        if (QFileInfo::exists(trainingControlPath_)) { QMessageBox::information(this, "Run already exists", "Choose a new run name; this run already has training control state."); return; }
+        args << "--control-file" << trainingControlPath_;
+        if (earlyStop_->isChecked()) args << "--early-stop-error" << QString::number(earlyStopError_->value());
+        if (!resumePath_->text().trimmed().isEmpty()) args << "--resume" << resumePath_->text().trimmed();
+        trainingStopping_ = false;
         startJob("Train RAFT-Stereo", args);
+    }
+
+    void updateSessionBusy() {
+        if (session_) session_->setBusy(busy_ && job_ != "Refresh library" ? activeOperation_ : exportRunning() ? QString("export") : QString());
+    }
+
+    void configureExportProcess() {
+        if (exportProcess_) return;
+        exportProcess_ = new QProcess(this);
+        auto finished = [this] {
+            updateSessionBusy();
+            export_->setEnabled(!busy_ || job_ == "Train RAFT-Stereo");
+            if (closeAfterTraining_ && !(busy_ && job_ == "Train RAFT-Stereo")) {
+                closeAfterTraining_ = false; QTimer::singleShot(0, this, &QWidget::close);
+            }
+        };
+        connect(exportProcess_, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this, finished](int code, QProcess::ExitStatus status) {
+            const auto result = QJsonDocument::fromJson(exportProcess_->readAllStandardOutput()).object();
+            log_->appendPlainText(status == QProcess::NormalExit && code == 0 ? "Checkpoint export ready: " + exportedCheckpointPath(result) : "Checkpoint export failed: " + result.value("error").toString(QString::fromUtf8(exportProcess_->readAllStandardError())));
+            finished();
+        });
+        connect(exportProcess_, &QProcess::errorOccurred, this, [this, finished](QProcess::ProcessError error) {
+            if (error == QProcess::FailedToStart) { log_->appendPlainText("Could not start checkpoint export: " + exportProcess_->errorString()); finished(); }
+        });
+    }
+
+    QString exportedCheckpointPath(const QJsonObject &result) const {
+        const QString path = result.value("checkpoint_path").toString();
+        if (!path.isEmpty()) return path;
+        return QDir(exportDestination_).filePath(result.value("checkpoint").toString(result.value("schema").toString().contains("display") ? "display-model.pth" : "raft-model.pth"));
     }
 
     void exportModel() {
@@ -1899,7 +2122,16 @@ private:
         const QString parent = QFileDialog::getExistingDirectory(this, "Choose export destination", workspace_->text());
         if (parent.isEmpty()) return;
         exportDestination_ = QDir(parent).filePath("raft-export-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"));
-        startJob("Export RAFT model", {"export", checkpoint, "--output", exportDestination_});
+        const QStringList arguments{"export", checkpoint, "--output", exportDestination_, "--raft-root", raftRoot_->text()};
+        if (busy_ && job_ == "Train RAFT-Stereo") {
+            if (exportRunning()) return;
+            configureExportProcess();
+            exportProcess_->setProgram(pythonPath()); exportProcess_->setArguments(QStringList{scriptPath(), "--json"} + arguments); exportProcess_->start();
+            updateSessionBusy();
+            export_->setEnabled(false); log_->appendPlainText("Exporting the saved checkpoint while training continues…");
+            return;
+        }
+        startJob("Export RAFT model", arguments);
     }
 
     void refreshLibrary() {
@@ -2006,24 +2238,28 @@ private:
 
     void setBusy(bool busy) {
         busy_ = busy;
-        if (session_) session_->setBusy(busy && job_ != "Refresh library" ? activeOperation_ : QString());
-        workspace_->setEnabled(!busy); chooseWorkspace_->setEnabled(!busy); refresh_->setEnabled(!busy); export_->setEnabled(!busy);
+        updateSessionBusy();
+        workspace_->setEnabled(!busy); chooseWorkspace_->setEnabled(!busy); refresh_->setEnabled(!busy); export_->setEnabled((!busy || job_ == "Train RAFT-Stereo") && (!exportProcess_ || exportProcess_->state() == QProcess::NotRunning));
         generate_->setEnabled(!busy); train_->setEnabled(!busy); importHf_->setEnabled(!busy); cancelAdding_->setEnabled(!busy);
         for (auto *button : editActions_) button->setEnabled(!busy && !reviewGenerating_ && !reviewEntries().isEmpty());
         reviewSamples_->setEnabled(!busy || job_ == "Generate dataset"); reviewedName_->setEnabled(!busy);
         train_->setText(busy && job_ == "Train RAFT-Stereo" ? "Training model…" : "Start model training");
-        for (auto *control : QList<QWidget *>{runName_, raftRoot_, raftModel_, epochs_, steps_, patch_, iterations_, scope_, trainDevice_, trainingMode_}) control->setEnabled(!busy);
+        for (auto *control : QList<QWidget *>{runName_, student_, raftRoot_, raftModel_, epochs_, steps_, patch_, iterations_, scope_, trainDevice_, trainingMode_, stepsPerUpdate_, limitMode_, validationSchedule_, validationSamples_, checkpointSchedule_, checkpointEvery_, earlyStop_, earlyStopError_, maxLoss_, learningRate_, resumePath_, quality_, length_, advanced_}) control->setEnabled(!busy);
         collectionSources_->setEnabled(!busy); collectionName_->setEnabled(!busy); splitMode_->setEnabled(!busy); groupingPolicy_->setEnabled(!busy); splitSeed_->setEnabled(!busy);
         validationFraction_->setEnabled(!busy && splitMode_->currentData().toString() != "explicit"); validationCount_->setEnabled(!busy && splitMode_->currentData().toString() == "equal-per-dataset");
         updateCollectionReadiness();
         updateReviewCount();
-        cancel_->setEnabled(busy);
+        cancel_->setEnabled(busy && !trainingStopping_);
+        cancel_->setText(busy && job_ == "Train RAFT-Stereo" ? "Stop and save training" : "Cancel current task");
+        saveCheckpoint_->setEnabled(busy && job_ == "Train RAFT-Stereo" && !trainingStopping_);
+        if (!busy) { trainingStopping_ = false; trainingControlPath_.clear(); }
+
         if (job_ == "Train RAFT-Stereo") {
             if (busy) {
                 trainingStatus_->setText("Starting model training. Checking the selected dataset before the first epoch.");
-                progress_->setRange(0, epochs_->value() * steps_->value()); progress_->setValue(0);
+                progress_->setRange(0, int(qBound<qint64>(qint64(1), plannedTrainingSteps(), qint64(steps_->maximum())))); progress_->setValue(0);
             }
-            progress_->setTextVisible(true); progress_->setFormat("%v / %m updates");
+            progress_->setTextVisible(true); progress_->setFormat("%v / %m Total Steps");
         } else { progress_->setTextVisible(false); progress_->setRange(0, busy ? 0 : 1); progress_->setValue(0); }
         updateTrainingSelection();
         updateCleanupActions();
@@ -2128,6 +2364,7 @@ private:
                 previewStats_->setText("Preview failed. See the error below; this sample has not been automatically excluded.");
             }
             if (job_ == "Generate dataset") stopGenerationStreaming("Generation failed. See the progress log and generate a new dataset to try again.");
+            closeAfterTraining_ = false;
             refreshAfter_ = false; return;
         }
         const QJsonObject result = doc.object();
@@ -2185,20 +2422,23 @@ private:
         }
         else if (job_ == "Train RAFT-Stereo") {
             const auto metrics = result.value("validation").toObject();
-            QString summary = QString("Model training complete · %1 epochs · %2 updates · best epoch %3.")
+            QString summary = QString("Model training finished · %1 epochs · %2 Total Steps · best epoch %3.")
                 .arg(result.value("epochs_completed").toInt(result.value("history").toArray().size()))
                 .arg(result.value("total_steps").toInt()).arg(result.value("best_epoch").toInt());
-            if (metrics.value("mean_absolute_flow_error_pixels").isDouble()) summary += " Held-out error: " + QString::number(metrics.value("mean_absolute_flow_error_pixels").toDouble(), 'f', 3) + " px.";
+            if (relativeDepthError(metrics).isDouble() || metrics.value("mean_absolute_flow_error_pixels").isDouble()) summary += " Held-out error: " + validationDescription(metrics, result.value("units").toString()) + ".";
+            if (result.contains("stop_reason")) summary += " Reason: " + result.value("stop_reason").toString() + ".";
             summary += " Checkpoint: " + result.value("checkpoint_path").toString();
             const auto excluded = result.value("excluded_samples").toArray();
             if (!excluded.isEmpty()) summary += QString(" %1 unusable targets skipped; dataset unchanged.").arg(excluded.size());
             trainingStatus_->setText(summary); log_->appendPlainText(summary);
             for (const auto &warning : result.value("warnings").toArray()) log_->appendPlainText(warning.toString());
+            if (closeAfterTraining_) { refreshAfter_ = false; if (!exportRunning()) { closeAfterTraining_ = false; QTimer::singleShot(0, this, &QWidget::close); } return; }
         }
         else log_->appendPlainText(QString::fromUtf8(QJsonDocument(result).toJson(QJsonDocument::Indented)).left(18000));
         statusBar()->showMessage(job_ + " complete");
         if (job_ == "Export RAFT model") {
-            log_->appendPlainText("Export complete: " + exportDestination_ + "/raft-model.pth — choose this file in IPDE's RAFT model control.");
+            const QString file = exportedCheckpointPath(result);
+            log_->appendPlainText("Export complete: " + file + " — choose this checkpoint in the model control; its architecture determines the available output grid.");
             showFolder(exportDestination_);
         }
         const bool refresh = refreshAfter_; refreshAfter_ = false;
@@ -2245,8 +2485,7 @@ private:
         for (const QJsonValue &value : result.value("runs").toArray()) {
             const auto obj = value.toObject(); const QString path = obj.value("path").toString();
             const QJsonObject metrics = obj.value("validation").toObject();
-            const QJsonValue mae = metrics.value("mean_absolute_flow_error_pixels");
-            QString validation = mae.isDouble() ? QString::number(mae.toDouble(), 'f', 2) + " px teacher MAE" : "See metrics";
+            QString validation = validationDescription(metrics, obj.value("units").toString());
             auto *item = new QTreeWidgetItem(runs_, {obj.value("name").toString(QFileInfo(path).completeBaseName()), QString::number(obj.value("best_epoch").toInt()), validation});
             item->setData(0, Qt::UserRole, path); item->setToolTip(0, path);
             item->setToolTip(2, QString::fromUtf8(QJsonDocument(metrics).toJson(QJsonDocument::Indented)));
@@ -2342,18 +2581,25 @@ private:
     QMap<QString, QLineEdit *> modelPaths_, modelSources_;
     QTreeWidget *datasets_ = nullptr, *runs_ = nullptr, *sources_ = nullptr;
     QTreeWidget *reviewSamples_ = nullptr, *collectionSources_ = nullptr;
-    QComboBox *teacher_ = nullptr, *teacherDevice_ = nullptr, *trainDevice_ = nullptr, *scope_ = nullptr, *trainingMode_ = nullptr;
+    QComboBox *teacher_ = nullptr, *teacherDevice_ = nullptr, *trainDevice_ = nullptr, *scope_ = nullptr, *trainingMode_ = nullptr, *student_ = nullptr;
     QComboBox *reviewLabel_ = nullptr, *goal_ = nullptr, *reviewCamera_ = nullptr, *visualView_ = nullptr, *splitMode_ = nullptr, *groupingPolicy_ = nullptr;
     QLabel *scaleHelp_ = nullptr, *reviewPath_ = nullptr, *reviewCount_ = nullptr, *previewStats_ = nullptr, *goalHelp_ = nullptr, *splitHelp_ = nullptr, *collectionStatus_ = nullptr;
-    QLabel *trainingStatus_ = nullptr, *trainingDataset_ = nullptr, *sourceTitle_ = nullptr;
+    QLabel *trainingStatus_ = nullptr, *trainingDataset_ = nullptr, *sourceTitle_ = nullptr, *patchLabel_ = nullptr, *trainingHelp_ = nullptr, *trainingLabelHelp_ = nullptr;
     QList<QLabel *> depthTitles_;
     DepthPreview *rgbPreview_ = nullptr, *depthPreview_ = nullptr;
     QList<DepthPreview *> depthPreviews_;
     QSplitter *library_ = nullptr;
-    QPushButton *verifiedScenes_ = nullptr, *anchor_ = nullptr, *advanced_ = nullptr, *useGroups_ = nullptr, *compareTeachers_ = nullptr, *includeDisplayTeacher_ = nullptr;
+    QPushButton *verifiedScenes_ = nullptr, *anchor_ = nullptr, *advanced_ = nullptr, *useGroups_ = nullptr, *compareTeachers_ = nullptr;
     QList<QPushButton *> teacherChecks_;
     QGroupBox *datasetAdvanced_ = nullptr, *trainingAdvanced_ = nullptr;
     QSpinBox *inputSize_ = nullptr, *epochs_ = nullptr, *steps_ = nullptr, *patch_ = nullptr, *iterations_ = nullptr;
+    QWidget *trainingSimple_ = nullptr;
+    QSlider *quality_ = nullptr, *length_ = nullptr;
+    QComboBox *limitMode_ = nullptr, *validationSchedule_ = nullptr, *checkpointSchedule_ = nullptr;
+    QSpinBox *stepsPerUpdate_ = nullptr, *validationSamples_ = nullptr, *checkpointEvery_ = nullptr;
+    QDoubleSpinBox *earlyStopError_ = nullptr, *maxLoss_ = nullptr, *learningRate_ = nullptr;
+    QPushButton *earlyStop_ = nullptr, *saveCheckpoint_ = nullptr;
+    QLineEdit *resumePath_ = nullptr; QString trainingControlPath_; bool trainingStopping_ = false, closeAfterTraining_ = false;
     QSpinBox *splitSeed_ = nullptr, *validationCount_ = nullptr;
     QDoubleSpinBox *validationFraction_ = nullptr; QFormLayout *collectionForm_ = nullptr;
     QTabWidget *tabs_ = nullptr; QPlainTextEdit *log_ = nullptr; QProgressBar *progress_ = nullptr;
@@ -2362,6 +2608,7 @@ private:
     QPushButton *saveReviewed_ = nullptr, *compose_ = nullptr, *importHf_ = nullptr, *compareBaseline_ = nullptr;
     QPushButton *cleanupDataset_ = nullptr, *cleanupRun_ = nullptr;
     QProcess *process_ = nullptr; QByteArray stdout_; QString job_, exportDestination_;
+    QProcess *exportProcess_ = nullptr;
     QProcess *editProcess_ = nullptr; QTimer *autosaveTimer_ = nullptr; QByteArray editStdout_;
     std::unique_ptr<QTemporaryFile> editSaveFile_;
     QString draftWorkspace_, editingDataset_, trainerAfterSave_; QJsonObject savingDraft_;
