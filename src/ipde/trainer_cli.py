@@ -115,6 +115,19 @@ def _parser() -> argparse.ArgumentParser:
                         help="attach new prepared entries using hard links without scanning existing arrays")
     update.add_argument("--expected-manifest-sha256", help="reject stale edits instead of overwriting concurrent changes")
     update.add_argument("--operation-id", help="persist a unique save ID so an identical committed request can be recovered safely")
+    generate = commands.add_parser("generate-teacher", help="generate a missing display teacher for selected photos, or enable its stored result")
+    generate.add_argument("dataset", type=Path)
+    generate.add_argument("--sample-id", action="append", required=True, help="existing photo/teacher sample ID; repeat to select more photos")
+    generate.add_argument("--expected-manifest-sha256", help="reject stale selections instead of overwriting concurrent dataset edits")
+    generate.add_argument("--metric-anchor", choices=("depthpro",), help="allow DepthPro inference if no same-photo meter anchor is already stored")
+    generate.add_argument("--anchor-model-path", type=Path)
+    generate.add_argument("--anchor-source-dir", type=Path)
+    _model_arguments(generate)
+    disable = commands.add_parser("disable-teacher", help="turn a selected photo teacher off and discard its unused generated depth files")
+    disable.add_argument("dataset", type=Path)
+    disable.add_argument("--sample-id", action="append", required=True)
+    disable.add_argument("--model", choices=("depthpro", "depth-anything-v2", "depth-anything-3"), required=True)
+    disable.add_argument("--expected-manifest-sha256")
     dataset = commands.add_parser("dataset", help="generate a lossless teacher-target dataset")
     dataset.add_argument("sources", type=Path, nargs="+")
     dataset.add_argument("--output-dir", required=True, type=Path)
@@ -191,7 +204,7 @@ def _parser() -> argparse.ArgumentParser:
         cleanup.add_argument("dataset" if command == "cleanup-dataset" else "checkpoint", type=Path)
         cleanup.add_argument("--workspace", required=True, type=Path)
         cleanup.add_argument("--confirm", action="store_true", help="explicitly confirm permanent removal")
-    for command in (inspect, scan, compose, compact, hf, curate, edit, dataset, train):
+    for command in (inspect, scan, compose, compact, hf, curate, edit, dataset, generate, train):
         command.add_argument("--workers", type=int, default=0,
                              help="CPU file/preparation workers; 0 uses available cores (default)")
     return parser
@@ -301,13 +314,33 @@ def _teacher_configs(args):
     return configs, ids
 
 
+def _metric_anchor_config(args, teacher_configs=()):
+    """Reuse the selected DepthPro settings unless its anchor is overridden."""
+    if not args.metric_anchor:
+        return None
+    from dataclasses import replace
+    from .learned_depth import LearnedDepthConfig
+    selected = next((config for config in teacher_configs if config.model == "depthpro"), None)
+    if selected is not None:
+        if args.anchor_model_path is None and args.anchor_source_dir is None:
+            # Keep all settings, including requested size/device and explicit
+            # paths, identical so the dataset can reuse the on-disk prepass.
+            return selected
+        return replace(selected,
+            model_path=args.anchor_model_path if args.anchor_model_path is not None else selected.model_path,
+            source_dir=args.anchor_source_dir if args.anchor_source_dir is not None else selected.source_dir,
+            device=args.device, input_size=args.input_size)
+    return LearnedDepthConfig(model="depthpro", model_path=args.anchor_model_path,
+                              source_dir=args.anchor_source_dir, device=args.device, input_size=args.input_size)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         # Third-party model imports/loggers must not corrupt the GUI JSON protocol.
         with redirect_stdout(sys.stderr), ExitStack() as locks:
             from .resource_lock import resource_lock
-            if args.command in {"edit-dataset", "update-dataset"}:
+            if args.command in {"edit-dataset", "update-dataset", "generate-teacher", "disable-teacher"}:
                 locks.enter_context(_edit_cancellation())
             if args.command in {"inspect-dataset", "review-dataset", "preview-sample", "compare-samples", "compose-datasets", "compact-dataset", "curate-dataset", "edit-dataset", "train"}:
                 inputs = [*args.datasets, *args.validation_dataset] if args.command == "compose-datasets" else [args.dataset, *args.add_dataset] if args.command == "edit-dataset" else [args.dataset]
@@ -373,9 +406,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                                              add_datasets=args.add_dataset,
                                              expected_manifest_sha256=args.expected_manifest_sha256,
                                              operation_id=args.operation_id)
+            elif args.command == "generate-teacher":
+                from .dataset_teachers import generate_teacher
+                configuration = _config(args)
+                report = generate_teacher(args.dataset, args.sample_id, configuration,
+                    metric_anchor=_metric_anchor_config(args, (configuration,)),
+                    expected_manifest_sha256=args.expected_manifest_sha256, workers=args.workers, progress_callback=_progress)
+            elif args.command == "disable-teacher":
+                from .dataset_teachers import disable_teacher
+                report = disable_teacher(args.dataset, args.sample_id, args.model,
+                                         expected_manifest_sha256=args.expected_manifest_sha256)
             elif args.command == "dataset":
                 from .dataset import DatasetOptions, build_dataset
-                from .learned_depth import LearnedDepthConfig
                 groups = json.loads(args.groups.read_text()) if args.groups else None
                 if groups is not None and (not isinstance(groups, dict) or any(not isinstance(v, str) for v in groups.values())):
                     raise ValueError("scene groups must be a JSON object mapping source paths to scene ID strings")
@@ -388,8 +430,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         array_format=args.array_format, retain_intermediates=args.retain_intermediates,
                         preserve_auxiliary_assets=args.preserve_auxiliary_assets,
                         validation_fraction=args.validation_fraction, split_seed=args.seed, workers=args.workers,
-                        metric_anchor=LearnedDepthConfig(model="depthpro", model_path=args.anchor_model_path,
-                            source_dir=args.anchor_source_dir, device=args.device) if args.metric_anchor else None), progress_callback=_progress)
+                        metric_anchor=_metric_anchor_config(args, teacher_configs)), progress_callback=_progress)
                 report = {"dataset_path": str(args.output_dir.expanduser().resolve()), **report}
             elif args.command == "teacher":
                 from .extractor import ExtractOptions, extract_file

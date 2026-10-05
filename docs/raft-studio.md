@@ -36,6 +36,15 @@ archive, removal and linking commands. Membership and split changes save to the
 selected dataset automatically. Durable pending drafts survive switching rows
 and reopening Studio; save failures keep them available for retry.
 
+In **Photos and depth**, each photo's **DepthPro**, **DA3** and **V2** buttons
+generate a missing result immediately from stored full display RGB. Select several
+photos for **Enable teacher for selected photos…**. Turn an enabled teacher off
+to discard unneeded computed maps; enabling it later regenerates them. Shared
+files and source/reference arrays are protected. **Remove selected** also discards supported generated display teachers; legacy
+or imported targets that these controls cannot regenerate retain their files. Generation runs all photos through one resident model
+before releasing it and loading the next; matching DepthPro teacher/anchor
+settings reuse predictions.
+
 **Scan spatial directory** recurses without following links. Nonspatial photos,
 portraits without calibrated stereo, malformed containers and inconsistent views
 are skipped with a reason. Apple camera metadata and supported stereo structure

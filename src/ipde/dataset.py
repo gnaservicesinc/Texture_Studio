@@ -35,6 +35,10 @@ class DatasetError(RuntimeError):
     """A dataset could not be built without losing alignment or provenance."""
 
 
+class _TeacherModelLoadError(DatasetError):
+    """A shared model load failure is handled once for the whole phase."""
+
+
 @dataclass(frozen=True)
 class DatasetOptions:
     teacher: LearnedDepthConfig
@@ -272,6 +276,8 @@ def build_dataset(
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination.parent))
     predictors: dict[str, Any] = {}
+    cached_anchors: dict[tuple[str, bool], dict[str, Any]] = {}
+    anchor_errors: dict[tuple[str, bool], str] = {}
     array_sizes: dict[str, tuple[int, int]] = {}
     stored_arrays: dict[tuple[str, tuple[int, ...], str], dict[str, Any]] = {}
 
@@ -330,9 +336,42 @@ def build_dataset(
     def predict(array: np.ndarray, *, anchor: bool = False, teacher_index: int = 0, **kwargs: Any) -> LearnedDepthResult:
         name = "metric_anchor" if anchor else teacher_ids[teacher_index]
         if name not in predictors:
+            if predictors:
+                raise DatasetError("The previous teacher must be released before loading another model")
             from .learned_depth import LearnedDepthPredictor
-            predictors[name] = LearnedDepthPredictor(options.metric_anchor if anchor else teachers[teacher_index])
+            config = options.metric_anchor if anchor else teachers[teacher_index]
+            emit("model_loading", dataset_dir=str(temporary), teacher_id=name,
+                 model=getattr(config, "model", None), device=getattr(config, "device", None))
+            try:
+                predictors[name] = LearnedDepthPredictor(config)
+            except Exception as exc:
+                raise _TeacherModelLoadError(f"Cannot load teacher {name}: {exc}") from exc
+            emit("model_loaded", dataset_dir=str(temporary), teacher_id=name,
+                 model=getattr(config, "model", None))
         return predictors[name](array, **kwargs)
+
+    def release_predictors(*, report: bool = True) -> None:
+        while predictors:
+            name, predictor = predictors.popitem()
+            close = getattr(predictor, "close", None)
+            try:
+                if report:
+                    emit("model_releasing", dataset_dir=str(temporary), teacher_id=name)
+            finally:
+                if close is not None:
+                    close()
+            del predictor
+            if report:
+                emit("model_released", dataset_dir=str(temporary), teacher_id=name)
+
+    def cached_anchor_result(source: Path, *, display: bool) -> LearnedDepthResult | None:
+        cached = cached_anchors.get((str(source), display))
+        if cached is None:
+            return None
+        from .learned_depth import LearnedDepthResult
+        return LearnedDepthResult(read_array(temporary / cached["native"]["path"]),
+                                  read_array(temporary / cached["target"]["path"]), cached["metadata"],
+                                  read_array(temporary / cached["confidence"]["path"]) if "confidence" in cached else None)
 
     def anchored_label(
         source: Path, rgb: np.ndarray, prediction: LearnedDepthResult, folder: Path,
@@ -343,7 +382,12 @@ def build_dataset(
         print(f"  Applying explicit metric-model anchor on the {'DISPLAY' if display else 'LEFT'} grid", file=sys.stderr, flush=True)
         anchor_prediction = _lookup(display_metric_anchor_results if display else metric_anchor_results, source)
         if anchor_prediction is None:
-            anchor_prediction = predict(rgb, anchor=True, focal_pixels=focal_pixels, reference_label="display" if display else "spatial_left")
+            key = str(source), display
+            if key in anchor_errors:
+                raise DatasetError(f"Metric anchor failed for this photo: {anchor_errors[key]}")
+            anchor_prediction = cached_anchor_result(source, display=display)
+            if anchor_prediction is None:
+                raise DatasetError("Metric anchor was not prepared before the teacher phase")
         anchor_depth = np.asarray(anchor_prediction.source_depth)
         anchor_native = np.asarray(anchor_prediction.native_depth)
         if anchor_prediction.metadata.get("units") != "meters" or anchor_depth.shape != rgb.shape[:2] or anchor_depth.dtype != np.float32:
@@ -468,6 +512,8 @@ def build_dataset(
         prediction = _lookup((display_teacher_results_by_id if display_mode else teacher_results_by_id).get(teacher_id), source)
         if prediction is None and teacher_index == 0:
             prediction = _lookup(display_teacher_results if display_mode else teacher_results, source)
+        if prediction is None and teachers[teacher_index] == options.metric_anchor:
+            prediction = cached_anchor_result(source, display=display_mode)
         if prediction is None:
             print("  Running selected teacher on the full display image" if display_mode else
                   "  Running selected teacher on the calibrated LEFT view (explicit legacy workflow)", file=sys.stderr, flush=True)
@@ -559,6 +605,8 @@ def build_dataset(
             display_prediction = prediction if display_mode else _lookup(display_teacher_results_by_id.get(teacher_id), source)
             if display_prediction is None and teacher_index == 0:
                 display_prediction = _lookup(display_teacher_results, source)
+            if display_prediction is None and options.include_display_teacher and teachers[teacher_index] == options.metric_anchor:
+                display_prediction = cached_anchor_result(source, display=True)
             if display_prediction is None and options.include_display_teacher:
                 print("  Running selected teacher on the full display image", file=sys.stderr, flush=True)
                 display_prediction = predict(display.array, teacher_index=teacher_index, reference_label="display")
@@ -686,12 +734,39 @@ def build_dataset(
             discovery = discover_file(source)
             from .spatial_scan import validate_spatial_discovery
             metadata = validate_spatial_discovery(discovery, require_apple_camera=options.require_apple_camera)
+            if options.teacher_view == "display" and sum(asset.kind == "display_view" for asset in discovery.assets) != 1:
+                raise DatasetError("Display-teacher datasets require exactly one full display image; stereo-view fallback is disabled")
             return discovery, metadata
         except Exception as exc:
             return exc
 
+    def restore_source(entry: dict[str, Any]) -> Any:
+        """Reload one photo's required views, without retaining decoded HEICs."""
+        discovery = copy.copy(entry["discovery"])
+        discovery.assets = [copy.copy(asset) for asset in discovery.assets]
+        for ordinal, record in entry["raw"].items():
+            asset = discovery.assets[ordinal]
+            if asset.kind == "display_view" or asset.kind == "spatial_view" and asset.semantic_name in {"spatial_left", "spatial_right"}:
+                asset.array = read_array(temporary / record["storage"]["path"])
+        return discovery
+
+    def needs_anchor(source: Path, *, display: bool) -> bool:
+        for teacher_index, config in enumerate(teachers):
+            mapping = display_teacher_results_by_id if display else teacher_results_by_id
+            prediction = _lookup(mapping.get(teacher_ids[teacher_index]), source)
+            if prediction is None and teacher_index == 0:
+                prediction = _lookup(display_teacher_results if display else teacher_results, source)
+            if display and options.teacher_view == "stereo-left" and not options.include_display_teacher and prediction is None:
+                continue
+            if prediction is not None:
+                if prediction.metadata.get("units") != "meters":
+                    return True
+            elif getattr(config, "model", None) != "depthpro":
+                return True
+        return False
+
     # HEIC input size is compressed; reserve a conservative decoding window.
-    # Prefetch overlaps native file decoding with serial accelerator inference.
+    # Extract once to disk, then process every photo with one resident teacher.
     def source_bytes(source: Path) -> int:
         try:
             return source.stat().st_size
@@ -701,15 +776,25 @@ def build_dataset(
             return 16 * 1024**2
     largest_source = max(map(source_bytes, inputs), default=1)
     discovery_workers = memory_limited_workers(worker_count, largest_source * 32)
+    prepared_sources: list[dict[str, Any]] = []
+    source_completions = [0] * len(inputs)
+
+    def completed_sources() -> int:
+        return sum(count == len(teachers) for count in source_completions)
+
     try:
         snapshot("generating", 0)
         emit("dataset_started", dataset_dir=str(temporary), output_dir=str(destination), total_sources=len(inputs))
+        from .learned_depth import release_learned_depth_cache
+        release_learned_depth_cache()
+        emit("sources_started", dataset_dir=str(temporary), total_sources=len(inputs))
         for index, prepared in enumerate(ordered_map(prepare_source, inputs, workers=discovery_workers)):
             source = inputs[index]
             print(f"Dataset photo {index + 1}/{len(inputs)}: {source.name}", file=sys.stderr, flush=True)
             if isinstance(prepared, Exception):
                 skip(source, prepared)
-                snapshot("generating", index + 1)
+                source_completions[index] = len(teachers)
+                snapshot("generating", completed_sources())
                 continue
             discovery, photo_metadata = prepared
             views = {asset.semantic_name: asset for asset in discovery.assets if asset.kind == "spatial_view"}
@@ -722,30 +807,142 @@ def build_dataset(
             raw = store_raw_assets(discovery, photo_folder)
             left_index = next(i for i, asset in enumerate(discovery.assets) if asset is left)
             right_index = next(i for i, asset in enumerate(discovery.assets) if asset is right)
-            count_before = len(samples)
-            for teacher_index, teacher_id in enumerate(teacher_ids):
-                folder = photo_folder / f"teacher-{teacher_index + 1}"
-                folder.mkdir()
-                try:
-                    sample = make_sample(source, discovery, index, teacher_index, raw, left, right,
-                                         left_index, right_index, source_id, photo_metadata, folder)
-                except OSError:
-                    # ENOSPC/permissions/output failures are not invalid-photo errors.
+            blueprint = copy.copy(discovery)
+            blueprint.assets = [copy.copy(asset) for asset in discovery.assets]
+            for asset in blueprint.assets:
+                asset.array = None
+            prepared_sources.append({"source": source, "index": index, "discovery": blueprint,
+                "photo_metadata": photo_metadata, "raw": raw, "left_index": left_index,
+                "right_index": right_index, "source_id": source_id, "photo_folder": photo_folder})
+            emit("source_ready", dataset_dir=str(temporary), source_id=source_id,
+                 source_path=str(source), processed_sources=index + 1, total_sources=len(inputs))
+            del discovery, prepared, views, left, right, blueprint
+        if options.metric_anchor is not None:
+            emit("teacher_started", dataset_dir=str(temporary), teacher_id="metric_anchor",
+                 model=getattr(options.metric_anchor, "model", None), total_sources=len(prepared_sources),
+                 teacher_index=0, total_teachers=len(teachers), role="metric_anchor")
+            try:
+                for entry in prepared_sources:
+                    source = entry["source"]
+                    discovery = restore_source(entry)
+                    for display in ((True,) if options.teacher_view == "display" else (False, True)):
+                        if not needs_anchor(source, display=display):
+                            continue
+                        candidates = [asset for asset in discovery.assets if asset.kind == "display_view"] if display else [discovery.assets[entry["left_index"]]]
+                        if not candidates:
+                            continue
+                        rgb = candidates[0].array
+                        key = str(source), display
+                        try:
+                            prediction = _lookup(display_metric_anchor_results if display else metric_anchor_results, source)
+                            if prediction is None:
+                                prediction = predict(rgb, anchor=True, focal_pixels=None if display else discovery.spatial_photo["left_camera"]["focal_length_x_pixels"],
+                                                     reference_label="display" if display else "spatial_left")
+                            target, native = np.asarray(prediction.source_depth), np.asarray(prediction.native_depth)
+                            if (prediction.metadata.get("units") != "meters" or target.shape != rgb.shape[:2]
+                                    or target.dtype != np.float32 or native.ndim != 2 or native.dtype != np.float32
+                                    or prediction.metadata.get("input_rgb_sha256") != sha256_array(rgb)
+                                    or not prediction.metadata.get("checkpoint_sha256")):
+                                raise DatasetError("Metric anchor must preserve float32 meters, native depth and provenance on the exact selected RGB grid")
+                            folder = entry["photo_folder"] / ("display-anchor" if display else "left-anchor")
+                            folder.mkdir()
+                            cached_anchors[key] = {"target": dataset_array_record(temporary, folder / "target.npy", target),
+                                                   "native": dataset_array_record(temporary, folder / "native.npy", native),
+                                                   "metadata": _jsonable(prediction.metadata)}
+                            if options.retain_intermediates and getattr(prediction, "confidence", None) is not None:
+                                cached_anchors[key]["confidence"] = dataset_array_record(temporary, folder / "confidence.npy", prediction.confidence)
+                            emit("anchor_ready", dataset_dir=str(temporary), source_id=entry["source_id"],
+                                 source_path=str(source), teacher_id="metric_anchor", reference_label="display" if display else "spatial_left")
+                        except (OSError, _TeacherModelLoadError):
+                            raise
+                        except Exception as exc:
+                            if not options.skip_bad_photos:
+                                raise
+                            anchor_errors[key] = str(exc)
+                            emit("anchor_failed", dataset_dir=str(temporary), source_path=str(source), reason=str(exc))
+                    del discovery
+                    candidates = rgb = prediction = target = native = None
+            except _TeacherModelLoadError as exc:
+                if not options.skip_bad_photos:
                     raise
-                except Exception as exc:
-                    discard(folder)
-                    skip(source, exc, teacher_id=teacher_id)
-                    continue
-                samples.append(sample)
-                manifest = snapshot("generating", index + (teacher_index + 1 == len(teachers)))
-                emit("sample_ready", dataset_dir=str(temporary), sample_id=sample["id"], source_id=source_id,
-                     source_photo_id=source_id, teacher_id=teacher_id, summary=manifest["summary"])
-            if len(samples) == count_before:
-                discard(photo_folder)
-            snapshot("generating", index + 1)
+                emit("teacher_failed", dataset_dir=str(temporary), teacher_id="metric_anchor",
+                     reason=str(exc), error_type=type(exc).__name__)
+                for pending in prepared_sources:
+                    for display in ((True,) if options.teacher_view == "display" else (False, True)):
+                        key = str(pending["source"]), display
+                        if key not in cached_anchors and needs_anchor(pending["source"], display=display):
+                            anchor_errors[key] = str(exc)
+            finally:
+                release_predictors()
+        teacher_order = {teacher_id: index for index, teacher_id in enumerate(teacher_ids)}
+        source_order = {entry["source_id"]: entry["index"] for entry in prepared_sources}
+        for teacher_index, teacher_id in enumerate(teacher_ids):
+            emit("teacher_started", dataset_dir=str(temporary), teacher_id=teacher_id,
+                 model=getattr(teachers[teacher_index], "model", None), teacher_index=teacher_index + 1,
+                 total_teachers=len(teachers), total_sources=len(prepared_sources), role="teacher")
+            try:
+                for phase_position, entry in enumerate(prepared_sources):
+                    source, index = entry["source"], entry["index"]
+                    discovery = restore_source(entry)
+                    left_index, right_index = entry["left_index"], entry["right_index"]
+                    left, right = discovery.assets[left_index], discovery.assets[right_index]
+                    raw, source_id, photo_metadata = entry["raw"], entry["source_id"], entry["photo_metadata"]
+                    photo_folder = entry["photo_folder"]
+                    print(f"Teacher {teacher_index + 1}/{len(teachers)} ({teacher_id}), photo {index + 1}/{len(inputs)}: {source.name}", file=sys.stderr, flush=True)
+                    emit("photo_started", dataset_dir=str(temporary), teacher_id=teacher_id,
+                         source_path=str(source), source_id=source_id, photo_index=index + 1, total_sources=len(inputs))
+                    folder = photo_folder / f"teacher-{teacher_index + 1}"
+                    folder.mkdir()
+                    try:
+                        sample = make_sample(source, discovery, index, teacher_index, raw, left, right,
+                                             left_index, right_index, source_id, photo_metadata, folder)
+                    except (OSError, _TeacherModelLoadError):
+                        # Output and shared model failures must not masquerade as bad photos.
+                        raise
+                    except Exception as exc:
+                        discard(folder)
+                        skip(source, exc, teacher_id=teacher_id)
+                    else:
+                        samples.append(sample)
+                        # Manifest ordering and stable IDs remain source-major even
+                        # though inference is teacher-major.
+                        samples.sort(key=lambda value: (source_order[value["source_id"]], teacher_order[value["teacher_id"]]))
+                        source_completions[index] += 1
+                        manifest = snapshot("generating", completed_sources())
+                        emit("sample_ready", dataset_dir=str(temporary), sample_id=sample["id"], source_id=source_id,
+                             source_photo_id=source_id, teacher_id=teacher_id, summary=manifest["summary"])
+                        del discovery, left, right
+                        continue
+                    source_completions[index] += 1
+                    snapshot("generating", completed_sources())
+                    del discovery, left, right
+            except _TeacherModelLoadError as exc:
+                if not options.skip_bad_photos:
+                    raise
+                emit("teacher_failed", dataset_dir=str(temporary), teacher_id=teacher_id,
+                     reason=str(exc), error_type=type(exc).__name__)
+                # A model configuration failure applies to this entire phase.
+                # Keep completed teachers and avoid retrying the same load for
+                # every remaining photo.
+                for pending in prepared_sources[phase_position:]:
+                    skip(pending["source"], exc, teacher_id=teacher_id)
+                    source_completions[pending["index"]] += 1
+                snapshot("generating", completed_sources())
+            finally:
+                release_predictors()
+            emit("teacher_complete", dataset_dir=str(temporary), teacher_id=teacher_id,
+                 teacher_index=teacher_index + 1, total_teachers=len(teachers))
         if not samples:
             reasons = "; ".join(record["reason"] for record in skipped[:5])
             raise DatasetError(f"No usable calibrated spatial photos/teacher labels remain. {reasons}")
+        # Two-pass anchor natives and wholly rejected photos may own shared
+        # files. Prune by final references, never by photo folder ownership.
+        from .dataset_review import _array_records
+        referenced = {record["path"] for record in _array_records(samples)}
+        for path in list(array_sizes):
+            if path not in referenced:
+                (temporary / path).unlink()
+                del array_sizes[path]
         manifest = snapshot("complete", len(inputs))
         # Never replace an existing user dataset, including one created while inference ran.
         if destination.exists():
@@ -756,16 +953,21 @@ def build_dataset(
         _publish_new_directory(temporary, destination)
         emit("dataset_complete", dataset_dir=str(destination), output_dir=str(destination), summary=manifest["summary"])
         return manifest
-    except Exception:
+    except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
+    finally:
+        release_predictors(report=False)
 
 
 def _sample_scientific_records(sample: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Require complete records before recursive discovery can omit a plane."""
-    from .dataset_review import _ARRAY_FIELDS, _array_records
+    from .dataset_review import _ARRAY_FIELDS, _TEACHER_PAYLOAD_FIELDS, _array_records
 
     identity = sample.get("id", "")
+    removed = sample.get("teacher_payload_removed", False)
+    if type(removed) is not bool or removed and sample.get("excluded") is not True:
+        raise DatasetError(f"Sample {identity} has an invalid removed-teacher payload declaration")
 
     def require_record(value: Any, field: str) -> None:
         if not isinstance(value, dict) or not _ARRAY_FIELDS.issubset(value):
@@ -790,6 +992,8 @@ def _sample_scientific_records(sample: Mapping[str, Any]) -> list[dict[str, Any]
         "reference": ("target", "valid_mask"),
     }
     for key, required in label_fields.items():
+        if removed and key in _TEACHER_PAYLOAD_FIELDS:
+            continue
         if key != "teacher" and key not in sample:
             continue
         label = sample.get(key)
@@ -821,7 +1025,7 @@ def _sample_scientific_records(sample: Mapping[str, Any]) -> list[dict[str, Any]
             for index, child in enumerate(value):
                 check_partial(child, f"{field}[{index}]")
 
-    check_partial(sample, "sample")
+    check_partial({key: value for key, value in sample.items() if not removed or key not in _TEACHER_PAYLOAD_FIELDS}, "sample")
     return list(_array_records(sample))
 
 

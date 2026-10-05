@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(IPDE VERSION 0.9.2 LANGUAGES CXX)
+project(IPDE VERSION 0.9.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -161,6 +161,7 @@ list(APPEND RAFT_STUDIO_PYTHON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/dataset.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/dataset_review.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/dataset_edit.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/dataset_teachers.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/training.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/concurrency.py"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/ipde/resource_lock.py"

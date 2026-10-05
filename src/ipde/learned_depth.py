@@ -9,6 +9,7 @@ distinct, and a relative model is never relabelled as measured metric depth.
 from __future__ import annotations
 
 import hashlib
+import gc
 import importlib
 import json
 import math
@@ -316,11 +317,23 @@ class LearnedDepthPredictor:
                 "stored checkpoint tensors loaded without reduced-precision conversion"
             )
         except LearnedDepthError:
+            self.close()
             raise
         except Exception as exc:
+            self.close()
             raise LearnedDepthError(f"could not load local {config.model} checkpoint {checkpoint}: {exc}") from exc
 
+    def close(self) -> None:
+        """Release model weights before another teacher is loaded."""
+        if getattr(self, "model", None) is None:
+            return
+        self.model = None
+        gc.collect()
+        _release_accelerator_cache(self.torch, self.device)
+
     def __call__(self, rgb: np.ndarray, *, focal_pixels: float | None = None, reference_label: str | None = None) -> LearnedDepthResult:
+        if self.model is None:
+            raise LearnedDepthError("This depth predictor has been closed; load a new predictor before inference")
         normalized, nominal_limit = _prepare_rgb(rgb, self.config)
         if focal_pixels is not None and (not math.isfinite(focal_pixels) or focal_pixels <= 0):
             raise LearnedDepthError("focal_pixels must be finite and positive in the supplied reference image grid")
@@ -463,6 +476,25 @@ def _plane(torch: Any, value: Any) -> np.ndarray:
 @lru_cache(maxsize=1)
 def _cached_predictor(config: LearnedDepthConfig, file_fingerprint: tuple[int, ...]) -> LearnedDepthPredictor:
     return LearnedDepthPredictor(config)
+
+
+def _release_accelerator_cache(torch: Any, device: str | None = None) -> None:
+    for name in ("cuda", "mps"):
+        if device is not None and not str(device).startswith(name):
+            continue
+        backend = getattr(torch, name, None)
+        if backend is not None and backend.is_available():
+            backend.synchronize()
+            backend.empty_cache()
+
+
+def release_learned_depth_cache() -> None:
+    """Clear any previous one-off inference model before a batch model phase."""
+    _cached_predictor.cache_clear()
+    gc.collect()
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        _release_accelerator_cache(torch)
 
 
 def infer_learned_depth(rgb: np.ndarray, config: LearnedDepthConfig | None = None, *, focal_pixels: float | None = None, reference_label: str | None = None) -> LearnedDepthResult:

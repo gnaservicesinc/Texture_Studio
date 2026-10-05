@@ -159,6 +159,8 @@ def apply_dataset_edits(
             included = set(keep)
             for sample in samples:
                 excluded = sample["id"] not in included
+                if not excluded and sample.get("teacher_payload_removed", False):
+                    raise DatasetError("This teacher's depth files were discarded. Generate its teacher again to restore it")
                 membership_changed |= excluded != sample.get("excluded", False)
                 sample["excluded"] = excluded
 

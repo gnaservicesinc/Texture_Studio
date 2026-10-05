@@ -42,6 +42,8 @@ PREVIEW_LABELS = tuple(LABEL_TITLES)
 _TRAINING_LABELS = {"teacher", "anchored_teacher", "registered_display_teacher", "reference", "display_teacher", "anchored_display_teacher"}
 _DEPTH_UNITS = {"meters", "relative_depth", "relative_inverse_depth"}
 _ARRAY_FIELDS = {"path", "shape", "dtype", "array_sha256", "file_sha256"}
+_TEACHER_PAYLOAD_FIELDS = frozenset({"teacher", "raft_target", "display_teacher", "registered_display_teacher",
+                                    "metric_anchor", "display_metric_anchor", "anchored_teacher", "anchored_display_teacher"})
 
 
 def _label_title(key: str, label: dict[str, Any]) -> str:
@@ -55,7 +57,9 @@ def _array_records(value: Any) -> Iterator[dict[str, Any]]:
         if _ARRAY_FIELDS.issubset(value):
             yield value
         else:
-            for child in value.values():
+            for key, child in value.items():
+                if value.get("teacher_payload_removed") is True and value.get("excluded") is True and key in _TEACHER_PAYLOAD_FIELDS:
+                    continue
                 yield from _array_records(child)
     elif isinstance(value, list):
         for child in value:
@@ -132,6 +136,9 @@ def _validate_manifest_metadata(root: Path, manifest: Any, *, validate_files: bo
         ids.add(sample["id"])
         if "excluded" in sample and not isinstance(sample["excluded"], bool):
             raise DatasetError(f"Sample {sample['id']} has malformed excluded membership")
+        if "teacher_payload_removed" in sample and (not isinstance(sample["teacher_payload_removed"], bool)
+                or sample["teacher_payload_removed"] and sample.get("excluded") is not True):
+            raise DatasetError(f"Sample {sample['id']} has malformed discarded teacher membership; regenerate it before enabling")
         group, split = sample.get("group_id"), sample.get("split")
         if not isinstance(group, str) or not group or split not in {"train", "validation"}:
             raise DatasetError(f"Sample {sample['id']} has invalid group/split metadata")
@@ -148,6 +155,10 @@ def _validate_manifest_metadata(root: Path, manifest: Any, *, validate_files: bo
         for key in LABEL_TITLES:
             if key != "training" and key in sample:
                 _label(sample, key)
+        if sample.get("teacher_payload_removed"):
+            for key in _TEACHER_PAYLOAD_FIELDS:
+                for record in _array_records(sample.get(key)):
+                    _array_path(root, record, validate_file=False)
         for record in _array_records(sample):
             _array_path(root, record, validate_file=validate_files)
 
@@ -233,12 +244,15 @@ def review_dataset(directory: Path | str) -> dict[str, Any]:
             "excluded": sample.get("excluded", False), "included": not sample.get("excluded", False),
             "group_id": sample["group_id"], "requested_group": sample.get("requested_group"),
             "management_group_id": management_groups[sample["id"]],
-            "training_target_choice": chosen, "labels": labels, "warnings": warnings,
+            "training_target_choice": chosen, "labels": [] if sample.get("teacher_payload_removed") else labels, "warnings": warnings,
+            "teacher_payload_removed": sample.get("teacher_payload_removed", False),
+            "can_generate_display_teacher": isinstance(sample.get("display_rgb"), dict),
             "source_id": sample.get("source_id", sample.get("source_sha256", sample["source_path"])),
             "teacher_id": sample.get("teacher_id", sample.get("teacher_model", sample.get("teacher", {}).get("metadata", {}).get("model_id", "Teacher"))),
+            "teacher_model": sample.get("teacher_model", sample.get("teacher", {}).get("metadata", {}).get("model_id", sample.get("teacher_id", ""))),
             "photo_metadata": sample.get("photo_metadata", {}),
             "rgb_reference": "display" if str(training_label.get("coordinate_reference", "")).startswith("display") else "spatial_left", "display_registration": display_registration,
-            "training_ready": rejection is None and bool(sample.get("calibration", {}).get("raft_stereo_ready")),
+            "training_ready": not sample.get("teacher_payload_removed", False) and rejection is None and bool(sample.get("calibration", {}).get("raft_stereo_ready")),
         })
     return {"dataset_path": str(root), "samples": samples, "summary": _summary(manifest["samples"]), "warnings": _warnings(manifest),
             "max_native_stereo_pixels": max((math.prod(sample["rgb"]["shape"][:2]) for sample in manifest["samples"]), default=0),
@@ -297,6 +311,8 @@ def preview_sample(
     sample = next((sample for sample in manifest["samples"] if sample["id"] == sample_id), None)
     if sample is None:
         raise DatasetError(f"Unknown dataset sample ID: {sample_id}")
+    if sample.get("teacher_payload_removed"):
+        raise DatasetError("This teacher map was discarded. Enable its teacher to regenerate the result.")
     resolved, target = _label(sample, label)
     rgb_key = "display_rgb" if resolved in {"display_teacher", "anchored_display_teacher", "display_metric_anchor"} or str(target.get("coordinate_reference", "")).startswith("display") else "right_rgb" if resolved == "registered_display_teacher" and target.get("reference_role") == "right" else "rgb"
     if rgb_key not in sample:
@@ -390,6 +406,8 @@ def compare_samples(
     if any(identifier not in by_id for identifier in sample_ids):
         raise DatasetError("Unknown sample in teacher comparison")
     selected = [by_id[identifier] for identifier in sample_ids]
+    if any(sample.get("teacher_payload_removed") for sample in selected):
+        raise DatasetError("A compared teacher map was discarded. Enable that teacher to regenerate it first.")
     source_ids = {sample.get("source_id", sample.get("source_sha256", sample["source_path"])) for sample in selected}
     if len(source_ids) != 1:
         raise DatasetError("Teacher comparison requires entries from the same source photo")

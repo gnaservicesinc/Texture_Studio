@@ -519,6 +519,7 @@ public:
             [this](int code, QProcess::ExitStatus status) { processFinished(code, status); });
         connect(process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
             if (error == QProcess::FailedToStart) {
+                pendingTeacherJobs_.clear();
                 log_->appendPlainText("Could not launch Python: " + process_->errorString());
                 setBusy(false); groupsFile_.reset(); teachersFile_.reset(); editsFile_.reset(); refreshAfter_ = false;
                 if (job_ == "Generate dataset") stopGenerationStreaming("Generation could not start. Generate a new dataset to try again.");
@@ -533,7 +534,7 @@ public:
                 return;
             }
             cancelled_ = true;
-            if (activeOperation_ == "edit-dataset") {
+            if (QStringList{"edit-dataset", "generate-teacher", "disable-teacher"}.contains(activeOperation_)) {
                 const auto pid = process_->processId(); process_->terminate();
                 QTimer::singleShot(5000, this, [this, pid] { if (process_->state() != QProcess::NotRunning && process_->processId() == pid) process_->kill(); });
             } else process_->kill();
@@ -995,10 +996,21 @@ private:
         editActions_ << addPhotos_ << addExisting << removePhotos_ << restorePhotos_;
         pendingPhotosAction_ = new QPushButton(tab); pendingPhotosAction_->hide(); root->addWidget(pendingPhotosAction_);
         connect(pendingPhotosAction_, &QPushButton::clicked, this, [this] { prepareAddedPhotoGeneration(pendingPhotoPaths_); });
+        auto *teacherActions = new QHBoxLayout;
+        auto *enableTeacher = new QToolButton(tab); enableTeacher->setObjectName("enablePhotoTeacher");
+        enableTeacher->setText("Enable teacher for selected photos…"); enableTeacher->setPopupMode(QToolButton::InstantPopup);
+        auto *teacherMenu = new QMenu(enableTeacher);
+        for (const auto &model : {QString("depthpro"), QString("depth-anything-3"), QString("depth-anything-v2")}) {
+            auto *action = teacherMenu->addAction(model == "depthpro" ? "DepthPro" : model == "depth-anything-3" ? "Depth Anything 3" : "Depth Anything V2");
+            connect(action, &QAction::triggered, this, [this, model] { enablePhotoTeacher(model, selectedReviewEntries()); });
+        }
+        enableTeacher->setMenu(teacherMenu); enableTeacher->setVisible(datasetMode_); teacherActions->addWidget(enableTeacher);
+        auto *teacherHint = new QLabel("Generate a teacher for one photo with its button below, or select several photos to run one batch. Off discards that teacher's maps; On regenerates them.", tab);
+        teacherHint->setWordWrap(true); teacherHint->setVisible(datasetMode_); teacherActions->addWidget(teacherHint, 1); root->addLayout(teacherActions);
 
         auto *body = new QSplitter(Qt::Horizontal, tab);
         reviewSamples_ = new QTreeWidget(body);
-        reviewSamples_->setHeaderLabels({"Photo / teacher", "Split", "Group", "Camera", "Captured", "Status"});
+        reviewSamples_->setHeaderLabels({"Photo / teacher", "Split", "Group", "Camera", "Captured", "Status", "DepthPro", "DA3", "V2"});
         reviewSamples_->setRootIsDecorated(true); reviewSamples_->setAlternatingRowColors(true);
         reviewSamples_->setSelectionMode(QAbstractItemView::ExtendedSelection); reviewSamples_->setObjectName("datasetPhotos");
         reviewSamples_->header()->setStretchLastSection(false);
@@ -1006,6 +1018,11 @@ private:
         reviewSamples_->setColumnWidth(0, 170); reviewSamples_->setColumnWidth(1, 90); reviewSamples_->setColumnWidth(2, 90); reviewSamples_->setColumnWidth(3, 130); reviewSamples_->setColumnWidth(4, 155);
         if (datasetMode_) { for (int column : {2, 3, 4}) reviewSamples_->setColumnHidden(column, true); }
         reviewSamples_->setColumnWidth(5, 100);
+        if (datasetMode_) {
+            reviewSamples_->setColumnWidth(0, 140); reviewSamples_->setColumnWidth(1, 70); reviewSamples_->setColumnWidth(5, 90);
+            reviewSamples_->setMinimumWidth(540);
+        }
+        for (int column : {6, 7, 8}) { reviewSamples_->setColumnWidth(column, 74); reviewSamples_->setColumnHidden(column, !datasetMode_); }
         auto *previewScroll = new QScrollArea(body); previewScroll->setObjectName("reviewPreviewScroll");
         previewScroll->setWidgetResizable(true); previewScroll->setFrameShape(QFrame::NoFrame);
         auto *preview = new QWidget; preview->setObjectName("reviewPreviewContent");
@@ -1049,7 +1066,7 @@ private:
         auto *legend = new QLabel("White = nearer · Black = farther · Magenta = invalid. Hover for synchronized 1:1 detail. Click an image to open native pixels centered on that point; drag to pan. Right-click or click outside the popup to close. Metric comparisons share contrast; relative views use separate ranges. Overlay, relief and disagreement are display copies; saved values stay unchanged.", preview);
         legend->setObjectName("reviewPreviewLegend"); legend->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
         legend->setWordWrap(true); previewRoot->addWidget(legend);
-        body->addWidget(reviewSamples_); body->addWidget(previewScroll); body->setChildrenCollapsible(false); body->setSizes({420, 700}); root->addWidget(body, 1);
+        body->addWidget(reviewSamples_); body->addWidget(previewScroll); body->setChildrenCollapsible(false); body->setSizes(datasetMode_ ? QList<int>{600, 520} : QList<int>{420, 700}); root->addWidget(body, 1);
         auto *filterRow = new QHBoxLayout; reviewFilter_ = new QLineEdit(tab); reviewFilter_->setPlaceholderText("Filter photo, teacher, group, or date…");
         reviewCamera_ = new QComboBox(tab); reviewCamera_->addItem("All cameras"); filterRow->addWidget(reviewFilter_, 1); filterRow->addWidget(reviewCamera_); root->addLayout(filterRow);
         auto *navigation = new QHBoxLayout;
@@ -1138,7 +1155,99 @@ private:
 
     QTreeWidgetItem *selectedReviewEntry() const {
         auto *item = reviewSamples_->currentItem();
-        return item && item->childCount() ? item->child(0) : item;
+        if (item && item->childCount()) {
+            for (int index = 0; index < item->childCount(); ++index)
+                if (!item->child(index)->data(0, Qt::UserRole).toJsonObject().value("teacher_payload_removed").toBool()) return item->child(index);
+            return item->child(0);
+        }
+        return item;
+    }
+
+    static QString photoTeacherModel(const QJsonObject &sample) {
+        const QString model = sample.value("teacher_model").toString(sample.value("teacher_id").toString()).toLower();
+        if (model.contains("depthpro") || model.contains("depth-pro")) return "depthpro";
+        if (model.contains("depth-anything-3") || model.startsWith("da3")) return "depth-anything-3";
+        if (model.contains("depth-anything-v2") && !model.contains("small")) return "depth-anything-v2";
+        return model;
+    }
+
+    QList<QTreeWidgetItem *> photoTeacherEntries(QTreeWidgetItem *photo, const QString &model) const {
+        QList<QTreeWidgetItem *> result;
+        if (!photo) return result;
+        for (int index = 0; index < photo->childCount(); ++index) {
+            auto *entry = photo->child(index);
+            if (photoTeacherModel(entry->data(0, Qt::UserRole).toJsonObject()) == model) result << entry;
+        }
+        return result;
+    }
+
+    void queuePhotoTeacher(const QString &operation, const QString &model, const QList<QTreeWidgetItem *> &entries) {
+        if (!QStringList{"depthpro", "depth-anything-3", "depth-anything-v2"}.contains(model)) {
+            statusBar()->showMessage("Choose DepthPro, Depth Anything 3 or Depth Anything V2 to regenerate this teacher."); return;
+        }
+        if (!datasetMode_ || (busy_ && activeOperation_ != "generate-teacher" && activeOperation_ != "disable-teacher") || reviewGenerating_ || reviewedDataset_.isEmpty()
+                || (!requestedReviewPath_.isEmpty() && requestedReviewPath_ != reviewedDataset_) || entries.isEmpty()) return;
+        QStringList ids; QSet<QString> photos;
+        for (auto *entry : entries) {
+            const auto sample = entry->data(0, Qt::UserRole).toJsonObject();
+            const QString source = sample.value("source_id").toString(sample.value("source_path").toString());
+            if (!photos.contains(source)) { photos.insert(source); ids << sample.value("id").toString(); }
+        }
+        QStringList args{operation, reviewedDataset_, "--model", model};
+        for (const QString &id : ids) args << "--sample-id" << id;
+        if (operation == "generate-teacher") {
+            const bool primary = teacher_->currentData().toString() == model;
+            args << "--model-path" << (primary ? teacherPath_->text() : modelPaths_.value(model)->text())
+                 << "--source-dir" << (primary ? teacherSource_->text() : modelSources_.value(model)->text())
+                 << "--device" << teacherDevice_->currentText() << "--input-size" << QString::number(inputSize_->value());
+            if (anchor_->isChecked() && model != "depthpro")
+                args << "--metric-anchor" << "depthpro" << "--anchor-model-path" << modelPaths_.value("depthpro")->text()
+                     << "--anchor-source-dir" << modelSources_.value("depthpro")->text();
+        }
+        pendingTeacherJobs_.append(args);
+        maybeStartPhotoTeacher(); updateReviewCount();
+    }
+
+    void enablePhotoTeacher(const QString &model, const QList<QTreeWidgetItem *> &entries) {
+        queuePhotoTeacher("generate-teacher", model, entries);
+    }
+
+    void maybeStartPhotoTeacher() {
+        if (pendingTeacherJobs_.isEmpty() || busy_ || process_->state() != QProcess::NotRunning) return;
+        for (const auto &draft : std::as_const(reviewDrafts_)) {
+            if (draft.value("dirty").toBool() && !draft.value("save_error").toString().isEmpty()) {
+                pendingTeacherJobs_.clear(); updateReviewCount();
+                statusBar()->showMessage("Teacher change was not started because photo edits failed to save. Retry Save changes, then enable the teacher again."); return;
+            }
+        }
+        if (hasPendingDatasetEdits() || (editProcess_ && editProcess_->state() != QProcess::NotRunning)) {
+            startNextDatasetSave(); statusBar()->showMessage("Saving photo edits before changing its teacher maps…"); return;
+        }
+        const QStringList args = pendingTeacherJobs_.takeFirst();
+        refreshAfter_ = true;
+        startJob(args.first() == "disable-teacher" ? "Discard teacher maps" : "Generate photo teacher", args);
+        if (!busy_) pendingTeacherJobs_.clear();
+    }
+
+    void updatePhotoTeacherButtons(bool editable) {
+        for (int index = 0; index < reviewSamples_->topLevelItemCount(); ++index) {
+            auto *photo = reviewSamples_->topLevelItem(index);
+            for (int column : {6, 7, 8}) {
+                auto *button = qobject_cast<QPushButton *>(reviewSamples_->itemWidget(photo, column));
+                if (!button) continue;
+                const auto entries = photoTeacherEntries(photo, button->property("teacher_model").toString());
+                bool included = false, available = false;
+                for (auto *entry : entries) {
+                    const bool removed = entry->data(0, Qt::UserRole).toJsonObject().value("teacher_payload_removed").toBool();
+                    available |= !removed; included |= reviewIncluded(entry) && !removed;
+                }
+                QSignalBlocker blocker(button); button->setChecked(included);
+                button->setText(included ? "On" : available ? "Off" : "Generate");
+                button->setEnabled(editable && pendingTeacherJobs_.isEmpty());
+                button->setToolTip(included ? "Turn off to discard this teacher's generated maps. Shared files still needed by another entry are preserved." : "Generate this teacher for this photo, or enable an existing result. Uses the full display image. Relative results can reuse this photo's DepthPro meter estimate for scale.");
+            }
+        }
+        if (auto *bulk = findChild<QToolButton *>("enablePhotoTeacher")) bulk->setEnabled(editable && pendingTeacherJobs_.isEmpty() && !reviewSamples_->selectedItems().isEmpty());
     }
 
     void filterReview() {
@@ -1198,6 +1307,20 @@ private:
                 item->setToolTip(1, warnings.join('\n')); item->setToolTip(2, sample.value("group_id").toString());
             }
         }
+        if (datasetMode_) for (int index = 0; index < reviewSamples_->topLevelItemCount(); ++index) {
+            auto *photo = reviewSamples_->topLevelItem(index); int column = 6;
+            for (const auto &model : {QString("depthpro"), QString("depth-anything-3"), QString("depth-anything-v2")}) {
+                auto *button = new QPushButton(reviewSamples_); button->setCheckable(true);
+                button->setObjectName("photoTeacher_" + model); button->setProperty("teacher_model", model);
+                reviewSamples_->setItemWidget(photo, column++, button);
+                connect(button, &QPushButton::clicked, this, [this, photo, model] {
+                    const auto entries = photoTeacherEntries(photo, model);
+                    bool included = false; for (auto *entry : entries) included |= reviewIncluded(entry);
+                    queuePhotoTeacher(included ? "disable-teacher" : "generate-teacher", model, {photo->child(0)});
+                    updateReviewCount();
+                });
+            }
+        }
         { QSignalBlocker blocker(reviewCamera_); const QString camera = reviewCamera_->currentText(); reviewCamera_->clear(); reviewCamera_->addItem("All cameras"); cameras.sort(); reviewCamera_->addItems(cameras); reviewCamera_->setCurrentIndex(qMax(0, reviewCamera_->findText(camera))); }
         filterReview();
         reviewSamples_->setEnabled(true);
@@ -1219,6 +1342,10 @@ private:
             QSignalBlocker blocker(reviewLabel_); reviewLabel_->clear();
             if (auto *item = selectedReviewEntry()) {
                 const auto sample = item->data(0, Qt::UserRole).toJsonObject();
+                if (sample.value("teacher_payload_removed").toBool()) {
+                    rgbPreview_->reset("Source photos are retained."); depthPreview_->reset("Teacher map discarded — enable it to regenerate.");
+                    previewStats_->setText("This result was removed to save disk space. Its teacher settings and photo remain available."); return;
+                }
                 for (const auto &value : sample.value("labels").toArray()) {
                     const auto label = value.toObject(); reviewLabel_->addItem(label.value("title").toString() + " (" + label.value("units").toString() + ")", label.value("key").toString());
                 }
@@ -1237,9 +1364,14 @@ private:
         const QString id = item->data(0, Qt::UserRole).toJsonObject().value("id").toString();
         // Only the Python process constructs file names from manifest IDs.
         auto *photo = item->parent();
-        if (compareTeachers_->isChecked() && reviewLabel_->currentData().toString() == "training" && photo && photo->childCount() >= 2) {
+        QStringList available;
+        if (photo) for (int index = 0; index < photo->childCount() && available.size() < 3; ++index) {
+            const auto sample = photo->child(index)->data(0, Qt::UserRole).toJsonObject();
+            if (!sample.value("teacher_payload_removed").toBool()) available << sample.value("id").toString();
+        }
+        if (compareTeachers_->isChecked() && reviewLabel_->currentData().toString() == "training" && available.size() >= 2) {
             QStringList args{"compare-samples", reviewedDataset_};
-            for (int i=0; i<qMin(3, photo->childCount()); ++i) args << "--sample" << photo->child(i)->data(0, Qt::UserRole).toJsonObject().value("id").toString();
+            for (const auto &identifier : available) args << "--sample" << identifier;
             args << "--output-dir" << reviewPreviews_->path() << "--max-dimension" << "0"; requestPreview("compare", args);
         } else requestPreview("preview", {"preview-sample", reviewedDataset_, "--sample", id, "--label", reviewLabel_->currentData().toString(), "--output-dir", reviewPreviews_->path(), "--max-dimension", "0"});
     }
@@ -1524,6 +1656,7 @@ private:
         if (!newer && reviewedDataset_ == path && (result.value("added_samples").toInt() || !result.value("pending_photos").toArray().isEmpty())) reviewDataset(path, false);
         if (!autosavePaused_) autosaveTimer_->start();
         else if (!trainerAfterSave_.isEmpty() || closeAfterSave_) startNextDatasetSave();
+        maybeStartPhotoTeacher();
     }
 
     QJsonObject selectedReviewEdits() const {
@@ -1547,8 +1680,20 @@ private:
 
     void setReviewIncluded(bool include) {
         if (busy_ || reviewGenerating_ || reviewEntries().isEmpty() || (!requestedReviewPath_.isEmpty() && requestedReviewPath_ != reviewedDataset_)) return;
-        { QSignalBlocker blocker(reviewSamples_); for (auto *item : selectedReviewEntries()) setReviewItemIncluded(item, include); }
-        queueReviewSave();
+        QMap<QString, QList<QTreeWidgetItem *>> regenerate, discard; bool changed = false;
+        { QSignalBlocker blocker(reviewSamples_); for (auto *item : selectedReviewEntries()) {
+            const auto sample = item->data(0, Qt::UserRole).toJsonObject();
+            const QString model = photoTeacherModel(sample);
+            if (include && sample.value("teacher_payload_removed").toBool()) regenerate[model].append(item);
+            else if (!include && sample.value("can_generate_display_teacher").toBool() && sample.value("rgb_reference").toString() == "display"
+                    && QStringList{"depthpro", "depth-anything-3", "depth-anything-v2"}.contains(model)) {
+                if (!sample.value("teacher_payload_removed").toBool()) discard[model].append(item);
+            }
+            else { setReviewItemIncluded(item, include); changed = true; }
+        } }
+        if (changed) queueReviewSave();
+        for (auto it = discard.cbegin(); it != discard.cend(); ++it) queuePhotoTeacher("disable-teacher", it.key(), it.value());
+        for (auto it = regenerate.cbegin(); it != regenerate.cend(); ++it) enablePhotoTeacher(it.key(), it.value());
     }
 
     void setReviewSplit(const QString &split) {
@@ -1604,6 +1749,7 @@ private:
         addPhotos_->setEnabled(datasetMode_ && !reviewedDataset_.isEmpty() && !reviewGenerating_ && !busy_ && (requestedReviewPath_.isEmpty() || requestedReviewPath_ == reviewedDataset_));
         removePhotos_->setEnabled(editable && !reviewSamples_->selectedItems().isEmpty()); restorePhotos_->setEnabled(removePhotos_->isEnabled());
         updateCollectionReadiness();
+        updatePhotoTeacherButtons(editable);
     }
 
     bool writeReviewEdits(const QJsonObject &edits) {
@@ -2188,7 +2334,7 @@ private:
 
     void startJob(const QString &label, const QStringList &arguments) {
         const QString operation = arguments.value(0);
-        const bool mutatesDataset = QStringList{"dataset", "compose-datasets", "compact-dataset", "curate-dataset", "edit-dataset", "import-hf", "cleanup-dataset", "archive-dataset"}.contains(operation);
+        const bool mutatesDataset = QStringList{"dataset", "generate-teacher", "disable-teacher", "compose-datasets", "compact-dataset", "curate-dataset", "edit-dataset", "import-hf", "cleanup-dataset", "archive-dataset"}.contains(operation);
         if ((!datasetMode_ && mutatesDataset) || (datasetMode_ && QStringList{"train", "export", "cleanup-run"}.contains(operation))) {
             openApp(mutatesDataset ? "datasets" : "trainer", mutatesDataset ? "prepare" : "train", selectedPath(datasets_));
             groupsFile_.reset(); teachersFile_.reset(); refreshAfter_ = false; return;
@@ -2216,7 +2362,23 @@ private:
                 const auto event = QJsonDocument::fromJson(line.mid(11).toUtf8()).object(); const QString type = event.value("event").toString(), phase = event.value("phase").toString();
                 if (type == "dataset_started" && appendBase_.isEmpty()) streamingDataset_ = event.value("dataset_dir").toString();
                 else if (type == "sample_ready" && appendBase_.isEmpty()) { streamingDataset_ = event.value("dataset_dir").toString(streamingDataset_); if (!streamingTimer_->isActive()) streamingTimer_->start(); }
+                else if (type == "source_ready") {
+                    const int completed = event.value("processed_sources").toInt(), total = event.value("total_sources").toInt();
+                    statusBar()->showMessage(QString("Prepared source photo %1 of %2 before teacher batches.").arg(completed).arg(total));
+                    if (total > 0) { progress_->setRange(0, total); progress_->setValue(completed); }
+                }
                 else if (type == "photo_skipped") log_->appendPlainText("Skipped " + QFileInfo(event.value("source_path").toString()).fileName() + ": " + event.value("reason").toString());
+                else if (type == "teacher_failed" || type == "anchor_failed") {
+                    const QString message = "Teacher failed: " + event.value("teacher_id").toString() + " — " + event.value("reason").toString();
+                    log_->appendPlainText(message); statusBar()->showMessage(message);
+                }
+                else if (type == "model_loading" || type == "model_loaded" || type == "model_releasing" || type == "model_released" || type == "teacher_started") {
+                    const QString message = type == "model_loading" ? "Loading " + event.value("model").toString(event.value("teacher_id").toString()) + "…"
+                        : type == "model_releasing" ? "Releasing " + event.value("teacher_id").toString() + "…"
+                        : type == "model_released" ? "Released " + event.value("teacher_id").toString() + " before loading the next model."
+                        : "Generating " + event.value("teacher_id").toString() + " for this batch…";
+                    log_->appendPlainText(message); statusBar()->showMessage(message);
+                }
                 else if (job_ == "Scan spatial photos" && type == "scan_started") {
                     log_->appendPlainText("Searching " + event.value("directory").toString() + ". Photos appear as they are validated; cancelling keeps photos already found.");
                 }
@@ -2234,7 +2396,14 @@ private:
                 else if (!phase.isEmpty()) {
                     QString message;
                     const int processed = event.value("processed").toInt(), total = event.value("total").toInt();
-                    if (phase == "verifying_dataset") message = QString("Checking source dataset %1 of %2: %3. Large datasets can take several minutes.").arg(processed).arg(total).arg(QFileInfo(event.value("dataset_path").toString()).fileName());
+                    if (phase == "teacher_generation") {
+                        const int completed = event.value("completed").toInt();
+                        message = type == "model_started" || type == "anchor_model_started" ? "Loading " + event.value("model").toString() + " for the selected photos…"
+                            : type == "photo_ready" ? QString("Generated %1: %2 of %3 selected photos.").arg(event.value("model").toString()).arg(completed).arg(total)
+                            : "Saving selected teacher results…";
+                        if (type == "photo_ready" && total > 0) { progress_->setRange(0, total); progress_->setValue(completed); }
+                    }
+                    else if (phase == "verifying_dataset") message = QString("Checking source dataset %1 of %2: %3. Large datasets can take several minutes.").arg(processed).arg(total).arg(QFileInfo(event.value("dataset_path").toString()).fileName());
                     else if (phase == "sample_composed") message = QString("Preparing training set: %1 of %2 entries · %3 arrays %4.").arg(processed).arg(total).arg(event.value("unique_arrays").toInt()).arg(event.value("storage_mode").toString() == "copy" ? "copied losslessly" : "reused without a full data copy");
                     else if (phase == "editing_dataset") message = QString("Saving dataset version: %1 of %2 arrays preserved.").arg(processed).arg(total);
                     else if (phase == "compressing") message = QString("Compressing arrays losslessly: %1 of %2 records (%3 unique arrays).").arg(processed).arg(total).arg(event.value("unique_arrays").toInt());
@@ -2352,7 +2521,14 @@ private:
         stdout_ += process_->readAllStandardOutput(); appendProgress(process_->readAllStandardError());
         if (!progressBuffer_.trimmed().isEmpty()) { log_->appendPlainText(QString::fromUtf8(progressBuffer_).trimmed()); progressBuffer_.clear(); }
         setBusy(false); groupsFile_.reset(); teachersFile_.reset(); editsFile_.reset();
+        const auto refreshTeacherState = [this] {
+            if ((activeOperation_ == "generate-teacher" || activeOperation_ == "disable-teacher") && !reviewedDataset_.isEmpty()) {
+                const QString path = reviewedDataset_;
+                QTimer::singleShot(0, this, [this, path] { reviewDataset(path, false); });
+            }
+        };
         if (cancelled_) {
+            pendingTeacherJobs_.clear();
             if (job_ == "Create training set") continueToTrainer_ = false;
             if (job_ == "Generate dataset") stopGenerationStreaming("Generation cancelled. Generate a new dataset before saving a reviewed copy.");
             if (job_ == "Train RAFT-Stereo") trainingStatus_->setText("Model training cancelled. The dataset is unchanged; this run did not finish.");
@@ -2360,10 +2536,12 @@ private:
             refreshAfter_ = false; statusBar()->showMessage("Cancelled");
             if (job_ == "Scan spatial photos") { log_->appendPlainText("Scan cancelled; photos already found remain in the list."); statusBar()->showMessage("Scan cancelled; photos already found remain in the list."); }
             if (job_ == "Preview depth") { rgbPreview_->reset("Preview cancelled."); depthPreview_->reset("Choose another photo or depth label to retry."); }
+            refreshTeacherState();
             return;
         }
         QJsonParseError error; const QJsonDocument doc = QJsonDocument::fromJson(stdout_.trimmed(), &error);
         if (status != QProcess::NormalExit || code != 0 || !doc.isObject()) {
+            pendingTeacherJobs_.clear();
             if (job_ == "Create training set") continueToTrainer_ = false;
             log_->appendPlainText(job_ + " failed (exit " + QString::number(code) + ").");
             statusBar()->showMessage(job_ + " failed; see the progress log. You can adjust the selection and retry.");
@@ -2380,7 +2558,7 @@ private:
             }
             if (job_ == "Generate dataset") stopGenerationStreaming("Generation failed. See the progress log and generate a new dataset to try again.");
             closeAfterTraining_ = false;
-            refreshAfter_ = false; return;
+            refreshAfter_ = false; refreshTeacherState(); return;
         }
         const QJsonObject result = doc.object();
         if (job_ == "Generate dataset" && !appendBase_.isEmpty()) {
@@ -2430,6 +2608,12 @@ private:
             clearUnavailableReview(result.value("cleaned_dataset").toString(), "Generated dataset removed. Original photos and trained models retained.");
             log_->appendPlainText(QString("Removed %1 generated files (%2 MiB logical size). Shared storage may remain in other datasets.").arg(result.value("removed_files").toInt()).arg(result.value("removed_logical_bytes").toDouble() / (1024*1024), 0, 'f', 1));
         }
+        else if (job_ == "Generate photo teacher" || job_ == "Discard teacher maps") {
+            pendingReview_ = result.value("dataset_path").toString();
+            manifestHashes_.insert(pendingReview_, result.value("manifest_sha256").toString(manifestHash(pendingReview_)));
+            log_->appendPlainText(job_ + " complete for " + result.value("model").toString() + ". Other photos and splits are unchanged.");
+            for (const auto &warning : result.value("warnings").toArray()) log_->appendPlainText(warning.toString());
+        }
         else if (job_ == "Generate dataset" || job_ == "Save reviewed dataset" || job_ == "Save dataset version" || job_ == "Import Hugging Face dataset" || job_ == "Compact dataset") {
             pendingReview_ = result.value("dataset_path").toString();
             log_->appendPlainText("Dataset saved: " + pendingReview_ + "\n" + QString::fromUtf8(QJsonDocument(result.value("summary").toObject()).toJson(QJsonDocument::Compact)));
@@ -2457,6 +2641,7 @@ private:
             showFolder(exportDestination_);
         }
         const bool refresh = refreshAfter_; refreshAfter_ = false;
+        if (!pendingTeacherJobs_.isEmpty()) { QTimer::singleShot(0, this, [this] { maybeStartPhotoTeacher(); }); return; }
         if (refresh) QTimer::singleShot(0, this, [this] { refreshLibrary(); });
         else if (job_ == "Refresh library" && !pendingReview_.isEmpty()) {
             const QString path = pendingReview_; pendingReview_.clear();
@@ -2634,6 +2819,7 @@ private:
     QString requestedReviewPath_, reviewedDataset_, pendingReview_, pendingTrainingPath_;
     QProcess *previewProcess_ = nullptr; QByteArray previewStdout_, progressBuffer_; QString previewKind_, pendingPreviewKind_, streamingDataset_, differencePath_;
     QStringList pendingPreviewArgs_; QJsonArray previewRecords_; QTimer *streamingTimer_ = nullptr;
+    QList<QStringList> pendingTeacherJobs_;
     QSet<QString> scanDeliveredPaths_;
     bool cancelled_ = false, refreshAfter_ = false, reviewGenerating_ = false, requestedReviewOpen_ = true, busy_ = false;
     std::unique_ptr<QTemporaryFile> groupsFile_, teachersFile_, editsFile_;

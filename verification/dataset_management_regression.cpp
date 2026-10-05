@@ -295,6 +295,66 @@ void photoEditsAndDrafts(TrainerWindow &window, const QString &workspace) {
     requireNoItemCheckboxes(window.reviewSamples_);
 }
 
+void perPhotoTeacherControls(TrainerWindow &window, const QString &workspace) {
+    clearPendingFixtureEdits(window);
+    const QString path = QDir(workspace).filePath("datasets/teacher-buttons");
+    auto first = sample("pro-one", "one", "capture-a", "depthpro"); first.insert("teacher_model", "depthpro");
+    first.insert("can_generate_display_teacher", true); first.insert("rgb_reference", "display");
+    auto discarded = sample("da3-one", "one", "capture-a", "depth-anything-3");
+    discarded.insert("teacher_model", "depth-anything-3"); discarded.insert("teacher_payload_removed", true);
+    discarded.insert("excluded", true); discarded.insert("included", false);
+    auto second = sample("pro-two", "two", "capture-b", "depthpro", "validation"); second.insert("teacher_model", "depthpro");
+    populateFixtureReview(window, {{"dataset_path", path}, {"samples", QJsonArray{first, discarded, second}}});
+    // Represent a running teacher job so subsequent requests queue without launching real inference.
+    window.busy_ = true; window.activeOperation_ = "generate-teacher";
+    auto *photo = window.reviewSamples_->topLevelItem(0);
+    auto *pro = qobject_cast<QPushButton *>(window.reviewSamples_->itemWidget(photo, 6));
+    auto *da3 = qobject_cast<QPushButton *>(window.reviewSamples_->itemWidget(photo, 7));
+    { QSignalBlocker blocker(window.tabs_); window.tabs_->setCurrentIndex(1); }
+    QApplication::processEvents(); window.reviewSamples_->horizontalScrollBar()->setValue(0);
+    auto *v2 = qobject_cast<QPushButton *>(window.reviewSamples_->itemWidget(photo, 8));
+    require(v2 && window.reviewSamples_->viewport()->rect().contains(v2->geometry()),
+            "per-photo teacher buttons require horizontal scrolling at the normal window size");
+    require(pro && pro->isChecked() && pro->text() == "On", "photo DepthPro button did not reflect its enabled teacher");
+    require(da3 && !da3->isChecked() && da3->text() == "Generate", "discarded DA3 map was presented as a retained result");
+    pro->click();
+    require(window.pendingTeacherJobs_.size() == 1 && window.pendingTeacherJobs_.first().first() == "disable-teacher" &&
+            window.pendingTeacherJobs_.first().contains("pro-one") && !window.pendingTeacherJobs_.first().contains("pro-two"),
+            "photo Off did not queue physical teacher removal for only that photo");
+    require(window.process_->state() == QProcess::NotRunning && !da3->isEnabled(), "teacher mutation launched overlapping inference or allowed overlapping clicks");
+    window.pendingTeacherJobs_.clear(); da3->setEnabled(true); window.anchor_->setChecked(true); da3->click();
+    require(window.pendingTeacherJobs_.size() == 1 && window.pendingTeacherJobs_.first().first() == "generate-teacher" &&
+            window.pendingTeacherJobs_.first().contains("depth-anything-3") && window.pendingTeacherJobs_.first().contains("pro-one"),
+            "photo Generate did not queue immediate selected-photo inference");
+    require(window.pendingTeacherJobs_.first().contains("--metric-anchor") && window.pendingTeacherJobs_.first().contains("--anchor-model-path"),
+            "selected-photo teacher generation ignored the requested scale anchor");
+    window.pendingTeacherJobs_.clear(); window.updateReviewCount();
+    selectOnly(window.reviewSamples_, photo); window.reviewSamples_->topLevelItem(1)->setSelected(true);
+    window.enablePhotoTeacher("depth-anything-3", window.selectedReviewEntries());
+    const auto bulk = window.pendingTeacherJobs_.first();
+    require(bulk.count("--sample-id") == 2 && bulk.contains("pro-one") && bulk.contains("pro-two") && !bulk.contains("da3-one"),
+            "bulk teacher generation failed to deduplicate teacher variants into selected photos");
+    window.pendingTeacherJobs_.clear(); window.setBusy(true);
+    require(!pro->isEnabled() && !da3->isEnabled(), "teacher buttons stayed enabled during a running task");
+    window.setBusy(false);
+    window.reviewDrafts_.insert(path, {{"dirty", true}, {"save_error", "isolated failed-save fixture"}});
+    window.enablePhotoTeacher("depth-anything-3", {photo->child(0)});
+    require(window.pendingTeacherJobs_.isEmpty() && pro->isEnabled() && window.statusBar()->currentMessage().contains("failed to save"),
+            "failed autosave left a blocked teacher request and disabled buttons indefinitely");
+    require(TrainerWindow::photoTeacherModel({{"teacher_model", "depth-anything-v2-small"}}) != "depth-anything-v2",
+            "V2 Large button claimed control of a legacy Small teacher");
+    clearPendingFixtureEdits(window);
+    selectOnly(window.reviewSamples_, photo->child(0));
+    {
+        QSignalBlocker blocker(window.process_);
+        window.setReviewIncluded(false);
+        require(window.process_->arguments().contains("disable-teacher") && window.process_->arguments().contains("pro-one"),
+                "Remove selected retained a regenerable display teacher instead of discarding its payload");
+        if (window.process_->state() != QProcess::NotRunning) { window.process_->kill(); window.process_->waitForFinished(1500); }
+        window.setBusy(false); window.refreshAfter_ = false;
+    }
+}
+
 void filteredNavigation(TrainerWindow &window, const QString &workspace) {
     populateFixtureReview(window, review(QDir(workspace).filePath("datasets/navigation")));
     window.reviewFilter_->setText("one");
@@ -791,6 +851,7 @@ int main(int argc, char **argv) {
         librarySelection(window, workspace);
         ordinaryGenerationButtonsAndLinks(window);
         photoEditsAndDrafts(window, workspace);
+        perPhotoTeacherControls(window, workspace);
         filteredNavigation(window, workspace);
         streamingAndUngroupedPhotos(window, workspace);
         asynchronousDatasetSwitch(window, workspace);
