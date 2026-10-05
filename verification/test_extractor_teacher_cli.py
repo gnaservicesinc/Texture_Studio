@@ -20,7 +20,7 @@ class ExtractorTeacherCLITests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(json.loads(output.getvalue()), report)
         options = extract.call_args.args[1]
-        self.assertEqual(options.selected_products, ("learned-display-depth", "learned-display-native"))
+        self.assertEqual(options.selected_products, ("learned-da3",))
         self.assertEqual((options.learned_model, options.learned_model_path, options.learned_source_dir,
                           options.learned_device, options.learned_input_size),
                          ("depth-anything-3", Path("local-model"), Path("local-source"), "mps", 1036))
@@ -42,8 +42,16 @@ class ExtractorTeacherCLITests(unittest.TestCase):
 
     def test_explicit_product_selection_remains_authoritative(self):
         with patch("ipde.cli.extract_file", return_value={}) as extract, redirect_stdout(io.StringIO()):
-            self.assertEqual(cli.main(["photo.heic", "--json", "--learned-depth", "--select", "learned-display-preview"]), 0)
-        self.assertEqual(extract.call_args.args[1].selected_products, ("learned-display-preview",))
+            self.assertEqual(cli.main(["photo.heic", "--json", "--learned-depth", "--select", "learned-depthpro", "--select", "learned-da3", "--select", "learned-da2"]), 0)
+        self.assertEqual(extract.call_args.args[1].selected_products, ("learned-depthpro", "learned-da3", "learned-da2"))
+
+    def test_checked_models_keep_their_own_local_paths(self):
+        settings = {"depth-anything-3": {"model_path": "/models/da3", "source_dir": "/sources/da3"},
+                    "depth-anything-v2": {"model_path": "/models/da2.pth"}}
+        with patch("ipde.cli.extract_file", return_value={}) as extract, redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["photo.heic", "--json", "--learned-depth",
+                "--learned-model-settings", json.dumps(settings)]), 0)
+        self.assertEqual(extract.call_args.args[1].learned_model_settings, settings)
 
     def test_model_stdout_is_redirected_away_from_gui_json_response(self):
         def noisy_model(*args):

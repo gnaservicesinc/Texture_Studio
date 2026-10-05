@@ -45,6 +45,12 @@ def _prediction(rgb, *, units="meters", depth=None):
 
 
 class DisplayTeacherSourceTests(unittest.TestCase):
+    def setUp(self):
+        # Exercise historical scientific paths independently of the temporary admission policy.
+        admission = patch("ipde.dataset.require_dataset_teacher")
+        admission.start()
+        self.addCleanup(admission.stop)
+
     def _build(self, root, *, options=None, capture=None, factory=None, **kwargs):
         sources = [root / f"capture-{index}.heic" for index in range(3)]
         for source in sources:

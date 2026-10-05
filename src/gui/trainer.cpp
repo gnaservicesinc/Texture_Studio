@@ -50,6 +50,7 @@
 #include <QSlider>
 #include <QSplitter>
 #include <QStandardPaths>
+#include <QStandardItemModel>
 #include <QStatusBar>
 #include <QStyledItemDelegate>
 #include <QTabWidget>
@@ -136,6 +137,24 @@ protected:
     }
     void dropEvent(QDropEvent *event) override {
         const auto paths = photoPaths(event->mimeData());
+        if ((!canDropPhotos || canDropPhotos()) && !paths.isEmpty() && onPhotosDropped && onPhotosDropped(paths)) event->acceptProposedAction(); else event->ignore();
+    }
+};
+
+class PhotoDropPage final : public QWidget {
+public:
+    explicit PhotoDropPage(QWidget *parent = nullptr) : QWidget(parent) { setAcceptDrops(true); }
+    std::function<bool()> canDropPhotos;
+    std::function<bool(const QStringList &)> onPhotosDropped;
+protected:
+    void dragEnterEvent(QDragEnterEvent *event) override {
+        if ((!canDropPhotos || canDropPhotos()) && !PhotoDropTree::photoPaths(event->mimeData()).isEmpty()) event->acceptProposedAction(); else event->ignore();
+    }
+    void dragMoveEvent(QDragMoveEvent *event) override {
+        if ((!canDropPhotos || canDropPhotos()) && !PhotoDropTree::photoPaths(event->mimeData()).isEmpty()) event->acceptProposedAction(); else event->ignore();
+    }
+    void dropEvent(QDropEvent *event) override {
+        const auto paths = PhotoDropTree::photoPaths(event->mimeData());
         if ((!canDropPhotos || canDropPhotos()) && !paths.isEmpty() && onPhotosDropped && onPhotosDropped(paths)) event->acceptProposedAction(); else event->ignore();
     }
 };
@@ -243,11 +262,14 @@ public:
         QLabel::setVisible(visible);
     }
     bool load(const QString &path) {
+        const QString identity = imageIdentity(path);
+        if (identity == originalPath_ && !original_.isNull()) return true;
         original_ = QPixmap(path);
         if (original_.isNull()) { reset("Preview could not be loaded."); return false; }
+        originalPath_ = identity;
         updateImage(); return true;
     }
-    void setSource(const QString &path) { source_ = QPixmap(path); updateImage(); }
+    void setSource(const QString &path) { const QString identity = imageIdentity(path); if (identity == sourcePath_ && !source_.isNull()) return; sourcePath_ = identity; source_ = QPixmap(path); updateImage(); }
     void setSurface(const QJsonObject &surface) { surface_ = surface; update(); }
     void setView(const QString &view) { view_ = view; updateImage(); update(); }
     void setAngles(double yaw, double pitch) { yaw_ = yaw; pitch_ = pitch; update(); }
@@ -257,7 +279,7 @@ public:
     void showMagnifier(const QPointF &position) {
         hover_ = position; update();
     }
-    void reset(const QString &message) { original_ = QPixmap(); surface_ = {}; clear(); setText(message); update(); }
+    void reset(const QString &message) { originalPath_.clear(); original_ = QPixmap(); sourcePath_.clear(); source_ = {}; surface_ = {}; clear(); setText(message); update(); }
 protected:
     void resizeEvent(QResizeEvent *event) override { QLabel::resizeEvent(event); updateImage(); }
     void mousePressEvent(QMouseEvent *event) override {
@@ -296,6 +318,7 @@ protected:
         painter.setPen(Qt::yellow); painter.drawRect(lens.adjusted(0, 0, -1, -1)); painter.drawText(lens.adjusted(5, 4, -5, -4), Qt::AlignBottom | Qt::AlignLeft, "1:1 native pixels");
     }
 private:
+    static QString imageIdentity(const QString &path) { const QFileInfo info(path); return path + "\n" + QString::number(info.size()) + "\n" + QString::number(info.lastModified().toMSecsSinceEpoch()); }
     QPointF imagePosition(const QPointF &point) const {
         const QSize fitted = original_.size().scaled(size(), Qt::KeepAspectRatio);
         if (fitted.isEmpty()) return QPointF(-1, -1);
@@ -335,7 +358,7 @@ private:
         painter.setPen(Qt::NoPen); for (const auto &face : faces) { painter.setBrush(face.color); painter.drawPolygon(face.polygon); }
         painter.setPen(Qt::white); painter.drawText(rect().adjusted(8,8,-8,-8), Qt::AlignBottom | Qt::AlignLeft, "Drag to rotate · display relief");
     }
-    QPixmap original_, source_; QJsonObject surface_; QString view_ = "depth";
+    QPixmap original_, source_; QJsonObject surface_; QString view_ = "depth", originalPath_, sourcePath_;
     QPointer<QDialog> floating_; QPointF hover_{-1, -1}, pressed_; bool dragged_ = false;
     double yaw_ = -.25, pitch_ = -.5;
 };
@@ -455,6 +478,12 @@ public:
                 connect(menu, &QMenu::aboutToShow, action, [button, action] { action->setEnabled(button->isEnabled()); });
             }
             more->setMenu(menu); datasetLayout->addWidget(more);
+            auto *newDataset = new QPushButton("New dataset…", datasetBox); newDataset->setObjectName("newDataset"); datasetLayout->addWidget(newDataset);
+            connect(newDataset, &QPushButton::clicked, this, [this] {
+                if (busy_ || !appendBase_.isEmpty()) return;
+                sources_->clear(); datasetName_->setText("dataset-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"));
+                addingPhotosHint_->hide(); cancelAdding_->hide(); generate_->setText("Create dataset"); tabs_->setCurrentIndex(0);
+            });
             auto *hint = new QLabel("Select any dataset to open its photos.\nIn Training split, select a row and choose its use with the buttons.", datasetBox); hint->setWordWrap(true); datasetLayout->addWidget(hint);
         }
 
@@ -520,9 +549,9 @@ public:
         connect(datasets_, &QTreeWidget::itemSelectionChanged, this, [this] {
             syncDatasetSelection(datasets_, collectionSources_); updateTrainingSelection(); updateCleanupActions();
             loadSplitControls(selectedPath(datasets_));
-            if (datasetMode_ && tabs_->currentIndex() == 1 && process_ && !busy_ && !selectedPath(datasets_).isEmpty() && selectedPath(datasets_) != requestedReviewPath_) reviewDataset(selectedPath(datasets_), false);
+            if (datasetMode_ && process_ && !selectedPath(datasets_).isEmpty() && !syncingCollectionSelection_) reviewDataset(selectedPath(datasets_));
         });
-        connect(collectionSources_, &QTreeWidget::currentItemChanged, this, [this] { syncDatasetSelection(collectionSources_, datasets_); });
+        connect(collectionSources_, &QTreeWidget::currentItemChanged, this, [this] { syncingCollectionSelection_ = true; syncDatasetSelection(collectionSources_, datasets_); syncingCollectionSelection_ = false; });
         connect(datasets_, &QTreeWidget::itemDoubleClicked, this, [this] { reviewDataset(selectedPath(datasets_)); });
         connect(runs_, &QTreeWidget::itemSelectionChanged, this, [this] { updateCleanupActions(); });
         if (datasetMode_) {
@@ -559,7 +588,8 @@ public:
                 pendingTeacherJobs_.clear();
                 log_->appendPlainText("Could not launch Python: " + process_->errorString());
                 setBusy(false); groupsFile_.reset(); teachersFile_.reset(); editsFile_.reset(); refreshAfter_ = false;
-                if (job_ == "Generate dataset") stopGenerationStreaming("Generation could not start. Generate a new dataset to try again.");
+                if (job_ == "Generate dataset") stopGenerationStreaming(appendBase_.isEmpty() ? "Generation could not start. Try creating the dataset again." : "Depth generation could not start. Added photos remain in this dataset; retry their depth generation.");
+                if (job_ == "Generate dataset") releaseFailedPhotoAddition();
                 statusBar()->showMessage(job_ + " failed to start; see the progress log.");
                 if (job_ == "Train RAFT-Stereo") trainingStatus_->setText("Model training failed to start: " + process_->errorString());
                 if (job_ == "Preview depth") previewStats_->setText("Preview failed: Python could not be launched.");
@@ -585,6 +615,10 @@ public:
             if (previewKind_ == "discarded") return;
             const auto doc = QJsonDocument::fromJson(previewStdout_.trimmed());
             if (status == QProcess::NormalExit && code == 0 && doc.isObject()) {
+                if (!activePreviewCacheKey_.isEmpty() && (previewKind_ != "review" || cacheableReview(doc.object()))) {
+                    if (previewCache_.size() >= 16 && !previewCache_.contains(activePreviewCacheKey_)) previewCache_.erase(previewCache_.begin());
+                    previewCache_.insert(activePreviewCacheKey_, doc.object());
+                }
                 if (previewKind_ == "review") { if (doc.object().value("dataset_path").toString() == requestedReviewPath_) populateReview(doc.object()); } else populatePreview(doc.object());
             } else if (previewKind_ == "review") {
                 const QString error = doc.isObject() ? doc.object().value("error").toString() : QString::fromUtf8(previewStdout_).left(800);
@@ -630,7 +664,7 @@ public:
         settings_.setValue("workspace", workspace_->text());
         settings_.setValue("teacher_model", teacher_->currentData());
         settings_.setValue("raft_root", raftRoot_->text()); settings_.setValue("raft_model", raftModel_->text());
-        for (auto *process : {process_, previewProcess_, editProcess_, exportProcess_}) {
+        for (auto *process : {process_, previewProcess_, editProcess_, exportProcess_, depthExportProcess_}) {
             if (process && process->state() != QProcess::NotRunning) {
                 process->kill(); process->waitForFinished(1500);
             }
@@ -638,7 +672,7 @@ public:
     }
 
     bool exportRunning() const { return exportProcess_ && exportProcess_->state() != QProcess::NotRunning; }
-    bool taskRunning() const { return process_->state() != QProcess::NotRunning || previewProcess_->state() != QProcess::NotRunning || editProcess_->state() != QProcess::NotRunning || exportRunning(); }
+    bool taskRunning() const { return process_->state() != QProcess::NotRunning || previewProcess_->state() != QProcess::NotRunning || editProcess_->state() != QProcess::NotRunning || exportRunning() || (depthExportProcess_ && depthExportProcess_->state() != QProcess::NotRunning); }
     void attachSession(IPDE::ProjectSession *session) {
         session_ = session;
         session_->setActivationHandler(this, [this](const QJsonObject &request) { activateRequested(request); });
@@ -868,7 +902,7 @@ private:
         advanced_ = binaryButton("Advanced settings", tab);
         goalHelp_ = new QLabel(tab); goalHelp_->setWordWrap(true); root->addWidget(goalHelp_);
         auto *row = new QHBoxLayout;
-        datasetName_ = new QLineEdit("dataset-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"), tab);
+        datasetName_ = new QLineEdit("dataset-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"), tab); datasetName_->setObjectName("datasetName");
         row->addWidget(new QLabel("New dataset", tab)); row->addWidget(datasetName_, 1);
         auto *add = new QPushButton("Add photos…", tab); auto *scan = new QPushButton("Find spatial photos in folder…", tab); auto *remove = new QPushButton("Remove selected", tab);
         row->addWidget(add); row->addWidget(scan); row->addWidget(remove); root->addLayout(row);
@@ -903,27 +937,32 @@ private:
         auto *teachers = new QHBoxLayout; teachers->addWidget(new QLabel("Generate teacher entries", tab));
         for (const auto &choice : QList<QPair<QString, QString>>{{"DepthPro", "depthpro"}, {"Depth Anything V2", "depth-anything-v2"}, {"Depth Anything 3", "depth-anything-3"}}) {
             auto *check = binaryButton(choice.first, tab); check->setProperty("model", choice.second); check->setChecked(choice.second == "depthpro");
+            check->setEnabled(choice.second == "depthpro");
+            if (choice.second != "depthpro") check->setToolTip(unavailableDepthTeacherReason());
             teacherChecks_.append(check); teachers->addWidget(check);
         }
         teachers->addStretch(); root->addLayout(teachers);
-        auto *teacherHint = new QLabel("Select up to three teachers. Each prediction becomes its own training entry; reviewing a photo lets you exclude an individual teacher.", tab); teacherHint->setWordWrap(true); root->addWidget(teacherHint);
+        auto *teacherHint = new QLabel(unavailableDepthTeacherReason(), tab); teacherHint->setWordWrap(true); root->addWidget(teacherHint);
         datasetAdvanced_ = new QGroupBox("Model locations and processing", tab); auto *advancedLayout = new QVBoxLayout(datasetAdvanced_);
         auto *controls = new QHBoxLayout; auto *left = new QFormLayout; auto *right = new QFormLayout;
         teacher_ = new QComboBox(tab);
         teacher_->addItem("Apple DepthPro — estimated meters", "depthpro");
         teacher_->addItem("Depth Anything V2 Large — relative inverse depth", "depth-anything-v2");
         teacher_->addItem("Depth Anything 3 Giant — relative depth", "depth-anything-3");
+        if (auto *model = qobject_cast<QStandardItemModel *>(teacher_->model())) for (int index : {1, 2}) {
+            model->item(index)->setEnabled(false); model->item(index)->setToolTip(unavailableDepthTeacherReason());
+        }
         left->addRow("Depth teacher", teacher_);
         left->addRow("Teacher checkpoint", pathRow(teacherPath_, "/opt/ipde/models/depth_pro.pt", false, "Choose teacher checkpoint", tab));
         right->addRow("Teacher source", pathRow(teacherSource_, "/opt/ipde/ml-depth-pro", true, "Choose model source", tab));
         auto *processing = new QWidget(tab); auto *processingLayout = new QHBoxLayout(processing); processingLayout->setContentsMargins(0, 0, 0, 0);
-        migrateDA3NativeSize_ = settings_.contains("teacher_input_size") && settings_.value("teacher_input_size").toInt() == 0
-            && !settings_.value("teacher_da3_size_default_migrated", false).toBool();
-        teacherDevice_ = deviceBox(processing); inputSize_ = spin(processing, 0, 8192, settings_.value("teacher_input_size", 1036).toInt()); inputSize_->setSingleStep(14);
+        if (settings_.value("teacher_input_size", 0).toInt() == 1036 && !settings_.value("teacher_native_default_restored", false).toBool()) settings_.setValue("teacher_input_size", 0);
+        settings_.setValue("teacher_native_default_restored", true);
+        teacherDevice_ = deviceBox(processing); inputSize_ = spin(processing, 0, 8192, settings_.value("teacher_input_size", 0).toInt()); inputSize_->setSingleStep(14);
         inputSize_->setObjectName("teacherInputSize"); inputSize_->setSpecialValueText("Native source size (V2 / DA3)");
         connect(inputSize_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int value) {
             settings_.setValue("teacher_input_size", value);
-            settings_.setValue("teacher_da3_size_default_migrated", true); migrateDA3NativeSize_ = false;
+            settings_.setValue("teacher_native_default_restored", true);
         });
         processingLayout->addWidget(teacherDevice_); processingLayout->addWidget(new QLabel("V2 / DA3 input size", processing)); processingLayout->addWidget(inputSize_);
         right->addRow("Inference device", processing);
@@ -940,6 +979,10 @@ private:
             additionalForm->addRow(model + " checkpoint", pathRow(modelEdit, path, model == "depth-anything-3", "Choose " + model + " model", datasetAdvanced_));
             additionalForm->addRow(model + " source", pathRow(sourceEdit, source, true, "Choose " + model + " source", datasetAdvanced_));
             modelPaths_.insert(model, modelEdit); modelSources_.insert(model, sourceEdit);
+            if (model != "depthpro") {
+                modelEdit->parentWidget()->setEnabled(false); sourceEdit->parentWidget()->setEnabled(false);
+                modelEdit->parentWidget()->setToolTip(unavailableDepthTeacherReason()); sourceEdit->parentWidget()->setToolTip(unavailableDepthTeacherReason());
+            }
         }
         advancedLayout->addLayout(additionalForm);
         auto *storageControls = new QFormLayout;
@@ -957,12 +1000,13 @@ private:
         auto *teacherView = new QLabel("Teacher source: full display photo. Training inputs: left/right stereo RGB. Training labels: the teacher's depth map.", datasetAdvanced_);
         teacherView->setWordWrap(true); advancedLayout->addWidget(teacherView);
         scaleHelp_ = new QLabel(tab); scaleHelp_->setWordWrap(true); advancedLayout->addWidget(scaleHelp_);
-        auto *sizeHelp = new QLabel("Teachers receive the full display photo. V2 uses the configured shortest side; DA3 uses the longest side. The default is 1036 pixels; an older saved native-size setting is changed to 1036 once when DA3 is selected to avoid excessive memory use. Advanced settings allow custom sizes or 0 for the native 14-pixel grid. DA3 rejects processing grids above 8192 patches before loading the model; use 1036 or smaller if rejected. Original RGB and full-size float depth results are retained. Restoring a prediction to the display-photo dimensions uses interpolation and adds no independently predicted detail. DepthPro internally uses a fixed 1536-pixel grid. The stereo pair trains against the stored reference depth map.", tab);
+        auto *sizeHelp = new QLabel("DepthPro generates depth from the full display photo using its fixed model grid. Full display-size results retain 32-bit floating-point depth values. Existing DA3 and V2 results remain available to inspect and save.", tab);
         sizeHelp->setWordWrap(true); advancedLayout->addWidget(sizeHelp); root->addWidget(datasetAdvanced_);
         connect(teacher_, &QComboBox::currentIndexChanged, this, [this] { teacherDefaults(); });
         for (auto *check : teacherChecks_) connect(check, &QPushButton::toggled, this, [this] { updateTeacherSizeControl(); });
         connect(anchor_, &QPushButton::toggled, this, [this] { updateScaleHelp(); });
-        teacher_->setCurrentIndex(qMax(0, teacher_->findData(settings_.value("teacher_model", "depthpro"))));
+        teacher_->setCurrentIndex(teacher_->findData("depthpro"));
+        settings_.setValue("teacher_model", "depthpro");
         teacherDefaults();
         connect(goal_, &QComboBox::currentIndexChanged, this, [this] { applyGoal(); });
         connect(advanced_, &QPushButton::toggled, this, [this](bool visible) { datasetAdvanced_->setVisible(visible); if (trainingAdvanced_) trainingAdvanced_->setVisible(visible); });
@@ -970,21 +1014,21 @@ private:
         goal_->setCurrentIndex(qMax(0, goal_->findData(configuredGoal))); applyGoal();
         generate_ = new QPushButton("Generate & review dataset", tab); root->addWidget(generate_);
         connect(generate_, &QPushButton::clicked, this, [this] { generateDataset(); });
-        tabs_->addTab(scroll, "Add photos / new dataset");
+        tabs_->addTab(scroll, "New dataset");
     }
 
     void applyGoal(bool save = true) {
         const QString goal = goal_->currentData().toString();
         if (save) settings_.setValue("goal", goal);
         if (save && projectSettings_) { projectSettings_->setValue("goal", goal); projectSettings_->sync(); }
-        if (goal == "manual") { advanced_->setChecked(true); goalHelp_->setText("Every inference, scale, and training setting is available for manual control."); }
+        if (goal == "manual") { advanced_->setChecked(true); goalHelp_->setText("DepthPro model settings and training settings are available for manual control."); }
         else {
             advanced_->setChecked(false); datasetAdvanced_->hide(); teacherDevice_->setCurrentIndex(0); anchor_->setChecked(false);
             retainTeacherIntermediates_->setChecked(false); preserveAuxiliaryAssets_->setChecked(false);
-            const QString preferred = goal == "effect/map" ? "depth-anything-3" : "depthpro";
+            const QString preferred = "depthpro";
             teacher_->setCurrentIndex(teacher_->findData(preferred));
             for (auto *check : teacherChecks_) check->setChecked(check->property("model").toString() == preferred);
-            goalHelp_->setText(goal == "effect/map" ? "Detail preset: DA3 teacher on the full display photo, with optional DepthPro meter scale. Review reference depth maps before model training; output detail and accuracy require checking." : goal == "depth-estimation" ? "Distance preset: DepthPro estimates meters from the full display photo. Independent photo groups stay together during validation; model estimates still require visual checking." : "Portrait preset: use Photo Studio for embedded depth and composited portrait mattes. Portraits do not have the calibrated stereo pair required for stereo training datasets; the scanner skips them.");
+            goalHelp_->setText(goal == "effect/map" ? "DepthPro generates estimated depth from the full display photo. Review reference depth maps before model training; output detail and accuracy require checking." : goal == "depth-estimation" ? "Distance preset: DepthPro estimates meters from the full display photo. Independent photo groups stay together during validation; model estimates still require visual checking." : "Portrait preset: use Photo Studio for embedded depth and composited portrait mattes. Portraits do not have the calibrated stereo pair required for stereo training datasets; the scanner skips them.");
         }
         if (trainingAdvanced_) trainingAdvanced_->setVisible(advanced_->isChecked());
     }
@@ -999,6 +1043,7 @@ private:
     }
 
     void teacherDefaults() {
+        if (teacher_->currentData() != "depthpro") { teacher_->setCurrentIndex(teacher_->findData("depthpro")); return; }
         const QString model = teacher_->currentData().toString();
         const bool da3 = model == "depth-anything-3";
         teacherPath_->setText(da3 ? "/opt/ipde/models/DA3-GIANT-1.1" : model == "depthpro" ? "/opt/ipde/models/depth_pro.pt" : "/opt/ipde/models/depth_anything_v2_vitl.pth");
@@ -1017,26 +1062,19 @@ private:
     }
 
     void updateTeacherSizeControl() {
-        bool configurable = teacher_->currentData() != "depthpro";
-        bool da3Selected = teacher_->currentData() == "depth-anything-3";
-        for (auto *check : teacherChecks_) {
-            configurable |= check->isChecked() && check->property("model") != "depthpro";
-            da3Selected |= check->isChecked() && check->property("model") == "depth-anything-3";
-        }
-        if (da3Selected) migrateDA3InputSize("depth-anything-3");
-        inputSize_->setEnabled(configurable);
-        inputSize_->setToolTip("Default 1036: V2 shortest side / DA3 longest side. Zero requests the native grid; DA3 grids above 8192 14×14 patches are rejected before model loading. Full-size output interpolation does not add predicted detail. DepthPro uses a fixed 1536-pixel network. Requested and actual model dimensions are recorded.");
-    }
-
-    void migrateDA3InputSize(const QString &model) {
-        if (model == "depth-anything-3" && migrateDA3NativeSize_ && inputSize_->value() == 0) {
-            inputSize_->setValue(1036);
-            statusBar()->showMessage("DA3 processing size changed from the older native-size setting to 1036 pixels to bound memory use. Custom sizes remain available in Advanced settings.");
-        }
+        inputSize_->setEnabled(false);
+        inputSize_->setToolTip("DepthPro uses its fixed model grid. " + unavailableDepthTeacherReason());
     }
 
     void buildReviewTab() {
-        auto *tab = new QWidget; auto *root = new QVBoxLayout(tab);
+        auto *tab = new PhotoDropPage; tab->setObjectName("datasetPhotoPage"); auto *root = new QVBoxLayout(tab);
+        tab->canDropPhotos = [this] { return datasetMode_ && !busy_ && !reviewGenerating_ && !reviewedDataset_.isEmpty()
+            && (requestedReviewPath_.isEmpty() || requestedReviewPath_ == reviewedDataset_); };
+        tab->onPhotosDropped = [this](const QStringList &files) { return addPhotosToExistingDataset(files, reviewedDataset_); };
+        auto *nameRow = new QHBoxLayout;
+        reviewedName_ = new QLineEdit(tab); reviewedName_->setObjectName("loadedDatasetName"); reviewedName_->setReadOnly(true);
+        reviewedName_->setPlaceholderText("Choose a dataset"); nameRow->addWidget(new QLabel("Dataset", tab)); nameRow->addWidget(reviewedName_, 1);
+        if (datasetMode_) root->addLayout(nameRow); else { delete nameRow; reviewedName_->hide(); }
         reviewPath_ = new QLabel("Choose a dataset from the library to manage its photos.", tab);
         reviewPath_->setWordWrap(true); reviewPath_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Minimum);
         reviewPath_->setTextFormat(Qt::PlainText); reviewPath_->setTextInteractionFlags(Qt::TextSelectableByMouse); root->addWidget(reviewPath_);
@@ -1063,12 +1101,12 @@ private:
         auto *enableTeacher = new QToolButton(tab); enableTeacher->setObjectName("enablePhotoTeacher");
         enableTeacher->setText("Enable teacher for selected photos…"); enableTeacher->setPopupMode(QToolButton::InstantPopup);
         auto *teacherMenu = new QMenu(enableTeacher);
-        for (const auto &model : {QString("depthpro"), QString("depth-anything-3"), QString("depth-anything-v2")}) {
+        for (const auto &model : {QString("depthpro")}) {
             auto *action = teacherMenu->addAction(model == "depthpro" ? "DepthPro" : model == "depth-anything-3" ? "Depth Anything 3" : "Depth Anything V2");
             connect(action, &QAction::triggered, this, [this, model] { enablePhotoTeacher(model, selectedReviewEntries()); });
         }
         enableTeacher->setMenu(teacherMenu); enableTeacher->setVisible(datasetMode_); teacherActions->addWidget(enableTeacher);
-        auto *teacherHint = new QLabel("Generate a teacher for one photo with its button below, or select several photos to run one batch. Off discards that teacher's maps; On regenerates them.", tab);
+        auto *teacherHint = new QLabel("Generate DepthPro for one photo or select several for one batch. " + unavailableDepthTeacherReason(), tab);
         teacherHint->setWordWrap(true); teacherHint->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Minimum); teacherHint->setVisible(datasetMode_); teacherActions->addWidget(teacherHint, 1); root->addLayout(teacherActions);
 
         auto *body = new QSplitter(datasetMode_ ? Qt::Vertical : Qt::Horizontal, tab); body->setObjectName("datasetReviewSplit");
@@ -1097,7 +1135,15 @@ private:
         previewScroll->setWidget(preview);
         auto *labelRow = new QHBoxLayout; labelRow->addWidget(new QLabel("Depth to view", preview));
         reviewLabel_ = new QComboBox(preview); reviewLabel_->setMinimumWidth(0); reviewLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed); labelRow->addWidget(reviewLabel_, 1);
+        saveDepth_ = new QPushButton("Save full-resolution depth…", preview); saveDepth_->setObjectName("saveFullResolutionDepth"); saveDepth_->setVisible(datasetMode_); saveDepth_->setEnabled(false);
+        saveDepth_->setToolTip("Save the selected model's full display-photo depth without changing its floating-point values.");
+        connect(saveDepth_, &QPushButton::clicked, this, [this] { chooseDepthExport(); });
         previewRoot->addLayout(labelRow);
+        auto *depthActions = new QHBoxLayout; depthActions->addWidget(saveDepth_);
+        regenerateDepth_ = new QPushButton("Regenerate depth", preview); regenerateDepth_->setObjectName("regeneratePhotoDepth"); regenerateDepth_->setVisible(datasetMode_); regenerateDepth_->setEnabled(false); depthActions->addWidget(regenerateDepth_); depthActions->addStretch(); previewRoot->addLayout(depthActions);
+        connect(regenerateDepth_, &QPushButton::clicked, this, [this] {
+            if (auto *entry = selectedReviewEntry()) queuePhotoTeacher("generate-teacher", photoTeacherModel(entry->data(0, Qt::UserRole).toJsonObject()), {entry}, true);
+        });
         compareTeachers_ = binaryButton("Compare teachers", preview); compareTeachers_->setChecked(true);
         previewRoot->addWidget(compareTeachers_);
         auto *viewRow = new QHBoxLayout; viewRow->addWidget(new QLabel("Visual inspection", preview));
@@ -1165,7 +1211,6 @@ private:
         root->addLayout(navigation);
         reviewCount_ = new QLabel("No dataset loaded", tab); reviewCount_->setWordWrap(true); reviewCount_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Minimum); root->addWidget(reviewCount_);
         auto *saveRow = new QHBoxLayout;
-        reviewedName_ = new QLineEdit(tab); reviewedName_->hide();
         reviewSaveStatus_ = new QLabel("All changes saved", tab); reviewSaveStatus_->setObjectName("datasetSaveStatus"); reviewSaveStatus_->setWordWrap(true);
         reviewSaveStatus_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Minimum); saveRow->addWidget(reviewSaveStatus_, 1);
         saveReviewed_ = new QPushButton("Save changes", tab); saveReviewed_->setObjectName("saveDatasetChanges"); saveReviewed_->setEnabled(false); saveRow->addWidget(saveReviewed_); root->addLayout(saveRow);
@@ -1183,6 +1228,12 @@ private:
         connect(exclude, &QPushButton::clicked, this, [this] {
             if (busy_ || reviewGenerating_ || reviewEntries().isEmpty() || (!requestedReviewPath_.isEmpty() && requestedReviewPath_ != reviewedDataset_)) return;
             if (auto *item = reviewSamples_->currentItem()) {
+                if (item->data(0, Qt::UserRole + 1).isValid()) {
+                    const int index = reviewSamples_->indexOfTopLevelItem(item);
+                    removePendingPhotoPaths({item->data(0, Qt::UserRole + 1).toString()});
+                    if (reviewSamples_->topLevelItemCount()) reviewSamples_->setCurrentItem(reviewSamples_->topLevelItem(qMin(index, reviewSamples_->topLevelItemCount() - 1)));
+                    return;
+                }
                 if (item->childCount()) {
                     const int index = reviewSamples_->indexOfTopLevelItem(item); setReviewItemIncluded(item, false);
                     for (int nextIndex = index + 1; nextIndex < reviewSamples_->topLevelItemCount(); ++nextIndex) {
@@ -1209,6 +1260,8 @@ private:
         if (!reviewedDataset_.isEmpty() && !reviewEntries().isEmpty()) rememberReviewDraft();
         requestedReviewPath_ = path;
         requestedReviewOpen_ = openTab;
+        reviewedName_->setText(readJson(QDir(path).filePath("dataset.json")).value("name").toString(QFileInfo(path).fileName()));
+        datasetName_->setText(reviewedName_->text());
         { QSignalBlocker blocker(reviewSamples_); reviewSamples_->clear(); }
         reviewSamples_->setEnabled(false); saveReviewed_->setEnabled(false); for (auto *button : editActions_) button->setEnabled(false);
         previewRecords_ = {}; differencePath_.clear(); rgbPreview_->reset("Loading dataset…");
@@ -1230,6 +1283,7 @@ private:
 
     QTreeWidgetItem *selectedReviewEntry() const {
         auto *item = reviewSamples_->currentItem();
+        if (item && item->data(0, Qt::UserRole + 1).isValid()) return nullptr;
         if (item && item->childCount()) {
             for (int index = 0; index < item->childCount(); ++index)
                 if (!item->child(index)->data(0, Qt::UserRole).toJsonObject().value("teacher_payload_removed").toBool()) return item->child(index);
@@ -1246,6 +1300,10 @@ private:
         return model;
     }
 
+    static QString unavailableDepthTeacherReason() {
+        return "DA3 and V2 generation is temporarily disabled because full-resolution processing is too slow. Existing maps can still be inspected and saved.";
+    }
+
     QList<QTreeWidgetItem *> photoTeacherEntries(QTreeWidgetItem *photo, const QString &model) const {
         QList<QTreeWidgetItem *> result;
         if (!photo) return result;
@@ -1256,9 +1314,9 @@ private:
         return result;
     }
 
-    void queuePhotoTeacher(const QString &operation, const QString &model, const QList<QTreeWidgetItem *> &entries) {
-        if (!QStringList{"depthpro", "depth-anything-3", "depth-anything-v2"}.contains(model)) {
-            statusBar()->showMessage("Choose DepthPro, Depth Anything 3 or Depth Anything V2 to regenerate this teacher."); return;
+    void queuePhotoTeacher(const QString &operation, const QString &model, const QList<QTreeWidgetItem *> &entries, bool regenerate = false) {
+        if (model != "depthpro") {
+            statusBar()->showMessage(unavailableDepthTeacherReason()); return;
         }
         if (!datasetMode_ || (busy_ && activeOperation_ != "generate-teacher" && activeOperation_ != "disable-teacher") || reviewGenerating_ || reviewedDataset_.isEmpty()
                 || (!requestedReviewPath_.isEmpty() && requestedReviewPath_ != reviewedDataset_) || entries.isEmpty()) return;
@@ -1271,7 +1329,7 @@ private:
         QStringList args{operation, reviewedDataset_, "--model", model};
         for (const QString &id : ids) args << "--sample-id" << id;
         if (operation == "generate-teacher") {
-            migrateDA3InputSize(model);
+            if (regenerate) args << "--regenerate";
             const bool primary = teacher_->currentData().toString() == model;
             args << "--model-path" << (primary ? teacherPath_->text() : modelPaths_.value(model)->text())
                  << "--source-dir" << (primary ? teacherSource_->text() : modelSources_.value(model)->text())
@@ -1319,8 +1377,9 @@ private:
                 }
                 QSignalBlocker blocker(button); button->setChecked(included);
                 button->setText(included ? "On" : available ? "Off" : "Generate");
-                button->setEnabled(editable && pendingTeacherJobs_.isEmpty());
-                button->setToolTip(included ? "Turn off to discard this teacher's generated maps. Shared files still needed by another entry are preserved." : "Generate this teacher for this photo, or enable an existing result. Uses the full display image. Relative results can reuse this photo's DepthPro meter estimate for scale.");
+                const bool enabledModel = button->property("teacher_model") == "depthpro";
+                button->setEnabled(enabledModel && editable && pendingTeacherJobs_.isEmpty());
+                button->setToolTip(!enabledModel ? unavailableDepthTeacherReason() : included ? "Turn off to discard this teacher's generated maps. Shared files still needed by another entry are preserved." : "Generate DepthPro for this photo, or enable an existing result. Uses the full display image.");
             }
         }
         if (auto *bulk = findChild<QToolButton *>("enablePhotoTeacher")) bulk->setEnabled(editable && pendingTeacherJobs_.isEmpty() && !reviewSamples_->selectedItems().isEmpty());
@@ -1361,7 +1420,10 @@ private:
         generationNotice_->setText(reviewGenerationStatus_.value("reason").toString(reviewGenerating_ ? "This dataset is incomplete. Photo and teacher edits are available after generation finishes or safe recovery completes." : QString()));
         generationNotice_->setVisible(datasetMode_ && reviewGenerating_);
         recoverDataset_->setVisible(datasetMode_ && interrupted && !reviewGenerationStatus_.value("active").toBool() && reviewGenerationStatus_.value("recoverable").toBool());
-        reviewedName_->setText(draft.value("version_name").toString(QFileInfo(reviewedDataset_).fileName() + "-edited-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss")));
+        const auto manifest = readJson(QDir(reviewedDataset_).filePath("dataset.json"));
+        reviewedName_->setText(result.value("name").toString(manifest.value("name").toString(QFileInfo(reviewedDataset_).fileName())));
+        datasetName_->setText(reviewedName_->text());
+        category_->setText(result.value("category").toString(manifest.value("category").toString()));
         if (!reviewPreviews_) reviewPreviews_ = std::make_unique<QTemporaryDir>();
         QTreeWidgetItem *selected = nullptr; QMap<QString, QTreeWidgetItem *> photos; QStringList cameras;
         {
@@ -1411,13 +1473,15 @@ private:
             if (tabs_->currentIndex() == 1) QTimer::singleShot(0, this, [this] { reviewSelectionChanged(); });
         }
         for (const auto &warning : result.value("warnings").toArray()) log_->appendPlainText(warning.toString());
-        const auto pending = result.value("pending_photos").toArray();
+        const auto pending = draft.contains("pending_photos") ? draft.value("pending_photos").toArray() : result.value("pending_photos").toArray();
         pendingPhotosAction_->setVisible(datasetMode_ && !pending.isEmpty());
         pendingPhotosAction_->setText(QString("%1 added photo(s) awaiting depth — generate targets").arg(pending.size()));
         pendingPhotoPaths_.clear(); for (const auto &path : pending) pendingPhotoPaths_ << path.toString();
+        showPendingReviewPhotos(); updateReviewCount();
     }
 
     void reviewSelectionChanged() {
+        updateDepthExportActions();
         rgbPreview_->reset("Loading source view…"); depthPreview_->reset("Loading generated depth…"); previewStats_->clear();
         {
             QSignalBlocker blocker(reviewLabel_); reviewLabel_->clear();
@@ -1430,6 +1494,7 @@ private:
                 for (const auto &value : sample.value("labels").toArray()) {
                     const auto label = value.toObject(); reviewLabel_->addItem(label.value("title").toString() + " (" + label.value("units").toString() + ")", label.value("key").toString());
                 }
+                const int raw = reviewLabel_->findData("display_teacher"); if (raw >= 0) reviewLabel_->setCurrentIndex(raw);
             }
         }
         previewSelectedSample();
@@ -1459,7 +1524,68 @@ private:
 
     void requestPreview(const QString &kind, const QStringList &args) {
         if (previewProcess_->state() != QProcess::NotRunning) { pendingPreviewKind_ = kind; pendingPreviewArgs_ = args; previewProcess_->kill(); return; }
+        activePreviewCacheKey_.clear();
+        if (QStringList{"review", "preview", "compare"}.contains(kind)) {
+            const QString hash = manifestHash(args.value(1));
+            if (!hash.isEmpty() && (kind != "review" || cacheableReview(readJson(QDir(args.value(1)).filePath("dataset.json"))))) activePreviewCacheKey_ = kind + "\n" + hash + "\n" + args.join('\n');
+        }
+        if (!activePreviewCacheKey_.isEmpty() && previewCache_.contains(activePreviewCacheKey_)) {
+            previewKind_ = kind; const auto result = previewCache_.value(activePreviewCacheKey_);
+            if (kind == "review") populateReview(result); else populatePreview(result); return;
+        }
         previewKind_ = kind; previewStdout_.clear(); previewProcess_->setProgram(pythonPath()); previewProcess_->setArguments(QStringList{scriptPath(), "--json"} + args); previewProcess_->start();
+    }
+
+    static bool cacheableReview(const QJsonObject &result) { return result.value("generation_state").toString() != "generating" && !result.value("splits_provisional").toBool(); }
+
+    void updateDepthExportActions() {
+        if (!saveDepth_) return;
+        auto *entry = selectedReviewEntry(); const auto sample = entry ? entry->data(0, Qt::UserRole).toJsonObject() : QJsonObject{};
+        const bool ready = datasetMode_ && !busy_ && !reviewGenerating_ && !sample.isEmpty() && !sample.value("teacher_payload_removed").toBool()
+            && (requestedReviewPath_.isEmpty() || requestedReviewPath_ == reviewedDataset_);
+        saveDepth_->setEnabled(ready && (!depthExportProcess_ || depthExportProcess_->state() == QProcess::NotRunning));
+        regenerateDepth_->setEnabled(ready && photoTeacherModel(sample) == "depthpro");
+        regenerateDepth_->setToolTip(photoTeacherModel(sample) == "depthpro" ? "Replace this DepthPro result in place." : unavailableDepthTeacherReason());
+    }
+
+    void chooseDepthExport() {
+        auto *entry = selectedReviewEntry(); if (!entry || !saveDepth_->isEnabled()) return;
+        const auto sample = entry->data(0, Qt::UserRole).toJsonObject();
+        const QString defaultName = QFileInfo(sample.value("source_path").toString()).completeBaseName() + "-" + photoTeacherModel(sample) + ".exr";
+        QString filter = "32-bit float OpenEXR (*.exr)";
+        QString output = QFileDialog::getSaveFileName(this, "Save full-resolution model depth", QDir(settings_.value("depth_export_folder", workspace_->text()).toString()).filePath(defaultName),
+            filter + ";;Exact NumPy array (*.npy)", &filter);
+        if (output.isEmpty()) return;
+        if (QFileInfo(output).suffix().isEmpty()) {
+            output += filter.contains("*.npy") ? ".npy" : ".exr";
+            if (QFileInfo::exists(output) && QMessageBox::question(this, "Replace existing depth file?", "Replace " + QDir::toNativeSeparators(output) + "?", QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+        }
+        settings_.setValue("depth_export_folder", QFileInfo(output).absolutePath());
+        exportSelectedDepth(output, QFileInfo::exists(output));
+    }
+
+    void exportSelectedDepth(const QString &output, bool replaceExisting = false) {
+        auto *entry = selectedReviewEntry(); if (!entry || output.isEmpty() || busy_ || (depthExportProcess_ && depthExportProcess_->state() != QProcess::NotRunning)) return;
+        const QString id = entry->data(0, Qt::UserRole).toJsonObject().value("id").toString();
+        if (id.isEmpty()) return;
+        if (!depthExportProcess_) {
+            depthExportProcess_ = new QProcess(this);
+            connect(depthExportProcess_, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this](int code, QProcess::ExitStatus status) {
+                const auto result = QJsonDocument::fromJson(depthExportProcess_->readAllStandardOutput()).object();
+                const QString message = code == 0 && status == QProcess::NormalExit ? "Full-resolution depth saved: " + result.value("output_path").toString()
+                    : "Depth could not be saved: " + result.value("error").toString(QString::fromUtf8(depthExportProcess_->readAllStandardError()));
+                statusBar()->showMessage(message); log_->appendPlainText(message);
+                if (code != 0 || status != QProcess::NormalExit) previewStats_->setText(message);
+                updateDepthExportActions();
+            });
+            connect(depthExportProcess_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+                if (error == QProcess::FailedToStart) { statusBar()->showMessage("Depth export could not start: " + depthExportProcess_->errorString()); updateDepthExportActions(); }
+            });
+        }
+        QStringList args{scriptPath(), "--json", "export-sample", reviewedDataset_, "--sample", id, "--label", "display_teacher", "--output", output};
+        if (replaceExisting) args << "--replace-existing";
+        depthExportProcess_->setProgram(pythonPath()); depthExportProcess_->setArguments(args); depthExportProcess_->start();
+        saveDepth_->setEnabled(false); statusBar()->showMessage("Saving full-resolution floating-point depth…");
     }
 
     void populatePreview(const QJsonObject &result) {
@@ -1738,6 +1864,7 @@ private:
         if (!autosavePaused_) autosaveTimer_->start();
         else if (!trainerAfterSave_.isEmpty() || closeAfterSave_) startNextDatasetSave();
         maybeStartPhotoTeacher();
+        maybeStartAddedPhotoGeneration();
     }
 
     QJsonObject selectedReviewEdits() const {
@@ -1753,26 +1880,59 @@ private:
     QList<QTreeWidgetItem *> selectedReviewEntries() const {
         QList<QTreeWidgetItem *> result;
         for (auto *item : reviewSamples_->selectedItems()) {
+            if (item->data(0, Qt::UserRole + 1).isValid()) continue;
             if (item->childCount()) { for (int i=0; i<item->childCount(); ++i) if (!result.contains(item->child(i))) result << item->child(i); }
             else if (!result.contains(item)) result << item;
         }
         return result;
     }
 
+    QStringList selectedPendingPhotoPaths() const {
+        QStringList result;
+        for (auto *item : reviewSamples_->selectedItems()) if (item->data(0, Qt::UserRole + 1).isValid()) result << item->data(0, Qt::UserRole + 1).toString();
+        return result;
+    }
+
+    void removePendingPhotoPaths(const QStringList &paths) {
+        if (!datasetMode_ || reviewedDataset_.isEmpty() || busy_ || reviewGenerating_ || paths.isEmpty()
+            || (!requestedReviewPath_.isEmpty() && requestedReviewPath_ != reviewedDataset_)) return;
+        const QString dataset = reviewedDataset_; const auto draft = reviewDrafts_.value(dataset);
+        const auto pending = draft.contains("pending_photos") ? draft.value("pending_photos").toArray() : readJson(QDir(dataset).filePath("dataset.json")).value("pending_photos").toArray();
+        QJsonArray remaining; for (const auto &path : pending) if (!paths.contains(path.toString())) remaining.append(path);
+        if (remaining == pending) return;
+        auto queued = queuedPhotoGenerations_.value(dataset); for (const auto &path : paths) queued.removeAll(path);
+        if (queued.isEmpty()) queuedPhotoGenerations_.remove(dataset); else queuedPhotoGenerations_.insert(dataset, queued);
+        if (appendBase_ == dataset && addedPhotosReady_) {
+            for (int i=sources_->topLevelItemCount() - 1; i>=0; --i) if (paths.contains(sources_->topLevelItem(i)->data(0, Qt::UserRole).toString())) delete sources_->takeTopLevelItem(i);
+            if (!sources_->topLevelItemCount()) { appendBase_.clear(); appendEdits_ = {}; appendVersionName_.clear(); addedPhotosReady_ = false; }
+        }
+        { QSignalBlocker blocker(reviewSamples_); for (int i=reviewSamples_->topLevelItemCount() - 1; i>=0; --i)
+            if (paths.contains(reviewSamples_->topLevelItem(i)->data(0, Qt::UserRole + 1).toString())) delete reviewSamples_->takeTopLevelItem(i); }
+        pendingPhotoPaths_.clear(); for (const auto &path : remaining) pendingPhotoPaths_ << path.toString();
+        pendingPhotosAction_->setVisible(!remaining.isEmpty()); pendingPhotosAction_->setText(QString("%1 added photo(s) awaiting depth — generate targets").arg(remaining.size()));
+        saveDatasetVersion(dataset, {{"pending_photos", remaining}});
+        statusBar()->showMessage("Removed pending photos from this dataset.");
+    }
+
     void setReviewIncluded(bool include) {
-        if (busy_ || reviewGenerating_ || reviewEntries().isEmpty() || (!requestedReviewPath_.isEmpty() && requestedReviewPath_ != reviewedDataset_)) return;
+        if (busy_ || reviewGenerating_ || reviewedDataset_.isEmpty() || (!requestedReviewPath_.isEmpty() && requestedReviewPath_ != reviewedDataset_)) return;
+        const auto pendingPaths = include ? QStringList{} : selectedPendingPhotoPaths();
         QMap<QString, QList<QTreeWidgetItem *>> regenerate, discard; bool changed = false;
         { QSignalBlocker blocker(reviewSamples_); for (auto *item : selectedReviewEntries()) {
             const auto sample = item->data(0, Qt::UserRole).toJsonObject();
             const QString model = photoTeacherModel(sample);
-            if (include && sample.value("teacher_payload_removed").toBool()) regenerate[model].append(item);
+            if (include && sample.value("teacher_payload_removed").toBool()) {
+                if (model == "depthpro") regenerate[model].append(item);
+                else statusBar()->showMessage(unavailableDepthTeacherReason());
+            }
             else if (!include && sample.value("can_generate_display_teacher").toBool() && sample.value("rgb_reference").toString() == "display"
-                    && QStringList{"depthpro", "depth-anything-3", "depth-anything-v2"}.contains(model)) {
+                    && model == "depthpro") {
                 if (!sample.value("teacher_payload_removed").toBool()) discard[model].append(item);
             }
             else { setReviewItemIncluded(item, include); changed = true; }
         } }
         if (changed) queueReviewSave();
+        if (!pendingPaths.isEmpty()) removePendingPhotoPaths(pendingPaths);
         for (auto it = discard.cbegin(); it != discard.cend(); ++it) queuePhotoTeacher("disable-teacher", it.key(), it.value());
         for (auto it = regenerate.cbegin(); it != regenerate.cend(); ++it) enablePhotoTeacher(it.key(), it.value());
     }
@@ -1814,12 +1974,13 @@ private:
         }
         for (int i=0; i<reviewSamples_->topLevelItemCount(); ++i) {
             auto *photo = reviewSamples_->topLevelItem(i); const bool included = reviewIncluded(photo); int includedTargets = 0;
+            if (photo->data(0, Qt::UserRole + 1).isValid()) { ++photos; photo->setText(5, appendBase_ == reviewedDataset_ && busy_ ? "Generating depth" : queuedPhotoGenerations_.contains(reviewedDataset_) ? "Queued" : "Awaiting depth"); continue; }
             for (int j=0; j<photo->childCount(); ++j) includedTargets += reviewIncluded(photo->child(j));
             photo->setText(5, !includedTargets ? "Removed" : includedTargets == photo->childCount() ? "Included" : "Some removed");
             photos += included; QFont font = photo->font(0); font.setStrikeOut(!included); photo->setFont(0, font);
         }
         const auto draft = reviewDrafts_.value(reviewedDataset_); const bool pending = draft.value("dirty").toBool();
-        QString text = entries.isEmpty() ? "Choose a dataset to view its photos." : QString("%1 photos · %2 targets included · %3 train / %4 validation%5").arg(photos).arg(kept).arg(train).arg(validation).arg(changed || pending ? " · Saving changes" : " · Saved");
+        QString text = reviewedDataset_.isEmpty() ? "Choose a dataset to view its photos." : QString("%1 photos · %2 targets included · %3 train / %4 validation%5").arg(photos).arg(kept).arg(train).arg(validation).arg(changed || pending ? " · Saving changes" : " · Saved");
         if (kept && (!train || !validation)) text += " · Set aside a related photo group for validation before training.";
         if (!reviewAdditions_.value(reviewedDataset_).isEmpty()) text += " · Adding prepared photos";
         reviewCount_->setText(text);
@@ -1828,13 +1989,17 @@ private:
         if (reviewSaveStatus_) reviewSaveStatus_->setText(!draft.value("save_error").toString().isEmpty() ? "Not saved — retry Save changes" : pending ? "Saving changes…" : "All changes saved");
         for (auto *button : editActions_) button->setEnabled(editable);
         addPhotos_->setEnabled(datasetMode_ && !reviewedDataset_.isEmpty() && !reviewGenerating_ && !busy_ && (requestedReviewPath_.isEmpty() || requestedReviewPath_ == reviewedDataset_));
-        removePhotos_->setEnabled(editable && !reviewSamples_->selectedItems().isEmpty()); restorePhotos_->setEnabled(removePhotos_->isEnabled());
+        const bool pendingEditable = datasetMode_ && !reviewedDataset_.isEmpty() && !reviewGenerating_ && !busy_ && (requestedReviewPath_.isEmpty() || requestedReviewPath_ == reviewedDataset_);
+        removePhotos_->setEnabled((editable && !selectedReviewEntries().isEmpty()) || (pendingEditable && !selectedPendingPhotoPaths().isEmpty()));
+        restorePhotos_->setEnabled(editable && !selectedReviewEntries().isEmpty());
         updateCollectionReadiness();
         updatePhotoTeacherButtons(editable);
         recoverDataset_->setEnabled(datasetMode_ && !busy_ && reviewGenerating_ && reviewGenerationStatus_.value("status").toString() == "interrupted"
             && !reviewGenerationStatus_.value("active").toBool() && reviewGenerationStatus_.value("recoverable").toBool()
             && (requestedReviewPath_.isEmpty() || requestedReviewPath_ == reviewedDataset_));
         pendingPhotosAction_->setEnabled(datasetMode_ && !busy_ && !reviewGenerating_);
+        if (auto *button = findChild<QPushButton *>("newDataset")) button->setEnabled(!busy_ && appendBase_.isEmpty());
+        updateDepthExportActions();
         if (auto *reload = findChild<QPushButton *>("reloadDatasetState")) reload->setEnabled(datasetMode_ && !busy_ && !reviewedDataset_.isEmpty()
             && editProcess_ && editProcess_->state() == QProcess::NotRunning);
     }
@@ -1893,14 +2058,67 @@ private:
         if (openTrainer) startNextDatasetSave(); else if (!autosavePaused_) autosaveTimer_->start();
     }
 
-    void prepareAddedPhotoGeneration(const QStringList &files) {
-        if (files.isEmpty() || busy_ || reviewGenerating_) return;
-        appendBase_ = reviewedDataset_; appendEdits_ = {}; appendVersionName_.clear();
+    void prepareAddedPhotoGeneration(const QStringList &files, const QString &dataset = {}) {
+        if (files.isEmpty() || busy_ || (dataset.isEmpty() && reviewGenerating_)) return;
+        const QString destination = dataset.isEmpty() ? reviewedDataset_ : dataset;
+        if (destination.isEmpty()) return;
+        queuedPhotoGenerations_.insert(destination, files);
+        if (!appendBase_.isEmpty() && appendBase_ != destination) return;
+        appendBase_ = destination; appendEdits_ = {}; appendVersionName_.clear();
+        teacher_->setCurrentIndex(teacher_->findData("depthpro"));
+        for (auto *check : teacherChecks_) check->setChecked(check->property("model") == "depthpro");
         sources_->clear(); for (const auto &file : files) addSourcePhoto(file);
         settings_.setValue("photo_folder", QFileInfo(files.first()).absolutePath());
-        datasetName_->setText(".added-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss-zzz"));
-        addingPhotosHint_->setText("These photos are registered in " + QFileInfo(appendBase_).fileName() + ". Generate only their new depth targets; existing photos and depth files stay in place.");
-        addingPhotosHint_->show(); cancelAdding_->show(); generate_->setText("Generate depth and add to dataset"); tabs_->setCurrentIndex(0);
+        datasetName_->setText(reviewedName_->text());
+        addingPhotosHint_->hide(); cancelAdding_->hide(); addedPhotosReady_ = true;
+        if (auto *button = findChild<QPushButton *>("newDataset")) button->setEnabled(false);
+        statusBar()->showMessage("Adding photos to " + reviewedName_->text() + "…");
+        maybeStartAddedPhotoGeneration();
+    }
+
+    void maybeStartAddedPhotoGeneration() {
+        if (busy_ || !process_ || process_->state() != QProcess::NotRunning
+            || hasPendingDatasetEdits() || !editProcess_ || editProcess_->state() != QProcess::NotRunning) return;
+        if (appendBase_.isEmpty() && !queuedPhotoGenerations_.isEmpty()) {
+            const auto next = queuedPhotoGenerations_.firstKey(); prepareAddedPhotoGeneration(queuedPhotoGenerations_.value(next), next); return;
+        }
+        if (!addedPhotosReady_ || appendBase_.isEmpty()) return;
+        const auto registered = readJson(QDir(appendBase_).filePath("dataset.json")).value("pending_photos").toArray();
+        for (int i=sources_->topLevelItemCount() - 1; i>=0; --i) if (!registered.contains(sources_->topLevelItem(i)->data(0, Qt::UserRole).toString())) delete sources_->takeTopLevelItem(i);
+        if (!sources_->topLevelItemCount()) {
+            queuedPhotoGenerations_.remove(appendBase_); appendBase_.clear(); addedPhotosReady_ = false; updateReviewCount();
+            QTimer::singleShot(0, this, [this] { maybeStartAddedPhotoGeneration(); }); return;
+        }
+        queuedPhotoGenerations_.remove(appendBase_);
+        addedPhotosReady_ = false; generateDataset();
+        if (!busy_) { addedPhotosReady_ = true; pendingPhotosAction_->show(); }
+    }
+
+    void releaseFailedPhotoAddition() {
+        if (appendBase_.isEmpty()) return;
+        const QString source = appendBase_; queuedPhotoGenerations_.remove(source);
+        appendBase_.clear(); appendEdits_ = {}; appendVersionName_.clear(); addedPhotosReady_ = false; sources_->clear();
+        addingPhotosHint_->hide(); cancelAdding_->hide(); generate_->setText("Create dataset");
+        if (reviewedDataset_ == source && !pendingPhotoPaths_.isEmpty()) {
+            pendingPhotosAction_->setText(QString("%1 added photo(s) awaiting depth — retry generation").arg(pendingPhotoPaths_.size())); pendingPhotosAction_->show();
+        }
+        if (auto *button = findChild<QPushButton *>("newDataset")) button->setEnabled(!busy_);
+        updateReviewCount();
+        QTimer::singleShot(0, this, [this] { maybeStartAddedPhotoGeneration(); });
+    }
+
+    void showPendingReviewPhotos() {
+        QSignalBlocker blocker(reviewSamples_);
+        QSet<QString> existing;
+        for (int i=0; i<reviewSamples_->topLevelItemCount(); ++i) {
+            auto *photo = reviewSamples_->topLevelItem(i);
+            if (photo->data(0, Qt::UserRole + 1).isValid()) existing.insert(photo->data(0, Qt::UserRole + 1).toString());
+            for (int j=0; j<photo->childCount(); ++j) existing.insert(photo->child(j)->data(0, Qt::UserRole).toJsonObject().value("source_path").toString());
+        }
+        for (const auto &path : pendingPhotoPaths_) if (!existing.contains(path)) {
+            auto *photo = new QTreeWidgetItem(reviewSamples_, {QFileInfo(path).fileName()});
+            disableItemCheckboxes(photo); photo->setData(0, Qt::UserRole + 1, path); photo->setToolTip(0, path); photo->setText(5, "Generating depth"); existing.insert(path);
+        }
     }
 
     void beginAddingPhotos() {
@@ -1910,10 +2128,13 @@ private:
     }
 
     void registerAddedPhotoPaths(const QString &dataset, const QStringList &files) {
-        QJsonArray pending = reviewDrafts_.value(dataset).value("pending_photos").toArray();
-        if (pending.isEmpty()) pending = readJson(QDir(dataset).filePath("dataset.json")).value("pending_photos").toArray();
+        const auto draft = reviewDrafts_.value(dataset);
+        QJsonArray pending = draft.contains("pending_photos") ? draft.value("pending_photos").toArray() : readJson(QDir(dataset).filePath("dataset.json")).value("pending_photos").toArray();
         for (const auto &file : files) if (!pending.contains(file)) pending.append(file);
         saveDatasetVersion(dataset, {{"pending_photos", pending}});
+        if (dataset == reviewedDataset_) {
+            pendingPhotoPaths_.clear(); for (const auto &path : pending) pendingPhotoPaths_ << path.toString(); showPendingReviewPhotos(); updateReviewCount();
+        }
     }
 
     bool addDroppedSourcePhotos(const QStringList &files) {
@@ -1934,8 +2155,16 @@ private:
         if (!datasetMode_ || dataset.isEmpty() || busy_ || reviewGenerating_ || files.isEmpty()) return false;
         const auto manifest = readJson(QDir(dataset).filePath("dataset.json"));
         if (manifest.value("generation_state").toString() == "generating" || manifest.value("splits_provisional").toBool()) return false;
-        registerAddedPhotoPaths(dataset, files);
-        prepareAddedPhotoGeneration(files);
+        QSet<QString> known;
+        const auto canonical = [](const QString &path) { const QFileInfo info(path); const auto resolved = info.canonicalFilePath(); return resolved.isEmpty() ? info.absoluteFilePath() : resolved; };
+        for (const auto &value : manifest.value("samples").toArray()) known.insert(canonical(value.toObject().value("source_path").toString()));
+        const auto draft = reviewDrafts_.value(dataset);
+        const auto pending = draft.contains("pending_photos") ? draft.value("pending_photos").toArray() : manifest.value("pending_photos").toArray();
+        for (const auto &value : pending) known.insert(canonical(value.toString()));
+        QStringList additions; for (const auto &file : files) { const auto path = canonical(file); if (!known.contains(path)) { additions << path; known.insert(path); } }
+        if (additions.isEmpty()) { statusBar()->showMessage("These photos are already in this dataset."); return true; }
+        registerAddedPhotoPaths(dataset, additions);
+        prepareAddedPhotoGeneration(pendingPhotoPaths_);
         return true;
     }
 
@@ -2336,9 +2565,8 @@ private:
     void generateDataset() {
         if (!datasetMode_) { openApp("datasets", "import"); return; }
         if (sources_->topLevelItemCount() == 0) { QMessageBox::information(this, "Add photos", "Add spatial HEIC photos before generating a dataset."); return; }
-        const QString name = datasetName_->text().trimmed();
+        const QString name = appendBase_.isEmpty() ? datasetName_->text().trimmed() : ".added-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
         if (!validName(name)) { QMessageBox::information(this, "Dataset name", "Use a folder name without path separators."); return; }
-        if (inputSize_->value() > 0 && inputSize_->value() < 14) { QMessageBox::information(this, "Teacher input size", "Use 0 for native source dimensions, or a custom input size of at least 14 pixels."); return; }
         QStringList args{"dataset"}; QJsonObject groups;
         for (int i = 0; i < sources_->topLevelItemCount(); ++i) {
             auto *item = sources_->topLevelItem(i); const QString group = item->text(1).trimmed();
@@ -2353,7 +2581,7 @@ private:
             args << "--groups" << groupsFile_->fileName();
         }
         QJsonArray teachers;
-        for (auto *check : teacherChecks_) if (check->isChecked()) {
+        for (auto *check : teacherChecks_) if (check->property("model") == "depthpro") {
             const QString model = check->property("model").toString(), primary = teacher_->currentData().toString();
             teachers.append(QJsonObject{{"id", model}, {"model", model}, {"model_path", model == primary ? teacherPath_->text() : modelPaths_.value(model)->text()}, {"source_dir", model == primary ? teacherSource_->text() : modelSources_.value(model)->text()}, {"device", teacherDevice_->currentText()}, {"input_size", inputSize_->value()}});
         }
@@ -2361,7 +2589,7 @@ private:
         teachersFile_ = std::make_unique<QTemporaryFile>();
         if (!teachersFile_->open() || teachersFile_->write(QJsonDocument(teachers).toJson()) < 0 || !teachersFile_->flush()) { log_->appendPlainText("Could not create teacher configuration."); teachersFile_.reset(); return; }
         args << "--output-dir" << QDir(workspace_->text()).filePath("datasets/" + name)
-             << "--teachers-json" << teachersFile_->fileName() << "--name" << name << "--category" << category_->text().trimmed()
+             << "--teachers-json" << teachersFile_->fileName() << "--name" << name << "--category" << (appendBase_.isEmpty() ? category_->text().trimmed() : readJson(QDir(appendBase_).filePath("dataset.json")).value("category").toString())
              << "--teacher-view" << "display"
              << "--grouping" << (useGroups_->isChecked() ? (verifiedScenes_->isChecked() ? "scene" : "capture") : "none");
         if (anchor_->isChecked()) args << "--metric-anchor" << "depthpro";
@@ -2480,7 +2708,7 @@ private:
     void clearUnavailableReview(const QString &path, const QString &message) {
         if (path.isEmpty() || path != reviewedDataset_) return;
         pendingPreviewArgs_.clear(); previewKind_ = "discarded"; previewProcess_->kill();
-        reviewedDataset_.clear(); requestedReviewPath_.clear(); reviewPreviews_.reset(); reviewGenerating_ = false;
+        reviewedDataset_.clear(); requestedReviewPath_.clear(); reviewPreviews_.reset(); reviewGenerating_ = false; previewCache_.clear(); reviewedName_->clear();
         reviewGenerationStatus_ = {}; generationNotice_->hide(); recoverDataset_->hide();
         { QSignalBlocker blocker(reviewSamples_); reviewSamples_->clear(); }
         { QSignalBlocker blocker(reviewLabel_); reviewLabel_->clear(); }
@@ -2581,6 +2809,7 @@ private:
         updateSessionBusy();
         workspace_->setEnabled(!busy); chooseWorkspace_->setEnabled(!busy); refresh_->setEnabled(!busy); export_->setEnabled((!busy || job_ == "Train RAFT-Stereo") && (!exportProcess_ || exportProcess_->state() == QProcess::NotRunning));
         generate_->setEnabled(!busy); train_->setEnabled(!busy); importHf_->setEnabled(!busy); cancelAdding_->setEnabled(!busy);
+        if (auto *button = findChild<QPushButton *>("newDataset")) button->setEnabled(!busy && appendBase_.isEmpty());
         for (auto *button : editActions_) button->setEnabled(!busy && !reviewGenerating_ && !reviewEntries().isEmpty());
         reviewSamples_->setEnabled(!busy || job_ == "Generate dataset"); reviewedName_->setEnabled(!busy);
         train_->setText(busy && job_ == "Train RAFT-Stereo" ? "Training model…" : "Start model training");
@@ -2687,7 +2916,8 @@ private:
         if (cancelled_) {
             pendingTeacherJobs_.clear();
             if (job_ == "Create training set") continueToTrainer_ = false;
-            if (job_ == "Generate dataset") stopGenerationStreaming("Generation cancelled. Generate a new dataset before saving a reviewed copy.");
+            if (job_ == "Generate dataset") stopGenerationStreaming(appendBase_.isEmpty() ? "Generation cancelled." : "Depth generation cancelled. Added photos remain in this dataset; retry their depth generation.");
+            if (job_ == "Generate dataset") releaseFailedPhotoAddition();
             if (job_ == "Train RAFT-Stereo") trainingStatus_->setText("Model training cancelled. The dataset is unchanged; this run did not finish.");
             streamingTimer_->stop(); streamingDataset_.clear();
             refreshAfter_ = false; statusBar()->showMessage("Cancelled");
@@ -2713,7 +2943,8 @@ private:
                 rgbPreview_->reset("Preview unavailable."); depthPreview_->reset("Preview unavailable.");
                 previewStats_->setText("Preview failed. See the error below; this sample has not been automatically excluded.");
             }
-            if (job_ == "Generate dataset") stopGenerationStreaming("Generation failed. See the progress log and generate a new dataset to try again.");
+            if (job_ == "Generate dataset") stopGenerationStreaming(appendBase_.isEmpty() ? "Generation failed. See the progress log and try again." : "Depth generation failed. Added photos remain in this dataset; retry their depth generation.");
+            if (job_ == "Generate dataset") releaseFailedPhotoAddition();
             closeAfterTraining_ = false;
             refreshAfter_ = false; refreshTeacherState(); return;
         }
@@ -2721,6 +2952,7 @@ private:
         if (job_ == "Generate dataset" && !appendBase_.isEmpty()) {
             const QString source = appendBase_, addition = result.value("dataset_path").toString(); const QJsonObject edits = appendEdits_;
             appendBase_.clear(); appendEdits_ = {}; appendVersionName_.clear();
+            sources_->clear(); addedPhotosReady_ = false;
             addingPhotosHint_->hide(); cancelAdding_->hide(); generate_->setText("Generate dataset");
             log_->appendPlainText("New photo targets generated. Linking them into the existing dataset…");
             saveDatasetVersion(source, edits, {addition}, {addition}); return;
@@ -2971,7 +3203,6 @@ private:
     QList<QPushButton *> teacherChecks_;
     QGroupBox *datasetAdvanced_ = nullptr, *trainingAdvanced_ = nullptr;
     QSpinBox *inputSize_ = nullptr, *epochs_ = nullptr, *steps_ = nullptr, *patch_ = nullptr, *iterations_ = nullptr;
-    bool migrateDA3NativeSize_ = false;
     QWidget *trainingSimple_ = nullptr;
     QSlider *quality_ = nullptr, *length_ = nullptr;
     QComboBox *limitMode_ = nullptr, *validationSchedule_ = nullptr, *checkpointSchedule_ = nullptr;
@@ -2987,7 +3218,8 @@ private:
     QPushButton *saveReviewed_ = nullptr, *compose_ = nullptr, *importHf_ = nullptr, *compareBaseline_ = nullptr;
     QPushButton *cleanupDataset_ = nullptr, *cleanupRun_ = nullptr;
     QProcess *process_ = nullptr; QByteArray stdout_; QString job_, exportDestination_;
-    QProcess *exportProcess_ = nullptr;
+    QProcess *exportProcess_ = nullptr, *depthExportProcess_ = nullptr;
+    QPushButton *saveDepth_ = nullptr, *regenerateDepth_ = nullptr;
     QProcess *editProcess_ = nullptr; QTimer *autosaveTimer_ = nullptr; QByteArray editStdout_;
     std::unique_ptr<QTemporaryFile> editSaveFile_;
     QString draftWorkspace_, editingDataset_, trainerAfterSave_; QJsonObject savingDraft_;
@@ -2997,13 +3229,15 @@ private:
     QString requestedReviewPath_, reviewedDataset_, pendingReview_, pendingTrainingPath_;
     QProcess *previewProcess_ = nullptr; QByteArray previewStdout_, progressBuffer_; QString previewKind_, pendingPreviewKind_, streamingDataset_, differencePath_;
     QStringList pendingPreviewArgs_; QJsonArray previewRecords_; QTimer *streamingTimer_ = nullptr;
+    QMap<QString, QJsonObject> previewCache_; QString activePreviewCacheKey_;
     QList<QStringList> pendingTeacherJobs_;
     QSet<QString> scanDeliveredPaths_;
-    bool cancelled_ = false, refreshAfter_ = false, reviewGenerating_ = false, requestedReviewOpen_ = true, busy_ = false;
+    bool cancelled_ = false, refreshAfter_ = false, reviewGenerating_ = false, requestedReviewOpen_ = true, busy_ = false, syncingCollectionSelection_ = false, addedPhotosReady_ = false;
     std::unique_ptr<QTemporaryFile> groupsFile_, teachersFile_, editsFile_;
     QMap<QString, QJsonObject> reviewDrafts_;
     QMap<QString, QStringList> reviewAdditions_; QString savingVersionSource_;
     QString appendBase_, appendVersionName_; QJsonObject appendEdits_;
+    QMap<QString, QStringList> queuedPhotoGenerations_;
     QLabel *addingPhotosHint_ = nullptr; QPushButton *cancelAdding_ = nullptr;
     QPushButton *addPhotos_ = nullptr, *removePhotos_ = nullptr, *restorePhotos_ = nullptr; QList<QPushButton *> editActions_;
     QPushButton *openDatasetTrainer_ = nullptr, *pendingPhotosAction_ = nullptr; QStringList pendingPhotoPaths_;

@@ -226,7 +226,12 @@ class _DisplayPool:
 
     def prefetch(self, indices):
         if self.executor:
-            for index in indices:
+            upcoming = [index for index in indices if index not in self.cache]
+            wanted = set(upcoming[:self.prefetch_count])
+            for index in list(self.pending):
+                if index not in wanted and (self.pending[index].done() or self.pending[index].cancel()):
+                    self.pending.pop(index)
+            for index in upcoming[:self.prefetch_count]:
                 if len(self.pending) >= self.prefetch_count:
                     break
                 if index not in self.cache and index not in self.pending:
@@ -328,24 +333,35 @@ def train_display_dataset(dataset_dir: Path | str, checkpoint_path: Path | str,
     torch.manual_seed(options.seed)
     rng, validation_rng = np.random.default_rng(options.seed), np.random.default_rng(options.seed + 1)
     device = _select_device(torch, options.device)
-    progress("model_setup", status="started", device=device)
-    if options.resume_from:
-        model, architecture, device = load_student_checkpoint(options.resume_from, raft_root=options.raft_root,
-            device=device, train_scope=options.train_scope, allow_legacy=False)
-        if architecture.get("units") != eligibility["units"] or architecture.get("iterations") != options.iterations:
-            raise TrainingError("Resume model units/iterations differ from the selected training contract")
-    else:
-        model, architecture, device = create_student(raft_root=options.raft_root, raft_model=options.raft_model,
-            raft_model_member=options.raft_model_member, device=device, train_scope=options.train_scope,
-            iterations=options.iterations, seed=options.seed, units=eligibility["units"],
-            quality=0 if options.patch_size <= 256 else 1 if options.patch_size <= 512 else 2)
-    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
-    detail_objective = architecture.get("architecture") == ARCHITECTURE
-    ordinal_objective = detail_objective
-    if not trainable:
-        raise TrainingError("Display-depth model has no trainable parameters")
-    optimizer = torch.optim.AdamW(trainable, lr=options.learning_rate, weight_decay=1e-5, eps=1e-8)
     pools = _DisplayPool(root, train, options), _DisplayPool(root, validation, options)
+    # Match the first eventual shuffle without advancing the training RNG.
+    # Resume state is validated below before any decode workers are started.
+    if not options.resume_from:
+        first_order = np.random.default_rng(options.seed).permutation(len(train)).tolist()
+        pools[0].prefetch(first_order)
+        pools[1].prefetch(range(len(validation)))
+    progress("model_setup", status="started", device=device)
+    try:
+        if options.resume_from:
+            model, architecture, device = load_student_checkpoint(options.resume_from, raft_root=options.raft_root,
+                device=device, train_scope=options.train_scope, allow_legacy=False)
+            if architecture.get("units") != eligibility["units"] or architecture.get("iterations") != options.iterations:
+                raise TrainingError("Resume model units/iterations differ from the selected training contract")
+        else:
+            model, architecture, device = create_student(raft_root=options.raft_root, raft_model=options.raft_model,
+                raft_model_member=options.raft_model_member, device=device, train_scope=options.train_scope,
+                iterations=options.iterations, seed=options.seed, units=eligibility["units"],
+                quality=0 if options.patch_size <= 256 else 1 if options.patch_size <= 512 else 2)
+        trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
+        detail_objective = architecture.get("architecture") == ARCHITECTURE
+        ordinal_objective = detail_objective
+        if not trainable:
+            raise TrainingError("Display-depth model has no trainable parameters")
+        optimizer = torch.optim.AdamW(trainable, lr=options.learning_rate, weight_decay=1e-5, eps=1e-8)
+    except BaseException:
+        for pool in pools:
+            pool.close()
+        raise
     progress("model_setup", status="finished", device=device, precision="float32", student_architecture="ipde-display-depth-v1")
     options_json = {key: str(value) if isinstance(value, Path) else value for key, value in asdict(options).items()}
     epoch, cursor, epochs_completed = 1, 0, 0
@@ -713,7 +729,9 @@ def train_display_dataset(dataset_dir: Path | str, checkpoint_path: Path | str,
     try:
         last_safe = snapshot("initial_state")
         if not baseline:
-            baseline = evaluate("baseline_validation", full=True)
+            baseline = evaluate("baseline_validation", full=options.validation_samples == 0)
+            if not baseline.get("full_validation"):
+                notes.append("Initial baseline uses the requested validation subset; full held-out validation remains required for final and best checkpoints")
         elif not baseline.get("full_validation"):
             notes.append("Resumed baseline used a subset; comparison with the original initial model remains unavailable")
         while progress_state["completed_steps"] < progress_state["total_steps"]:
@@ -737,6 +755,7 @@ def train_display_dataset(dataset_dir: Path | str, checkpoint_path: Path | str,
             if not order:
                 order = [int(index) for index in rng.permutation(len(train))]
                 cursor, epoch_losses = 0, []
+            pools[0].prefetch(order[cursor:])
             progress_state.update(epoch=epoch, step=cursor)
             last_safe = snapshot("last_finite_update")
             optimizer.zero_grad(set_to_none=True)

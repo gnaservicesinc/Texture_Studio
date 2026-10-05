@@ -385,13 +385,16 @@ class _SamplePool(Sequence):
         """
         if not self.prefetch_count:
             return
-        wanted = set(indices[:self.prefetch_count])
+        # Cached samples consume no worker slot; preload the next uncached
+        # images even when the beginning of the planned order is cached.
+        upcoming = [index for index in indices if index not in self.cache]
+        wanted = set(upcoming[:self.prefetch_count])
         for index in list(self.pending):
             if index not in wanted and (self.pending[index].done() or self.pending[index].cancel()):
                 self.pending.pop(index)
         if self.executor is None:
             self.executor = ThreadPoolExecutor(max_workers=self.prefetch_count, thread_name_prefix="ipde-train-input")
-        for index in indices[:self.prefetch_count]:
+        for index in upcoming[:self.prefetch_count]:
             if index not in self.cache and index not in self.pending and len(self.pending) < self.prefetch_count:
                 self.pending[index] = self.executor.submit(_load_sample, self.root, self.samples[index], self.options)
 
@@ -531,15 +534,17 @@ def _evaluate(torch: Any, model: Any, device: str, padder_class: Any, samples: S
     patches = []
     model.eval()
     with torch.inference_mode():
+        if isinstance(samples, _SamplePool):
+            samples.prefetch(indices)
         for position, index in enumerate(indices):
             if stopped_callback is not None and stopped_callback():
                 raise _TrainingStopped("Training stopped during validation")
-            if isinstance(samples, _SamplePool):
-                samples.prefetch(indices[position + 1:position + 1 + samples.prefetch_count])
             if progress_callback is not None:
                 progress_callback({"processed": position, "total": len(indices), "sample_index": index,
                     "evaluated_patches": len(patches), "status": "running"})
             sample = samples[index]
+            if isinstance(samples, _SamplePool):
+                samples.prefetch(indices[position + 1:])
             crop_origins = _validation_crop_origins(sample, options.patch_size)
             for crop_index, (y, x) in enumerate(crop_origins):
                 if stopped_callback is not None and stopped_callback():
@@ -1040,6 +1045,7 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
                 if not epoch_order:
                     epoch_order = [int(index) for index in rng.permutation(active_train)]
                     cursor, epoch_losses = 0, []
+                train_arrays.prefetch(epoch_order[cursor:])
                 progress_state.update(epoch=epoch, step=epoch_image_step())
                 command = control_command()
                 if stop_requested or command == "stop":
@@ -1069,9 +1075,9 @@ def train_dataset(dataset_dir: Path | str, checkpoint_path: Path | str, options:
                         continue
                     progress_state["step"] = epoch_image_step() + 1
                     progress("epoch_step", status="started", sample_id=train_arrays.samples[sample_index]["id"])
-                    train_arrays.prefetch(epoch_order[cursor + 1:cursor + 1 + train_arrays.prefetch_count])
                     try:
                         sample = train_arrays[sample_index]
+                        train_arrays.prefetch(epoch_order[cursor + 1:])
                         if sample_index not in train_arrays.crop_origins:
                             origin = _training_crop_origin(sample, options.patch_size)
                             if origin is None:

@@ -24,6 +24,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMainWindow>
+#include <QMessageBox>
 #include <QMimeData>
 #include <QProcess>
 #include <QProgressBar>
@@ -82,6 +83,10 @@ QString configuredPython() {
     return IPDE::pythonExecutable();
 }
 
+bool individualDepthProduct(const QString &id) {
+    return id == "learned-da3" || id == "learned-da2";
+}
+
 class MainWindow final : public QMainWindow {
 public:
     MainWindow() {
@@ -118,11 +123,11 @@ public:
         advancedToggle_ = new QCheckBox("Advanced settings", central); goalRow->addWidget(advancedToggle_);
         root->addLayout(goalRow);
         auto *methodRow = new QHBoxLayout;
-        methodRow->addWidget(new QLabel("Depth method", central));
+        methodRow->addWidget(new QLabel("Default depth source", central));
         depthMethod_ = new QComboBox(central); depthMethod_->setObjectName("depthMethod");
-        depthMethod_->addItem("DepthPro · estimated meters", "depthpro");
-        depthMethod_->addItem("Depth Anything V2 Large · relative inverse depth", "depth-anything-v2");
-        depthMethod_->addItem("Depth Anything 3 · relative depth", "depth-anything-3");
+        depthMethod_->addItem("DepthPro", "depthpro");
+        depthMethod_->addItem("DA3", "depth-anything-3");
+        depthMethod_->addItem("DA2", "depth-anything-v2");
         depthMethod_->addItem("Selected RAFT model", "raft");
         methodRow->addWidget(depthMethod_, 1); root->addLayout(methodRow);
         goalHint_ = new QLabel(central); goalHint_->setWordWrap(true); root->addWidget(goalHint_);
@@ -204,10 +209,10 @@ public:
         learnedDevice_ = new QComboBox(central);
         for (const auto &device : {QString("auto"), QString("mps"), QString("cpu"), QString("cuda")})
             learnedDevice_->addItem(device == "auto" ? "AI device: Automatic" : "AI device: " + device, device);
-        learnedInputSize_ = new QSpinBox(central); learnedInputSize_->setRange(0, 4096); learnedInputSize_->setValue(1036);
+        learnedInputSize_ = new QSpinBox(central); learnedInputSize_->setRange(0, 4096); learnedInputSize_->setValue(0);
         learnedInputSize_->setKeyboardTracking(false);
-        learnedInputSize_->setSpecialValueText("Native processing");
-        learnedInputSize_->setToolTip("V2 shortest-side bound; DA3 longest-side bound. DA3 rejects unsafe native grids. DepthPro always predicts at 1536 × 1536.");
+        learnedInputSize_->setSpecialValueText("Full display image");
+        learnedInputSize_->setToolTip("Process the full display image by default. An explicit size reduces model input resolution; DepthPro uses its fixed model grid.");
         learnedOptions->addWidget(learnedDevice_); learnedOptions->addWidget(new QLabel("AI processing size", central));
         learnedOptions->addWidget(learnedInputSize_); learnedOptions->addStretch(); advancedLayout->addLayout(learnedOptions);
         auto addLearnedPath = [this, central, advancedLayout](const QString &label, bool source) {
@@ -280,11 +285,7 @@ public:
         });
         connect(raftMember_, &QLineEdit::editingFinished, this, [this] { modelSelectionChanged(); });
         auto *help = new QLabel(QStringLiteral(
-            "Check individual outputs, then Export checked. Or select one row and click Export this map. "
-            "AI depth runs directly on the full display photo and retains float32 predictions and recorded resampling. "
-            "For displacement, choose linear depth 0–1 and import the EXR as non-color data. "
-            "For viewing, choose Depth preview. RAFT uses the stereo pair; its support mask describes local correspondence evidence. "
-            "Raw depth, previews and normalized displacement are distinct products."), central);
+            "Check the sources to save, then Export checked. For DA3 or DA2, select one row and use Export this map."), central);
         help->setWordWrap(true);
         root->addWidget(help);
 
@@ -482,7 +483,11 @@ private:
         }
         const QSignalBlocker deviceBlock(learnedDevice_), sizeBlock(learnedInputSize_);
         learnedDevice_->setCurrentIndex(qMax(0, learnedDevice_->findData(sharedValue("learned/device", "auto"))));
-        learnedInputSize_->setValue(sharedValue("learned/input_size", 1036).toInt());
+        if (!sharedValue("learned/full_display_sources", false).toBool()) {
+            if (sharedValue("learned/input_size", 0).toInt() == 1036) setSharedValue("learned/input_size", 0);
+            setSharedValue("learned/full_display_sources", true);
+        }
+        learnedInputSize_->setValue(sharedValue("learned/input_size", 0).toInt());
     }
     void applyGoal(bool updateSelections = true) {
         const QString goal = goal_->currentData().toString();
@@ -490,10 +495,7 @@ private:
             advancedToggle_->setChecked(goal == "manual"); advancedScroll_->setVisible(advancedToggle_->isChecked());
         }
         if (directDepthSelected() && (goal == "depth-estimation" || goal == "effect/map")) {
-            const QString units = depthMethod_->currentData().toString() == "depthpro" ? "estimated meters" : "relative units, not meter distances";
-            goalHint_->setText(goal == "effect/map"
-                ? "Suggested output: linear depth 0–1 displacement from the selected AI model on the full display photo. This is a separate normalized derivative; raw depth remains available."
-                : "Suggested output: " + units + " on the full display photo, stored as float32 EXR. Native prediction is also available. Resizing to the photo grid adds samples, not independently predicted detail.");
+            goalHint_->setText("DepthPro saves full-resolution float32 depth. DA3 and DA2 are individual exports with a delay warning.");
         }
         else if (goal == "effect/map") goalHint_->setText(displayStudentSelected() ? "Suggested output: selected RAFT model height map on the display grid. The stereo pair produces one map; compare it with held-out reference depth." : "Suggested output: selected RAFT model displacement on the left stereo grid. All RAFT export choices remain available when you change models.");
         else if (goal == "depth-estimation") goalHint_->setText(displayStudentSelected() ? "Suggested output: selected RAFT model depth. Units follow its training labels; relative outputs are not meter distances. All RAFT export choices remain available." : "Suggested output: calibrated RAFT meter depth plus its support mask. Unknown or unsupported values need review.");
@@ -509,14 +511,19 @@ private:
     }
     bool suggestedProduct(const QString &id, const QString &kind) const {
         const QString goal = goal_->currentData().toString();
-        if (goal == "effect/map") return id == (directDepthSelected() ? "learned-display-displacement" : "raft-displacement");
-        if (goal == "depth-estimation") return directDepthSelected() ? id == "learned-display-depth"
+        if (individualDepthProduct(id)) return false;
+        if (goal == "effect/map") return id == (directDepthSelected() ? "learned-depthpro" : "raft-displacement");
+        if (goal == "depth-estimation") return directDepthSelected() ? id == "learned-depthpro"
             : id == "raft-depth" || (!displayStudentSelected() && id == "raft-support");
         if (goal == "photo-effects") return id.startsWith("raw:") && (kind.contains("depth") || kind.contains("matte"));
         return false;
     }
     bool displayStudentSelected() const {
         return !directDepthSelected() && selectedModelKind_ == "display_student" && resolvedModelSelection_ == modelSelectionKey();
+    }
+    QString selectedLearnedProduct() const {
+        const auto model = depthMethod_->currentData().toString();
+        return model == "depth-anything-3" ? "learned-da3" : model == "depth-anything-v2" ? "learned-da2" : "learned-depthpro";
     }
     QStringList modelSelectionKey() const {
         if (directDepthSelected()) return {depthMethod_->currentData().toString(), learnedModel_->text().trimmed(),
@@ -536,13 +543,10 @@ private:
     }
     QString productForSelectedModel(const QString &id) const {
         if (directDepthSelected()) {
-            if (id == "raft-depth" || id == "raft-display-depth" || id == "student-display-depth") return "learned-display-depth";
-            if (id == "raft-displacement" || id == "student-display-displacement") return "learned-display-displacement";
-            if (id == "raft-preview" || id == "raft-display-preview" || id == "student-display-preview") return "learned-display-preview";
+            if (id.startsWith("raft-") || id.startsWith("student-") || id == "learned-depth" || id.startsWith("learned-display-")
+                || id == "learned-native" || id == "learned-preview" || id == "learned-displacement") return selectedLearnedProduct();
         } else {
-            if (id == "learned-display-depth") return "raft-depth";
-            if (id == "learned-display-displacement") return "raft-displacement";
-            if (id == "learned-display-preview") return "raft-preview";
+            if (id.startsWith("learned-")) return "raft-depth";
         }
         if (id == "student-display-depth") return "raft-display-depth";
         if (id == "student-display-displacement") return "raft-displacement";
@@ -581,6 +585,32 @@ private:
         return nullptr;
     }
 
+    bool approveSelectedExports() {
+        bool hasIndividualDepth = false;
+        for (const auto &products : selectedProducts_) {
+            for (const auto &id : products) hasIndividualDepth |= individualDepthProduct(id);
+        }
+        if (!hasIndividualDepth) return true;
+        if (!individualDepthProduct(singleProduct_) || selectedProducts_.size() != 1
+            || selectedProducts_.value(singleSource_) != QStringList{singleProduct_}) {
+            QMessageBox message(QMessageBox::Information, "Individual depth export",
+                "DA3 and DA2 are available as individual exports. Select one model row under a photo and use Export this map.",
+                QMessageBox::Ok, this);
+            message.setObjectName("individualDepthExportRequired");
+            message.exec();
+            return false;
+        }
+        const QString text = singleProduct_ == "learned-da3"
+            ? "DA3 full-resolution processing took about 20 minutes for one 5712 × 4284 photo in testing. Export this one photo now?"
+            : "DA2 full-resolution processing can take several minutes for one high-resolution photo. Export this one photo now?";
+        QMessageBox warning(QMessageBox::Warning, "Slow full-resolution export", text,
+            QMessageBox::Ok | QMessageBox::Cancel, this);
+        warning.setObjectName("depthAnythingExportWarning");
+        warning.button(QMessageBox::Ok)->setText("Continue export");
+        warning.setDefaultButton(QMessageBox::Cancel);
+        return warning.exec() == QMessageBox::Ok;
+    }
+
     void beginQueue(bool inspectOnly) {
         if (running_ || sources_.isEmpty()) {
             return;
@@ -615,6 +645,7 @@ private:
                 log_->append(QStringLiteral("Check an output or select a row and use Export this map."));
                 return;
             }
+            if (!approveSelectedExports()) return;
         }
         inspectOnly_ = inspectOnly;
         cancelled_ = false;
@@ -679,6 +710,17 @@ private:
                 << "--learned-input-size" << QString::number(learnedInputSize_->value());
             if (!learnedModel_->text().trimmed().isEmpty()) arguments << "--learned-model-path" << learnedModel_->text().trimmed();
             if (!learnedSource_->text().trimmed().isEmpty()) arguments << "--learned-source-dir" << learnedSource_->text().trimmed();
+            QJsonObject modelSettings;
+            for (const auto &model : {QString("depthpro"), QString("depth-anything-3"), QString("depth-anything-v2")}) {
+                QJsonObject paths;
+                const QString key = "learned/" + model;
+                const QString checkpoint = model == depthMethod_->currentData().toString() ? learnedModel_->text().trimmed() : sharedValue(key + "/model").toString().trimmed();
+                const QString source = model == depthMethod_->currentData().toString() ? learnedSource_->text().trimmed() : sharedValue(key + "/source").toString().trimmed();
+                if (!checkpoint.isEmpty()) paths.insert("model_path", checkpoint);
+                if (!source.isEmpty()) paths.insert("source_dir", source);
+                if (!paths.isEmpty()) modelSettings.insert(model, paths);
+            }
+            if (!modelSettings.isEmpty()) arguments << "--learned-model-settings" << QString::fromUtf8(QJsonDocument(modelSettings).toJson(QJsonDocument::Compact));
         } else {
             if (!raftModel_->text().trimmed().isEmpty()) arguments << "--raft-model" << raftModel_->text().trimmed();
             if (!raftRoot_->text().trimmed().isEmpty()) arguments << "--raft-root" << raftRoot_->text().trimmed();
@@ -754,17 +796,23 @@ private:
                     const auto product = entry.toObject();
                     const auto id = product.value(QStringLiteral("id")).toString();
                     if (id.startsWith("stereo-") || id.startsWith("student-")) continue;
+                    if (id.startsWith("learned-") && id != "learned-depthpro" && id != "learned-da3" && id != "learned-da2") continue;
                     if ((directDepthSelected() && id.startsWith("raft-")) || (!directDepthSelected() && id.startsWith("learned-"))) continue;
                     auto *child = new QTreeWidgetItem(root);
-                    child->setText(0, id.startsWith("learned-") ? depthMethod_->currentText().section(" · ", 0, 0) + " — " + product.value("name").toString() : product.value("name").toString());
+                    child->setText(0, product.value("name").toString());
                     child->setText(1, dimensionText(product));
                     child->setText(2, product.value(QStringLiteral("source_precision")).toString());
                     child->setText(3, product.value(QStringLiteral("precision")).toString());
-                    const auto description = product.value(QStringLiteral("description")).toString();
+                    auto description = product.value(QStringLiteral("description")).toString();
+                    if (individualDepthProduct(id)) description += " Individual export only: select this row and use Export this map. Full-resolution processing takes minutes.";
                     for (int column = 0; column < 4; ++column) child->setToolTip(column, description);
                     child->setData(0, Qt::UserRole + 1, id);
-                    child->setFlags(child->flags() | Qt::ItemIsUserCheckable);
-                    child->setCheckState(0, (checked.contains(id) || (firstInspection && suggestedProduct(id, product.value("name").toString().toLower()))) ? Qt::Checked : Qt::Unchecked);
+                    if (individualDepthProduct(id)) {
+                        child->setFlags(child->flags() & ~Qt::ItemIsUserCheckable);
+                    } else {
+                        child->setFlags(child->flags() | Qt::ItemIsUserCheckable);
+                        child->setCheckState(0, (checked.contains(id) || (firstInspection && suggestedProduct(id, product.value("name").toString().toLower()))) ? Qt::Checked : Qt::Unchecked);
+                    }
                     if (id == currentProduct) files_->setCurrentItem(child);
                 }
                 for (const auto &warning : object.value(QStringLiteral("warnings")).toArray())

@@ -29,21 +29,16 @@ an independent scene: use scene groups only for related captures that must stay
 together during validation. Metadata columns and search expose phone model,
 capture date/time and source filenames.
 
-Dataset Studio keeps the dataset library in a left sidebar. Select any row and
-open **Photos and depth**; role assignments on **Training split** are separate
+Dataset Studio keeps the dataset library in a left sidebar. Clicking any row
+opens **Photos and depth** with that dataset's name and photos. **New dataset…**
+starts a separate dataset; adding photos edits the selected dataset in place.
+Role assignments on **Training split** are separate
 choices for combining datasets. **Dataset actions** holds inspection, storage,
 archive, removal and linking commands. Membership and split changes save to the
 selected dataset automatically. Durable pending drafts survive switching rows
 and reopening Studio; save failures keep them available for retry.
 
-In **Photos and depth**, each photo's **DepthPro**, **DA3** and **V2** buttons
-generate a missing result immediately from stored full display RGB. Select several
-photos for **Enable teacher for selected photos…**. Turn an enabled teacher off
-to discard unneeded computed maps; enabling it later regenerates them. Shared
-files and source/reference arrays are protected. **Remove selected** also discards supported generated display teachers; legacy
-or imported targets that these controls cannot regenerate retain their files. Generation runs all photos through one resident model
-before releasing it and loading the next; matching DepthPro teacher/anchor
-settings reuse predictions.
+In **Photos and depth**, generate **DepthPro** for one photo or a selected batch. DA3 and V2 generation is temporarily disabled because native processing takes many minutes per photo. Their existing maps remain inspectable, exportable and usable for training. **Save full-resolution depth** preserves a selected stored map as raw floating-point EXR or exact NPY. **Regenerate depth** replaces DepthPro in the existing photo row. Depth Anything remains available in Extractor for individual exports with a delay warning.
 
 **Scan spatial directory** recurses without following links. Nonspatial photos,
 portraits without calibrated stereo, malformed containers and inconsistent views
@@ -56,12 +51,12 @@ list as the scan runs; cancelling keeps the photos already found. Scanning and
 manual addition share the same duplicate handling.
 
 Drop local HEIC, HEIF or HIF files onto the import photo list to add them.
-Duplicate paths are kept once. In **Photos and depth**, dropping files onto the
-selected dataset's photo list opens its **Add photos** workflow. Further drops
-onto that import list stay assigned to the same dataset and are recorded as
-pending additions before their depth is generated.
+Duplicate paths and path aliases are kept once. In **Photos and depth**, drop
+files onto the page or use **Add photos…**. They appear in the selected dataset
+immediately, their paths save automatically, and only their new depth targets
+are generated. No second creation step or new visible dataset is required.
 
-Use the teacher buttons to turn one to three teachers **On**. Each teacher creates
+Use the DepthPro button to generate or enable its result. Existing multi-teacher datasets keep their stored teacher entries. Each teacher creates
 an independently reviewable entry for a photo, sharing its raw data and validation
 split. Select a poor teacher result and choose **Remove selected** without dropping
 the photo's other results. Generation publishes
@@ -178,8 +173,9 @@ GPU memory use; training uses MPS when **Device** is `auto` on a supported Mac
 or explicitly `mps`, preserving FP32 rather than adding mixed precision.
 
 New GUI datasets run teachers and optional metric anchors only on the full
-display RGB photo. Full-display targets and native model predictions are retained
-for review/export; they can add hundreds of MiB per photo. They are not
+display RGB photo. Raw full-display targets are always retained for review and
+export. Native model predictions and other intermediate arrays are optional
+Advanced storage settings; they can add hundreds of MiB per photo. Targets are not
 automatically warped or selected for stock RAFT training. The original display
 RGB remains lossless. An explicit native-stereo experiment is a different output
 task and needs compatible left-grid labels.
@@ -278,17 +274,17 @@ or surfaces.
 **Input size** controls a configurable teacher's effective processing resolution,
 not the full reference-photo dimensions or saved output size. Teachers receive
 the complete display photo. V2 uses the configured shortest side; DA3 uses the
-longest side. The GUI and CLI begin at 1036. The GUI changes an older saved zero
-to 1036 once when DA3 is selected, including an additional teacher or per-photo
-generation, to avoid excessive memory use. Advanced settings still allow an
-explicit custom size or zero for native 14-pixel divisibility processing. The
+longest side. The GUI and CLI default to zero for native display processing,
+for individual Extractor exports. Dataset Studio generation currently uses DepthPro only. Advanced settings allow
+an explicit smaller processing size. The
 field also applies to a configurable secondary teacher. DepthPro always resizes
 internally to 1536×1536 and uses its
 fixed pyramid/decoder, regardless of this configurable-teacher field.
 Requested and actual processing dimensions are recorded. DA3's current adapter
-evaluates single views independently. DA3 rejects processing grids above 8192
-14×14 patches before loading weights or running inference; choose 1036 or smaller
-if rejected. Original RGB and full-size float results are retained. Interpolating
+evaluates single views independently. Bounded global-attention queries preserve
+the complete model input and skip independent auxiliary prediction branches.
+Native inference can take substantially longer than reduced processing.
+Original RGB and full-size float results are retained. Interpolating
 the prediction back to the photo dimensions does not add independently predicted
 detail. Review geometry and processing dimensions together and consult the
 [manual's memory discussion](manual/index.html#full-display-teacher-memory).
@@ -300,9 +296,12 @@ device your machine
 supports; CPU can be useful when accelerator memory is insufficient, though it
 can be slower. Device choice does not certify depth accuracy.
 
-Datasets preserve all decoded RGB/auxiliary arrays as exact NPY or lossless NPZ files, camera
-calibration, source/model hashes, source revisions, native prediction grids,
-source-grid float32 predictions, masks, and grouping/split metadata. Depth
+Datasets preserve their stored RGB and depth arrays losslessly, with camera
+calibration, source/model hashes, source revisions, prediction dimensions,
+source-grid float32 targets, masks, and grouping/split metadata. Auxiliary
+archives and native model prediction arrays are optional Advanced storage
+settings. Raw full-display teacher values are retained separately from any
+estimated meter-scale training labels. Depth
 targets never pass through an 8-bit preview. Normalized RGB tensors used by a
 model are separate from the saved raw data. Training checks array hashes before
 loading targets.
@@ -333,10 +332,21 @@ including related rows outside a filter. The totals show included targets and
 save state immediately. Changes save automatically without copying or decoding
 existing arrays. Removed rows remain restorable when you reopen the dataset.
 
-**Add photos…** saves the new spatial HEIC paths in the selected dataset before
-opening generation. The pending photo list survives reopening, so you can resume
-generation from **Photos and depth**. Generate their depth targets to add them to
-the selected dataset; existing photos and teacher results are not regenerated.
+**Add photos…** or a drop onto **Photos and depth** saves the new spatial HEIC
+paths in the selected dataset and starts generating their depth automatically.
+The photo list stays open and the dataset keeps its name. Existing photos and
+teacher results are not regenerated. If generation fails or is cancelled, the
+pending list survives reopening and its retry button resumes generation.
+Select an ungenerated pending row and choose **Remove selected** to remove that
+addition and cancel its queued inference while retaining the original photo.
+
+Select a teacher row and choose **Save full-resolution depth…** to export its
+raw display-grid depth as lossless 32-bit float EXR or an exact NPY array. This
+saves model values without normalization, gamma conversion or estimated meter
+scale, regardless of the viewing mode. Older datasets that discarded the raw
+relative result require regeneration. **Regenerate depth** replaces the selected
+model's result in place while preserving its photo, source RGB and split. Use it
+to refresh a map generated with an older reduced processing size.
 **Add from dataset…** includes active photos and teacher targets from another
 prepared dataset using existing array storage, without
 running inference. Any conflict between existing split assignments for the same
@@ -377,7 +387,8 @@ the decoded left view. Scaling all three RGB images to the same size and
 overlaying them is a useful alignment diagnostic; it is not a depth registration.
 
 Dataset Studio's default teachers and metric anchors use full display RGB only,
-and retain the full display grid plus each model's native prediction. They do
+and always retain the raw full-display target; native prediction arrays are
+retained only when the optional intermediate storage setting is enabled. They do
 not fall back to a stereo-left teacher or automatically choose a registered
 display-to-left training target. Camera viewpoint differences can cause
 distance-dependent alignment; a single fixed warp cannot generally correct it.
@@ -545,9 +556,10 @@ dataset, preserving their labels and splits without inference.
 
 ## Initial two-capture pilot
 
-The supplied IMG_1148 and IMG_1168 originals were processed locally with
+In an earlier pilot, the supplied IMG_1148 and IMG_1168 originals were processed locally with
 DepthPro, V2 Large at 1036, and DA3 GIANT at 1036, using FP32 inference on MPS.
-All three produce float arrays rather than 8-bit depth. Source-sized exports
+These historical runs used reduced configurable model sizes, before native input
+became the default. All three produce float arrays rather than 8-bit depth. Source-sized exports
 are resampled derivatives, not independent per-pixel measurements.
 
 The workspace includes a two-capture DepthPro dataset, a 160-update real RAFT

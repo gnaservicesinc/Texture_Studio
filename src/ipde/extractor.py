@@ -88,7 +88,8 @@ class ExtractOptions:
     learned_model_path: Path | None = None
     learned_source_dir: Path | None = None
     learned_device: str = "auto"
-    learned_input_size: int = 1036
+    learned_input_size: int = 0
+    learned_model_settings: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     write_learned_depth: bool = False
     overwrite: bool = False
 
@@ -1149,14 +1150,31 @@ def _raft_review_outputs(
 
 # Product IDs are stable within a decoded inventory and also serve as CLI selectors.
 _LEARNED_PRODUCTS = {
-    "learned-depth": ("AI depth — selected model, source image grid", "derived_learned_depth"),
-    "learned-native": ("AI depth — original model prediction grid", "derived_learned_native"),
-    "learned-preview": ("AI depth preview — view only, near white", "derived_learned_preview"),
-    "learned-displacement": ("AI depth — explicit linear 0–1 displacement", "derived_learned_displacement"),
+    "learned-depthpro": ("DepthPro", "derived_learned_display_depthpro"),
+    "learned-da3": ("DA3", "derived_learned_display_da3"),
+    "learned-da2": ("DA2", "derived_learned_display_da2"),
 }
-_LEARNED_PRODUCTS.update({key.replace("learned-", "learned-display-"): (
-    name.replace("AI depth", "Display AI depth"), role.replace("derived_learned_", "derived_learned_display_")
-) for key, (name, role) in list(_LEARNED_PRODUCTS.items())})
+_LEARNED_PRODUCT_MODELS = {
+    "learned-depthpro": "depthpro",
+    "learned-da3": "depth-anything-3",
+    "learned-da2": "depth-anything-v2",
+}
+
+
+def _selected_learned_product(config: ExtractOptions) -> str:
+    for product, model in _LEARNED_PRODUCT_MODELS.items():
+        if model == config.learned_model:
+            return product
+    raise ExtractionError(f"unsupported built-in depth model {config.learned_model!r}")
+
+
+def _learned_product_config(config: ExtractOptions, product: str) -> ExtractOptions:
+    model = _LEARNED_PRODUCT_MODELS[product]
+    settings = config.learned_model_settings.get(model, {})
+    selected = model == config.learned_model
+    return replace(config, learned_model=model,
+                   learned_model_path=Path(settings["model_path"]) if settings.get("model_path") else config.learned_model_path if selected else None,
+                   learned_source_dir=Path(settings["source_dir"]) if settings.get("source_dir") else config.learned_source_dir if selected else None)
 
 
 def _learned_reference(discovery: Discovery, *, display: bool = False) -> tuple[int, Asset] | None:
@@ -1169,37 +1187,30 @@ def _learned_reference(discovery: Discovery, *, display: bool = False) -> tuple[
 
 def _learned_paths(output_dir: Path, discovery: Discovery, config: ExtractOptions,
                    reference: Asset, product: str) -> list[Path]:
-    suffix = {"learned-depth": "depth", "learned-native": "native_depth",
-              "learned-preview": "depth_preview", "learned-displacement": "displacement_0_to_1"}[product.replace("learned-display-", "learned-")]
-    base = output_dir / f"{discovery.source.stem}_{reference.semantic_name}_{config.learned_model}_{suffix}"
-    if product.endswith("-preview"):
-        return [Path(f"{base}.png")]
+    base = output_dir / f"{discovery.source.stem}_display_{_LEARNED_PRODUCT_MODELS[product]}_depth"
     return [Path(f"{base}.exr")] + ([Path(f"{base}.npy")] if config.write_npy else [])
 
 
 def _learned_pending_outputs(output_dir: Path, discovery: Discovery, config: ExtractOptions,
                              selected: set[str] | None) -> list[PendingOutput]:
-    products = selected.intersection(_LEARNED_PRODUCTS) if selected is not None else {"learned-depth"}
+    products = selected.intersection(_LEARNED_PRODUCTS) if selected is not None else {_selected_learned_product(config)}
     pending = []
-    for display in (False, True):
-        subset = {key for key in products if key.startswith("learned-display-") == display}
-        if subset:
-            pending.extend(_learned_reference_outputs(output_dir, discovery, config, subset, display=display))
+    for product in sorted(products):
+        pending.extend(_learned_reference_outputs(output_dir, discovery, _learned_product_config(config, product), product))
     return pending
 
 
 def _learned_reference_outputs(output_dir: Path, discovery: Discovery, config: ExtractOptions,
-                               products: set[str], *, display: bool) -> list[PendingOutput]:
-    reference = _learned_reference(discovery, display=display)
+                               product: str) -> list[PendingOutput]:
+    reference = _learned_reference(discovery, display=True)
     if reference is None:
-        raise ExtractionError("AI depth requires an exposed spatial left or display image")
+        raise ExtractionError("AI depth requires the full display image")
     index, asset = reference
-    focal = None if display else (discovery.spatial_photo or {}).get("focal_length_pixels_for_depth")
     try:
         result = infer_learned_depth(asset.array, LearnedDepthConfig(
             model=config.learned_model, model_path=config.learned_model_path, source_dir=config.learned_source_dir,
             device=config.learned_device, input_size=config.learned_input_size,
-        ), focal_pixels=focal, reference_label=asset.semantic_name)
+        ), focal_pixels=None, reference_label="display")
     except (LearnedDepthError, ValueError, OSError) as exc:
         raise ExtractionError(str(exc)) from exc
     metadata = dict(result.metadata)
@@ -1209,53 +1220,27 @@ def _learned_reference_outputs(output_dir: Path, discovery: Discovery, config: E
     depth = result.source_depth
     if depth.shape != asset.array.shape[:2]:
         raise ExtractionError("AI depth output does not match its source image grid")
+    if depth.dtype != np.dtype("float32"):
+        raise ExtractionError("AI depth output must retain float32 model predictions")
     pending = []
-    for product in sorted(products):
-        base_product = product.replace("learned-display-", "learned-")
-        array = result.native_depth if base_product == "learned-native" else depth
-        details_metadata = {**metadata, "source_image_sha256": sha256_array(asset.array),
-                            "source_heic_sha256": discovery.source_sha256,
-                            "reference_image": asset.semantic_name, "normalization": False}
-        output_units = units
-        direction = "larger values indicate nearer geometry" if inverse else "smaller values indicate nearer geometry"
-        if base_product in ("learned-preview", "learned-displacement"):
-            # Separate, explicitly requested display/displacement derivatives.
-            finite = np.isfinite(depth) & (depth > 0)
-            mapped = np.full(depth.shape, np.nan, np.float32)
-            if finite.any():
-                near, far = np.float32(depth[finite].min()), np.float32(depth[finite].max())
-                if far > near:
-                    mapped[finite] = ((depth[finite]-near) if inverse else (far-depth[finite])) / (far-near)
-                else:
-                    mapped[finite] = 0
-                details_metadata["mapping_bounds"] = [float(near), float(far)]
-            details_metadata.update({"normalization": True, "mapping_domain": units,
-                                     "formula": "(inverse_depth-min)/(max-min)" if inverse else "(far-Z)/(far-near)"})
-            array, output_units = mapped, "normalized 0..1"
-            direction = "near high; invalid is NaN"
-            if base_product == "learned-preview":
-                gray = np.rint(np.where(finite, mapped, 0).astype(np.float64)*65535).astype(np.uint16)
-                array = np.stack((gray, np.where(finite, 65535, 0).astype(np.uint16)), axis=-1)
-                output_units = "16-bit display codes (view only)"
-                details_metadata["preview_only"] = True
-        role = _LEARNED_PRODUCTS[product][1]
-        details = _inference_output_details(array, details_metadata, name=role, units=output_units, value_direction=direction)
-        attrs = {"ipdeUnits": output_units, "ipdeSemantic": direction,
-                 "ipdePrecision": "model estimate; float32 arithmetic does not create measured precision",
-                 "ipdeDerivation": json.dumps(details["derivation"], sort_keys=True, allow_nan=False)}
-        paths = _learned_paths(output_dir, discovery, config, asset, product)
-        for path in paths:
-            if path.suffix == ".png":
-                writer = lambda p, a=array, at=attrs: write_png(p, a, attributes=at)
-                verifier = lambda p, a=array: verify_png(p, a)
-            elif path.suffix == ".npy":
-                writer = lambda p, a=array: write_npy(p, a)
-                verifier = lambda p, a=array: verify_npy(p, a)
-            else:
-                writer = lambda p, a=array, at=attrs: write_exr(p, a, attributes=at)
-                verifier = lambda p, a=array: verify_exr(p, a)
-            pending.append(PendingOutput(path, role + ("_exact_array" if path.suffix == ".npy" else ""),
-                                         index, writer, verifier, details))
+    details_metadata = {**metadata, "source_image_sha256": sha256_array(asset.array),
+                        "source_heic_sha256": discovery.source_sha256,
+                        "reference_image": "display", "normalization": False}
+    direction = "larger values indicate nearer geometry" if inverse else "smaller values indicate nearer geometry"
+    role = _LEARNED_PRODUCTS[product][1]
+    details = _inference_output_details(depth, details_metadata, name=role, units=units, value_direction=direction)
+    attrs = {"ipdeUnits": units, "ipdeSemantic": direction,
+             "ipdePrecision": "model estimate; float32 arithmetic does not create measured precision",
+             "ipdeDerivation": json.dumps(details["derivation"], sort_keys=True, allow_nan=False)}
+    for path in _learned_paths(output_dir, discovery, config, asset, product):
+        if path.suffix == ".npy":
+            writer = lambda p, a=depth: write_npy(p, a)
+            verifier = lambda p, a=depth: verify_npy(p, a)
+        else:
+            writer = lambda p, a=depth, at=attrs: write_exr(p, a, attributes=at)
+            verifier = lambda p, a=depth: verify_exr(p, a)
+        pending.append(PendingOutput(path, role + ("_exact_array" if path.suffix == ".npy" else ""),
+                                     index, writer, verifier, details))
     return pending
 
 
@@ -1318,17 +1303,14 @@ def _available_products(discovery: Discovery, *, include_learned: bool = False,
                                  "origin": "Calculated", "description": "Calculated from encoded depth codes. Float32 is export storage, not import bit depth. "
                                  f"Apple depth accuracy: {asset.metadata.get('apple_depth_accuracy') or 'unspecified'}."})
     for key, (name, _) in (_LEARNED_PRODUCTS.items() if include_learned else ()):
-        reference = _learned_reference(discovery, display=key.startswith("learned-display-"))
+        reference = _learned_reference(discovery, display=True)
         if reference is not None:
             _, asset = reference
             products.append({"id": key, "name": name,
-                             "width": 0 if key.endswith("-native") else asset.array.shape[1],
-                             "height": 0 if key.endswith("-native") else asset.array.shape[0],
-                             "precision": "16-bit PNG + alpha (view only)" if key.endswith("-preview") else "32-bit float EXR",
+                             "width": asset.array.shape[1], "height": asset.array.shape[0], "channels": 1,
+                             "precision": "32-bit float EXR", "model": _LEARNED_PRODUCT_MODELS[key],
                              "source_precision": "Generated estimate", "origin": "Inferred",
-                             "description": f"Selected AI model on {asset.semantic_name}. DepthPro estimates meters; Depth Anything V2/DA3 estimate relative depth. "
-                             "Native prediction dimensions depend on the model. Source-grid output is resampled and adds no independent detail. "
-                             "Preview and 0–1 displacement are separate explicit derivatives; raw decoded arrays stay untouched."})
+                             "description": f"{name} depth on the full display photo. Raw float32 values; no normalization."})
     if discovery.spatial_photo and discovery.spatial_photo.get("rectified_stereo_ready"):
         camera = discovery.spatial_photo["left_camera"]
         display_model = bool(selected_model and selected_model["kind"] == "display_student")
@@ -1615,6 +1597,7 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
     config = options or ExtractOptions()
     discovery = discover_file(Path(source))
     selected = None if config.selected_products is None else set(config.selected_products)
+    include_learned = config.write_learned_depth or bool(selected and any(key.startswith("learned-") for key in selected))
     requested_products = None if selected is None else set(selected)
     remapping: dict[str, str] = {}
     decoder_products: set[str] = set()
@@ -1623,6 +1606,8 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
         raise ExtractionError("Classical stereo generation has been removed. Select a RAFT export and model.")
     if selected is not None:
         remapping = {key: _LEGACY_PRODUCT_ALIASES[key] for key in selected if key in _LEGACY_PRODUCT_ALIASES}
+        for key in selected.intersection({"learned-depth", "learned-display-depth"}):
+            remapping[key] = _selected_learned_product(config)
         selected = {remapping.get(key, key) for key in selected}
     requests_raft = (bool(selected and any(key.startswith("raft-") for key in selected)) if selected is not None
                      else config.write_raft_stereo or config.write_raft_diagnostics)
@@ -1664,7 +1649,7 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
     records = [_asset_record(asset) for asset in discovery.assets]
     warnings = _discovery_warnings(discovery)
     if remapping:
-        warnings.append("Loaded the saved export selection using current RAFT product names.")
+        warnings.append("Loaded the saved export selection using current product names.")
     if not records:
         warnings.append(
             "No depth, non-alpha auxiliary, alpha, or spatial-view planes were exposed."
@@ -1727,12 +1712,12 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
     manifest_path = output_dir / f"{discovery.source.stem}{selection_suffix}_aux_manifest.json"
     manifest_paths = [manifest_path] if config.write_manifest else []
     if config.write_learned_depth:
-        products = selected.intersection(_LEARNED_PRODUCTS) if selected is not None else {"learned-depth"}
+        products = selected.intersection(_LEARNED_PRODUCTS) if selected is not None else {_selected_learned_product(config)}
         predicted = []
         for product in products:
-            reference = _learned_reference(discovery, display=product.startswith("learned-display-"))
+            reference = _learned_reference(discovery, display=True)
             if reference is None:
-                raise ExtractionError("AI depth requires the selected spatial left or display image")
+                raise ExtractionError("AI depth requires the full display image")
             predicted.extend(_learned_paths(output_dir, discovery, config, reference[1], product))
         _check_output_paths([item.final_path for item in pending] + predicted + manifest_paths, overwrite=config.overwrite)
         pending.extend(_learned_pending_outputs(output_dir, discovery, config, selected))
@@ -1946,7 +1931,7 @@ def extract_file(source: Path | str, options: ExtractOptions | None = None) -> d
             if item.asset_index is not None:
                 records[item.asset_index]["outputs"].append(output_record)
 
-        manifest = _build_manifest(discovery, records, warnings, include_learned=config.write_learned_depth,
+        manifest = _build_manifest(discovery, records, warnings, include_learned=include_learned,
                                    selected_model=selected_model)
         manifest["selected_products"] = sorted(selected) if selected is not None else None
         if remapping:

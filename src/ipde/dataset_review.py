@@ -22,7 +22,7 @@ from typing import Any, Iterator, Sequence
 import numpy as np
 
 from .dataset import DatasetError, load_dataset
-from .formats import sha256_array, sha256_file, write_png
+from .formats import sha256_array, sha256_file, write_png, write_exr
 from .array_storage import ARRAY_SUFFIXES, read_array
 from .concurrency import ordered_map, resolve_workers
 
@@ -255,7 +255,8 @@ def review_dataset(directory: Path | str) -> dict[str, Any]:
             "rgb_reference": "display" if str(training_label.get("coordinate_reference", "")).startswith("display") else "spatial_left", "display_registration": display_registration,
             "training_ready": not sample.get("teacher_payload_removed", False) and rejection is None and bool(sample.get("calibration", {}).get("raft_stereo_ready")),
         })
-    return {"dataset_path": str(root), "samples": samples, "summary": _summary(manifest["samples"]), "warnings": _warnings(manifest),
+    return {"dataset_path": str(root), "name": manifest.get("name", root.name), "category": manifest.get("category", ""),
+            "samples": samples, "summary": _summary(manifest["samples"]), "warnings": _warnings(manifest),
             "max_native_stereo_pixels": max((math.prod(sample["rgb"]["shape"][:2]) for sample in manifest["samples"]), default=0),
             "excluded_samples": sum(sample.get("excluded", False) for sample in manifest["samples"]),
             "manifest_sha256": digest, "edit_revision": manifest.get("edit_revision", 0),
@@ -280,6 +281,65 @@ def _verified_array(root: Path, record: dict[str, Any]) -> np.ndarray:
     except (ValueError, OSError) as exc:
         raise DatasetError(f"Cannot read dataset array {record['path']}: {exc}") from exc
     return value
+
+
+def export_sample(
+    directory: Path | str, sample_id: str, output: Path | str, *,
+    label: str = "display_teacher", replace_existing: bool = False,
+) -> dict[str, Any]:
+    """Save a verified depth plane at its stored dimensions and precision."""
+    from .resource_lock import resource_lock
+    root = Path(directory).expanduser().resolve()
+    destination = Path(output).expanduser().resolve()
+    if destination.is_relative_to(root):
+        raise DatasetError("Save generated depth outside the dataset")
+    if destination.suffix.lower() not in {".exr", ".npy"}:
+        raise DatasetError("Full-precision depth must be saved as EXR or NPY")
+    with resource_lock(root, shared=True), resource_lock(destination):
+        root, manifest = _read_manifest(root, validate_files=False)
+        sample = next((item for item in manifest["samples"] if item["id"] == sample_id), None)
+        if sample is None:
+            raise DatasetError(f"Unknown dataset sample ID: {sample_id}")
+        if sample.get("teacher_payload_removed"):
+            raise DatasetError("This teacher map was discarded. Generate it again before saving")
+        resolved, target = _label(sample, label)
+        if resolved in {"teacher", "display_teacher"} and sample.get("original_teacher_provenance", {}).get("payload_retained") is False:
+            raise DatasetError("This older result discarded the raw model depth. Regenerate its teacher before saving raw depth")
+        depth = _verified_array(root, target["target"])
+        if depth.ndim != 2 or not depth.size or depth.dtype.kind != "f":
+            raise DatasetError("Depth must be a nonempty floating-point plane")
+        if destination.suffix.lower() == ".exr" and depth.dtype not in (np.dtype("float16"), np.dtype("float32")):
+            raise DatasetError("EXR stores native float16/float32 depth. Use NPY to preserve this array's original precision and byte order")
+        if destination.exists() and not replace_existing:
+            raise DatasetError(f"Output already exists: {destination}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        handle, name = tempfile.mkstemp(prefix=".depth-export-", suffix=destination.suffix, dir=destination.parent)
+        os.close(handle)
+        temporary = Path(name)
+        try:
+            if destination.suffix.lower() == ".exr":
+                write_exr(temporary, depth, attributes={"ipdeUnits": target["units"], "ipdeSample": sample_id},
+                          storage_description="Full-resolution stored depth; exact floating samples; no normalization or resampling")
+            else:
+                with temporary.open("wb") as stream:
+                    np.save(stream, depth, allow_pickle=False)
+            saved = read_array(temporary)
+            digest = sha256_array(depth)
+            if saved.dtype != depth.dtype or saved.shape != depth.shape or sha256_array(saved) != digest:
+                raise DatasetError("Export failed the exact depth round-trip check")
+            with temporary.open("rb") as stream:
+                os.fsync(stream.fileno())
+            if replace_existing:
+                os.replace(temporary, destination)
+            else:
+                # Publish without overwriting a file created since the check.
+                os.link(temporary, destination)
+                temporary.unlink()
+        finally:
+            temporary.unlink(missing_ok=True)
+        return {"output_path": str(destination), "sample_id": sample_id, "label": resolved,
+                "shape": list(depth.shape), "dtype": depth.dtype.str, "units": target["units"],
+                "array_sha256": digest}
 
 
 def _rgb_preview(rgb: np.ndarray, record: dict[str, Any]) -> np.ndarray:

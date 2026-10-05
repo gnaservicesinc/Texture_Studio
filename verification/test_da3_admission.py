@@ -13,12 +13,15 @@ from ipde.learned_depth import (DA3_MAX_PATCH_TOKENS, LearnedDepthConfig,
 
 
 class DA3AdmissionTests(unittest.TestCase):
-    def test_iphone_native_request_rejected_before_rgb_copy_and_model_load(self):
-        # A broadcast view supplies the real input shape without a large test allocation.
-        rgb = np.broadcast_to(np.zeros((1, 1, 3), np.uint8), (4284, 5712, 3))
+    def test_iphone_native_request_preserves_full_model_grid(self):
+        self.assertEqual(validate_learned_depth_input((4284, 5712, 3),
+            LearnedDepthConfig(model="depth-anything-3", input_size=0)), (4284, 5712))
+
+    def test_unsupported_request_rejected_before_rgb_copy_and_model_load(self):
+        rgb = np.broadcast_to(np.zeros((1, 1, 3), np.uint8), (8192, 8192, 3))
         with patch("ipde.learned_depth._validate_rgb") as validate, \
                 patch("ipde.learned_depth._cached_predictor") as load:
-            with self.assertRaisesRegex(LearnedDepthError, r"124,848.*1036"):
+            with self.assertRaisesRegex(LearnedDepthError, r"342,225.*never silently"):
                 infer_learned_depth(rgb, LearnedDepthConfig(model="depth-anything-3", input_size=0))
         validate.assert_not_called()
         load.assert_not_called()
@@ -30,9 +33,11 @@ class DA3AdmissionTests(unittest.TestCase):
             LearnedDepthConfig(model="depth-anything-3", input_size=1036)), (1036, 784))
         self.assertEqual(validate_learned_depth_input((42, 56, 3),
             LearnedDepthConfig(model="depth-anything-3", input_size=0)), (42, 56))
-        with self.assertRaisesRegex(LearnedDepthError, "9,020"):
-            validate_learned_depth_input((4284, 5712, 3),
-                LearnedDepthConfig(model="depth-anything-3", input_size=1536))
+        self.assertEqual(validate_learned_depth_input((4284, 5712, 3),
+            LearnedDepthConfig(model="depth-anything-3", input_size=1536)), (1148, 1540))
+        with self.assertRaisesRegex(LearnedDepthError, "342,225"):
+            validate_learned_depth_input((8192, 8192, 3),
+                LearnedDepthConfig(model="depth-anything-3", input_size=0))
 
     def test_changed_processor_cannot_dispatch_oversized_attention(self):
         import torch
@@ -53,7 +58,7 @@ class DA3AdmissionTests(unittest.TestCase):
             dataset, manifest = DatasetTeacherTests()._dataset(Path(directory))
             before = {path.relative_to(dataset): path.read_bytes()
                       for path in dataset.rglob("*") if path.is_file()}
-            with patch("ipde.learned_depth.LearnedDepthPredictor") as load:
+            with patch("ipde.dataset.require_dataset_teacher"), patch("ipde.learned_depth.LearnedDepthPredictor") as load:
                 with self.assertRaisesRegex(LearnedDepthError, "patch limit"):
                     generate_teacher(dataset, [manifest["samples"][0]["id"]],
                         LearnedDepthConfig(model="depth-anything-3", input_size=8192))

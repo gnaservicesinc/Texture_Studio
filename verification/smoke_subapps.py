@@ -39,6 +39,16 @@ def backend_smoke(app_root: Path, project: Path, python: Path) -> None:
     edited = owner / "edited"
     edits_file = project / "edits.json"
     source_samples = json.loads((source / "dataset.json").read_text())["samples"]
+    depth_output = project / "full-resolution-depth.npy"
+    saved = invoke("Dataset Studio", ["export-sample", str(source), "--sample", source_samples[0]["id"],
+                                     "--label", "teacher", "--output", str(depth_output)])
+    from ipde.array_storage import read_array
+    original_depth = read_array(source / source_samples[0]["teacher"]["target"]["path"])
+    saved_depth = read_array(depth_output)
+    if (saved_depth.dtype != original_depth.dtype or saved_depth.shape != original_depth.shape
+            or saved_depth.tobytes() != original_depth.tobytes()
+            or saved["dtype"] != original_depth.dtype.str):
+        raise RuntimeError("Embedded full-resolution depth export changed floating-point bits or dimensions")
     edits_file.write_text(json.dumps({"keep": [s["id"] for s in source_samples[1:]],
                                       "splits": {source_samples[1]["id"]: "validation"}}))
     invoke("Dataset Studio", ["edit-dataset", str(source), "--edits-json", str(edits_file),
@@ -80,7 +90,7 @@ def backend_smoke(app_root: Path, project: Path, python: Path) -> None:
     archived = invoke("Dataset Studio", ["archive-dataset", str(source), "--workspace", str(workspace)])
     if source.exists() or not Path(archived["archived_dataset"]).is_dir():
         raise RuntimeError("Embedded archive did not preserve the source fixture")
-    print("Packaged dataset/trainer backends: in-place membership/restore, committed-save recovery and 5/100 percent splits, unchanged array bytes, composition, review, workspace, cleanup and archive passed")
+    print("Packaged dataset/trainer backends: exact full-resolution depth export, in-place membership/restore, committed-save recovery and 5/100 percent splits, unchanged array bytes, composition, review, workspace, cleanup and archive passed")
 
 
 def main() -> None:

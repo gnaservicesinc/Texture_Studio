@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -66,15 +67,16 @@ def generate_teacher(
     expected_manifest_sha256: str | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     workers: int | None = None,
+    regenerate: bool = False,
 ) -> dict[str, Any]:
     """Generate only missing model variants, or enable an existing stored result.
 
     Selected sample IDs identify photos, so selecting two teacher entries for
     one photo still performs one inference. Checksummed stored display images
     supply the input; original HEIC files may be offline. Every existing array,
-    sample ID, group and split stays intact. Same-photo DepthPro display depth
-    is reused to estimate meter scale for a new relative teacher when present.
-    An explicit anchor configuration allows inference when that cache is absent.
+    sample ID, group and split stays intact. An explicit anchor configuration
+    enables a separate meter-scale training target and reuses same-photo
+    DepthPro depth when available. Raw model depth is always retained.
     New files and membership publish together under an optimistic manifest lock;
     concurrent edits cause a clean refusal, leaving existing work untouched.
     """
@@ -84,6 +86,8 @@ def generate_teacher(
 
     if teacher.model not in {"depthpro", "depth-anything-v2", "depth-anything-3"}:
         raise DatasetError("Choose DepthPro, Depth Anything V2 or Depth Anything 3")
+    from .dataset import require_dataset_teacher
+    require_dataset_teacher(teacher.model)
     if metric_anchor is not None and metric_anchor.model != "depthpro":
         raise DatasetError("Metric anchoring requires an explicit DepthPro model configuration")
     if not sample_ids or any(not isinstance(value, str) or not value for value in sample_ids):
@@ -134,12 +138,17 @@ def generate_teacher(
             if any((sample["group_id"], sample["split"]) != (base["group_id"], base["split"]) for sample in related):
                 raise DatasetError("Teacher variants of a selected photo have conflicting groups or splits; resolve those before generating")
             variants = [sample for sample in related if _model(sample) == teacher.model and _display_label(sample) is not None]
-            matches = [sample for sample in variants if not sample.get("teacher_payload_removed", False)]
+            matches = [sample for sample in variants if not sample.get("teacher_payload_removed", False)
+                       and sample.get("original_teacher_provenance", {}).get("payload_retained") is not False]
+            if regenerate:
+                matches = []
             for sample in matches:
                 (reenabled if sample.get("excluded", False) else unchanged).append(sample["id"])
             if not matches:
                 missing.append(base)
-                removed = next((sample for sample in variants if sample.get("teacher_payload_removed", False)), None)
+                removed = next((sample for sample in variants if sample["id"] == base["id"]), None)
+                if removed is None:
+                    removed = next(iter(variants), None)
                 if removed is not None:
                     restore_ids[key] = removed["id"]
             anchor = next((_display_label(sample) for sample in related if _model(sample) == "depthpro"
@@ -221,12 +230,17 @@ def generate_teacher(
 
         try:
             predictor = None
+            reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ipde-display-read") if missing and worker_count > 1 else None
+            next_rgb = reader.submit(_verified_array, root, missing[0]["display_rgb"]) if reader is not None else None
             try:
                 if missing:
                     emit("model_started", total=len(missing), completed=0)
                     predictor = LearnedDepthPredictor(teacher)
                 for index, base in enumerate(missing):
-                    rgb = _verified_array(root, base["display_rgb"])
+                    rgb = next_rgb.result() if next_rgb is not None else _verified_array(root, base["display_rgb"])
+                    # One bounded read overlaps model loading and the previous
+                    # photo's inference, never buffering the entire dataset.
+                    next_rgb = reader.submit(_verified_array, root, missing[index + 1]["display_rgb"]) if reader is not None and index + 1 < len(missing) else None
                     result = predictor(rgb, reference_label="display")
                     label = prediction_label(result, rgb, f"photo-{index}-teacher")
                     restored_id = restore_ids.get(_photo_key(base))
@@ -238,7 +252,7 @@ def generate_teacher(
                         sample.pop(key, None)
                     identity = hashlib.sha256((teacher.model + ":" + ":".join(_photo_key(base))).encode()).hexdigest()
                     sample.update(id=restored_id or "teacher-" + identity, teacher_id=teacher.model + "-on-demand", teacher_model=teacher.model,
-                                  teacher_view="display", excluded=False, display_teacher=label,
+                                  teacher_view="display", excluded=sample.get("excluded", False) if regenerate and restored_id else False, display_teacher=label,
                                   teacher={**copy.deepcopy(label), "alias_of": "display_teacher"},
                                   training_target_choice="display_teacher",
                                   training_target_choice_note="Full display teacher generated from the exact preserved display image; no stereo registration or resizing",
@@ -254,6 +268,8 @@ def generate_teacher(
                     emit("photo_ready", sample_id=base["id"], completed=index + 1, total=len(missing))
                     del result, rgb
             finally:
+                if reader is not None:
+                    reader.shutdown(wait=True, cancel_futures=True)
                 close(predictor)
             # All requested teacher predictions finish and their model unloads
             # before any missing metric-anchor model is loaded.
@@ -264,8 +280,8 @@ def generate_teacher(
                     if label["units"] == "meters":
                         continue
                     cached = cached_anchors.get(_photo_key(sample))
-                    if cached is None and metric_anchor is None:
-                        warnings.append(f"{sample['source_path']}: {teacher.model} uses {label['units']}; no same-photo DepthPro meter anchor is available. Keep unit conventions in separate training runs")
+                    if metric_anchor is None:
+                        warnings.append(f"{sample['source_path']}: {teacher.model} preserves {label['units']}; keep different unit conventions in separate training runs")
                         continue
                     if cached is not None:
                         metric_depth = _verified_array(root, cached["target"])
@@ -305,14 +321,9 @@ def generate_teacher(
                                          "metric_anchor_checkpoint_sha256": anchor_label["metadata"]["checkpoint_sha256"],
                                          "pseudo_calibration": calibration}}
                         sample["training_target_choice"] = "anchored_display_teacher"
-                        if not retain:
-                            sample["original_teacher_provenance"] = {"units": label["units"],
-                                "target_array_sha256": label["target"]["array_sha256"],
-                                "target_shape": label["target"]["shape"], "target_dtype": label["target"]["dtype"],
-                                "payload_retained": False}
-                            selected_label = sample["anchored_display_teacher"]
-                            sample["display_teacher"] = copy.deepcopy(selected_label)
-                            sample["teacher"] = {**copy.deepcopy(selected_label), "alias_of": "display_teacher"}
+                        # The scaled training target is a separate product.
+                        # Always retain the model's raw display prediction for
+                        # full-precision inspection and external export.
                     del relative, metric_depth
             finally:
                 close(predictor)

@@ -235,7 +235,7 @@ void modelTrainingProgress(TrainerWindow &window, const QString &workspace) {
 }
 
 void trainingControls(TrainerWindow &window, const QString &workspace) {
-    require(window.inputSize_->value() == 1036, "fresh configurable teachers did not default to bounded 1036-pixel processing");
+    require(window.inputSize_->value() == 0, "fresh configurable teachers did not default to native display-photo processing");
     require(window.student_->currentData() == "display" && window.patchLabel_->text().contains("tile"), "display student was not the default visible architecture");
     require(window.earlyStopError_->suffix().contains("fraction") && window.learningRate_->value() == .0001, "display errors or new-head learning rate retained native RAFT units/defaults");
     window.populateLibrary({{"datasets", QJsonArray{dataset(QDir(workspace).filePath("datasets/control-fixture"))}}});
@@ -271,7 +271,9 @@ void trainingControls(TrainerWindow &window, const QString &workspace) {
     for (auto *check : window.teacherChecks_) check->setChecked(check->property("model") == "depthpro");
     require(!window.inputSize_->isEnabled(), "fixed-size DepthPro exposed an ineffective custom size");
     for (auto *check : window.teacherChecks_) if (check->property("model") == "depth-anything-3") check->setChecked(true);
-    require(window.inputSize_->isEnabled(), "selected DA3 teacher could not use custom input size with DepthPro primary");
+    require(!window.inputSize_->isEnabled(), "disabled Depth Anything teacher reenabled dataset processing controls");
+    for (auto *check : window.teacherChecks_) if (check->property("model") != "depthpro")
+        require(!check->isEnabled(), "slow dataset teacher remained selectable");
     window.inputSize_->setValue(0); require(window.inputSize_->value() == 0, "native teacher size was silently clamped");
     window.inputSize_->setValue(1036);
     window.goal_->setCurrentIndex(window.goal_->findData("effect/map")); window.applyGoal(false);
@@ -313,28 +315,28 @@ void da3TeacherSizeMigration(const QString &project) {
     QSettings projectSettings(QDir(project).filePath("project.ini"), QSettings::IniFormat);
     projectSettings.setValue("goal", "manual"); projectSettings.sync();
     const auto legacy = [&](const QString &primary) {
-        settings.clear(); settings.setValue("teacher_model", primary); settings.setValue("teacher_input_size", 0); settings.sync();
+        settings.clear(); settings.setValue("teacher_model", primary); settings.setValue("teacher_input_size", 1036); settings.sync();
     };
     legacy("depth-anything-3");
     {
         TrainerWindow window(true); window.autosavePaused_ = true;
-        require(window.inputSize_->value() == 1036 && settings.value("teacher_da3_size_default_migrated").toBool(), "saved native DA3 primary was not migrated once");
+        require(window.inputSize_->value() == 0 && settings.value("teacher_native_default_restored").toBool(), "previous low-detail DA3 default was not restored to native resolution");
         window.inputSize_->setValue(728);
         window.teacher_->setCurrentIndex(window.teacher_->findData("depthpro"));
         window.teacher_->setCurrentIndex(window.teacher_->findData("depth-anything-3"));
         require(window.inputSize_->value() == 728, "DA3 selection discarded an explicit custom processing size");
-        window.inputSize_->setValue(0); window.settings_.sync();
+        window.inputSize_->setValue(1036); window.settings_.sync();
     }
     {
         TrainerWindow window(true); window.autosavePaused_ = true;
-        require(window.inputSize_->value() == 0, "a later explicit native-size choice was migrated again on restart");
+        require(window.inputSize_->value() == 1036, "a later explicit custom-size choice was migrated again on restart");
     }
     legacy("depthpro");
     {
         TrainerWindow window(true); window.autosavePaused_ = true;
-        require(window.inputSize_->value() == 0, "DA3 migration altered an existing native setting without DA3 selection");
+        require(window.inputSize_->value() == 0, "previous low-detail default remained active with DepthPro primary");
         for (auto *check : window.teacherChecks_) if (check->property("model") == "depth-anything-3") check->setChecked(true);
-        require(window.inputSize_->value() == 1036, "saved native additional DA3 teacher was not migrated");
+        require(window.inputSize_->value() == 0, "selecting an additional DA3 teacher silently reduced native resolution");
     }
     legacy("depthpro");
     {
@@ -345,9 +347,8 @@ void da3TeacherSizeMigration(const QString &project) {
         entry->setData(0, Qt::UserRole, QJsonObject{{"id", "photo"}, {"source_id", "source"}});
         window.busy_ = true; window.activeOperation_ = "generate-teacher";
         window.queuePhotoTeacher("generate-teacher", "depth-anything-3", {entry});
-        require(window.pendingTeacherJobs_.size() == 1, "per-photo DA3 migration fixture did not queue generation");
-        const auto args = window.pendingTeacherJobs_.first();
-        require(args.value(args.indexOf("--input-size") + 1) == "1036", "per-photo DA3 generation retained the old unsafe native-size setting");
+        require(window.pendingTeacherJobs_.isEmpty() && window.statusBar()->currentMessage().contains("temporarily disabled"),
+                "per-photo DA3 bypassed the temporary dataset generation restriction");
         window.pendingTeacherJobs_.clear(); window.busy_ = false; window.activeOperation_.clear();
     }
     settings.clear(); settings.sync(); projectSettings.remove("goal"); projectSettings.sync();

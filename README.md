@@ -17,6 +17,13 @@ display-oriented processing. The project has two parts:
 - a Python command-line extractor built on `pillow-heif >= 1.5.0`;
 - a native Qt 6 desktop GUI that runs the extractor with structured JSON I/O.
 
+Extractor offers exactly one depth source for each built-in model: **DepthPro**,
+**DA3** and **DA2**. DepthPro supports checked batch exports. DA3 and DA2 are
+individual exports with a delay warning. Each saves one full-resolution float32
+EXR based on the full display photo. Dataset Studio temporarily uses DepthPro
+only for generation; existing Depth Anything maps remain usable. Generated values stay
+unchanged; native-grid, preview and normalized AI duplicates are omitted.
+
 [IPDE Studio](docs/studio-projects.md) is the project hub for the extractor, Dataset
 Studio, RAFT Studio, Photo Studio and Raw Studio. Launch it with `make studio`, create/open a project, choose
 your purpose, then open its apps. Studio shares project settings and changes,
@@ -45,10 +52,12 @@ assembles reviewed datasets with explicit or seeded validation choices. Trainer
 reads those datasets, trains and exports models, and compares a project model with its
 baseline. [Dataset library and import details](docs/dataset-library.md).
 
-New GUI datasets use verified lossless compressed NumPy arrays and deduplicate
-identical arrays. Existing datasets can be compacted into new copies. Teachers and
-metric anchors use only the full display RGB photo; full-display and native model
-predictions are retained separately. The RAFT stereo-to-display depth model learns one full reference depth map from native stereo inputs. Its right-view content is correspondence-aligned to the left reference before shared feature fusion and a single depth decoder.
+New GUI datasets store depth in verified lossless EXR, unsigned images in PNG,
+and other arrays in lossless compressed NumPy files, deduplicating identical
+arrays. Existing datasets can be compacted into new copies. Teachers and
+metric anchors use only the full display RGB photo. Raw full-display depth is
+always retained; native model predictions and other intermediate arrays are
+optional Advanced storage settings. The RAFT stereo-to-display depth model learns one full reference depth map from native stereo inputs. Its right-view content is correspondence-aligned to the left reference before shared feature fusion and a single depth decoder.
 Its query decoder produces the requested display grid without resizing teacher
 labels. Stock RAFT's native-left correspondence and metric products remain a
 separate baseline/experiment. Scientific arrays retain their exact

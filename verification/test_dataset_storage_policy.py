@@ -33,6 +33,12 @@ def _with_unused_assets(source):
 
 
 class DatasetStoragePolicyTests(unittest.TestCase):
+    def setUp(self):
+        # Exercise historical scientific paths independently of the temporary admission policy.
+        admission = patch("ipde.dataset.require_dataset_teacher")
+        admission.start()
+        self.addCleanup(admission.stop)
+
     def _build(self, root, options=None, factory=None):
         sources = [root / f"capture-{index}.heic" for index in range(3)]
         for source in sources:

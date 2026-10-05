@@ -43,8 +43,12 @@ QTreeWidgetItem *addProduct(QTreeWidgetItem *root, const QString &id) {
 void response(MainWindow &window, const QString &source, const QString &path,
               const QString &kind, const QStringList &products, bool inspectOnly = true, const QJsonObject &quality = {}) {
     QJsonArray catalogue;
-    for (const auto &id : products)
-        catalogue.append(QJsonObject{{"id", id}, {"name", id}, {"width", 6}, {"height", 4}});
+    for (const auto &id : products) {
+        const bool learned = id == "learned-depthpro" || id == "learned-da3" || id == "learned-da2";
+        const QString name = id == "learned-depthpro" ? "DepthPro" : id == "learned-da3" ? "DA3" : id == "learned-da2" ? "DA2" : id;
+        catalogue.append(QJsonObject{{"id", id}, {"name", name}, {"width", learned ? 5712 : 6}, {"height", learned ? 4284 : 4},
+            {"precision", learned ? "32-bit float EXR" : ""}});
+    }
     QFile file(path); require(file.open(QIODevice::WriteOnly), "cannot create process response fixture");
     file.write(QJsonDocument(QJsonObject{{"selected_model", kind.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(QJsonObject{{"kind", kind}, {"quality_assessment", quality}})},
         {"available_products", catalogue}, {"assets", QJsonArray{}}, {"source", QJsonObject{}}}).toJson());
@@ -136,8 +140,10 @@ void checkpointRouting(const QString &directory) {
 
 void directDepthRouting(const QString &directory) {
     QSettings().clear();
+    QSettings().setValue("learned/input_size", 1036);
     MainWindow window;
     require(window.depthMethod_->currentData() == "depthpro", "new extractor does not default to direct DepthPro");
+    require(window.learnedInputSize_->value() == 0, "legacy reduced processing default was retained for full-display sources");
     require(!window.learnedInputSize_->isEnabled(), "DepthPro offered an ineffective processing size");
     window.raftModel_->setText("/missing/stale-raft.pth");
     window.learnedModel_->setText(" /fixture/depth_pro.pt ");
@@ -149,12 +155,18 @@ void directDepthRouting(const QString &directory) {
         && !arguments.contains("--raft-model"), "direct AI inspection uses a stale RAFT checkpoint or omits AI configuration");
     auto *root = new QTreeWidgetItem(window.files_, {"ai.HEIC"}); root->setData(0, Qt::UserRole, window.current_);
     const QString source = window.current_;
-    const QStringList inventory{"raw:0", "learned-display-depth", "learned-display-displacement", "learned-display-native", "raft-depth"};
+    const QStringList inventory{"raw:0", "learned-depthpro", "learned-da3", "learned-da2", "learned-depth", "learned-display-depth", "learned-display-displacement", "learned-display-native", "learned-display-preview", "raft-depth"};
     response(window, source, QDir(directory).filePath("ai-response.json"), {}, inventory);
-    require(product(root, "learned-display-depth") && product(root, "learned-display-depth")->checkState(0) == Qt::Checked
+    require(product(root, "learned-depthpro") && product(root, "learned-depthpro")->checkState(0) == Qt::Checked
         && !product(root, "raft-depth"), "direct depth preset did not select full-display AI depth");
-    require(window.goalHint_->text().contains("float32") && window.goalHint_->text().contains("estimated meters"),
-        "DepthPro precision and units were omitted");
+    require(root->childCount() == 4, "AI sources include duplicate or derived subimages");
+    for (const auto &id : {QString("learned-depthpro"), QString("learned-da3"), QString("learned-da2")}) {
+        require(product(root, id) && product(root, id)->text(1) == "5712 × 4284"
+            && product(root, id)->text(3) == "32-bit float EXR", "AI source lost full display dimensions or precision");
+    }
+    require(product(root, "learned-depthpro")->text(0) == "DepthPro" && product(root, "learned-da3")->text(0) == "DA3"
+        && product(root, "learned-da2")->text(0) == "DA2", "model sources have confusing labels");
+    require(window.goalHint_->text().contains("float32"), "full bit-depth output was omitted");
     require(dimensionText(QJsonObject{{"width", 0}, {"height", 0}}) == "Model prediction grid",
         "unknown native prediction grid is shown as zero size");
     product(root, "raw:0")->setCheckState(0, Qt::Checked);
@@ -162,17 +174,52 @@ void directDepthRouting(const QString &directory) {
         window.sources_.clear(); window.depthMethod_->setCurrentIndex(window.depthMethod_->findData(method));
         window.current_ = source;
         const auto args = window.processArguments();
-        require(args.contains(method) && args.contains("1036") && !args.contains("/fixture/depth_pro.pt"),
-            "switching AI models retained the prior model checkpoint or unsafe native size");
+        require(args.contains(method) && args.value(args.indexOf("--learned-input-size") + 1) == "0" && !args.contains("/fixture/depth_pro.pt"),
+            "switching AI models retained the prior model checkpoint or reduced the full display processing size");
         response(window, source, QDir(directory).filePath(method + ".json"), {}, inventory);
-        require(product(root, "raw:0")->checkState(0) == Qt::Checked && product(root, "learned-display-depth")->checkState(0) == Qt::Checked,
+        require(product(root, "raw:0")->checkState(0) == Qt::Checked && product(root, "learned-depthpro")->checkState(0) == Qt::Checked
+            && product(root, "learned-da3") && product(root, "learned-da2") && root->childCount() == 4,
             "switching AI models lost checked raw or full-display outputs");
-        require(window.goalHint_->text().contains("relative units"), "relative model was described as meter depth");
     }
-    window.inspectOnly_ = false; window.selectedProducts_[source] = {"learned-display-depth"};
+    window.goal_->setCurrentIndex(window.goal_->findData("effect/map"));
+    window.applyGoal();
+    require(product(root, "learned-depthpro")->checkState(0) == Qt::Checked
+        && product(root, "learned-da3")->checkState(0) != Qt::Checked && !product(root, "learned-display-displacement"),
+        "default export enables a slow Depth Anything model or requires a normalized duplicate");
+    for (const auto &id : {QString("learned-da3"), QString("learned-da2")}) {
+        require(!(product(root, id)->flags() & Qt::ItemIsUserCheckable), "slow individual export has a batch checkbox");
+        window.singleSource_ = source; window.singleProduct_ = id;
+        window.selectedProducts_.clear(); window.selectedProducts_[source] = QStringList{id};
+        bool shown = false;
+        QTimer::singleShot(0, [&shown] {
+            auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+            shown = dialog && dialog->objectName() == "depthAnythingExportWarning" && dialog->text().contains("minutes")
+                && dialog->defaultButton() == dialog->button(QMessageBox::Cancel);
+            if (dialog) dialog->done(QMessageBox::Cancel);
+        });
+        require(!window.approveSelectedExports() && shown, "individual export omitted its cancellable runtime warning");
+        QTimer::singleShot(0, [] { if (auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) dialog->done(QMessageBox::Ok); });
+        require(window.approveSelectedExports(), "confirmed individual export was refused");
+    }
+    window.singleProduct_.clear(); window.selectedProducts_[source] = QStringList{"learned-depthpro", "learned-da3"};
+    bool batchRefused = false;
+    QTimer::singleShot(0, [&batchRefused] {
+        auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+        batchRefused = dialog && dialog->objectName() == "individualDepthExportRequired";
+        if (dialog) dialog->done(QMessageBox::Ok);
+    });
+    require(!window.approveSelectedExports() && batchRefused, "slow batch export bypassed the individual-only guard");
+    window.selectedProducts_[source] = QStringList{"learned-depthpro"};
+    require(window.approveSelectedExports(), "DepthPro incorrectly requires the slow-model warning");
+    QSettings().setValue("learned/depth-anything-v2/model", "/fixture/da2.pth");
+    window.inspectOnly_ = false; window.selectedProducts_[source] = {"learned-depthpro", "learned-da3", "learned-da2"};
     const auto exports = window.processArguments();
-    require(exports.contains("--select") && exports.contains("learned-display-depth") && exports.contains("--learned-depth"),
+    require(exports.count("--select") == 3 && exports.contains("learned-depthpro") && exports.contains("learned-da3")
+        && exports.contains("learned-da2") && exports.contains("--learned-depth"),
         "AI export discarded the selected full-display depth product");
+    const auto settings = QJsonDocument::fromJson(exports.value(exports.indexOf("--learned-model-settings") + 1).toUtf8()).object();
+    require(settings.value("depth-anything-v2").toObject().value("model_path") == "/fixture/da2.pth",
+        "checked model export discarded another model's saved local checkpoint");
     window.inspectOnly_ = true; window.sources_ = {source};
     auto *sizeEdit = window.learnedInputSize_->findChild<QLineEdit *>();
     require(sizeEdit, "processing size has no text editor"); sizeEdit->selectAll();

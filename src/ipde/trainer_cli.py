@@ -33,8 +33,8 @@ def _model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model-path", type=Path)
     parser.add_argument("--source-dir", type=Path)
     parser.add_argument("--device", choices=("auto", "mps", "cpu", "cuda"), default="auto")
-    parser.add_argument("--input-size", type=int, default=1036,
-                        help="processing size (default 1036): V2 shortest side / DA3 longest side; 0 requests native dimensions. DA3 rejects grids above 8192 patches before model loading; DepthPro retains its fixed internal grid")
+    parser.add_argument("--input-size", type=int, default=0,
+                        help="native display dimensions by default; a positive value explicitly reduces V2 shortest side / DA3 longest side. DepthPro retains its fixed internal grid")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -62,6 +62,13 @@ def _parser() -> argparse.ArgumentParser:
         "display_teacher", "registered_display_teacher", "anchored_display_teacher", "display_metric_anchor", "reference"), default="training")
     preview.add_argument("--output-dir", required=True, type=Path)
     preview.add_argument("--max-dimension", type=int, default=1600, help="0 preserves full pixel size in display copies")
+    save = commands.add_parser("export-sample", help="save a full-resolution depth plane as lossless EXR or exact NPY")
+    save.add_argument("dataset", type=Path)
+    save.add_argument("--sample", required=True)
+    save.add_argument("--label", choices=("training", "teacher", "anchored_teacher", "metric_anchor",
+        "display_teacher", "registered_display_teacher", "anchored_display_teacher", "display_metric_anchor", "reference"), default="display_teacher")
+    save.add_argument("--output", required=True, type=Path)
+    save.add_argument("--replace-existing", action="store_true")
     comparison = commands.add_parser("compare-samples", help="compare two or three teacher variants of one photo")
     comparison.add_argument("dataset", type=Path)
     comparison.add_argument("--sample", action="append", required=True)
@@ -124,6 +131,7 @@ def _parser() -> argparse.ArgumentParser:
     generate.add_argument("dataset", type=Path)
     generate.add_argument("--sample-id", action="append", required=True, help="existing photo/teacher sample ID; repeat to select more photos")
     generate.add_argument("--expected-manifest-sha256", help="reject stale selections instead of overwriting concurrent dataset edits")
+    generate.add_argument("--regenerate", action="store_true", help="replace selected model results in the same photo rows, preserving the original RGB and split")
     generate.add_argument("--metric-anchor", choices=("depthpro",), help="allow DepthPro inference if no same-photo meter anchor is already stored")
     generate.add_argument("--anchor-model-path", type=Path)
     generate.add_argument("--anchor-source-dir", type=Path)
@@ -133,7 +141,7 @@ def _parser() -> argparse.ArgumentParser:
     disable.add_argument("--sample-id", action="append", required=True)
     disable.add_argument("--model", choices=("depthpro", "depth-anything-v2", "depth-anything-3"), required=True)
     disable.add_argument("--expected-manifest-sha256")
-    dataset = commands.add_parser("dataset", help="generate a lossless teacher-target dataset")
+    dataset = commands.add_parser("dataset", help="generate a lossless DepthPro dataset; Depth Anything generation temporarily disabled")
     dataset.add_argument("sources", type=Path, nargs="+")
     dataset.add_argument("--output-dir", required=True, type=Path)
     dataset.add_argument("--groups", type=Path, help="JSON mapping absolute source paths to scene IDs")
@@ -379,6 +387,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             elif args.command == "preview-sample":
                 from .dataset_review import preview_sample
                 report = preview_sample(args.dataset, args.sample, args.label, args.output_dir, max_dimension=args.max_dimension)
+            elif args.command == "export-sample":
+                from .dataset_review import export_sample
+                report = export_sample(args.dataset, args.sample, args.output, label=args.label,
+                                       replace_existing=args.replace_existing)
             elif args.command == "compare-samples":
                 from .dataset_review import compare_samples
                 report = compare_samples(args.dataset, args.sample, args.output_dir, max_dimension=args.max_dimension)
@@ -420,7 +432,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 configuration = _config(args)
                 report = generate_teacher(args.dataset, args.sample_id, configuration,
                     metric_anchor=_metric_anchor_config(args, (configuration,)),
-                    expected_manifest_sha256=args.expected_manifest_sha256, workers=args.workers, progress_callback=_progress)
+                    expected_manifest_sha256=args.expected_manifest_sha256, workers=args.workers, progress_callback=_progress,
+                    regenerate=args.regenerate)
             elif args.command == "disable-teacher":
                 from .dataset_teachers import disable_teacher
                 report = disable_teacher(args.dataset, args.sample_id, args.model,

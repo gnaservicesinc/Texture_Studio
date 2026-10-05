@@ -22,6 +22,12 @@ from verification.test_display_teacher_source import _capture, _prediction
 
 
 class TeacherBatchingTests(unittest.TestCase):
+    def setUp(self):
+        # Exercise historical scientific paths independently of the temporary admission policy.
+        admission = patch("ipde.dataset.require_dataset_teacher")
+        admission.start()
+        self.addCleanup(admission.stop)
+
     def sources(self, root):
         sources = [root / f"capture-{index}.heic" for index in range(3)]
         for source in sources:
@@ -218,7 +224,7 @@ class TeacherBatchingTests(unittest.TestCase):
             with patch("ipde.dataset.discover_file", side_effect=_capture), \
                     patch("ipde.learned_depth.LearnedDepthPredictor", Predictor), redirect_stderr(io.StringIO()):
                 manifest = build_dataset(sources, root / "dataset", DatasetOptions(
-                    teacher=LearnedDepthConfig(model="depthpro"), additional_teachers=(LearnedDepthConfig(model="depth-anything-3"),),
+                    teacher=LearnedDepthConfig(model="depthpro"), additional_teachers=(LearnedDepthConfig(model="depth-anything-3", input_size=28),),
                     teacher_view="stereo-left", include_display_teacher=False, workers=1))
             self.assertEqual(len(manifest["samples"]), 5)
             self.assertEqual(len(manifest["skipped_sources"]), 1)

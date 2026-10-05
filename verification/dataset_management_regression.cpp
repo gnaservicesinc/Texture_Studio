@@ -92,6 +92,8 @@ void stopEditProcess(TrainerWindow &window) {
 
 void clearPendingFixtureEdits(TrainerWindow &window) {
     window.autosaveTimer_->stop(); window.reviewDrafts_.clear(); window.reviewAdditions_.clear();
+    window.addedPhotosReady_ = false;
+    window.queuedPhotoGenerations_.clear();
     require(window.persistReviewDrafts(), "cannot clear the isolated fixture edit journal");
 }
 
@@ -322,15 +324,14 @@ void perPhotoTeacherControls(TrainerWindow &window, const QString &workspace) {
             window.pendingTeacherJobs_.first().contains("pro-one") && !window.pendingTeacherJobs_.first().contains("pro-two"),
             "photo Off did not queue physical teacher removal for only that photo");
     require(window.process_->state() == QProcess::NotRunning && !da3->isEnabled(), "teacher mutation launched overlapping inference or allowed overlapping clicks");
-    window.pendingTeacherJobs_.clear(); da3->setEnabled(true); window.anchor_->setChecked(true); da3->click();
-    require(window.pendingTeacherJobs_.size() == 1 && window.pendingTeacherJobs_.first().first() == "generate-teacher" &&
-            window.pendingTeacherJobs_.first().contains("depth-anything-3") && window.pendingTeacherJobs_.first().contains("pro-one"),
-            "photo Generate did not queue immediate selected-photo inference");
-    require(window.pendingTeacherJobs_.first().contains("--metric-anchor") && window.pendingTeacherJobs_.first().contains("--anchor-model-path"),
-            "selected-photo teacher generation ignored the requested scale anchor");
+    window.pendingTeacherJobs_.clear();
+    require(!da3->isEnabled() && !v2->isEnabled(), "slow Depth Anything generation remained enabled in Dataset Studio");
+    window.enablePhotoTeacher("depth-anything-3", {photo->child(0)});
+    require(window.pendingTeacherJobs_.isEmpty() && window.statusBar()->currentMessage().contains("temporarily disabled"),
+            "programmatic Depth Anything generation bypassed Dataset Studio policy");
     window.pendingTeacherJobs_.clear(); window.updateReviewCount();
     selectOnly(window.reviewSamples_, photo); window.reviewSamples_->topLevelItem(1)->setSelected(true);
-    window.enablePhotoTeacher("depth-anything-3", window.selectedReviewEntries());
+    window.enablePhotoTeacher("depthpro", window.selectedReviewEntries());
     const auto bulk = window.pendingTeacherJobs_.first();
     require(bulk.count("--sample-id") == 2 && bulk.contains("pro-one") && bulk.contains("pro-two") && !bulk.contains("da3-one"),
             "bulk teacher generation failed to deduplicate teacher variants into selected photos");
@@ -338,7 +339,7 @@ void perPhotoTeacherControls(TrainerWindow &window, const QString &workspace) {
     require(!pro->isEnabled() && !da3->isEnabled(), "teacher buttons stayed enabled during a running task");
     window.setBusy(false);
     window.reviewDrafts_.insert(path, {{"dirty", true}, {"save_error", "isolated failed-save fixture"}});
-    window.enablePhotoTeacher("depth-anything-3", {photo->child(0)});
+    window.enablePhotoTeacher("depthpro", {photo->child(0)});
     require(window.pendingTeacherJobs_.isEmpty() && pro->isEnabled() && window.statusBar()->currentMessage().contains("failed to save"),
             "failed autosave left a blocked teacher request and disabled buttons indefinitely");
     require(TrainerWindow::photoTeacherModel({{"teacher_model", "depth-anything-v2-small"}}) != "depth-anything-v2",
@@ -413,19 +414,21 @@ void streamingAndUngroupedPhotos(TrainerWindow &window, const QString &workspace
             "moving an ungrouped photo changed another unrelated photo with an empty group ID");
 }
 
-bool dropFiles(QTreeWidget *tree, const QList<QUrl> &urls) {
+bool dropAt(QWidget *target, const QList<QUrl> &urls) {
     QMimeData mime; mime.setUrls(urls);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 12, 0)
     QDragEnterEvent enter(QPointF(8, 8), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
 #else
     QDragEnterEvent enter(QPoint(8, 8), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
 #endif
-    QApplication::sendEvent(tree->viewport(), &enter);
+    QApplication::sendEvent(target, &enter);
     if (!enter.isAccepted()) return false;
     QDropEvent drop(QPointF(8, 8), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
-    QApplication::sendEvent(tree->viewport(), &drop);
+    QApplication::sendEvent(target, &drop);
     return drop.isAccepted();
 }
+
+bool dropFiles(QTreeWidget *tree, const QList<QUrl> &urls) { return dropAt(tree->viewport(), urls); }
 
 void photoDragAndDrop(TrainerWindow &window, const QString &workspace) {
     clearPendingFixtureEdits(window); window.sources_->clear(); window.appendBase_.clear();
@@ -450,8 +453,14 @@ void photoDragAndDrop(TrainerWindow &window, const QString &workspace) {
         require(window.editProcess_->waitForStarted(), "cannot hold drop fixture save worker");
         { QSignalBlocker blocker(window.tabs_); window.tabs_->setCurrentIndex(1); } QApplication::processEvents();
         require(dropFiles(window.reviewSamples_, {QUrl::fromLocalFile(first)}), "selected dataset photo list did not accept dropped additions");
-        require(window.appendBase_ == base && window.tabs_->currentIndex() == 0 && window.sources_->topLevelItemCount() == 1,
-                "selected dataset drop did not open its existing Add Photos workflow");
+        require(window.appendBase_ == base && window.tabs_->currentIndex() == 1 && window.sources_->topLevelItemCount() == 1 && window.addedPhotosReady_,
+                "selected dataset drop required another creation step or failed to queue its depth generation");
+        require(window.reviewSamples_->topLevelItemCount() == 4 &&
+                window.reviewSamples_->topLevelItem(3)->data(0, Qt::UserRole + 1).toString() == firstCanonical &&
+                window.datasetName_->text() == "drop-existing",
+                "a dropped photo did not immediately appear in the existing dataset or changed its name");
+        require(dropFiles(window.reviewSamples_, {QUrl::fromLocalFile(first)}) && window.reviewSamples_->topLevelItemCount() == 4,
+                "dropping an existing photo duplicated a dataset photo");
         require(dropFiles(window.sources_, {QUrl::fromLocalFile(second), QUrl::fromLocalFile(first)}), "existing-dataset import continuation rejected additional photo drops");
         const auto pending = window.reviewDrafts_.value(base).value("pending_photos").toArray();
         require(pending.size() == 2 && pending.contains(firstCanonical) && pending.contains(secondCanonical) && window.sources_->topLevelItemCount() == 2,
@@ -461,13 +470,196 @@ void photoDragAndDrop(TrainerWindow &window, const QString &workspace) {
     clearPendingFixtureEdits(window); window.appendBase_.clear(); window.sources_->clear();
 }
 
+void directDatasetEditorAndRawExport(const QString &workspace) {
+    TrainerWindow window(true); window.autosavePaused_ = true;
+    { QSignalBlocker blocker(window.workspace_); window.workspace_->setText(workspace); }
+    const QString first = QDir(workspace).filePath("datasets/direct-first"), second = QDir(workspace).filePath("datasets/direct-second");
+    auto manifest = review(second); manifest.insert("name", "My existing photos"); writeFixtureManifest(second, manifest);
+    window.requestedReviewOpen_ = false; window.tabs_->setCurrentIndex(0);
+    window.populateLibrary({{"datasets", QJsonArray{libraryDataset(first), libraryDataset(second)}}});
+    {
+        QSignalBlocker previewSignals(window.previewProcess_);
+        window.datasets_->setCurrentItem(window.datasets_->topLevelItem(1));
+        require(window.tabs_->currentIndex() == 1 && window.requestedReviewPath_ == second &&
+                window.reviewedName_->text() == "My existing photos" && window.datasetName_->text() == "My existing photos",
+                "selecting a non-first library dataset did not immediately replace the right editor and dataset name");
+        require(window.findChild<QWidget *>("datasetPhotoPage")->acceptDrops(), "Photos and depth page does not accept photo drops");
+        window.pendingPreviewArgs_.clear(); window.previewKind_ = "discarded";
+        if (window.previewProcess_->state() != QProcess::NotRunning) { window.previewProcess_->kill(); window.previewProcess_->waitForFinished(1500); }
+    }
+    auto raw = sample("raw-sample", "raw-photo", "raw-group", "depth-anything-3");
+    raw.insert("teacher_model", "depth-anything-3"); raw.insert("training_ready", true);
+    raw.insert("labels", QJsonArray{QJsonObject{{"key", "training"}, {"title", "Training"}, {"units", "meters"}},
+        QJsonObject{{"key", "display_teacher"}, {"title", "Raw full display depth"}, {"units", "relative_depth"}}});
+    manifest.insert("samples", QJsonArray{raw}); manifest.insert("manifest_sha256", window.manifestHash(second));
+    window.requestedReviewOpen_ = false; { QSignalBlocker blocker(window.tabs_); window.tabs_->setCurrentIndex(0); }
+    populateFixtureReview(window, manifest);
+    { QSignalBlocker blocker(window.reviewLabel_); window.reviewLabel_->addItem("Training", "training"); window.reviewLabel_->setCurrentIndex(0); }
+    window.updateDepthExportActions(); require(window.saveDepth_->isEnabled() && !window.regenerateDepth_->isEnabled(), "existing Depth Anything map lost raw save or allows slow regeneration");
+    const QString output = QDir(workspace).filePath("raw-depth.npy"); window.exportSelectedDepth(output);
+    {
+        QSignalBlocker exportSignals(window.depthExportProcess_); const auto args = window.depthExportProcess_->arguments();
+        require(args.contains("export-sample") && args.contains(second) && args.value(args.indexOf("--sample") + 1) == "raw-sample" &&
+                args.value(args.indexOf("--label") + 1) == "display_teacher" && args.value(args.indexOf("--output") + 1) == output && !args.contains("--replace-existing"),
+                "saving generated depth exported a preview/training derivative or an incorrect sample");
+        if (window.depthExportProcess_->state() != QProcess::NotRunning) { window.depthExportProcess_->kill(); window.depthExportProcess_->waitForFinished(1500); }
+    }
+    auto pro = window.selectedReviewEntry()->data(0, Qt::UserRole).toJsonObject(); pro.insert("teacher_model", "depthpro");
+    window.selectedReviewEntry()->setData(0, Qt::UserRole, pro); window.updateDepthExportActions();
+    require(window.regenerateDepth_->isEnabled(), "DepthPro regeneration was disabled with Depth Anything");
+    {
+        QSignalBlocker processSignals(window.process_); window.regenerateDepth_->click();
+        const auto args = window.process_->arguments();
+        require(args.contains("generate-teacher") && args.contains(second) && args.contains("--regenerate") &&
+                args.value(args.indexOf("--sample-id") + 1) == "raw-sample" && !args.contains("--output-dir"),
+                "regenerating the selected teacher created a dataset or failed to replace its existing model result");
+        if (window.process_->state() != QProcess::NotRunning) { window.process_->kill(); window.process_->waitForFinished(1500); }
+        window.refreshAfter_ = false; window.setBusy(false);
+    }
+}
+
+void reviewCacheTracksManifest(const QString &workspace) {
+    TrainerWindow window(true); window.autosavePaused_ = true;
+    const QString path = QDir(workspace).filePath("datasets/cached-review"); auto result = review(path); writeFixtureManifest(path, result);
+    const auto key = QString("review\n") + window.manifestHash(path) + "\nreview-dataset\n" + path;
+    result.insert("manifest_sha256", window.manifestHash(path)); window.previewCache_.insert(key, result);
+    window.requestedReviewPath_ = path; window.requestedReviewOpen_ = false; { QSignalBlocker blocker(window.tabs_); window.tabs_->setCurrentIndex(0); }
+    window.requestPreview("review", {"review-dataset", path});
+    require(window.previewProcess_->state() == QProcess::NotRunning && window.reviewEntries().size() == 4,
+            "reopening a cached dataset launched another backend instead of loading its photo list immediately");
+    result.insert("name", "Changed manifest"); writeFixtureManifest(path, result);
+    {
+        QSignalBlocker previewSignals(window.previewProcess_); window.requestPreview("review", {"review-dataset", path});
+        require(window.previewProcess_->arguments().contains("review-dataset") && window.activePreviewCacheKey_ != key,
+                "dataset cache retained an outdated manifest after a saved edit");
+        if (window.previewProcess_->state() != QProcess::NotRunning) { window.previewProcess_->kill(); window.previewProcess_->waitForFinished(1500); }
+    }
+    const QString imagePath = QDir(workspace).filePath("replaced-preview.png"); QPixmap image(16, 16); image.fill(Qt::red); require(image.save(imagePath), "cannot create preview replacement fixture");
+    DepthPreview preview(nullptr); require(preview.load(imagePath), "cannot load initial preview replacement fixture");
+    QThread::msleep(2); image.fill(Qt::blue); require(image.save(imagePath) && preview.load(imagePath), "cannot replace preview fixture at the same path");
+    const auto pixels = preview.pixmap().toImage(); require(pixels.pixelColor(pixels.width() / 2, pixels.height() / 2) == QColor(Qt::blue), "regenerating a depth preview at the same path retained the old image");
+}
+
+void oneStepAdditionStartsAfterSave(const QString &workspace) {
+    TrainerWindow window(true); window.autosavePaused_ = true;
+    { QSignalBlocker blocker(window.workspace_); window.workspace_->setText(workspace); }
+    const QString base = QDir(workspace).filePath("datasets/one-step-existing"), photo = QDir(workspace).filePath("one-step.HEIC");
+    auto manifest = review(base); writeFixtureManifest(base, manifest); QFile file(photo); require(file.open(QIODevice::WriteOnly), "cannot create one-step photo fixture"); file.close();
+    window.requestedReviewOpen_ = false; { QSignalBlocker blocker(window.tabs_); window.tabs_->setCurrentIndex(0); }
+    populateFixtureReview(window, manifest); { QSignalBlocker blocker(window.tabs_); window.tabs_->setCurrentIndex(1); }
+    QSignalBlocker editSignals(window.editProcess_), generationSignals(window.process_);
+    window.editProcess_->setProgram("/bin/sleep"); window.editProcess_->setArguments({"5"}); window.editProcess_->start(); require(window.editProcess_->waitForStarted(), "cannot hold one-step save worker");
+    require(dropAt(window.findChild<QWidget *>("datasetPhotoPage"), {QUrl::fromLocalFile(photo)}), "one-step drop onto Photos and depth page was rejected");
+    require(window.addedPhotosReady_ && !window.busy_ && window.tabs_->currentIndex() == 1,
+            "photo addition started inference before metadata save or switched to dataset creation");
+    stopEditProcess(window); window.startNextDatasetSave(); stopEditProcess(window);
+    const QString canonicalPhoto = QFileInfo(photo).canonicalFilePath();
+    manifest.insert("pending_photos", QJsonArray{canonicalPhoto}); completeMetadataSave(window, base, manifest);
+    const auto args = window.process_->arguments();
+    require(window.busy_ && !window.addedPhotosReady_ && window.appendBase_ == base && args.contains("dataset") &&
+            args.contains(canonicalPhoto) && args.value(args.indexOf("--name") + 1).startsWith(".added-") &&
+            window.datasetName_->text() == "one-step-existing" && window.tabs_->currentIndex() == 1,
+            "saving the addition did not automatically generate only its new depth into the existing dataset");
+    if (window.process_->state() != QProcess::NotRunning) { window.process_->kill(); window.process_->waitForFinished(1500); }
+    window.refreshAfter_ = false; window.appendBase_.clear(); window.setBusy(false);
+}
+
+void liveGenerationReviewBypassesCache(const QString &workspace) {
+    TrainerWindow window(true); window.autosavePaused_ = true;
+    const QString path = QDir(workspace).filePath("datasets/live-cache-fixture"); auto partial = review(path);
+    partial.insert("generation_state", "generating"); partial.insert("splits_provisional", true);
+    partial.insert("generation_status", QJsonObject{{"active", true}, {"recoverable", false}, {"status", "active"}}); writeFixtureManifest(path, partial);
+    partial.insert("manifest_sha256", window.manifestHash(path));
+    const auto key = QString("review\n") + window.manifestHash(path) + "\nreview-dataset\n" + path;
+    window.previewCache_.insert(key, partial); window.requestedReviewPath_ = path; window.requestedReviewOpen_ = false;
+    { QSignalBlocker blocker(window.tabs_); window.tabs_->setCurrentIndex(0); }
+    {
+        QSignalBlocker previewSignals(window.previewProcess_); window.requestPreview("review", {"review-dataset", path});
+        require(window.activePreviewCacheKey_.isEmpty() && window.previewProcess_->arguments().contains("review-dataset") && window.reviewedDataset_.isEmpty(),
+                "provisional review reused cached live process ownership instead of checking the current owner");
+        if (window.previewProcess_->state() != QProcess::NotRunning) { window.previewProcess_->kill(); window.previewProcess_->waitForFinished(1500); }
+    }
+    window.previewCache_.clear(); partial.insert("generation_status", QJsonObject{{"active", false}, {"recoverable", true}, {"status", "interrupted"}});
+    window.previewStdout_ = QJsonDocument(partial).toJson(); window.previewKind_ = "review"; window.activePreviewCacheKey_ = key;
+    require(QMetaObject::invokeMethod(window.previewProcess_, "finished", Qt::DirectConnection, Q_ARG(int, 0), Q_ARG(QProcess::ExitStatus, QProcess::NormalExit)), "cannot deliver the recovered live-state fixture");
+    require(!window.previewCache_.contains(key) && !window.recoverDataset_->isHidden() && window.recoverDataset_->isEnabled(),
+            "cancelled generation with unchanged manifest remained cached as active or lost its recovery action");
+}
+
+void failedAdditionDoesNotBlockAnotherDataset(const QString &workspace) {
+    TrainerWindow window(true); window.autosavePaused_ = true;
+    { QSignalBlocker blocker(window.workspace_); window.workspace_->setText(workspace); }
+    const QString first = QDir(workspace).filePath("datasets/failed-addition-a"), second = QDir(workspace).filePath("datasets/failed-addition-b"), photo = QDir(workspace).filePath("after-failure.HEIC");
+    QFile file(photo); require(file.open(QIODevice::WriteOnly), "cannot create failure-continuation photo fixture"); file.close(); writeFixtureManifest(second, review(second));
+    window.requestedReviewOpen_ = false; { QSignalBlocker blocker(window.tabs_); window.tabs_->setCurrentIndex(0); }
+    populateFixtureReview(window, review(first)); window.appendBase_ = first; window.addedPhotosReady_ = false; window.job_ = "Generate dataset"; window.setBusy(true);
+    window.stdout_ = "{\"error\":\"isolated append failure\"}"; window.processFinished(1, QProcess::NormalExit);
+    require(window.appendBase_.isEmpty() && !window.addedPhotosReady_ && window.findChild<QPushButton *>("newDataset")->isEnabled(),
+            "failed addition left stale transient state blocking dataset editing or new dataset creation");
+    populateFixtureReview(window, review(second));
+    QSignalBlocker editSignals(window.editProcess_); window.editProcess_->setProgram("/bin/sleep"); window.editProcess_->setArguments({"5"}); window.editProcess_->start(); require(window.editProcess_->waitForStarted(), "cannot hold post-failure save worker");
+    require(window.addPhotosToExistingDataset({photo}, second) && window.appendBase_ == second && window.addedPhotosReady_ && window.queuedPhotoGenerations_.contains(second),
+            "a failed addition to one dataset prevented the next dataset from accepting and queuing photos");
+    stopEditProcess(window); clearPendingFixtureEdits(window); window.appendBase_.clear();
+}
+
+void pendingPhotosCanBeRemoved(const QString &workspace) {
+    const QString isolated = QDir(workspace).filePath("pending-removal"), base = QDir(isolated).filePath("datasets/existing"); QDir().mkpath(isolated);
+    QStringList paths; for (const auto &name : {QString("mistaken.HEIC"), QString("unfinished.HEIC")}) {
+        const QString path = QDir(isolated).filePath(name); QFile file(path); require(file.open(QIODevice::WriteOnly), "cannot create pending removal photo"); file.write("original photo bytes"); file.close(); paths << QFileInfo(path).canonicalFilePath();
+    }
+    auto manifest = review(base); manifest.insert("pending_photos", QJsonArray{paths[0], paths[1]}); writeFixtureManifest(base, manifest);
+    TrainerWindow window(true); window.autosavePaused_ = true; { QSignalBlocker blocker(window.workspace_); window.workspace_->setText(isolated); }
+    window.loadReviewDrafts(); window.requestedReviewOpen_ = false; { QSignalBlocker blocker(window.tabs_); window.tabs_->setCurrentIndex(0); } populateFixtureReview(window, manifest);
+    QSignalBlocker editSignals(window.editProcess_); window.editProcess_->setProgram("/bin/sleep"); window.editProcess_->setArguments({"5"}); window.editProcess_->start(); require(window.editProcess_->waitForStarted(), "cannot hold pending removal save worker");
+    window.prepareAddedPhotoGeneration(paths);
+    selectOnly(window.reviewSamples_, window.reviewSamples_->topLevelItem(3)); window.updateReviewCount();
+    require(window.removePhotos_->isEnabled() && !window.restorePhotos_->isEnabled(), "pending-only selection has no removal action or incorrectly offers restore");
+    window.busy_ = true; window.setReviewIncluded(false); window.busy_ = false;
+    require(window.reviewSamples_->topLevelItemCount() == 5 && window.queuedPhotoGenerations_.value(base).size() == 2, "pending removal altered an already running addition");
+    window.reviewGenerating_ = true; window.setReviewIncluded(false); window.reviewGenerating_ = false;
+    require(window.reviewSamples_->topLevelItemCount() == 5, "pending removal changed provisional generation ownership");
+    window.removePhotos_->click();
+    require(window.reviewSamples_->topLevelItemCount() == 4 && window.reviewDrafts_.value(base).value("pending_photos").toArray() == QJsonArray{paths[1]} &&
+            window.queuedPhotoGenerations_.value(base) == QStringList{paths[1]} && window.sources_->topLevelItemCount() == 1,
+            "pending-only removal lost its durable metadata edit or left the removed photo queued for inference");
+    selectOnly(window.reviewSamples_, window.reviewSamples_->topLevelItem(0)); window.reviewSamples_->topLevelItem(3)->setSelected(true); window.updateReviewCount(); window.removePhotos_->click();
+    const auto draft = window.reviewDrafts_.value(base);
+    require(draft.contains("pending_photos") && draft.value("pending_photos").toArray().isEmpty() && !draft.value("keep").toArray().contains("shared-1") &&
+            !draft.value("keep").toArray().contains("shared-2") && window.reviewSamples_->topLevelItemCount() == 3 && window.appendBase_.isEmpty() &&
+            !window.addedPhotosReady_ && !window.queuedPhotoGenerations_.contains(base) && window.sources_->topLevelItemCount() == 0,
+            "mixed removal failed to exclude generated rows or cancel the emptied pending batch");
+    {
+        TrainerWindow reopened(true); reopened.autosavePaused_ = true; { QSignalBlocker blocker(reopened.workspace_); reopened.workspace_->setText(isolated); }
+        reopened.loadReviewDrafts(); reopened.requestedReviewOpen_ = false; { QSignalBlocker blocker(reopened.tabs_); reopened.tabs_->setCurrentIndex(0); } populateFixtureReview(reopened, manifest);
+        require(reopened.reviewSamples_->topLevelItemCount() == 3 && reopened.pendingPhotoPaths_.isEmpty() && !TrainerWindow::reviewIncluded(reopened.reviewSamples_->topLevelItem(0)),
+                "reopening lost pending-photo removal or resurrected rows from the older manifest");
+        clearPendingFixtureEdits(reopened);
+    }
+    stopEditProcess(window); window.startNextDatasetSave(); stopEditProcess(window);
+    const auto args = window.editProcess_->arguments(); require(args.contains("update-dataset") && !args.contains("--add-dataset") && !args.contains("--output-dir"), "pending removal started inference or copied a dataset");
+    auto samples = manifest.value("samples").toArray(); for (int i=0; i<samples.size(); ++i) { auto entry = samples[i].toObject(); entry.insert("excluded", !draft.value("keep").toArray().contains(entry.value("id"))); samples[i] = entry; }
+    manifest.insert("samples", samples); manifest.insert("pending_photos", QJsonArray{}); completeMetadataSave(window, base, manifest);
+    require(!window.hasPendingDatasetEdits() && !window.busy_ && window.pendingPhotoPaths_.isEmpty(), "pending removal commit left dirty state or restarted the removed batch");
+    {
+        TrainerWindow reopened(true); reopened.autosavePaused_ = true; { QSignalBlocker blocker(reopened.workspace_); reopened.workspace_->setText(isolated); }
+        reopened.loadReviewDrafts(); reopened.requestedReviewOpen_ = false; { QSignalBlocker blocker(reopened.tabs_); reopened.tabs_->setCurrentIndex(0); }
+        auto saved = readJson(QDir(base).filePath("dataset.json")); auto savedSamples = saved.value("samples").toArray();
+        for (int i=0; i<savedSamples.size(); ++i) { auto entry = savedSamples[i].toObject(); entry.insert("included", !entry.value("excluded").toBool()); savedSamples[i] = entry; } saved.insert("samples", savedSamples);
+        populateFixtureReview(reopened, saved);
+        require(reopened.reviewSamples_->topLevelItemCount() == 3 && reopened.pendingPhotoPaths_.isEmpty() && !reopened.hasPendingDatasetEdits() &&
+                !TrainerWindow::reviewIncluded(reopened.reviewSamples_->topLevelItem(0)), "reopening the committed removal restored pending photos or lost the saved generated-row exclusion");
+    }
+    for (const auto &path : paths) require(readBytes(path) == QByteArray("original photo bytes"), "removing a pending photo changed or deleted its original file");
+}
+
 void interruptedGenerationRecoveryControls(TrainerWindow &window, const QString &workspace) {
     clearPendingFixtureEdits(window);
     const QString staging = QDir(workspace).filePath("datasets/.interrupted-fixture"), completed = QDir(workspace).filePath("datasets/recovered-fixture");
     auto partial = review(staging); partial.insert("generation_state", "generating"); partial.insert("splits_provisional", true);
     partial.insert("generation_status", QJsonObject{{"active", true}, {"recoverable", false}, {"status", "active"}, {"reason", "Teacher inference is still active."}});
     writeFixtureManifest(staging, partial); populateFixtureReview(window, partial);
-    auto *button = qobject_cast<QPushButton *>(window.reviewSamples_->itemWidget(window.reviewSamples_->topLevelItem(0), 7));
+    auto *button = qobject_cast<QPushButton *>(window.reviewSamples_->itemWidget(window.reviewSamples_->topLevelItem(0), 6));
     require(button && !button->isEnabled() && window.recoverDataset_->isHidden() && !window.addPhotos_->isEnabled(), "live partial generation enabled mutation or recovery");
     require(window.findChild<QPushButton *>("reloadDatasetState")->isEnabled(), "live generation disabled the safe read-only reload action");
     window.recoverInterruptedDataset(); require(!window.busy_, "direct recovery signal bypassed active-generation guard");
@@ -488,8 +680,8 @@ void interruptedGenerationRecoveryControls(TrainerWindow &window, const QString 
         require(window.pendingReview_ == completed && window.reviewedDataset_.isEmpty(), "recovery success kept the stale staging path or enabled its partial manifest");
     }
     auto recovered = review(completed); writeFixtureManifest(completed, recovered); populateFixtureReview(window, recovered);
-    button = qobject_cast<QPushButton *>(window.reviewSamples_->itemWidget(window.reviewSamples_->topLevelItem(0), 7));
-    require(button && button->isEnabled() && !window.reviewGenerating_ && window.recoverDataset_->isHidden(), "completed recovered dataset did not restore per-photo teacher actions");
+    button = qobject_cast<QPushButton *>(window.reviewSamples_->itemWidget(window.reviewSamples_->topLevelItem(0), 6));
+    require(button && button->isEnabled() && !window.reviewGenerating_ && window.recoverDataset_->isHidden(), "completed recovered dataset did not restore DepthPro actions");
     window.pendingReview_.clear(); window.activeOperation_.clear();
 }
 
@@ -935,6 +1127,12 @@ int main(int argc, char **argv) {
         filteredNavigation(window, workspace);
         streamingAndUngroupedPhotos(window, workspace);
         photoDragAndDrop(window, workspace);
+        directDatasetEditorAndRawExport(workspace);
+        reviewCacheTracksManifest(workspace);
+        oneStepAdditionStartsAfterSave(workspace);
+        liveGenerationReviewBypassesCache(workspace);
+        failedAdditionDoesNotBlockAnotherDataset(workspace);
+        pendingPhotosCanBeRemoved(workspace);
         interruptedGenerationRecoveryControls(window, workspace);
         asynchronousDatasetSwitch(window, workspace);
         addedPhotoContinuationAndRetry(window, workspace);

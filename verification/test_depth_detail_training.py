@@ -237,7 +237,7 @@ class FullValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             dataset = training_fixtures._display_dataset(root)
-            result, _ = self._run(dataset, root / "model.pth", self._options(epochs=1, validation_samples=1))
+            result, _ = self._run(dataset, root / "model.pth", self._options(epochs=1, validation_samples=0))
             baseline, final, best = (result[key] for key in ("baseline_validation", "validation", "best_validation"))
             self.assertEqual(baseline["sample_indices"], final["sample_indices"])
             self.assertEqual(best["sample_indices"], final["sample_indices"])

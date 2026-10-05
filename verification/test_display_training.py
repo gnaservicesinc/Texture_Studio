@@ -174,6 +174,22 @@ class DisplayTrainingTests(unittest.TestCase):
             self.assertEqual(result["validation"]["sample_count"], 3)
             self.assertTrue(any(event["stage"] == "early_stop_confirmation" for event in events))
 
+    def test_requested_baseline_subset_starts_quickly_and_final_validation_stays_full(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = _display_dataset(root)
+            events = []
+            options = self._options(limit_mode="steps", total_steps=1, validation_samples=1)
+            result, _ = self._run(dataset, root / "subset.pth", options, events.append)
+            baseline = [event for event in events if event["stage"] == "baseline_validation" and event["status"] == "finished"]
+            final = [event for event in events if event["stage"] == "final_validation" and event["status"] == "finished"]
+            self.assertEqual(baseline[0]["sample_count"], 1)
+            self.assertFalse(baseline[0]["full_validation"])
+            self.assertEqual(final[-1]["sample_count"], 3)
+            self.assertTrue(final[-1]["full_validation"])
+            self.assertTrue(result["validation"]["full_validation"])
+            self.assertFalse(result["baseline_validation"]["full_validation"])
+
     def test_fractional_error_units_are_reported_and_teacher_scale_is_not_converted(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

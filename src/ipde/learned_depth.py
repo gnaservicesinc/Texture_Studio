@@ -22,6 +22,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
+from types import MethodType
 from typing import Any
 
 import numpy as np
@@ -37,7 +38,7 @@ class LearnedDepthConfig:
     model_path: Path | None = None
     source_dir: Path | None = None
     device: str = "auto"
-    input_size: int = 518
+    input_size: int = 0
     # A nominal code-value range, never the observed image min/max. Defaults
     # to 255 for uint8, 65535 for uint16, and 1 for floating RGB input.
     input_max_value: float | None = None
@@ -73,10 +74,14 @@ _ENV_NAMES = {
     "depth-anything-3": ("IPDE_DA3_MODEL_DIR", "IPDE_DA3_DIR"),
 }
 _IMPORT_LOCK = threading.RLock()
-# DA3's global FP32 attention grows quadratically with the number of patches.
-# Bound the supported single-view workload before allocating weights/tensors.
-# This is an admission limit, not a guarantee that every device has enough RAM.
-DA3_MAX_PATCH_TOKENS = 8192
+# The supported grid includes a full 5712 x 4284 iPhone display photograph.
+# Global attention below is evaluated in query slices, retaining every key and
+# value. No windowed attention, image tiles or depth-map stitching is involved.
+DA3_MAX_PATCH_TOKENS = 131072
+DA3_ATTENTION_CHUNK_THRESHOLD = 8192
+DA3_ATTENTION_SCORE_BYTES = 2 * 1024**3
+DA3_DECODER_FEATURE_ELEMENTS = 128 * 1024**2
+DA3_DECODER_ROWS = 128
 
 
 def validate_learned_depth_input(shape: Any, config: LearnedDepthConfig) -> tuple[int, int] | None:
@@ -114,11 +119,210 @@ def validate_learned_depth_input(shape: Any, config: LearnedDepthConfig) -> tupl
         raise LearnedDepthError(
             f"DA3 FP32 processing would use {processed[1]} x {processed[0]} pixels "
             f"({tokens:,} transformer patches), exceeding the supported {DA3_MAX_PATCH_TOKENS:,}-patch limit. "
-            "Native photo resolution can exhaust memory and stall global attention. "
-            "Set teacher input_size to 1036 or smaller. The original RGB remains untouched; "
-            "the full photo-size float depth is a separately recorded interpolation of the model output."
+            "Choose a smaller explicit input_size or a smaller photograph. "
+            "IPDE never silently reduces the requested model grid."
         )
     return processed
+
+
+def _da3_attention_forward(attention: Any, x: Any, pos: Any = None, attn_mask: Any = None):
+    """Upstream FP32 global attention with bounded query working memory.
+
+    Each query still attends to every key in the original image. Slicing only
+    independent query rows preserves softmax's complete key axis; it does not
+    change the model's receptive field or introduce tile boundaries.
+    """
+    import torch
+    batch, tokens, channels = x.shape
+    heads = attention.num_heads
+    qkv = attention.qkv(x).reshape(batch, tokens, 3, heads, channels // heads).permute(2, 0, 3, 1, 4)
+    q, k, v = qkv.unbind(0)
+    q = attention.q_norm(q) if hasattr(attention, "q_norm") else q
+    k = attention.k_norm(k) if hasattr(attention, "k_norm") else k
+    if getattr(attention, "rope", None) is not None and pos is not None:
+        q, k = attention.rope(q, pos), attention.rope(k, pos)
+    rows = max(1, min(tokens, DA3_ATTENTION_SCORE_BYTES // (batch * heads * tokens * x.element_size())))
+    result = torch.empty_like(q)
+    # Inference alone uses this adapter: dropout never affects the predictions.
+    for start in range(0, tokens, rows):
+        stop = min(start + rows, tokens)
+        mask = attn_mask[:, None, start:stop, :] if attn_mask is not None else None
+        result[:, :, start:stop] = torch.nn.functional.scaled_dot_product_attention(
+            q[:, :, start:stop], k, v, dropout_p=0.0, attn_mask=mask,
+        )
+    result = result.transpose(1, 2).reshape(batch, tokens, channels)
+    return attention.proj_drop(attention.proj(result))
+
+
+def _install_bounded_attention(backbone: Any, *, da3: bool) -> int:
+    """Adapt only this local model instance; imported upstream classes stay intact."""
+    installed = 0
+    module_name = "depth_anything_3.model.dinov2.layers.attention" if da3 else "depth_anything_v2.dinov2_layers.attention"
+    for attention in backbone.modules():
+        if attention.__class__.__module__ != module_name:
+            continue
+        original = attention.forward
+
+        if da3:
+            def forward(instance, x, pos=None, attn_mask=None, _original=original):
+                if x.shape[1] <= DA3_ATTENTION_CHUNK_THRESHOLD:
+                    return _original(x, pos=pos, attn_mask=attn_mask)
+                return _da3_attention_forward(instance, x, pos, attn_mask)
+        else:
+            def forward(instance, x, attn_bias=None, _original=original):
+                if x.shape[1] <= DA3_ATTENTION_CHUNK_THRESHOLD:
+                    return _original(x) if attn_bias is None else _original(x, attn_bias=attn_bias)
+                if attn_bias is not None:
+                    raise LearnedDepthError("Full-resolution DA2 expects one image without a packed attention bias")
+                return _da3_attention_forward(instance, x)
+
+        attention.forward = MethodType(forward, attention)
+        installed += 1
+    return installed
+
+
+def _da3_depth_only(network: Any, tensor: Any) -> dict[str, Any]:
+    """Run the unchanged primary DualDPT branch without ray/camera/GS heads.
+
+    DA3's primary and ray decoder branches are independent after the shared
+    projected pyramid. Calling the primary branch alone avoids multiple unused
+    full-image auxiliary tensors while retaining its original arithmetic.
+    """
+    from depth_anything_3.model.utils.head_utils import custom_interpolate
+    head = network.head
+    if head.__class__.__name__ != "DualDPT" or head.__class__.__module__ != "depth_anything_3.model.dualdpt":
+        # Preserve the contract of other explicitly configured relative DA3
+        # architectures; the built-in GIANT checkpoint uses DualDPT below.
+        return network(tensor, None, None, [], False, False, "first")
+    height, width = tensor.shape[-2:]
+    feats, _ = network.backbone(tensor, cam_token=None, export_feat_layers=[], ref_view_strategy="first")
+    batch, views, count, channels = feats[0][0].shape
+    patch_h, patch_w = height // head.patch_size, width // head.patch_size
+    resized = []
+    for stage, take in enumerate(head.intermediate_layer_idx):
+        value = head.norm(feats[take][0].reshape(batch * views, count, channels))
+        value = value.permute(0, 2, 1).reshape(batch * views, channels, patch_h, patch_w)
+        value = head.projects[stage](value)
+        if head.pos_embed:
+            value = head._add_pos_embed(value, width, height)
+        resized.append(head.resize_layers[stage](value))
+    del feats
+    scratch = head.scratch
+    l1, l2, l3, l4 = (getattr(scratch, f"layer{stage}_rn")(value) for stage, value in enumerate(resized, 1))
+    del resized
+    value = scratch.refinenet4(l4, size=l3.shape[2:])
+    del l4
+    value = scratch.refinenet3(value, l3, size=l2.shape[2:])
+    del l3
+    value = scratch.refinenet2(value, l2, size=l1.shape[2:])
+    del l2
+    value = scratch.refinenet1(value, l1)
+    del l1
+    value = scratch.output_conv1(value)
+    output_shape = (int(height / head.down_ratio), int(width / head.down_ratio))
+    if math.prod(output_shape) * value.shape[0] * value.shape[1] > DA3_DECODER_FEATURE_ELEMENTS:
+        logits = _da3_primary_logits_rows(head, value, output_shape, width / height)
+    else:
+        value = custom_interpolate(value, output_shape, mode="bilinear", align_corners=True)
+        if head.pos_embed:
+            value = head._add_pos_embed(value, width, height)
+        logits = scratch.output_conv2(value)
+    logits = logits.permute(0, 2, 3, 1)
+    depth = head._apply_activation_single(logits[..., :-1], head.activation).squeeze(-1)
+    confidence = head._apply_activation_single(logits[..., -1], head.conf_activation)
+    return {"depth": depth.reshape(batch, views, *depth.shape[1:]),
+            "depth_conf": confidence.reshape(batch, views, *confidence.shape[1:])}
+
+
+def _bilinear_rows(value: Any, start: int, stop: int, shape: tuple[int, int]):
+    """Original align_corners=True bilinear coordinates for selected output rows."""
+    import torch
+    height, width = shape
+    source_height = value.shape[-2]
+    scale = (source_height - 1) / (height - 1) if height > 1 else 0.0
+    coordinates = torch.arange(start, stop, device=value.device, dtype=value.dtype) * scale
+    lower = coordinates.to(torch.long)
+    upper = (lower + 1).clamp(max=source_height - 1)
+    fraction = (coordinates - lower).reshape(1, 1, -1, 1)
+    # Horizontal resizing retains the full original width and boundary. Resize
+    # independent source rows before the unchanged vertical linear combination.
+    low = torch.nn.functional.interpolate(value.index_select(-2, lower), (stop - start, width), mode="bilinear", align_corners=True)
+    high = torch.nn.functional.interpolate(value.index_select(-2, upper), (stop - start, width), mode="bilinear", align_corners=True)
+    return (1 - fraction) * low + fraction * high
+
+
+def _da3_primary_logits_rows(head: Any, value: Any, shape: tuple[int, int], aspect_ratio: float):
+    """Bound primary decoder memory without changing its full-image coordinates.
+
+    The head's only spatial output convolution is 3x3. A one-row halo includes
+    its complete receptive field at each internal stripe edge. These are decoder
+    feature evaluations, not independently inferred image tiles or depth blends.
+    """
+    import torch
+    height, width = shape
+    channels = next(layer.out_channels for layer in reversed(head.scratch.output_conv2)
+                    if hasattr(layer, "out_channels"))
+    logits = torch.empty((value.shape[0], channels, height, width), dtype=value.dtype, device=value.device)
+    positional = getattr(head, "pos_embed", False)
+    if positional:
+        from depth_anything_3.model.utils.head_utils import position_grid_to_embed
+        diag = math.sqrt(aspect_ratio**2 + 1)
+        span_x, span_y = aspect_ratio / diag, 1 / diag
+        xcoords = torch.linspace(-span_x * (width - 1) / width, span_x * (width - 1) / width,
+                                width, device=value.device, dtype=value.dtype)
+        ycoords = torch.linspace(-span_y * (height - 1) / height, span_y * (height - 1) / height,
+                                height, device=value.device, dtype=value.dtype)
+    for start in range(0, height, DA3_DECODER_ROWS):
+        stop = min(start + DA3_DECODER_ROWS, height)
+        begin, end = max(0, start - 1), min(height, stop + 1)
+        stripe = _bilinear_rows(value, begin, end, shape)
+        if positional:
+            yy, xx = torch.meshgrid(ycoords[begin:end], xcoords, indexing="ij")
+            uv = torch.stack((xx, yy), dim=-1)
+            embedding = position_grid_to_embed(uv, value.shape[1]) * 0.1
+            stripe = stripe + embedding.permute(2, 0, 1)[None]
+        output = head.scratch.output_conv2(stripe)
+        logits[:, :, start:stop] = output[:, :, start - begin:stop - begin]
+    return logits
+
+
+def _da2_head_forward(head: Any, features: Any, patch_h: int, patch_w: int):
+    """Native DA2 decoder with its original pyramid and bounded output features."""
+    import torch
+    resized = []
+    for stage, feature in enumerate(features):
+        value = feature[0]
+        if head.use_clstoken:
+            token = feature[1].unsqueeze(1).expand_as(value)
+            value = head.readout_projects[stage](torch.cat((value, token), -1))
+        value = value.permute(0, 2, 1).reshape(value.shape[0], value.shape[-1], patch_h, patch_w)
+        resized.append(head.resize_layers[stage](head.projects[stage](value)))
+    scratch = head.scratch
+    l1, l2, l3, l4 = (getattr(scratch, f"layer{stage}_rn")(value) for stage, value in enumerate(resized, 1))
+    del resized
+    value = scratch.refinenet4(l4, size=l3.shape[2:])
+    del l4
+    value = scratch.refinenet3(value, l3, size=l2.shape[2:])
+    del l3
+    value = scratch.refinenet2(value, l2, size=l1.shape[2:])
+    del l2
+    value = scratch.refinenet1(value, l1)
+    del l1
+    value = scratch.output_conv1(value)
+    shape = (patch_h * 14, patch_w * 14)
+    return _da3_primary_logits_rows(head, value, shape, shape[1] / shape[0])
+
+
+def _install_da2_bounded_decoder(head: Any) -> None:
+    original = head.forward
+
+    def forward(instance, features, patch_h, patch_w):
+        channels = instance.scratch.output_conv1.out_channels
+        if patch_h * patch_w * 14**2 * channels <= DA3_DECODER_FEATURE_ELEMENTS:
+            return original(features, patch_h, patch_w)
+        return _da2_head_forward(instance, features, patch_h, patch_w)
+
+    head.forward = MethodType(forward, head)
 
 
 @contextmanager
@@ -343,6 +547,12 @@ class LearnedDepthPredictor:
                         self.input_processor = processor_module.InputProcessor()
                 self.model = LocalDA3()
                 dtype_counts = _load_safetensors_model(self.model, checkpoint)
+                installed = _install_bounded_attention(self.model.model.backbone, da3=True)
+                if not installed:
+                    raise LearnedDepthError("DA3 source has no supported attention layers; cannot provide bounded full-resolution inference")
+                self.base_metadata["bounded_global_attention_layers"] = installed
+                self.base_metadata["unused_branches"] = ["ray", "camera_pose", "gaussian_splats"]
+                self._da3_primary_only = True
                 self.base_metadata["model_config_sha256"] = _file_sha256(path / "config.json")
             else:
                 state, dtype_counts = _checkpoint_state(torch, path)
@@ -360,6 +570,13 @@ class LearnedDepthPredictor:
                     self.model = module.DepthAnythingV2(**model_args)
                 self.model.load_state_dict(state, strict=True)
                 del state
+                if config.model in {"depth-anything-v2", "depth-anything-v2-small"}:
+                    installed = _install_bounded_attention(self.model.pretrained, da3=False)
+                    if not installed:
+                        raise LearnedDepthError("DA2 source has no supported attention layers; cannot provide bounded full-resolution inference")
+                    self.base_metadata["bounded_global_attention_layers"] = installed
+                    _install_da2_bounded_decoder(self.model.depth_head)
+                    self.base_metadata["decoder_policy"] = "full-grid bilinear decoder with bounded row evaluation and complete convolution halo"
             self.model.to(device=self.device, dtype=torch.float32).eval()
             self.base_metadata["checkpoint_storage_dtypes"] = dtype_counts
             self.base_metadata["checkpoint_precision_note"] = (
@@ -478,15 +695,22 @@ class LearnedDepthPredictor:
         sample = module.NormalizeImage(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(sample)
         sample = module.PrepareForNet()(sample)
         tensor = torch.from_numpy(sample["image"]).unsqueeze(0).to(device=self.device, dtype=torch.float32)
+        tokens = math.prod(dimension // 14 for dimension in tensor.shape[-2:])
+        if tokens > DA3_MAX_PATCH_TOKENS:
+            raise LearnedDepthError("DA2 processor exceeded the supported full-resolution patch budget; choose a smaller explicit input_size")
         native = self.model(tensor)[:, None]
-        source = torch.nn.functional.interpolate(native, rgb.shape[:2], mode="bilinear", align_corners=True)
+        source = (native if tuple(native.shape[-2:]) == rgb.shape[:2] else
+                  torch.nn.functional.interpolate(native, rgb.shape[:2], mode="bilinear", align_corners=True))
         return native, source, {
             "units": "relative_inverse_depth", "quantity": "relative_inverse_depth", "metric_scale": "unavailable",
             "processing": "RGB / nominal limit; upstream aspect-preserving cubic Resize and ImageNet normalization on copy",
-            "source_grid_resampling": "bilinear relative inverse depth, align_corners=True; no sharpening",
+            "source_grid_resampling": "none; prediction already matches the full reference grid" if tuple(native.shape[-2:]) == rgb.shape[:2] else "bilinear relative inverse depth, align_corners=True; no sharpening",
             "model_input_shape": list(tensor.shape[-2:]), "input_size": input_size,
             "requested_input_size": self.config.input_size, "input_size_policy": "native source shortest side" if not self.config.input_size else "configured shortest side",
             "native_grid": "network output at processed RGB grid covering the full reference extent",
+            "attention_policy": "global FP32 attention; independent query rows sliced above 8192 tokens; every query retains all image keys",
+            "processing_patch_tokens": tokens, "processing_patch_limit": DA3_MAX_PATCH_TOKENS,
+            "decoder_policy": "full-grid bilinear decoder with bounded row evaluation and complete convolution halo",
         }
 
     def _depth_anything_3(self, rgb: np.ndarray, nominal_limit: float):
@@ -504,25 +728,30 @@ class LearnedDepthPredictor:
         actual_shape = tuple(imgs.shape[-2:])
         tokens = math.prod(dimension // 14 for dimension in actual_shape)
         if tokens > DA3_MAX_PATCH_TOKENS:
-            raise LearnedDepthError("DA3 processor exceeded the supported patch budget; choose input_size=1036 or smaller")
+            raise LearnedDepthError("DA3 processor exceeded the supported full-resolution patch budget")
         tensor = imgs[None].to(device=self.device, dtype=torch.float32)
         # The public DA3 wrapper enables FP16/BF16 autocast unconditionally.
         # Call its underlying network to honor IPDE's FP32 inference contract.
-        output = self.model.model(tensor, None, None, [], False, False, "first")
+        output = (_da3_depth_only(self.model.model, tensor) if getattr(self, "_da3_primary_only", False)
+                  else self.model.model(tensor, None, None, [], False, False, "first"))
         plane = _plane(torch, output["depth"])
         native = torch.from_numpy(plane)[None, None]
-        source = torch.nn.functional.interpolate(native, rgb.shape[:2], mode="bilinear", align_corners=False)
+        source = (native if plane.shape == rgb.shape[:2] else
+                  torch.nn.functional.interpolate(native, rgb.shape[:2], mode="bilinear", align_corners=False))
         confidence = _plane(torch, output["depth_conf"]) if "depth_conf" in output else None
         return native, source, {
             "units": "relative_depth", "quantity": "relative_camera_z_depth", "metric_scale": "unavailable",
             "processing": "upstream uint8 RGB aspect-preserving upper_bound_resize and ImageNet normalization; underlying network FP32",
-            "source_grid_resampling": "bilinear relative depth, align_corners=False; no sharpening",
+            "source_grid_resampling": "none; prediction already matches the full reference grid" if plane.shape == rgb.shape[:2] else "bilinear relative depth, align_corners=False; no sharpening",
             "model_input_shape": list(tensor.shape[-2:]), "input_size": input_size,
             "requested_input_size": self.config.input_size, "input_size_policy": "native source longest side" if not self.config.input_size else "configured longest side",
             "native_grid": "network output at processed RGB grid covering the full reference extent",
             "confidence_semantics": "unmodified DA3 depth_conf scores; not calibrated probabilities",
             "processing_patch_tokens": tokens, "processing_patch_limit": DA3_MAX_PATCH_TOKENS,
             "expected_model_input_shape": list(expected_shape),
+            "attention_policy": "global FP32 attention; independent query rows sliced above 8192 tokens; every query retains all image keys",
+            "attention_score_working_bytes": DA3_ATTENTION_SCORE_BYTES,
+            "decoder_policy": "primary depth branch only; full-grid bilinear decoder with bounded row evaluation and complete convolution halo",
         }, confidence
 
 

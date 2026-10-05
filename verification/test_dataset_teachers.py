@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -25,6 +26,12 @@ def _relative(rgb):
 
 
 class DatasetTeacherTests(unittest.TestCase):
+    def setUp(self):
+        # Exercise historical scientific paths independently of the temporary admission policy.
+        admission = patch("ipde.dataset.require_dataset_teacher")
+        admission.start()
+        self.addCleanup(admission.stop)
+
     def _dataset(self, root, model="depthpro"):
         sources = [root / f"capture-{index}.heic" for index in range(3)]
         results = {}
@@ -67,7 +74,8 @@ class DatasetTeacherTests(unittest.TestCase):
             calls, closed = [], []
             first, second = (sample["id"] for sample in before["samples"][:2])
             with patch("ipde.learned_depth.LearnedDepthPredictor", self._factory(calls, closed)):
-                result = generate_teacher(dataset, [first, first, second], LearnedDepthConfig(model="depth-anything-3"))
+                result = generate_teacher(dataset, [first, first, second], LearnedDepthConfig(model="depth-anything-3"),
+                                          metric_anchor=LearnedDepthConfig(model="depthpro"))
             after = load_dataset(dataset)
             self.assertEqual(len(calls), 2)
             self.assertEqual(closed, ["depth-anything-3"])
@@ -83,13 +91,14 @@ class DatasetTeacherTests(unittest.TestCase):
                 self.assertTrue(sample["teacher_generation"]["metric_anchor_reused"])
                 self.assertNotIn("display_metric_anchor", sample)
                 self.assertEqual(sample["metric_anchor_provenance"]["target_array_sha256"], base["display_teacher"]["target"]["array_sha256"])
-                self.assertEqual(sample["display_teacher"]["target"], sample["anchored_display_teacher"]["target"])
-                self.assertFalse(sample["original_teacher_provenance"]["payload_retained"])
+                self.assertNotEqual(sample["display_teacher"]["target"], sample["anchored_display_teacher"]["target"])
+                self.assertEqual(sample["display_teacher"]["units"], "relative_depth")
+                self.assertNotIn("original_teacher_provenance", sample)
                 self.assertIn("valid_mask", sample["anchored_display_teacher"])
             self.assertTrue(result["training_eligibility"]["trainable"])
             self.assertFalse(result["warnings"])
             distinct_targets = {sample["display_teacher"]["target"]["path"] for sample in after["samples"][3:]}
-            self.assertEqual(len(list((dataset / "arrays" / "teachers").rglob("*.exr"))), len(distinct_targets))
+            self.assertEqual(len(list((dataset / "arrays" / "teachers").rglob("*.exr"))), len(distinct_targets) * 2)
             self.assertEqual(original_arrays, {name: (dataset / name).read_bytes() for name in original_arrays})
 
     def test_existing_variant_enable_is_noop_or_metadata_only_without_inference(self):
@@ -111,6 +120,90 @@ class DatasetTeacherTests(unittest.TestCase):
             self.assertFalse(after["samples"][0]["excluded"])
             self.assertEqual(after["samples"][0]["split"], sample["split"])
             self.assertFalse(list(dataset.parent.glob(".teacher-generation-*")))
+
+    def test_relative_model_does_not_compute_an_unrequested_meter_scale(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset, before = self._dataset(Path(directory))
+            calls, closed = [], []
+            with patch("ipde.learned_depth.LearnedDepthPredictor", self._factory(calls, closed)), \
+                    patch("ipde.pseudo_calibration.anchor_relative_depth", side_effect=AssertionError("unrequested scale calculation")):
+                result = generate_teacher(dataset, [before["samples"][0]["id"]], LearnedDepthConfig(model="depth-anything-3"))
+            after = load_dataset(dataset)
+            added = next(sample for sample in after["samples"] if sample["id"] == result["generated_samples"][0])
+            self.assertEqual(added["display_teacher"]["units"], "relative_depth")
+            self.assertEqual(added["training_target_choice"], "display_teacher")
+            self.assertNotIn("anchored_display_teacher", added)
+            self.assertEqual([model for model, _, _ in calls], ["depth-anything-3"])
+
+    def test_regeneration_replaces_the_same_row_and_preserves_rgb_splits_and_existing_arrays(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset, before = self._dataset(Path(directory))
+            sample = before["samples"][0]
+            existing = {record["path"]: (dataset / record["path"]).read_bytes() for record in _array_records(before["samples"])}
+            calls, closed = [], []
+            with patch("ipde.learned_depth.LearnedDepthPredictor", self._factory(calls, closed)):
+                result = generate_teacher(dataset, [sample["id"]], LearnedDepthConfig(), regenerate=True)
+            after = load_dataset(dataset)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(result["generated_samples"], [sample["id"]])
+            self.assertEqual([item["id"] for item in after["samples"]], [item["id"] for item in before["samples"]])
+            for key in ("source_path", "source_sha256", "rgb", "right_rgb", "display_rgb", "group_id", "split"):
+                self.assertEqual(after["samples"][0][key], sample[key])
+            self.assertEqual(existing, {path: (dataset / path).read_bytes() for path in existing})
+
+    def test_regenerating_an_excluded_result_does_not_include_it_in_training(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset, before = self._dataset(Path(directory))
+            sample = before["samples"][0]
+            sample["excluded"] = True
+            (dataset / "dataset.json").write_text(json.dumps(before))
+            calls, closed = [], []
+            with patch("ipde.learned_depth.LearnedDepthPredictor", self._factory(calls, closed)):
+                generate_teacher(dataset, [sample["id"]], LearnedDepthConfig(), regenerate=True)
+            after = load_dataset(dataset)
+            self.assertTrue(after["samples"][0]["excluded"])
+            self.assertEqual(after["samples"][0]["split"], sample["split"])
+            self.assertEqual(len(after["samples"]), len(before["samples"]))
+
+    def test_old_discarded_raw_prediction_regenerates_without_an_extra_sample(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset, before = self._dataset(Path(directory))
+            sample = before["samples"][0]
+            sample["original_teacher_provenance"] = {"payload_retained": False}
+            (dataset / "dataset.json").write_text(json.dumps(before))
+            calls, closed = [], []
+            with patch("ipde.learned_depth.LearnedDepthPredictor", self._factory(calls, closed)):
+                result = generate_teacher(dataset, [sample["id"]], LearnedDepthConfig())
+            after = load_dataset(dataset)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(result["generated_samples"], [sample["id"]])
+            self.assertEqual(len(after["samples"]), len(before["samples"]))
+            self.assertNotIn("original_teacher_provenance", after["samples"][0])
+
+    def test_next_display_rgb_is_verified_while_current_photo_predicts(self):
+        from ipde.dataset_review import _verified_array
+        with tempfile.TemporaryDirectory() as directory:
+            dataset, manifest = self._dataset(Path(directory), model="depth-anything-v2")
+            first_ready, second_ready = threading.Event(), threading.Event()
+            reads, calls, closed = [], [], []
+            main_thread = threading.get_ident()
+            def read(root, record):
+                result = _verified_array(root, record)
+                reads.append(threading.get_ident())
+                (first_ready if len(reads) == 1 else second_ready).set()
+                return result
+            predictor = self._factory(calls, closed, hook=lambda: self.assertTrue(second_ready.wait(3)))
+            def create(config):
+                self.assertTrue(first_ready.wait(3), "first image should load concurrently with model initialization")
+                return predictor(config)
+            with patch("ipde.dataset_teachers._verified_array", side_effect=read), \
+                    patch("ipde.learned_depth.LearnedDepthPredictor", side_effect=create):
+                generate_teacher(dataset, [sample["id"] for sample in manifest["samples"][:2]],
+                                 LearnedDepthConfig(model="depth-anything-3"), workers=2)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(reads), 2)
+            self.assertTrue(all(identity != main_thread for identity in reads))
+            self.assertEqual(closed, ["depth-anything-3"])
 
     def test_off_deletes_unused_depth_keeps_core_and_restore_regenerates_same_row(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -259,7 +352,8 @@ class DatasetTeacherTests(unittest.TestCase):
             (dataset / "dataset.json").write_text(json.dumps(manifest))
             calls, closed = [], []
             with patch("ipde.learned_depth.LearnedDepthPredictor", self._factory(calls, closed)):
-                result = generate_teacher(dataset, [manifest["samples"][0]["id"]], LearnedDepthConfig(model="depth-anything-v2"))
+                result = generate_teacher(dataset, [manifest["samples"][0]["id"]], LearnedDepthConfig(model="depth-anything-v2"),
+                                          metric_anchor=LearnedDepthConfig(model="depthpro"))
             added = next(sample for sample in load_dataset(dataset)["samples"] if sample["id"] == result["generated_samples"][0])
             self.assertEqual(added["display_teacher"]["units"], "relative_inverse_depth")
             self.assertEqual(added["anchored_display_teacher"]["units"], "meters")

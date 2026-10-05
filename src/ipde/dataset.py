@@ -35,6 +35,16 @@ class DatasetError(RuntimeError):
     """A dataset could not be built without losing alignment or provenance."""
 
 
+def require_dataset_teacher(model: str) -> None:
+    """Keep expensive Depth Anything inference out of dataset generation."""
+    if model != "depthpro":
+        raise DatasetError(
+            "Depth Anything generation is temporarily disabled for datasets because full-resolution "
+            "processing takes many minutes per photo. Use DepthPro for datasets. DA3 and DA2 remain "
+            "available for individual exports in Extractor; existing dataset maps remain usable."
+        )
+
+
 class _TeacherModelLoadError(DatasetError):
     """A shared model load failure is handled once for the whole phase."""
 
@@ -207,6 +217,8 @@ def build_dataset(
 ) -> dict[str, Any]:
     """Hold generation ownership for CLI and direct Python callers alike."""
     from .resource_lock import resource_lock
+    for teacher in (options.teacher, *options.additional_teachers):
+        require_dataset_teacher(teacher.model)
     destination = Path(output_dir).expanduser().resolve()
     with resource_lock(destination / ".ipde-generation-owner"):
         return _build_dataset(sources, destination, options, **kwargs)

@@ -31,13 +31,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-npy", action="store_true", help="omit exact NumPy array companions")
     parser.add_argument("--manifest", action="store_true", help="also write a provenance JSON manifest (off by default)")
     parser.add_argument("--learned-depth", action="store_true",
-                        help="include AI depth in inspection; without --select export full display and native model predictions as float32 EXR")
-    parser.add_argument("--learned-model", choices=("depthpro", "depth-anything-v2", "depth-anything-3"), default="depthpro")
+                        help="include DepthPro, DA3 and DA2 in inspection; without --select export the selected model's full display depth as float32 EXR")
+    parser.add_argument("--learned-model", choices=("depthpro", "depth-anything-v2", "depth-anything-3"), default="depthpro",
+                        help="DepthPro by default; individual full-resolution DA3/DA2 exports can take many minutes")
     parser.add_argument("--learned-model-path", type=Path)
     parser.add_argument("--learned-source-dir", type=Path)
+    parser.add_argument("--learned-model-settings", type=json.loads, default={}, metavar="JSON",
+                        help="per-model local model_path and source_dir settings for checked AI sources")
     parser.add_argument("--learned-device", choices=("auto", "cpu", "mps", "cuda"), default="auto")
-    parser.add_argument("--learned-input-size", type=int, default=1036,
-                        help="V2 shortest side / DA3 longest side (default 1036); 0 requests native input, subject to DA3's patch limit")
+    parser.add_argument("--learned-input-size", type=int, default=0,
+                        help="V2 shortest side / DA3 longest side; default 0 processes the full display image")
     parser.add_argument(
         "--no-metric-depth",
         action="store_true",
@@ -152,8 +155,16 @@ def _backend_response(operation, *args, **kwargs):
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if (not isinstance(args.learned_model_settings, dict)
+            or any(model not in ("depthpro", "depth-anything-v2", "depth-anything-3")
+                   or not isinstance(settings, dict)
+                   or any(key not in ("model_path", "source_dir") or not isinstance(value, str)
+                          for key, value in settings.items())
+                   for model, settings in args.learned_model_settings.items())):
+        _parser().error("--learned-model-settings must map built-in models to local model_path/source_dir strings")
     selections = tuple(args.select) if args.select is not None else (
-        ("learned-display-depth", "learned-display-native") if args.learned_depth else None)
+        ({"depthpro": "learned-depthpro", "depth-anything-3": "learned-da3",
+          "depth-anything-v2": "learned-da2"}[args.learned_model],) if args.learned_depth else None)
     include_learned = args.learned_depth or bool(selections and any(key.startswith("learned-") for key in selections))
     failed = False
     for source in args.sources:
@@ -190,6 +201,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         learned_model=args.learned_model,
                         learned_model_path=args.learned_model_path,
                         learned_source_dir=args.learned_source_dir,
+                        learned_model_settings=args.learned_model_settings,
                         learned_device=args.learned_device,
                         learned_input_size=args.learned_input_size,
                         write_learned_depth=args.learned_depth,
