@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ipde"
-version = "0.9.0"
+version = "0.9.1"
 description = "Precision-preserving HEIF depth and auxiliary image extractor"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -5,6 +5,11 @@ BUILD_DIR ?= build
 BUILD_TYPE ?= Release
 DESTDIR ?= /
 CMAKE_ARGS ?=
+ifeq ($(shell uname -s),Darwin)
+# Reset the previous kit's default on every configure. CMAKE_ARGS follows this
+# option so an explicit deployment target still takes precedence.
+MACOS_CMAKE_ARGS = -DCMAKE_OSX_DEPLOYMENT_TARGET="$(MACOSX_DEPLOYMENT_TARGET)"
+endif
 
 .PHONY: setup configure build package install gui studio test smoke clean
 
@@ -18,9 +23,10 @@ setup:
 
 configure:
 	cmake -S . -B $(BUILD_DIR) -G Ninja \
+		-U 'Qt6*_DIR' -U IPDE_QT_OFFSCREEN -U IPDE_MACDEPLOYQT \
 		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
 		-DCMAKE_PREFIX_PATH="$(QT_CMAKE)" \
-		-DIPDE_PYTHON_EXECUTABLE="$(PYTHON)" $(CMAKE_ARGS)
+		-DIPDE_PYTHON_EXECUTABLE="$(PYTHON)" $(MACOS_CMAKE_ARGS) $(CMAKE_ARGS)
 
 build: configure
 	cmake --build $(BUILD_DIR)

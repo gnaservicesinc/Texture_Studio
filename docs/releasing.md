@@ -54,9 +54,15 @@ require an account with permission to write there.
 can be overridden for another development installation. Qt is otherwise
 discovered from installed `/opt/Qt/6.*/macos` versions.
 The release workflow pins Qt 6.11.1. A newer Qt may require a newer macOS
-version: [Qt 6.12 requires macOS 14.4](https://doc.qt.io/qt-6.12/macos.html). When building with that version, set
-`CMAKE_ARGS=-DCMAKE_OSX_DEPLOYMENT_TARGET=14.4` so the app declares its actual
-minimum. The audit deliberately rejects a bundle claiming an older minimum
+version: [Qt 6.12 requires macOS 14.4](https://doc.qt.io/qt-6.12/macos.html).
+`make build` automatically selects the greater of Qt's supported minimum and
+the bundled Python runtime's macOS 14.0 minimum. It refreshes cached Qt paths
+and the automatic target when selecting another installed kit. The compiler,
+Swift helper, About information and app plists use the same selected target.
+An explicit `CMAKE_ARGS=-DCMAKE_OSX_DEPLOYMENT_TARGET=14.4` overrides automatic
+selection; an incompatible target is rejected during configuration. The release
+workflow retains Qt 6.11.1 and its explicit 14.0 target. Direct CMake users can
+reset a cached automatic target with `-DCMAKE_OSX_DEPLOYMENT_TARGET=`. The audit deliberately rejects a bundle claiming an older minimum
 than one of its libraries supports.
 
 ## GitHub Actions

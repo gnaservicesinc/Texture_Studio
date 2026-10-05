@@ -22,6 +22,19 @@ def thin(minimum: tuple[int, int, int], *, endian: str = "<") -> bytes:
 
 
 class MacOSPackagingTests(unittest.TestCase):
+    def test_universal_library_self_identifier_is_relocated_once(self):
+        identifier = "/Library/Frameworks/Python.framework/Versions/3.14/Python"
+        listings = (f"Python:\n{identifier}\n",
+                    f"Python (architecture x86_64):\n{identifier}\nPython (architecture arm64):\n{identifier}\n")
+        for listing in listings:
+            with self.subTest(listing=listing), patch.object(bundle_macos, "run", return_value=listing):
+                self.assertEqual(bundle_macos.library_id(Path("Python")), identifier)
+        with patch.object(bundle_macos, "run", return_value="Executable:\n"):
+            self.assertIsNone(bundle_macos.library_id(Path("Executable")))
+        with patch.object(bundle_macos, "run", return_value="Library (architecture x86_64):\n/one\nLibrary (architecture arm64):\n/two\n"):
+            with self.assertRaisesRegex(RuntimeError, "Inconsistent library install names"):
+                bundle_macos.library_id(Path("Library"))
+
     def test_every_universal_slice_contributes_to_required_os(self):
         arm, intel = thin((14, 0, 0)), thin((15, 1, 0), endian=">")
         offset = 48

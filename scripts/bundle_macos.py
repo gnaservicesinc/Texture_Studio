@@ -105,7 +105,13 @@ def dependencies(path: Path) -> list[str]:
 
 def library_id(path: Path) -> str | None:
     lines = run("otool", "-D", path, capture=True).splitlines()
-    return lines[1] if len(lines) == 2 else None
+    # Universal binaries repeat the filename/architecture header and install
+    # name for each slice. Treat their shared name as one ID, so it can be
+    # relocated rather than mistaken for a dependency on the build machine.
+    identifiers = {line.strip() for line in lines[1:] if line.strip() and not line.rstrip().endswith(":")}
+    if len(identifiers) > 1:
+        raise RuntimeError(f"Inconsistent library install names across architectures: {path}")
+    return next(iter(identifiers), None)
 
 
 def rpaths(path: Path) -> list[str]:

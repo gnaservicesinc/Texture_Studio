@@ -1,17 +1,28 @@
 cmake_minimum_required(VERSION 3.24)
-if(CMAKE_HOST_APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Minimum supported macOS version" FORCE)
-endif()
-project(IPDE VERSION 0.9.0 LANGUAGES CXX)
-if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "14.0")
-    message(FATAL_ERROR "The bundled PyTorch runtime requires macOS 14.0 or later")
-endif()
+project(IPDE VERSION 0.9.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS Widgets Network)
+if(APPLE)
+    include(cmake/MacOSDeployment.cmake)
+    ipde_select_macos_deployment(IPDE_SELECTED_MACOS_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "${IPDE_SELECTED_MACOS_TARGET}"
+        CACHE STRING "Minimum supported macOS version; empty selects the Qt/runtime minimum" FORCE)
+    message(STATUS "IPDE macOS deployment target: ${CMAKE_OSX_DEPLOYMENT_TARGET} (Qt ${Qt6_VERSION})")
+    execute_process(COMMAND xcrun --sdk macosx --show-sdk-version
+        OUTPUT_VARIABLE IPDE_MACOS_SDK_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE IPDE_MACOS_SDK_RESULT ERROR_VARIABLE IPDE_MACOS_SDK_ERROR)
+    set(IPDE_REQUIRED_MACOS_SDK "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    if(QT_SUPPORTED_MIN_MACOS_SDK_VERSION VERSION_GREATER IPDE_REQUIRED_MACOS_SDK)
+        set(IPDE_REQUIRED_MACOS_SDK "${QT_SUPPORTED_MIN_MACOS_SDK_VERSION}")
+    endif()
+    if(NOT IPDE_MACOS_SDK_RESULT EQUAL 0 OR IPDE_MACOS_SDK_VERSION VERSION_LESS IPDE_REQUIRED_MACOS_SDK)
+        message(FATAL_ERROR "Qt ${Qt6_VERSION} and target ${CMAKE_OSX_DEPLOYMENT_TARGET} require macOS SDK ${IPDE_REQUIRED_MACOS_SDK} or newer; detected '${IPDE_MACOS_SDK_VERSION}'. ${IPDE_MACOS_SDK_ERROR}")
+    endif()
+endif()
 qt_standard_project_setup()
 
 # Development formats may change until 1.0.0. This same version is used in
