@@ -1,4 +1,6 @@
 # Byte-compiled / optimized / DLL files
+out/native-material-tools/
+out/native-map-inspection/
 __pycache__/
 *.py[codz]
 *$py.class
@@ -9,6 +11,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+build-*/
 develop-eggs/
 dist/
 downloads/
@@ -219,3 +222,8 @@ __marimo__/
 
 # macOS Finder metadata
 .DS_Store
+
+# Local experiments and weights stay out of source publication until Git LFS is configured.
+/out/material-training/
+/out/da3-validation/
+/docs/data/material-fitting-records/

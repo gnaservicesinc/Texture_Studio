@@ -1,4 +1,11 @@
-# Local high-detail depth models
+# Optional Python depth models
+
+This page describes the retained Python extraction and research commands.
+Texture Studio manages DA3-GIANT-1.1 and a separate PyTorch/MPS runtime in its
+**Local Models** window. Its bundled worker is independent of the older research
+source folders and commands below. Optional custom Core ML models are also
+supported. Apple Small V2 and embedded portrait depth are not material sources.
+You can attach a registered exported map where its licensing permits use.
 
 Run the setup script explicitly to install the optional dependencies and download
 revision-pinned model sources/checkpoints. Inference and importing IPDE never
@@ -24,10 +31,9 @@ IPDE's NumPy or replace the installed Torch are not applied.
 | `depth-anything-3` | `/opt/ipde/models/DA3-GIANT-1.1/` | `/opt/ipde/Depth-Anything-3` | Relative depth; smaller values are nearer |
 
 Configure `LearnedDepthConfig(model, model_path, source_dir, device, input_size)`
-or use Extractor's Advanced settings or Dataset Studio's model controls.
-Extractor has exactly three built-in depth sources: **DepthPro**, **DA3** and
-**DA2**. Each saves one raw float32 EXR at the full display-photo dimensions.
-Check one or several sources. Its CLI source IDs are `learned-depthpro`,
+or use the extraction CLI options. Its built-in depth sources are **DepthPro**,
+**DA3** and **DA2**. Each saves one raw float32 EXR at the full display-photo
+dimensions. The CLI source IDs are `learned-depthpro`,
 `learned-da3` and `learned-da2`; `--learned-depth` alone exports the selected
 `--learned-model` (DepthPro by default). For example:
 
@@ -94,4 +100,9 @@ Model licenses differ. Consult [Apple DepthPro](https://huggingface.co/apple/Dep
 [DA3 Giant1.1](https://huggingface.co/depth-anything/DA3-GIANT-1.1) before using
 or redistributing model-derived training outputs/checkpoints.
 
-Dataset Studio temporarily generates DepthPro only. Native DA3 took about 20 minutes for a 5712 × 4284 photo; DA2 also takes minutes. Their single raw display-depth sources remain available for individual Extractor exports with a delay warning. Existing dataset maps remain usable for inspection, export and training.
+The retained dataset CLI generates DepthPro by default. An earlier full-photo
+DA3 check took about 20 minutes for a 5712 × 4284 image; DA2 also took minutes.
+These historical timings explain why Texture Studio bounds model input
+independently of the final texture size. DA3 uses PyTorch/MPS in the native app.
+Existing dataset maps remain usable
+with the retained Python tools.

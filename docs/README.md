@@ -1,9 +1,23 @@
-# Bundled documentation
+# Texture Studio documentation
 
-The Help menu serves `help/` and `manual/` through the application's Qt Network loopback server. The guide works offline with no CDN, analytics, remote scripts or external server installation. Links to GitHub and reference documentation open external sites only when selected. Keep the app running while using its local help address.
+The current desktop app is **Texture Studio**, a standalone SwiftUI app for
+photo-based Blender materials. Start with the repository README and
+[building and releasing](releasing.md).
 
-Update `manual/chapters/*.md` as features change, then run `python3 scripts/build-docs.py`. The script generates `manual/manual.md` and the printable `manual/index.html` using only the Python standard library. These files are checked in so app builds require no Markdown tooling. Run `python3 scripts/build-docs.py --check` to detect stale generated output.
+The [native material tools](native-material-tools.md) provide full-detail map review,
+checkpoint comparisons, crop curation, native 1K/2K training and explicit model export.
 
-Update the approachable guide in `help/index.html`, its interaction logic in `help/help.js`, and styles in `help/style.css`. Each topic has an app-role anchor used by Help menu routing (`studio`, `extractor`, `photo`, `raw`, `datasets`, `trainer`). Keep sentences short, define specialist terms before use, and explain each choice through a concrete outcome. The browser's Print command prints the manual; its HTML and editable Markdown formats are both bundled.
+See the [surface workflow](texture-studio.md) and [material refinement research](material-refinement-research.md)
+for the DA3 backend, depth-to-height conversion and Poly Haven/MatSynth training options.
+The [surface validation record](texture-surface-validation-2026-10-07.md) reports actual
+supplied-photo inference, EXR checks and Blender Cycles renders.
+The [training data contract](material-training-data.md) defines original 16-bit targets,
+curated native-resolution crops and separate disk/compute precision.
+The [automated preparation and training workflow](material-training-workflow.md)
+provides the crop, naming, metadata, verification and native-height pilot commands.
 
-When a feature changes, update its manual chapter, guide topic, glossary and interactive calculation where applicable. Verify link targets, calculator arithmetic, keyboard access and a narrow-screen layout. Numerical examples must state the native camera grid, label units, whether values are estimated/measured, and whether resampling is involved. Keep release compatibility guidance in sync with the release policy.
+The [legacy documentation](legacy/README.md) records the retired Qt studio
+interfaces. It does not describe the native app or its build requirements.
+Scientific extraction and training audits remain useful references for the
+retained Python command-line tools; those tools do not communicate with Texture
+Studio automatically.
