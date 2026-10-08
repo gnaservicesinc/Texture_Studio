@@ -116,7 +116,7 @@ actor TextureEngine {
                  attachedDepth: TextureDepth? = nil) async throws -> MaterialResult {
         guard let device else { throw TextureError.missingMetal }
         try Task.checkCancellation()
-        try validate(settings, source:source, device: device)
+        try validate(settings, source:source, attachedDepth:attachedDepth, device:device)
         let kernels = try loadKernels()
         let extent = source.orientedImage.extent
         let focal = settings.focalLengthPixels ?? source.camera.focalLength35mm.map {
@@ -182,9 +182,10 @@ actor TextureEngine {
                 depthOrigin = selected.sourceLabel
                 warnings.append("Selected material-checkpoint height keeps its learned range and amplitude. Perspective/crop and explicit relief contrast apply; camera-depth normalization, plane removal and depth cleanup are bypassed.")
             } else {
-            // Cleanup stays at the source prediction's scale, bounded to 2048 per side;
-            // 8K export resamples that height rather than inventing model detail.
-            let side=min(settings.outputSize,2048,max(64,Int(ceil(max(selected.image.extent.width,selected.image.extent.height)))))
+            // Keep existing prediction detail through cleanup. The working-memory
+            // estimate accounts for these float buffers instead of silently
+            // reducing every 4K/8K source prediction to a 2K grid.
+            let side=Self.depthCleanupSide(outputSize:settings.outputSize, depthExtent:selected.image.extent)
             let depth=transform(aligned,corners:corners,crop:crop,size:side)
             var values=[Float](repeating:0,count:side*side)
             values.withUnsafeMutableBytes { dataContext.render(depth,toBitmap:$0.baseAddress!,rowBytes:side*4,
@@ -220,7 +221,7 @@ actor TextureEngine {
         if Double(settings.outputSize) > crop.width {
             warnings.append("Output exceeds the crop's \(Int(crop.width)) native pixels per side; upsampling adds no source detail.")
         }
-        if settings.outputSize >= 4098 { warnings.append("Large maps are rendered in tiles; preview and ML use smaller images to limit unified memory.") }
+        if settings.outputSize >= 4098 { warnings.append("Export rendering adapts its tile size to available memory. Preview size and the selected ML inference resolution remain independent of the final output size.") }
         if settings.lensDistortion != 0 { warnings.append("Manual radial lens correction uses a safe centre zoom; it is not a calibrated lens profile.") }
         let heightCandidate = attachedDepth?.interpretation == .surfaceHeight && settings.heightDetail == 0
             ? baseHeight : kernels.height.apply(extent:output, arguments:[baseHeight,linearDiffuse,lowPhoto,settings.heightDetail])
@@ -341,7 +342,7 @@ actor TextureEngine {
         return published
     }
 
-    private func validate(_ settings: TextureSettings, source: TextureSource, device: MTLDevice) throws {
+    private func validate(_ settings: TextureSettings, source: TextureSource, attachedDepth: TextureDepth?, device: MTLDevice) throws {
         guard TextureSettings.outputSizes.contains(settings.outputSize),
               settings.lensDistortion.isFinite, abs(settings.lensDistortion) <= 0.15,
               [settings.lightingStrength,settings.lightingRadius,settings.noiseReduction,settings.heightStrength,
@@ -357,17 +358,44 @@ actor TextureEngine {
             $0 + UInt64($1.extent.width) * UInt64($1.extent.height)
         } : 0
         let hdrPixels = settings.useHDRGainMap && source.hdrImage != nil ? primaryPixels : 0
-        let estimate = UInt64(settings.outputSize) * UInt64(settings.outputSize) * 48 +
-            (primaryPixels + supportingPixels + hdrPixels) * 16 + 256 * 1024 * 1024
-        let fixedBudget = min(ProcessInfo.processInfo.physicalMemory/3, device.recommendedMaxWorkingSetSize/2)
-        let available = Self.availableMemoryBytes()
-        let budget = min(fixedBudget, available.map { $0 * 3 / 5 } ?? fixedBudget)
+        let cleanupSide = attachedDepth.flatMap {
+            $0.interpretation == .surfaceHeight ? nil :
+                Self.depthCleanupSide(outputSize:settings.outputSize, depthExtent:$0.image.extent)
+        } ?? 0
+        let estimate = Self.workingMemoryEstimate(outputSize:settings.outputSize,
+            sourcePixels:primaryPixels+supportingPixels+hdrPixels, cleanupSide:cleanupSide)
+        let budget = Self.renderMemoryBudget(practicalBytes:MachineResources.current.practicalBytes,
+            metalRecommendedBytes:device.recommendedMaxWorkingSetSize,
+            availableBytes:Self.availableMemoryBytes())
         guard estimate <= budget else {
-            throw TextureError.insufficientResources("This photo and texture size need approximately \(estimate/1024/1024) MiB of working memory; the current safe budget is \(budget/1024/1024) MiB. Reduce output or input photo size, disable supporting/HDR views, or close memory-heavy apps and retry.")
+            throw TextureError.insufficientResources("This photo and texture size need approximately \(estimate/1024/1024) MiB of working memory; the current available render budget is \(budget/1024/1024) MiB. Reduce output or input photo size, disable supporting/HDR views, or close memory-heavy apps and retry.")
         }
     }
 
-    /// A conservative snapshot of free/reclaimable VM pages, refreshed for every render.
+    /// Apple recommends a total Metal working set, not half of that value.
+    /// Keep the machine reserve and other apps' current usage, then allow the
+    /// whole remaining recommended working set rather than applying another
+    /// arbitrary fraction at every layer.
+    static func renderMemoryBudget(practicalBytes:UInt64, metalRecommendedBytes:UInt64,
+                                   availableBytes:UInt64?) -> UInt64 {
+        let recommended = metalRecommendedBytes > 0 ? metalRecommendedBytes : practicalBytes
+        return min(practicalBytes,recommended,availableBytes ?? practicalBytes)
+    }
+
+    static func depthCleanupSide(outputSize:Int, depthExtent:CGRect) -> Int {
+        min(outputSize,max(64,Int(ceil(max(depthExtent.width,depthExtent.height)))))
+    }
+
+    static func workingMemoryEstimate(outputSize:Int, sourcePixels:UInt64, cleanupSide:Int) -> UInt64 {
+        // Six scalar Float32 arrays cover the input, repaired samples, relief,
+        // sorting scratch, and output of the depth-only cleanup path. Include
+        // them in addition to the lazy Core Image/output-writer estimate.
+        let cleanupBytes = UInt64(cleanupSide)*UInt64(cleanupSide)*24
+        return UInt64(outputSize)*UInt64(outputSize)*48 + sourcePixels*16 +
+            cleanupBytes + 256*1024*1024
+    }
+
+    /// A snapshot of free/reclaimable VM pages, refreshed for every render.
     static func availableMemoryBytes() -> UInt64? {
         var statistics = vm_statistics64_data_t()
         var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.stride / MemoryLayout<integer_t>.stride)

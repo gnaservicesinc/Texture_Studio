@@ -10,9 +10,7 @@ struct TrainingWorkbenchView: View {
         store.dataset?.materials.first { $0.id == store.selectedMaterialId }
     }
     private var resourceIssue: String? {
-        if !store.training.memoryGB.isFinite || !(2...30).contains(store.training.memoryGB) {
-            return "Choose a memory cap between 2 and 30 GB."
-        }
+        if let issue = store.resources.trainingMemoryIssue(store.training.memoryGB) { return issue }
         if !store.training.maxMinutes.isFinite || !(1...240).contains(store.training.maxMinutes) {
             return "Choose a time limit between 1 and 240 minutes."
         }
@@ -40,7 +38,7 @@ struct TrainingWorkbenchView: View {
                                           selectedSampleId: $store.selectedSampleId,
                                           nativeSize: Binding(get: { store.training.size }, set: store.selectTrainingSize),
                                           locateCheckpoint: store.chooseCheckpoint,
-                                          disabled: store.isBusy)
+                                          disabled: store.isBusy, resources: store.resources)
                 Divider()
                 WorkbenchRuntimeControls(store: store)
                     .padding(14)
@@ -169,6 +167,7 @@ private struct TrainingConfigurationForm: View {
     @Binding var nativeSize: Int
     let locateCheckpoint: () -> Void
     let disabled: Bool
+    let resources: MachineResources
 
     var body: some View {
         Form {
@@ -276,14 +275,24 @@ private struct TrainingConfigurationForm: View {
             Section("Resource limits") {
                 LabeledContent("Unified memory") {
                     HStack {
-                        TextField("GB", value: $options.memoryGB, format: .number.precision(.fractionLength(0...1)))
+                        TextField("GiB", value: $options.memoryGB, format: .number.precision(.fractionLength(0...1)))
                             .frame(width: 65)
                             .multilineTextAlignment(.trailing)
-                        Text("GB").foregroundStyle(.secondary)
+                        Text("GiB").foregroundStyle(.secondary)
                     }
                 }
-                Slider(value: $options.memoryGB, in: 2...30, step: 1)
-                    .accessibilityLabel("Maximum training memory in gigabytes")
+                Slider(value: $options.memoryGB, in: resources.trainingMemoryRange, step: 0.1)
+                    .accessibilityLabel("Maximum training memory in gibibytes")
+                    .help("The upper limit uses this Mac’s installed unified memory and leaves space for macOS. Training allocates memory as needed; cached inputs avoid repeated decoding.")
+                HStack {
+                    Text("\(resources.physicalGiB, format: .number.precision(.fractionLength(0...1))) GiB installed · up to \(resources.maximumTrainingGiB, format: .number.precision(.fractionLength(0...1))) GiB for training")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Use recommended") { options.memoryGB = resources.defaultTrainingGiB }
+                        .help("Use the recommended \(resources.defaultTrainingGiB.formatted(.number.precision(.fractionLength(0...1)))) GiB ceiling for this Mac.")
+                }
+                Text("Training uses memory as needed, up to this ceiling. The recommendation uses Metal’s working-set guidance and leaves \(resources.reservedGiB, format: .number.precision(.fractionLength(0...1))) GiB for macOS. A higher ceiling helps jobs that reach the limit; input caching uses spare capacity to reduce repeated work.")
+                    .font(.caption).foregroundStyle(.secondary)
                 LabeledContent("Time limit") {
                     HStack {
                         TextField("Minutes", value: $options.maxMinutes, format: .number.precision(.fractionLength(0)))

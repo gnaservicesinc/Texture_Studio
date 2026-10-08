@@ -212,6 +212,35 @@ final class TrainingPreparationTests: XCTestCase {
         XCTAssertEqual(recorder.arguments.count, 1)
     }
 
+    func test64GiBResourceCeilingIsAcceptedAndPassedExactlyToTrainingAndResume() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let recorder = WorkerRecorder()
+        let resources = MachineResources(physicalBytes: 64 * MachineResources.gibibyte,
+                                         metalRecommendedBytes: 52 * MachineResources.gibibyte)
+        let store = fixture.store(resources: resources) { args, _ in
+            recorder.arguments.append(args)
+            return args.first == "dataset" ? try fixture.result(size: 1024) : "finished\n"
+        }
+        XCTAssertEqual(store.training.memoryGB, 51.2, accuracy: 0.000_001)
+        try await store.loadDataset(fixture.original)
+        store.training.memoryGB = 56
+        XCTAssertNil(store.trainingConfigurationIssue)
+        store.startTraining()
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(value("--max-driver-bytes", in: try XCTUnwrap(recorder.arguments.last)), "60129542144")
+        store.resumeTraining(from: fixture.root.appendingPathComponent("checkpoint.latest.pt"))
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(value("--max-driver-bytes", in: try XCTUnwrap(recorder.arguments.last)), "60129542144")
+        store.training.memoryGB = 64
+        let count = recorder.arguments.count
+        store.startTraining()
+        XCTAssertNotNil(store.error)
+        XCTAssertEqual(recorder.arguments.count, count)
+    }
+
     func testReviewRequirementAppliesToSelectedMaterialsBeforeLaunching() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
@@ -272,7 +301,7 @@ final class TrainingPreparationTests: XCTestCase {
         XCTAssertEqual(args.first, "resume")
         XCTAssertEqual(value("--resume-checkpoint", in: args), checkpoint.path)
         XCTAssertEqual(value("--updates-per-crop", in: args), "900")
-        XCTAssertEqual(value("--max-driver-bytes", in: args), "12000000000")
+        XCTAssertEqual(value("--max-driver-bytes", in: args), "12884901888")
         for flag in ["--dataset", "--expected-size", "--target", "--warm-start"] { XCTAssertFalse(args.contains(flag)) }
         XCTAssertTrue(store.lastOutputURL?.lastPathComponent.hasPrefix("resumed-material-run-") == true)
         XCTAssertFalse(store.isResumingTraining)
@@ -376,8 +405,8 @@ final class TrainingPreparationTests: XCTestCase {
         preferences.removePersistentDomain(forName: suite)
         try? FileManager.default.removeItem(at: root)
     }
-    func store(worker: @escaping @MainActor ([String], String) async throws -> String) -> WorkbenchStore {
-        let result = WorkbenchStore(preferences: preferences, workerOverride: worker)
+    func store(resources: MachineResources = .current, worker: @escaping @MainActor ([String], String) async throws -> String) -> WorkbenchStore {
+        let result = WorkbenchStore(preferences: preferences, resources: resources, workerOverride: worker)
         result.workspacePath = root.path
         return result
     }

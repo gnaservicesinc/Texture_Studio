@@ -29,6 +29,7 @@ from frozen_dino_height import CODE_HASHES, CODE_REVISION, MODEL_REVISION, encod
 from material_height_model import squared_objective
 from probe_material_adapters import MAX_DRIVER_BYTES, ROOT, base_fingerprint, differentiable_features, install_adapters, load_checked_head, load_frozen_encoder, optimizer_tensor_bytes, synchronize
 from train_material_height import choose_device, digest, find_samples, load_pair, memory, save_prediction, write_json
+from material_resources import configure_training_resources, resolve_training_budget
 
 SCHEMA = "texture-studio-four-material-adaptation-diagnostic-v1"
 ARTIFACT_BUDGET = 220 * 1024**2
@@ -79,12 +80,14 @@ def verify_selected_files(expected: dict[str, str]) -> None:
 def run(args: argparse.Namespace, encoder_loader: Callable = load_frozen_encoder, head_loader: Callable = load_checked_head, encoder_contract: tuple[int, int] = (768, 12)) -> dict[str, Any]:
     if args.device == "mps" and os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") == "1":
         raise ValueError("MPS adaptation refuses CPU fallback")
-    if not 16 <= args.expected_size <= 1024 or not 0 < args.max_minutes <= 12 or not 0 < args.max_driver_bytes <= MAX_DRIVER_BYTES or args.evaluate_every < 1 or args.checkpoint_every < 1:
-        raise ValueError("Use native ≤1K, a positive time limit of at most 12 minutes per variant, driver ≤30 GB and positive intervals")
+    if not 16 <= args.expected_size <= 1024 or not 0 < args.max_minutes <= 12 or args.evaluate_every < 1 or args.checkpoint_every < 1:
+        raise ValueError("Use native ≤1K, a positive time limit of at most 12 minutes per variant and positive intervals")
     if not 28 <= args.encoder_size <= 518 or args.encoder_size % 14:
         raise ValueError("Encoder working size must be a multiple of 14 between 28 and 518")
     schedule = balanced_schedule(args.updates_per_crop, args.seed)
     device = choose_device(args.device)
+    args.max_driver_bytes, resource_limits = resolve_training_budget(args.max_driver_bytes, device)
+    resource_limits.update(configure_training_resources(args.max_driver_bytes, device))
     index_path = args.dataset / "dataset.json"
     index_bytes = index_path.read_bytes()
     found = find_samples(args.dataset, args.allow_unreviewed)
@@ -122,11 +125,12 @@ def run(args: argparse.Namespace, encoder_loader: Callable = load_frozen_encoder
     implementation = args.output / "implementation"
     implementation.mkdir()
     code_hashes = {}
-    for name in ("diagnose_material_adaptation.py", "probe_material_adapters.py", "frozen_dino_height.py", "diagnose_material_curriculum.py", "diagnose_material_fit.py", "material_height_model.py", "train_material_height.py", "material_dataset.py"):
+    for name in ("diagnose_material_adaptation.py", "material_resources.py", "probe_material_adapters.py", "frozen_dino_height.py", "diagnose_material_curriculum.py", "diagnose_material_fit.py", "material_height_model.py", "train_material_height.py", "material_dataset.py"):
         path = Path(__file__).parent / name
         (implementation / name).write_bytes(path.read_bytes())
         code_hashes[name] = digest(path)
     report: dict[str, Any] = {"schema": SCHEMA, "scope": "Matched four-material frozen-versus-LoRA experiment; unseen regions of known materials", "fresh_material_generalization_tested": False, "production_promotion": False, "materials": list(MATERIALS), "source_images_modified": False, "target_rescaled": False, "target_encoding": "Raw uint16 codes / 65535 into active Float32; no gamma or per-crop range normalization", "native_dimensions": [args.expected_size, args.expected_size], "encoder_dimensions": [args.encoder_size, args.encoder_size], "encoder_resize_only": True, "no_augmentation": True, "warm_start_bias": "Both heads already trained 300 times on white_stucco_02_auto_001; this favors stucco and is not training from scratch", "dataset_index_sha256_at_selection": index_hash, "selected_files_sha256": source_files, "sample_crop_rectangles_top_left_xywh": {sample["metadata"]["sample_id"]: sample["metadata"]["crop_rectangle_top_left_xywh"] for sample in training + validation}, "loss_valid_pixel_fractions": {sample["metadata"]["sample_id"]: sample["loss_valid_pixel_fraction"] for sample in training + validation}, "schedule": schedule, "schedule_sha256": hashlib.sha256(json.dumps(schedule, separators=(",", ":")).encode()).hexdigest(), "requested_updates_per_crop": args.updates_per_crop, "requested_steps_per_variant": len(schedule), "seed": args.seed, "head_learning_rate": 0.001, "adapter_learning_rate": 0.0001, "head_weight_decay": 1e-4, "adapter_weight_decay": 0.0, "objective": "relative_squared", "selection": "Minimum actual mean known-region relative-squared sum among initial and complete evaluated snapshots; all four regions equally weighted", "checkpoint_every_steps": args.checkpoint_every, "evaluate_every_steps": args.evaluate_every, "max_minutes_per_variant_soft_guard": args.max_minutes, "max_driver_bytes_soft_guard": args.max_driver_bytes, "soft_guard_limits": "Sampled before/after forwards, before backward and after optimizer; cannot predict an in-flight allocation peak", "artifact_budget_bytes": ARTIFACT_BUDGET, "checkpoint_budget_bytes": CHECKPOINT_BUDGET, "device": str(device), "torch_version": str(torch.__version__), "implementation_sha256": code_hashes, "variants": {}, "cancelled": False}
+    report["resources"] = resource_limits
     write_json(args.output / "run.json", report)
     encoder, encoder_info = encoder_loader(args.model_directory, args.code_directory, device)
     initial_head, head_info = head_loader(args.head_checkpoint, torch.device("cpu"))
@@ -410,7 +414,7 @@ def main() -> None:
     parser.add_argument("--evaluate-every", type=int, default=400)
     parser.add_argument("--checkpoint-every", type=int, default=100)
     parser.add_argument("--max-minutes", type=float, default=12)
-    parser.add_argument("--max-driver-bytes", type=int, default=MAX_DRIVER_BYTES)
+    parser.add_argument("--max-driver-bytes", type=int, default=None, help="Memory budget in bytes; default adapts to physical/Metal memory with OS headroom")
     parser.add_argument("--device", choices=("mps", "cpu"), default="mps")
     parser.add_argument("--allow-unreviewed", action="store_true")
     parser.add_argument("--mask-transparent-input", action="store_true")

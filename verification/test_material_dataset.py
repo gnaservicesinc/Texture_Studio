@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import struct
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -15,6 +16,7 @@ import zlib
 import numpy as np
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "material_dataset.py"
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("material_dataset", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
@@ -604,6 +606,24 @@ class MaterialPreparationTests(unittest.TestCase):
             MODULE.prepare_region_splits(self.output, self.sources, 2, material_ids=["first"])
         self.assertEqual((self.output / "dataset.json").read_bytes(), before)
         self.assertEqual(MODULE.prepare_region_splits(self.output, self.sources, 2, material_ids=["second"])["new_sample_count"], 0)
+
+    def test_region_preparation_decodes_each_parent_once_for_all_native_crops(self):
+        self.material(shape=(8, 8))
+        original_decoder = MODULE.read_png
+        parent_decodes = []
+        def count_parent_reads(path):
+            if Path(path).resolve().is_relative_to(self.sources.resolve()):
+                parent_decodes.append(Path(path).resolve())
+            return original_decoder(path)
+        with mock.patch.object(MODULE, "read_png", side_effect=count_parent_reads):
+            report = MODULE.prepare_region_splits(self.output, self.sources, 2)
+        self.assertEqual(report["sample_count"], 3)
+        self.assertEqual(len(parent_decodes), 5)
+        self.assertEqual(len(set(parent_decodes)), 5)
+        index = json.loads((self.output / "dataset.json").read_text())
+        self.assertEqual([entry["split"] for entry in index["samples"]], ["train", "train", "validation"])
+        for entry in index["samples"]:
+            self.assertEqual(MODULE.verify_sample(self.output / entry["path"], True), [])
 
     def test_unknown_material_selection_fails_before_creating_dataset(self):
         self.material()

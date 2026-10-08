@@ -205,28 +205,29 @@ def recover_cache_reviews(dataset: Path, proof: dict) -> tuple[dict, dict]:
 
 
 def available_memory() -> int:
-    """Read reclaimable memory without adding a runtime dependency."""
-    import re
-    import subprocess
-    if sys.platform == "darwin":
-        try:
-            text = subprocess.run(["/usr/bin/vm_stat"], capture_output=True, text=True, check=True, timeout=5).stdout
-            page = int(re.search(r"page size of (\d+) bytes", text)[1])
-            fields = {name:int(value) for name, value in re.findall(r"^(Pages [^:]+):\s+(\d+)", text, re.MULTILINE)}
-            return page * sum(fields.get(name, 0) for name in ("Pages free", "Pages inactive", "Pages speculative"))
-        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
-            return 2*1024**3
-    try:
-        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
-    except (ValueError, OSError):
-        return 2*1024**3
+    """Use the shared resource detector, without loading an ML runtime."""
+    from material_resources import available_memory_bytes
+    return available_memory_bytes()
+
+
+def preparation_resources(materials: dict, size: int) -> dict:
+    from material_resources import os_reserve_bytes, physical_memory_bytes
+    physical = physical_memory_bytes()
+    available = available_memory()
+    reserve = os_reserve_bytes(physical)
+    # One worker holds one parent, its decoder/channel-order buffers and the
+    # active crop/round-trip verification. Paired roles are decoded in turn.
+    peak = max((max(d["source"]["width"] * d["source"]["height"] * d["source"]["channels"] * (d["source"]["sample_bits"] // 8) for d in material["maps"].values()) * 4 + size*size*64 for material in materials.values()), default=512*1024**2)
+    budget = max(0, available - reserve)
+    return {"physical_memory_bytes": physical, "available_memory_bytes": available,
+            "system_reserve_bytes": reserve, "working_memory_budget_bytes": budget,
+            "estimated_worker_peak_bytes": peak, "logical_cpu_count": os.cpu_count() or 1}
 
 
 def worker_count(materials: dict, size: int, requested: int | None = None) -> int:
-    available = available_memory()
-    peak = max((max(d["source"]["width"] * d["source"]["height"] * d["source"]["channels"] * (d["source"]["sample_bits"] // 8) for d in material["maps"].values()) * 4 + size*size*64 for material in materials.values()), default=512*1024**2)
-    budget = min(12*1024**3, available//3)
-    hardware = max(1, min(8, os.cpu_count() or 1, len(materials), max(1, budget//max(peak, 1))))
+    resources = preparation_resources(materials, size)
+    hardware = max(1, min(resources["logical_cpu_count"], len(materials),
+                         max(1, resources["working_memory_budget_bytes"] // max(resources["estimated_worker_peak_bytes"], 1))))
     if requested is not None and (type(requested) is not int or requested < 1):
         raise ValueError("Crop worker count must be positive")
     return hardware if requested is None else min(hardware, requested)
@@ -359,8 +360,8 @@ def prepare_from_records(dataset: Path, index: dict, records: list[tuple[dict, P
         cancellation = threading.Event()
         started = time.monotonic()
         count = worker_count(materials, size, workers)
-        info.update(worker_count=count, png_compression=3)
-        print(json.dumps({"event":"native_preparation_started", "workers":count, "png_compression":3, "materials":len(materials)}), file=sys.stderr, flush=True)
+        info.update(worker_count=count, png_compression=3, resources=preparation_resources(materials, size))
+        print(json.dumps({"event":"native_preparation_started", "workers":count, "png_compression":3, "materials":len(materials), "resources":info["resources"]}), file=sys.stderr, flush=True)
         def prepare_material(material_id):
             material = materials[material_id]
             if cancellation.is_set(): raise InterruptedError("Crop preparation stopped")
@@ -436,6 +437,12 @@ def prepare_from_records(dataset: Path, index: dict, records: list[tuple[dict, P
                     sample.update(prior["fields"])
                 write_json(folder / "sample.json", sample)
             return [sample for _folder, sample in prepared]
+        # Multiple materials already occupy the CPU cores. A second OpenCV
+        # pool per material would multiply thread counts instead of throughput.
+        import cv2
+        previous_opencv_threads = cv2.getNumThreads()
+        if count > 1:
+            cv2.setNumThreads(1)
         pool = ThreadPoolExecutor(max_workers=count, thread_name_prefix="native-crop")
         futures = []
         try:
@@ -447,6 +454,8 @@ def prepare_from_records(dataset: Path, index: dict, records: list[tuple[dict, P
             cancellation.set()
             for future in futures: future.cancel()
             pool.shutdown(wait=True, cancel_futures=True)
+            if count > 1:
+                cv2.setNumThreads(previous_opencv_threads)
         output_records.sort(key=lambda sample: sample["sample_id"])
         info["elapsed_seconds"] = round(time.monotonic()-started, 3)
         derived_index = dict(index, crop_size=size, samples=[{k: s[k] for k in ("sample_id", "material_id", "split", "status")} | {"path": "samples/" + s["sample_id"]} for s in output_records],

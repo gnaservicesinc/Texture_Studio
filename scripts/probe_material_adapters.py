@@ -25,12 +25,13 @@ from torch.nn import functional as F
 from diagnose_material_curriculum import cpu_tree, save_checkpoint_atomic
 from frozen_dino_height import ARCHITECTURE as HEAD_ARCHITECTURE, CODE_HASHES, CODE_REVISION, DIAGNOSTIC_SCHEMA as HEAD_SCHEMA, MODEL_REVISION, MODEL_SHA256, ConditionedHeightNet, encoder_input, file_sha256, load_frozen_encoder, state_sha256
 from material_height_model import squared_objective
+from material_resources import configure_training_resources, resolve_training_budget, training_resources
 from train_material_height import choose_device, digest, find_samples, load_pair, memory, write_json
 
 SCHEMA = "texture-studio-material-adapter-feasibility-v1"
 HEAD_SHA256 = "9c6038d82fc0e371112226c4d85b709da3d586fe5e0f4ccc80eb0a82485f8f5d"
 ROOT = Path(__file__).resolve().parents[1]
-MAX_DRIVER_BYTES = 30_000_000_000
+MAX_DRIVER_BYTES = training_resources()["maximum_training_bytes"]
 
 
 class DifferentiableHeightNet(ConditionedHeightNet):
@@ -148,9 +149,11 @@ def synchronize(device: torch.device) -> None:
 def run(args: argparse.Namespace, encoder_loader: Callable = load_frozen_encoder, head_loader: Callable = load_checked_head, encoder_contract: tuple[int, int] = (768, 12)) -> dict[str, Any]:
     if os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") == "1" and args.device == "mps":
         raise ValueError("MPS probe refuses CPU fallback; unset PYTORCH_ENABLE_MPS_FALLBACK")
-    if not 0 < args.max_seconds <= 120 or not 0 < args.max_driver_bytes <= MAX_DRIVER_BYTES or not 16 <= args.expected_size <= 1024 or args.rank != 8 or args.alpha != 8 or args.learning_rate <= 0 or not 28 <= args.encoder_size <= 518 or args.encoder_size % 14:
-        raise ValueError("Use rank 8 / alpha 8, native≤1K, aligned encoder≤518, time≤120s, driver≤30 GB and positive learning rate")
+    if not 0 < args.max_seconds <= 120 or not 16 <= args.expected_size <= 1024 or args.rank != 8 or args.alpha != 8 or args.learning_rate <= 0 or not 28 <= args.encoder_size <= 518 or args.encoder_size % 14:
+        raise ValueError("Use rank 8 / alpha 8, native≤1K, aligned encoder≤518, time≤120s and positive learning rate")
     device = choose_device(args.device)
+    args.max_driver_bytes, resource_limits = resolve_training_budget(args.max_driver_bytes, device)
+    resource_limits.update(configure_training_resources(args.max_driver_bytes, device))
     found = find_samples(args.dataset, args.allow_unreviewed)
     matches = [sample for sample in found if sample["metadata"]["sample_id"] == args.sample_id and sample["metadata"]["split"] == "train"]
     if len(matches) != 1:
@@ -174,11 +177,12 @@ def run(args: argparse.Namespace, encoder_loader: Callable = load_frozen_encoder
             raise ValueError(f"Selected sample/head changed during probe preflight: {path}")
     args.output.mkdir(parents=True, exist_ok=False)
     report: dict[str, Any] = {"schema": SCHEMA, "scope": "Two genuine differentiable adapter/head updates; gradient and local MPS memory/time feasibility only", "quality_training": False, "fresh_material_generalization_tested": False, "giant_model_feasibility_tested": False, "full_encoder_finetuning_memory_tested": False, "production_promotion": False, "source_images_modified": False, "target_rescaled": False, "target_encoding": "Unchanged raw uint16 source codes / 65535 into active Float32", "native_dimensions": [args.expected_size, args.expected_size], "encoder_dimensions": [args.encoder_size, args.encoder_size], "encoder_resize_only": True, "device": str(device), "torch_version": str(torch.__version__), "rank": args.rank, "alpha": args.alpha, "steps_requested": 2, "max_seconds_soft_guard": args.max_seconds, "max_driver_bytes_soft_guard": args.max_driver_bytes, "soft_guard_limits": "Checked between synchronous stages; does not predict allocation peaks or interrupt an in-flight Metal operation", "sample_id": args.sample_id, "sample_crop_rectangle_top_left_xywh": sample["metadata"]["crop_rectangle_top_left_xywh"], "loss_valid_pixel_fraction": sample["loss_valid_pixel_fraction"], "selected_source_sha256": source_files, "dataset_index_sha256_at_selection": digest(args.dataset / "dataset.json"), "steps": [], "status": "preflight_complete"}
+    report["resources"] = resource_limits
     write_json(args.output / "run.json", report)
     implementation = args.output / "implementation"
     implementation.mkdir()
     report["implementation_sha256"] = {}
-    for name in ("probe_material_adapters.py", "frozen_dino_height.py", "material_height_model.py", "train_material_height.py", "material_dataset.py", "diagnose_material_curriculum.py", "diagnose_material_fit.py"):
+    for name in ("probe_material_adapters.py", "material_resources.py", "frozen_dino_height.py", "material_height_model.py", "train_material_height.py", "material_dataset.py", "diagnose_material_curriculum.py", "diagnose_material_fit.py"):
         path = Path(__file__).parent / name
         (implementation / name).write_bytes(path.read_bytes())
         report["implementation_sha256"][name] = digest(path)
@@ -325,7 +329,7 @@ def main() -> None:
     parser.add_argument("--expected-size", type=int, default=1024)
     parser.add_argument("--encoder-size", type=int, default=518)
     parser.add_argument("--max-seconds", type=float, default=120)
-    parser.add_argument("--max-driver-bytes", type=int, default=MAX_DRIVER_BYTES)
+    parser.add_argument("--max-driver-bytes", type=int, default=None, help="Memory budget in bytes; default adapts to physical/Metal memory with OS headroom")
     parser.add_argument("--device", choices=("mps", "cpu"), default="mps")
     parser.add_argument("--allow-unreviewed", action="store_true")
     parser.add_argument("--mask-transparent-input", action="store_true")

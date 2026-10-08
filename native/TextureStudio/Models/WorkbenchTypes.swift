@@ -112,7 +112,8 @@ struct MaterialTrainingOptions: Equatable, Sendable {
     var size = 1024
     var updatesPerCrop = 100
     var maxMinutes = 30.0
-    var memoryGB = 24.0
+    /// GiB throughout the UI and CLI; retain the field name for existing callers.
+    var memoryGB = MachineResources.current.defaultTrainingGiB
     var allowUnreviewed = true
     var maskTransparency = true
     var useSelectedMaterialOnly = false

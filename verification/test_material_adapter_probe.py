@@ -205,7 +205,7 @@ def test_two_real_cpu_steps_update_adapters_keep_base_sources_and_target(tmp_pat
 
 def test_forward_memory_soft_guard_stops_before_backprop(tmp_path, monkeypatch):
     args = arguments(tmp_path)
-    sequence = iter(({"mps_driver_bytes": 1}, {"mps_driver_bytes": 1}, {"mps_driver_bytes": 31 * 1024**3}))
+    sequence = iter(({"mps_driver_bytes": 1}, {"mps_driver_bytes": 1}, {"mps_driver_bytes": args.max_driver_bytes + 1}))
     monkeypatch.setattr(probe, "memory", lambda _device: next(sequence))
     report = probe.run(args, encoder_loader=tiny_encoder_loader, head_loader=tiny_head_loader(args), encoder_contract=(8, 2))
     assert report["status"] == "stopped_memory_soft_guard"
@@ -216,7 +216,7 @@ def test_forward_memory_soft_guard_stops_before_backprop(tmp_path, monkeypatch):
 
 def test_optimizer_memory_soft_guard_retains_one_update_and_stops_next_forward(tmp_path, monkeypatch):
     args = arguments(tmp_path)
-    sequence = iter(({"mps_driver_bytes": 1}, {"mps_driver_bytes": 1}, {"mps_driver_bytes": 1}, {"mps_driver_bytes": 31 * 1024**3}))
+    sequence = iter(({"mps_driver_bytes": 1}, {"mps_driver_bytes": 1}, {"mps_driver_bytes": 1}, {"mps_driver_bytes": args.max_driver_bytes + 1}))
     monkeypatch.setattr(probe, "memory", lambda _device: next(sequence))
     report = probe.run(args, encoder_loader=tiny_encoder_loader, head_loader=tiny_head_loader(args), encoder_contract=(8, 2))
     assert report["status"] == "stopped_memory_soft_guard"
@@ -227,7 +227,7 @@ def test_optimizer_memory_soft_guard_retains_one_update_and_stops_next_forward(t
 
 def test_existing_driver_pressure_stops_before_forward(tmp_path, monkeypatch):
     args = arguments(tmp_path)
-    monkeypatch.setattr(probe, "memory", lambda _device: {"mps_driver_bytes": 31 * 1024**3})
+    monkeypatch.setattr(probe, "memory", lambda _device: {"mps_driver_bytes": args.max_driver_bytes + 1})
     report = probe.run(args, encoder_loader=tiny_encoder_loader, head_loader=tiny_head_loader(args), encoder_contract=(8, 2))
     assert report["status"] == "stopped_memory_soft_guard"
     assert report["completed_updates"] == 0
@@ -236,7 +236,7 @@ def test_existing_driver_pressure_stops_before_forward(tmp_path, monkeypatch):
 
 def test_second_update_exceeding_guard_is_not_nominal_complete(tmp_path, monkeypatch):
     args = arguments(tmp_path)
-    sequence = iter([{"mps_driver_bytes": 1}] * 6 + [{"mps_driver_bytes": 31 * 1024**3}])
+    sequence = iter([{"mps_driver_bytes": 1}] * 6 + [{"mps_driver_bytes": args.max_driver_bytes + 1}])
     monkeypatch.setattr(probe, "memory", lambda _device: next(sequence))
     report = probe.run(args, encoder_loader=tiny_encoder_loader, head_loader=tiny_head_loader(args), encoder_contract=(8, 2))
     assert report["completed_updates"] == 2

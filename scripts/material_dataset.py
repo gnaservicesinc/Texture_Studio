@@ -38,7 +38,17 @@ FILE_PATTERN = re.compile(r"^(.+?)_(" + KNOWN_SUFFIXES + r")_(\d+k)\.png$", re.I
 AMBIENT_PATTERN = re.compile(r"^([A-Za-z][A-Za-z0-9]*)_([1248]K)-PNG_(Color|Displacement|NormalGL|NormalDX|Roughness)\.png$", re.I)
 AMBIENT_SUFFIXES = {"color": "diff", "displacement": "disp", "normalgl": "nor_gl", "normaldx": "nor_dx", "roughness": "rough"}
 GENERATOR = "ipde-material-dataset-v2"
-MAX_SOURCE_CACHE_BYTES = 512 * 1024 * 1024
+
+
+def source_cache_budget() -> int:
+    """Retain reusable source arrays within the current machine's headroom.
+
+    The same reserve as training leaves room for macOS and for decoding the
+    active parent, whose temporary buffers do not belong to the retained cache.
+    """
+    from material_resources import available_memory_bytes, os_reserve_bytes, physical_memory_bytes
+    reserve = os_reserve_bytes(physical_memory_bytes())
+    return max(0, available_memory_bytes() - reserve)
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -55,7 +65,10 @@ def file_sha256(path: Path) -> str:
 
 def pixel_sha256(array: np.ndarray) -> str:
     """Canonical RGB/HWC little-endian integer sample hash, independent of host."""
-    return sha256_bytes(np.ascontiguousarray(array.astype(array.dtype.newbyteorder("<"), copy=False)).tobytes())
+    canonical = np.ascontiguousarray(array.astype(array.dtype.newbyteorder("<"), copy=False))
+    # Hash the contiguous allocation directly instead of copying every crop
+    # into a second, equally large Python bytes object.
+    return hashlib.sha256(memoryview(canonical).cast("B")).hexdigest()
 
 
 def slugify(value: str) -> str:
@@ -92,7 +105,7 @@ def png_chunks(data: bytes):
         kind = data[position + 4:position + 8]
         payload = data[position + 8:position + 8 + size]
         expected = struct.unpack_from(">I", data, position + 8 + size)[0]
-        if zlib.crc32(kind + payload) & 0xFFFFFFFF != expected:
+        if zlib.crc32(payload, zlib.crc32(kind)) & 0xFFFFFFFF != expected:
             raise ValueError(f"Invalid PNG CRC in {kind!r}")
         yield kind, payload
         position = end
@@ -165,10 +178,12 @@ class SourceDecodeCache:
     The budget covers retained decoded arrays and their Python metadata objects.
     Decoding the active source still requires its own temporary working memory.
     """
-    def __init__(self, max_bytes: int = MAX_SOURCE_CACHE_BYTES):
-        if not 0 <= max_bytes <= MAX_SOURCE_CACHE_BYTES:
-            raise ValueError("Source decode cache must be between zero and 512 MiB")
-        self.max_bytes = max_bytes
+    def __init__(self, max_bytes: int | None = None):
+        if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+            raise ValueError("Source decode cache must be a nonnegative byte count; zero disables retention")
+        capacity = source_cache_budget()
+        self.max_bytes = capacity if max_bytes is None else min(max_bytes, capacity)
+        self.requested_bytes = max_bytes
         self.retained_bytes = 0
         self.peak_retained_bytes = 0
         self.hits = self.misses = self.evictions = 0
@@ -229,7 +244,9 @@ class SourceDecodeCache:
         return array, metadata
 
     def report(self) -> dict:
-        return {"max_retained_bytes": self.max_bytes, "retained_bytes": self.retained_bytes,
+        return {"max_retained_bytes": self.max_bytes, "requested_bytes": self.requested_bytes,
+                "budget_policy": "available_memory_minus_system_and_decode_reserve",
+                "retained_bytes": self.retained_bytes,
                 "peak_retained_bytes": self.peak_retained_bytes, "entries": len(self.entries),
                 "hits": self.hits, "misses": self.misses, "evictions": self.evictions,
                 "key_fields": ["canonical_path", "device", "inode", "size", "mtime_ns", "ctime_ns"],
@@ -927,20 +944,34 @@ def prepare_region_splits(dataset: Path, sources: Path, crop_size: int, migrate:
                 raise ValueError("Existing material samples have inconsistent approval; review them before migration")
             approve = statuses == {"approved"}
             print(f"Preparing disjoint native regions for {material['material_id']}...", flush=True)
+            # Decode each role once for all missing regions. Previously each
+            # individual crop decoded the same full-resolution parents again.
+            missing = []
             for region in regions:
                 identity = f"{material['material_id']}_auto_{region['ordinal']:03d}"
                 existing = existing_records.get(identity)
                 if existing:
                     if existing["crop_rectangle_top_left_xywh"] != region["rectangle"]:
                         raise ValueError(f"Existing native crop rectangle differs from region policy: {identity}")
-                    record = {**existing}
                 else:
                     destination = dataset / "samples" / identity
                     if destination.exists():
                         raise ValueError(f"Unindexed sample collision: {destination}; no files overwritten")
-                    request = {**material, "sample_ids": [identity], "explicit_split": region["split"],
-                               "crop_rectangles_top_left_xywh": [region["rectangle"]]}
-                    record = prepare_material(request, staging, {}, approve, .2, published_audit)[0]
+                    missing.append((identity, region))
+            created = {}
+            if missing:
+                request = {**material, "sample_ids": [identity for identity, _region in missing],
+                           "explicit_split": "train",
+                           "crop_rectangles_top_left_xywh": [region["rectangle"] for _identity, region in missing]}
+                created = {record["sample_id"]:record for record in prepare_material(request, staging, {}, approve, .2, published_audit)}
+            for region in regions:
+                identity = f"{material['material_id']}_auto_{region['ordinal']:03d}"
+                existing = existing_records.get(identity)
+                if existing:
+                    record = {**existing}
+                else:
+                    destination = dataset / "samples" / identity
+                    record = created[identity]
                     moves.append((staging / "samples" / identity, destination))
                 record.update(split=region["split"], split_strategy=REGION_SPLIT_STRATEGY,
                               validation_scope=REGION_VALIDATION_SCOPE, source_region_role=region["split"],
@@ -1065,7 +1096,7 @@ def main(argv: list[str] | None = None) -> int:
     child.add_argument("--dataset", type=Path, required=True)
     child.add_argument("--check-sources", action="store_true")
     child.add_argument("--report", type=Path)
-    child.add_argument("--source-cache-mib", type=int, default=512, help="Retained source decode cache for --check-sources, 0–512 MiB")
+    child.add_argument("--source-cache-mib", type=int, help="Retained source decode cache for --check-sources; default uses detected memory headroom, 0 disables retention, positive values set a smaller upper bound")
     child = sub.add_parser("prepare-region-splits", help="Prepare disjoint validation regions from every material; explicitly migrate old heldout-material metadata")
     child.add_argument("--dataset", type=Path, required=True)
     child.add_argument("--sources", type=Path, required=True)
@@ -1089,7 +1120,7 @@ def main(argv: list[str] | None = None) -> int:
             if index.get("generator") != GENERATOR or index.get("schema_version") != 2 or not isinstance(index.get("samples"), list):
                 raise ValueError("Dataset index is not a generated version-2 material dataset")
             checks = []
-            source_cache = SourceDecodeCache(arguments.source_cache_mib * 1024 * 1024) if arguments.check_sources else None
+            source_cache = SourceDecodeCache(None if arguments.source_cache_mib is None else arguments.source_cache_mib * 1024 * 1024) if arguments.check_sources else None
             for item in index["samples"]:
                 sample_path = contained_path(arguments.dataset, item["path"], "Dataset sample path")
                 errors = verify_sample(sample_path, arguments.check_sources, source_cache)

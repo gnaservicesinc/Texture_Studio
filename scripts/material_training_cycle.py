@@ -10,7 +10,7 @@ warm start transfers weights and explicitly resets the optimizer.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+from collections import Counter, OrderedDict
 import hashlib
 import io
 import json
@@ -33,12 +33,14 @@ from frozen_dino_height import ARCHITECTURE, CODE_REVISION, DIAGNOSTIC_SCHEMA, M
 from material_dataset import read_png
 from material_fixed_adapters import POLICY as FIXED_ADAPTER_POLICY, adapter_sha256, apply_fixed_adapters, encoder_size as fixed_encoder_size, validate_adapters
 from material_height_model import squared_objective, weighted_mean
+from material_resources import configure_training_resources, decoded_cache_budget, resolve_training_budget, training_resources
 from train_material_height import checked_relative, choose_device, digest, find_samples, load_pair, memory, opengl_normal_from_height, write_float_exr, write_json
 
 SCHEMA = "texture-studio-material-training-cycle-v1"
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = ("height", "roughness", "normal")
-MAX_DRIVER_BYTES = 30_000_000_000
+# Compatibility for scripts importing this name; the limit is machine-derived.
+MAX_DRIVER_BYTES = training_resources()["maximum_training_bytes"]
 ADAPTATION_SCHEMA = "texture-studio-four-material-adaptation-diagnostic-v1"
 
 
@@ -260,17 +262,76 @@ class CycleLimit(RuntimeError):
     pass
 
 
+class NativePairCache:
+    """Reuse unchanged decoded Float32 pairs, with bounded CPU-only storage.
+
+    Samples enter lazily in their existing feature/training order. This changes
+    neither optimizer batching nor the saved schedule, and never resizes maps.
+    """
+    def __init__(self, loader: Callable, maximum_bytes: int) -> None:
+        self.loader, self.maximum_bytes = loader, maximum_bytes
+        self.pairs: OrderedDict[str, tuple] = OrderedDict()
+        self.bytes, self.hits, self.misses, self.pressure_evictions = 0, 0, 0, 0
+
+    @staticmethod
+    def tensor_bytes(pair: tuple) -> int:
+        return sum(value.numel() * value.element_size() for value in pair if value is not None)
+
+    def get(self, sample: dict, device: torch.device) -> tuple:
+        identity = sample["metadata"]["sample_id"]
+        pair = self.pairs.pop(identity, None)
+        if pair is None:
+            self.misses += 1
+            pair = self.loader(sample)
+            size = self.tensor_bytes(pair)
+            if size <= self.maximum_bytes:
+                while self.pairs and self.bytes + size > self.maximum_bytes:
+                    _, evicted = self.pairs.popitem(last=False)
+                    self.bytes -= self.tensor_bytes(evicted)
+                self.pairs[identity] = pair
+                self.bytes += size
+        else:
+            self.hits += 1
+            self.pairs[identity] = pair
+        return tuple(None if value is None else value.to(device) for value in pair)
+
+    def report(self) -> dict:
+        return {"device": "cpu", "maximum_bytes": self.maximum_bytes,
+                "retained_bytes": self.bytes, "retained_pairs": len(self.pairs),
+                "hits": self.hits, "decodes": self.misses, "pressure_evictions": self.pressure_evictions,
+                "native_values_unchanged": True,
+                "prefilled": False, "eviction": "least_recently_used"}
+
+    def reclaim(self, bytes_needed: int) -> None:
+        target = max(0, self.bytes - bytes_needed)
+        while self.pairs and self.bytes > target:
+            _, pair = self.pairs.popitem(last=False)
+            self.bytes -= self.tensor_bytes(pair)
+            self.pressure_evictions += 1
+
+
 class Guard:
     def __init__(self, device: torch.device, minutes: float, driver_bytes: int) -> None:
         self.device, self.minutes, self.driver_bytes = device, minutes, driver_bytes
         self.started, self.peak, self.cancelled = time.monotonic(), {}, False
+        self.retained_cpu_bytes: Callable[[], int] = lambda: 0
+        self.reclaim_cpu_bytes: Callable[[int], None] = lambda _bytes: None
 
     def check(self, stage: str) -> None:
         current = memory(self.device)
+        retained = self.retained_cpu_bytes()
+        excess = current.get("mps_driver_bytes", 0) + retained - self.driver_bytes
+        if excess > 0:
+            self.reclaim_cpu_bytes(excess)
+            retained = self.retained_cpu_bytes()
+        current["retained_cpu_cache_bytes"] = retained
+        # These CPU tensors are deliberately not resident on the MPS device,
+        # so unlike RSS they do not overlap Metal driver accounting.
+        current["tracked_unified_bytes"] = current.get("mps_driver_bytes", 0) + retained
         for key, value in current.items():
             if isinstance(value, int):
                 self.peak[key] = max(self.peak.get(key, 0), value)
-        if current.get("mps_driver_bytes", 0) > self.driver_bytes:
+        if current["tracked_unified_bytes"] > self.driver_bytes:
             raise CycleLimit("memory soft guard at " + stage)
         if time.monotonic() - self.started >= self.minutes * 60:
             raise CycleLimit("time soft guard at " + stage)
@@ -371,11 +432,13 @@ def run_train(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
               head_loader: Callable = load_cycle_head, feature_extractor: Callable = extract_features) -> dict:
     if args.device == "mps" and os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") == "1":
         raise ValueError("Unset PYTORCH_ENABLE_MPS_FALLBACK; native MPS training never falls back to CPU")
-    if not 16 <= args.expected_size <= 2048 or not 28 <= args.encoder_size <= 518 or args.encoder_size % 14 or not 0 < args.max_minutes <= 240 or not 0 < args.max_driver_bytes <= MAX_DRIVER_BYTES or args.learning_rate <= 0 or args.weight_decay < 0 or min(args.checkpoint_every, args.evaluate_every) < 1 or args.prediction_limit < 0:
+    if not 16 <= args.expected_size <= 2048 or not 28 <= args.encoder_size <= 518 or args.encoder_size % 14 or not 0 < args.max_minutes <= 240 or args.learning_rate <= 0 or args.weight_decay < 0 or min(args.checkpoint_every, args.evaluate_every) < 1 or args.prediction_limit < 0:
         raise ValueError("Use native size ≤2048, aligned encoder ≤518, positive bounded time/memory and training intervals")
     if args.warm_start is not None and args.resume_checkpoint is not None:
         raise ValueError("Choose a fresh warm start or optimizer resume, not both")
     device = choose_device(args.device)
+    args.max_driver_bytes, resource_limits = resolve_training_budget(args.max_driver_bytes, device)
+    resource_limits.update(configure_training_resources(args.max_driver_bytes, device))
     training, validation, bindings, manifests = select_samples(args)
     schedule = balanced_schedule(len(training), args.updates_per_crop, args.seed)
     warm = args.resume_checkpoint or args.warm_start
@@ -421,11 +484,15 @@ def run_train(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
     implementation = args.output / "implementation"
     implementation.mkdir()
     code_hashes = {}
-    for name in ("material_training_cycle.py", "material_fixed_adapters.py", "probe_material_adapters.py", "frozen_dino_height.py", "material_height_model.py", "train_material_height.py", "material_dataset.py", "diagnose_material_fit.py", "diagnose_material_curriculum.py"):
+    for name in ("material_training_cycle.py", "material_resources.py", "material_fixed_adapters.py", "probe_material_adapters.py", "frozen_dino_height.py", "material_height_model.py", "train_material_height.py", "material_dataset.py", "diagnose_material_fit.py", "diagnose_material_curriculum.py"):
         path = Path(__file__).parent / name
         (implementation / name).write_bytes(path.read_bytes())
         code_hashes[name] = digest(path)
     guard = Guard(device, args.max_minutes, args.max_driver_bytes)
+    pairs = NativePairCache(lambda sample: load_target_pair(sample, torch.device("cpu"), args.target, args.mask_transparent_input),
+                            decoded_cache_budget(args.max_driver_bytes))
+    guard.retained_cpu_bytes = lambda: pairs.bytes + sum(f.numel() * f.element_size() for f in features.values())
+    guard.reclaim_cpu_bytes = pairs.reclaim
     report = {"schema": SCHEMA, "identity": identity, "head_config": config, "warm_start": head_info,
         "native_dimensions": [args.expected_size] * 2, "target": args.target, "target_resized": False,
         "target_precision_bits": {s["metadata"]["sample_id"]: s["target_sample_bits"] for s in training + validation},
@@ -437,8 +504,8 @@ def run_train(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
         "fixed_adapter_sha256": fixed_hash, "encoder_adapters_trained": False,
         "selected_crop_rectangles": {s["metadata"]["sample_id"]: s["metadata"]["crop_rectangle_top_left_xywh"] for s in training + validation},
         "implementation_sha256": code_hashes, "dataset_index_sha256_at_selection": digest(args.dataset / "dataset.json"), "device": str(device), "torch_version": str(torch.__version__),
-        "started_from_step": step, "feature_cache": "Detached frozen encoder grids on CPU; one native source/target pair at a time",
-        "guard": {"max_minutes": args.max_minutes, "max_driver_bytes": args.max_driver_bytes, "note": "Sampled stage guards cannot predict an in-flight allocation peak"}, "prediction_limit": args.prediction_limit,
+        "started_from_step": step, "feature_cache": "Detached frozen encoder grids on CPU; bounded lazy native-pair CPU cache reuses exact Float32 values",
+        "guard": {"max_minutes": args.max_minutes, "max_driver_bytes": args.max_driver_bytes, "note": "Sampled guards include retained CPU caches plus Metal driver allocations; allocator also enforces the GPU limit"}, "resources": resource_limits, "prediction_limit": args.prediction_limit,
         "export_split": args.export_split, "float_npy_duplicates_written": args.write_npy}
     write_json(args.output / "run.json", report)
     encoder_info, features = {"checkpoint_sha256": MODEL_SHA256, "official_meta_code_revision": CODE_REVISION}, {}
@@ -464,7 +531,7 @@ def run_train(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
                 records = []
                 for sample in samples:
                     guard.check("evaluation before forward")
-                    x, y, mask = load_target_pair(sample, device, args.target, args.mask_transparent_input)
+                    x, y, mask = pairs.get(sample, device)
                     prediction = head(x, features[sample["metadata"]["sample_id"]].to(device))
                     guard.check("evaluation after forward")
                     records.append({"material_id": sample["metadata"]["material_id"], "sample_id": sample["metadata"]["sample_id"], "metrics": map_metrics(prediction, y, mask, args.target), "loss_valid_pixel_fraction": sample["loss_valid_pixel_fraction"]})
@@ -494,7 +561,7 @@ def run_train(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
         guard.check("after encoder load")
         for sample in training + validation:
             guard.check("feature cache before forward")
-            x, y, mask = load_target_pair(sample, device, args.target, args.mask_transparent_input)
+            x, y, mask = pairs.get(sample, device)
             features[sample["metadata"]["sample_id"]] = feature_extractor(encoder, x, args.encoder_size).cpu().detach()
             guard.check("feature cache after forward")
             del x, y, mask
@@ -521,7 +588,7 @@ def run_train(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
             guard.check("training before forward")
             crop = schedule[step]
             sample = training[crop]
-            x, y, mask = load_target_pair(sample, device, args.target, args.mask_transparent_input)
+            x, y, mask = pairs.get(sample, device)
             optimizer.zero_grad(set_to_none=True)
             prediction = head(x, features[sample["metadata"]["sample_id"]].to(device))
             loss, components = map_objective(prediction, y, mask, args.target)
@@ -579,7 +646,7 @@ def run_train(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
             available = [sample for sample in ordered if sample["metadata"]["sample_id"] in features]
             for sample in available[:args.prediction_limit] if selected_step is not None else []:
                 guard.check("export before forward")
-                x, y, mask = load_target_pair(sample, device, args.target, args.mask_transparent_input)
+                x, y, mask = pairs.get(sample, device)
                 prediction = head(x, features[sample["metadata"]["sample_id"]].to(device))
                 guard.check("export after forward")
                 directory = args.output / "predictions" / sample["metadata"]["sample_id"]
@@ -599,6 +666,7 @@ def run_train(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
         "complete_schedule": step == len(schedule), "per_crop_update_counts": dict(zip(identity["training_sample_ids"], counts)),
         "history": history, "selected_step": selected_step, "best_validation_step": best_step, "best_validation_objective": best_score,
         "exported_sample_ids": exported, "export_stop_reason": export_stop, "sampled_peak_memory": guard.peak,
+        "decoded_pair_cache": pairs.report(),
         "elapsed_seconds": time.monotonic() - guard.started, "source_files_verified_unchanged": True,
         "dataset_index_changed_during_run": digest(args.dataset / "dataset.json") != report["dataset_index_sha256_at_selection"],
         "selection_checkpoint_sha256": digest(args.output / "checkpoint.selected.pt") if selected_step is not None else None})
@@ -612,9 +680,11 @@ def run_probe(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
     """Actual optimizer updates at both prepared native sizes; quality untested."""
     if args.device == "mps" and os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK") == "1":
         raise ValueError("MPS probe refuses CPU fallback")
-    if not 1 <= args.steps <= 5 or not 0 < args.max_minutes <= 2 or not 0 < args.max_driver_bytes <= MAX_DRIVER_BYTES or not 28 <= args.encoder_size <= 518 or args.encoder_size % 14 or args.learning_rate <= 0:
+    if not 1 <= args.steps <= 5 or not 0 < args.max_minutes <= 2 or not 28 <= args.encoder_size <= 518 or args.encoder_size % 14 or args.learning_rate <= 0:
         raise ValueError("Probe permits 1–5 real updates per native size and at most 2 minutes")
     device = choose_device(args.device)
+    args.max_driver_bytes, resource_limits = resolve_training_budget(args.max_driver_bytes, device)
+    resource_limits.update(configure_training_resources(args.max_driver_bytes, device))
     # Both native sample contracts are checked before any encoder allocation.
     selected, bindings = [], {}
     for size, dataset in zip(native_sizes, (args.dataset_1024, args.dataset_2048)):
@@ -638,7 +708,7 @@ def run_probe(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
     template, head_info = load_cycle_head(args.warm_start, torch.device("cpu"), args.warm_start_sha256, "height")
     args.encoder_size = head_info["source_encoder_size"]
     initial = cpu_tree(template.state_dict())
-    report = {"schema": SCHEMA + "-size-probe", "scope": "Native update timing/memory feasibility only; no quality or promotion", "warm_start": head_info, "sizes": {}, "selected_files_sha256": bindings, "implementation_sha256": {name: digest(Path(__file__).parent / name) for name in ("material_training_cycle.py", "frozen_dino_height.py", "material_height_model.py", "train_material_height.py")}}
+    report = {"schema": SCHEMA + "-size-probe", "scope": "Native update timing/memory feasibility only; no quality or promotion", "warm_start": head_info, "resources": resource_limits, "sizes": {}, "selected_files_sha256": bindings, "implementation_sha256": {name: digest(Path(__file__).parent / name) for name in ("material_training_cycle.py", "material_resources.py", "frozen_dino_height.py", "material_height_model.py", "train_material_height.py")}}
     args.output.mkdir(parents=True, exist_ok=False)
     write_json(args.output / "run.json", report)
     setup_guard = Guard(device, args.max_minutes, args.max_driver_bytes)
@@ -727,7 +797,7 @@ def parser() -> argparse.ArgumentParser:
         p.add_argument("--code-directory", type=Path, default=ROOT / "out/material-training/transfer-models" / ("dinov2-code-" + CODE_REVISION[:12]))
         p.add_argument("--encoder-size", type=int, default=518)
         p.add_argument("--max-minutes", type=float, default=2 if command == "probe" else 15)
-        p.add_argument("--max-driver-bytes", type=int, default=MAX_DRIVER_BYTES)
+        p.add_argument("--max-driver-bytes", type=int, default=None, help="Training memory in bytes; default adapts to physical/Metal memory, with OS headroom")
         p.add_argument("--allow-unreviewed", action="store_true")
         p.add_argument("--mask-transparent-input", action="store_true")
         p.add_argument("--learning-rate", type=float, default=0.001)

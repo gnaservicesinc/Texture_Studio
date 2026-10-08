@@ -32,6 +32,7 @@ final class WorkbenchStore {
     var pythonPath: String
     var modelDirectory: String
     var codeDirectory: String
+    let resources: MachineResources
     @ObservationIgnored private var runner: WorkbenchProcess?
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var activeWorkerId: UUID?
@@ -52,8 +53,10 @@ final class WorkbenchStore {
 
     init(preferences defaults: UserDefaults = UserDefaults(suiteName: "org.ipde.material-tools")!,
          managedWorkspaceURL: URL? = nil,
+         resources: MachineResources = .current,
          workerOverride: (@MainActor ([String], String) async throws -> String)? = nil) {
         preferences = defaults
+        self.resources = resources
         self.workerOverride = workerOverride
         self.managedWorkspaceURL = (managedWorkspaceURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Texture Studio/Material Workspace")).standardizedFileURL
@@ -65,6 +68,7 @@ final class WorkbenchStore {
         let cache = URL(fileURLWithPath: workspace).appendingPathComponent("out/material-training/transfer-models")
         modelDirectory = defaults.string(forKey: "encoder") ?? cache.appendingPathComponent("dinov2-base-f9e44c814b77").path
         codeDirectory = defaults.string(forKey: "encoderCode") ?? cache.appendingPathComponent("dinov2-code-7764ea0f912e").path
+        training.memoryGB = resources.defaultTrainingGiB
     }
 
     func restore() {
@@ -276,7 +280,7 @@ final class WorkbenchStore {
             if let issue = self.sampleIssue(dataset: prepared, options: options, material: material) { throw StudioError(issue) }
             var args = ["train", "--dataset", prepared.datasetPath, "--target", options.target,
                         "--expected-size", String(options.size), "--updates-per-crop", String(options.updatesPerCrop),
-                        "--max-minutes", String(options.maxMinutes), "--max-driver-bytes", String(Int64(options.memoryGB * 1_000_000_000)),
+                        "--max-minutes", String(options.maxMinutes), "--max-driver-bytes", String(self.resources.trainingMemoryBytes(options.memoryGB)),
                         "--selection", "final", "--checkpoint-every", "100", "--evaluate-every", "400", "--prediction-limit", "2", "--device", "mps"]
             if options.allowUnreviewed { args += ["--allow-unreviewed"] }
             if options.maskTransparency { args += ["--mask-transparent-input"] }
@@ -307,8 +311,9 @@ final class WorkbenchStore {
     }
 
     private func resourceIssue(options: MaterialTrainingOptions) -> String? {
-        guard options.memoryGB.isFinite, (2...30).contains(options.memoryGB), options.maxMinutes.isFinite,
-              (1...240).contains(options.maxMinutes), (1...10000).contains(options.updatesPerCrop) else { return "Choose 2–30 GB of memory, 1–240 minutes and 1–10,000 updates per crop." }
+        if let issue = resources.trainingMemoryIssue(options.memoryGB) { return issue }
+        guard options.maxMinutes.isFinite, (1...240).contains(options.maxMinutes),
+              (1...10000).contains(options.updatesPerCrop) else { return "Choose 1–240 minutes and 1–10,000 updates per crop." }
         return nil
     }
 
@@ -332,7 +337,7 @@ final class WorkbenchStore {
         let options = training
         if let issue = resourceIssue(options: options) { error = issue; return }
         launchTraining(["resume", "--resume-checkpoint", url.path, "--updates-per-crop", String(options.updatesPerCrop),
-                        "--max-minutes", String(options.maxMinutes), "--max-driver-bytes", String(Int64(options.memoryGB * 1_000_000_000))])
+                        "--max-minutes", String(options.maxMinutes), "--max-driver-bytes", String(self.resources.trainingMemoryBytes(options.memoryGB))])
     }
     private func launchTraining(_ args: [String]) {
         let options = training
