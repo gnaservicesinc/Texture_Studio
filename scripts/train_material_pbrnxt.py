@@ -359,9 +359,11 @@ def main(argv: list[str] | None = None) -> int:
     model = load_complete_pretrained(source, weights, device=device)
     parameters = configure_refinement(model, args.scope)
     cache = PairCache(int(args.cache_gib * 1024 ** 3))
-    report = {"schema": SCHEMA, "status": "running", "started_utc": datetime.now(timezone.utc).isoformat(),
+    report = {"schema": SCHEMA, "status": "running", "operation": args.command,
+              "started_utc": datetime.now(timezone.utc).isoformat(),
               "experimental": True, "production_eligible": False, "base": model.provenance,
-              "dataset": identity, "training_crop_size": args.size,
+              "dataset": identity, "inspection_crop_size": args.size,
+              "training_crop_size": previous["training_crop_size"] if args.command == "evaluate" else args.size,
               "dataset_crop_sizes": sorted({pair["dimensions"][0] for pair in training}),
               "image_padding": False, "image_resizing": False, "resources": plan,
               "trainable_parameters": sum(parameter.numel() for parameter in parameters),
@@ -371,7 +373,8 @@ def main(argv: list[str] | None = None) -> int:
                                   "Refine pretrained generator height decoder/tail and final RRDB height branch; shared encoder/body/fusion and other material branches frozen"),
               "boundary_policy": "Loss excludes64 outer pixels, but inputs/targets contain only real source pixels",
               "device": str(device), "steps": [], "comparison": []}
-    print(json.dumps({"event": "configuration", "base": "PBRnxt86.76M complete pretrained material network, native-scale adaptation", "training_crop": args.size,
+    print(json.dumps({"event": "configuration", "base": "PBRnxt86.76M complete pretrained material network, native-scale adaptation",
+                      "training_crop": report["training_crop_size"], "inspection_crop": args.size,
                       "dataset_crop": report["dataset_crop_sizes"], "refinement_scope": args.scope,
                       "trainable_parameters": report["trainable_parameters"], "resources": plan}), flush=True)
     report["comparison"] += export_comparison(model, inspection, cache, args.output / "comparison", "pretrained-base", device, args.size, args.seed)
@@ -381,7 +384,8 @@ def main(argv: list[str] | None = None) -> int:
         parent_step = previous["step"]
         report["parent"] = {"path": str(args.checkpoint.resolve()), "sha256": previous["_snapshot_sha256"], "step": parent_step,
                             "refinement_scope": checkpoint_scope(previous)}
-        report["comparison"] += export_comparison(model, inspection, cache, args.output / "comparison", "starting-checkpoint", device, args.size, args.seed)
+        if args.command != "evaluate":
+            report["comparison"] += export_comparison(model, inspection, cache, args.output / "comparison", "starting-checkpoint", device, args.size, args.seed)
     write_json(args.output / "run.json", report)
     optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.updates, eta_min=args.learning_rate * .2)
@@ -449,7 +453,8 @@ def main(argv: list[str] | None = None) -> int:
         write_json(args.output / "run.json", report)
         write_review_manifest(report, args.output / "review-manifest.json")
         print(json.dumps({"status": report["status"], "checkpoint": report["checkpoint"], "step": report["saved_step"],
-                          "training_crop_size": args.size, "production_eligible": False}), flush=True)
+                          "training_crop_size": report["training_crop_size"], "inspection_crop_size": args.size,
+                          "production_eligible": False}), flush=True)
     except BaseException as error:
         report["status"], report["error"] = "failed", str(error)
         report["completed_updates"] = completed_updates

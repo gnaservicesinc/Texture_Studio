@@ -1,0 +1,35 @@
+{
+  "schema": "texture-studio-pbrnxt-height-refinement-v1",
+  "status": "completed",
+  "saved_step": 80,
+  "training_crop_size": 1024,
+  "dataset_crop_sizes": [
+    2048
+  ],
+  "trainable_parameters": 18288455,
+  "refinement_scope": "height-decoder",
+  "checkpoint_sha256": "c2f47b64cb3a5b7d808b19558b877850443d991ca8f44c5d05f9452ba65ae618",
+  "started_utc": "2026-10-08T13:21:35.434506+00:00",
+  "finished_utc": "2026-10-08T13:42:15.661427+00:00",
+  "visual_acceptance": "rejected",
+  "production_eligible": false,
+  "requested_training_crop_size": 2048,
+  "requested_training_size_completed": false,
+  "source_padding": false,
+  "source_resizing": false,
+  "scope": "Four paired training samples from known stucco/brick materials; not full-dataset or unseen-material qualification",
+  "observations": [
+    "First final-branch trial flattened useful relief.",
+    "Wider height decoder trial increased broad brick variation but blurred grain and added dark edge frames.",
+    "Stucco remained shallow with false bright hotspots."
+  ],
+  "next_gate": "Useful relief in a controlled fitting trial plus actual native2048 memory qualification before full-dataset training",
+  "parameter_count_complete_base": 86763756,
+  "pretrained_base_sha256": "3f25b03e950c6199b53a3e1581296831e71555e1928ad209232b757f75153b7d",
+  "measured_driver_gib_final_run": 36.98252868652344,
+  "target_pixels_verified_equal_to_literal_source_crops": true,
+  "source_crop_max_pixel_difference": 0.0,
+  "source_bit_depth": 16,
+  "artifact_directory": "out/material-training/pbrnxt-native-1024-refine-02",
+  "source_crop_proof": "source-crop-proof.json"
+}

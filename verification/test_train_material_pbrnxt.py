@@ -118,13 +118,14 @@ def test_delta_checkpoint_roundtrip_reproduces_refined_numeric_height_without_ch
     assert not list(tmp_path.glob("*.partial"))
 
 
-def test_evaluation_labels_loaded_checkpoint_snapshot_when_path_is_replaced(tmp_path, monkeypatch):
+@pytest.mark.parametrize("inspection_size", [256, 512])
+def test_evaluation_labels_loaded_checkpoint_snapshot_when_path_is_replaced(tmp_path, monkeypatch, inspection_size):
     refined, _, checkpoint, rgb, _ = checkpoint_fixture(tmp_path)
     original_checksum = digest(checkpoint)
     replacement_state = torch.load(checkpoint, weights_only=True)
     replacement_state["height_decoder_state"]["ups.3.bias"].add_(.2)
     replacement_state["step"] = 2
-    pair = {"dimensions": [256, 256], "metadata": {"sample_id": "surface_001"}}
+    pair = {"dimensions": [inspection_size, inspection_size], "metadata": {"sample_id": "surface_001"}}
     monkeypatch.setattr(trainer, "select_pairs", lambda *_args: ([pair], [], {"fixture": "dataset"}))
     monkeypatch.setattr(trainer, "load_complete_pretrained", lambda *_args, **_kwargs: TinyPretrained())
     monkeypatch.setattr(trainer.signal, "signal", lambda *_args: None)
@@ -144,14 +145,18 @@ def test_evaluation_labels_loaded_checkpoint_snapshot_when_path_is_replaced(tmp_
     output = tmp_path / "evaluation"
     assert trainer.main(["evaluate", "--dataset", str(tmp_path / "dataset"), "--output", str(output),
                          "--checkpoint", str(checkpoint), "--source-dir", str(tmp_path / "source"),
-                         "--weights", str(tmp_path / "weights"), "--size", "256", "--memory-gib", "48",
+                         "--weights", str(tmp_path / "weights"), "--size", str(inspection_size), "--memory-gib", "48",
                          "--cache-gib", "0", "--device", "cpu"]) == 0
     assert digest(checkpoint) != original_checksum
     report = json.loads((output / "run.json").read_text())
+    assert report["operation"] == "evaluate"
+    assert report["training_crop_size"] == 256 and report["inspection_crop_size"] == inspection_size
+    assert [record["model_label"] for record in report["comparison"]] == ["pretrained-base", "refined-checkpoint"]
     assert report["parent"]["sha256"] == report["checkpoint_sha256"] == original_checksum
     assert report["saved_step"] == report["parent"]["step"] == 1
     variants = json.loads((output / "review-manifest.json").read_text())["materials"][0]["variants"]
     assert all(variant["checkpoint_sha256"] == original_checksum for variant in variants if variant.get("checkpoint"))
+    assert len(variants) == 3  # Original target, exact base, and one checkpoint.
     assert "_snapshot_sha256" not in report
 
 

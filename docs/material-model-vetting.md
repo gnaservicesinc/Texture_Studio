@@ -12,7 +12,9 @@ At native 512, the complete mapping responds to photographed stucco chips and br
 
 The first actual native 1024 trial completed 40 updates on four paired stucco/brick crops. Its lower fitting loss did **not** improve material quality: all four native comparisons lost relief. For example, interior stucco height standard deviation fell from 0.00858 in the base to 0.00188 after refinement, while the reference is 0.04558. Brick still turned some bright color flecks into false raised bumps. This checkpoint is rejected for Studio use; repeating the same final-branch-only configuration is not justified.
 
-The next bounded experiment widens refinement to the existing pretrained height decoder and tail (`gen.m_dec_3`, `gen.m_tail_3`) plus the final height branch. This makes 18,288,455 parameters trainable without adding a random head. The shared encoder/body/fusion and other task decoder parameters remain frozen. Fusion remains differentiable, so changing the height decoder can also affect intermediate material features; no claim is made that other outputs stay identical. The loss, crop policy and source values stay the same so the scope change can be judged directly.
+The second bounded experiment widened refinement to the existing pretrained height decoder and tail (`gen.m_dec_3`, `gen.m_tail_3`) plus the final height branch. This made 18,288,455 parameters trainable without adding a random head. The shared encoder/body/fusion and other task decoder parameters remained frozen. Fusion remains differentiable, so changing the height decoder can also affect intermediate material features; no claim is made that other outputs stay identical. The loss, crop policy and source values stayed the same so the scope change could be judged directly.
+
+That refinement completed another 40 updates (80 total), but **also failed visual acceptance**. Brick gained broad blotchy relief and severe dark edge frames while its fine grain became blurrier. Stucco stayed shallow and acquired false bright hotspots. Its interior height standard deviation was 0.00240 versus 0.04558 in the reference; greater brick variation was mostly broad artifacts. Neither checkpoint is selected for Studio. A longer full-dataset run with this configuration is not the next step.
 
 Upstream [preprocessing](https://github.com/aaf6aa/PBRnxt/blob/73ab49a0cc0de5ea70e7aa94fb1a7234dd59ab35/scripts/dataset_preprocess.py) writes UInt8 JPEG training references. Our refinement bypasses it, retaining the original **UInt16 linear numeric height codes**, mapped to Float32 by division by65535 only. No target gamma, min/max stretching, source padding or rescaling occurs. Float32 computation/export preserves those codes' distinctions; it cannot add missing source information.
 
@@ -24,7 +26,11 @@ A complete native 1024 forward/backward on the 64GiB M2 Max took 10.40/7.64 seco
 
 The wider pretrained height decoder also passed an actual native 1024 forward/backward/AdamW step: 10.41 seconds forward, 17.41 seconds backward, 34.28GiB sampled driver memory, finite gradients. These are measured probes, not a promise about peak usage over a complete training run. The resource preflight distinguishes the two refinement scopes.
 
+The complete wider run settled at 36.98GiB driver memory and about 27.8 seconds per update. **Requested native 2048 training has not been completed or qualified.** The 2048 dataset must not be presented as evidence that the model trained at 2048. A different memory strategy needs a real 2048 forward/backward/optimizer test; padding or stretched targets are not substitutes. Separately, the current 1:1 model adaptation and fitting objective need to learn useful relief before a long run is worthwhile.
+
 The reusable research entry point is [train_material_pbrnxt.py](../scripts/train_material_pbrnxt.py). It supports train-from-base, refine-from-checkpoint and evaluation, saves exact identities and raw Float32 EXRs, and produces labeled native review manifests. It does not automatically mark results production-ready or change Studio's model. The native training interface stays paused while this replacement is evaluated.
+
+The following commands describe the experimental interface. They are not a recommendation to repeat the rejected configuration or start unattended full-dataset training.
 
 ```sh
 .venv/bin/python scripts/train_material_pbrnxt.py train \
