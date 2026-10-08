@@ -233,7 +233,7 @@ def test_cli_has_one_json_object_for_success_and_failure(tmp_path):
     assert bad.returncode == 1 and not response["ok"] and response["error"]["code"] == "ValueError"
 
 
-def test_full_rank8_lora_package_identity_and_frozen_training_refusal(tmp_path):
+def test_full_rank8_lora_package_identity_and_fixed_adapter_head_refinement(tmp_path):
     path = checkpoint(tmp_path)
     payload = torch.load(path, weights_only=True)
     payload.update(schema=workbench.ADAPTATION_SCHEMA, variant="lora", adapter_state={})
@@ -247,8 +247,9 @@ def test_full_rank8_lora_package_identity_and_frozen_training_refusal(tmp_path):
     assert inspected["variant"] == "lora" and len(inspected["adapter_state"]) == 24
     assert json.loads((tmp_path / "lora/config.json").read_text())["has_rank8_attention_adapters"]
     from material_training_cycle import load_cycle_head
-    with pytest.raises(ValueError, match="adapted encoder"):
-        load_cycle_head(Path(exported["checkpoint_path"]), torch.device("cpu"))
+    head, provenance = load_cycle_head(Path(exported["checkpoint_path"]), torch.device("cpu"))
+    assert len(head.fixed_adapter_state) == 24 and provenance["fixed_adapter_sha256"]
+    assert provenance["encoder_refinement_policy"] == "refine_material_head_with_fixed_rank8_attention_adapters"
     broken = copy.deepcopy(payload)
     broken["adapter_state"].pop("blocks.0.attn.qkv")
     torch.save(broken, path)

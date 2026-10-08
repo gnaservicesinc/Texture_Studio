@@ -6,6 +6,18 @@ struct MaterialToolRootView: View {
     @State private var review = ReviewSessionStore()
     @State private var showModels = false
     @State private var showRuntime = false
+    init(role: MaterialTool, store: WorkbenchStore, review: ReviewSessionStore? = nil) {
+        self.role = role
+        self.store = store
+        self._review = State(initialValue: review ?? ReviewSessionStore())
+    }
+    private var comparisonSelection: [WorkbenchCheckpoint] {
+        store.checkpoints.filter { store.comparisonCheckpointIds.contains($0.id) }
+    }
+    private var comparisonReady: Bool {
+        comparisonSelection.count >= 2 && Set(comparisonSelection.map(\.target)).count == 1
+            && (store.sourceImageURL != nil || store.selectedSample?.maps["input"] != nil)
+    }
 
     var body: some View {
         Group {
@@ -21,7 +33,9 @@ struct MaterialToolRootView: View {
         .toolbar {
             ToolbarItemGroup {
                 Button { showModels = true } label: { Label("Checkpoints", systemImage: "shippingbox") }
+                    .help("Locate saved models, select Studio’s height model, or export a portable package.")
                 Button { showRuntime = true } label: { Label("Runtime", systemImage: "gearshape") }
+                    .help("Locate Python and existing encoder files, or download and remove the managed encoder.")
                 Menu {
                     ForEach(MaterialTool.allCases) { tool in
                         Button(tool.title, systemImage: tool.symbol) { MaterialToolLauncher.open(tool) }
@@ -35,7 +49,10 @@ struct MaterialToolRootView: View {
         .alert("Material tool", isPresented: Binding(get: { store.error != nil || review.error != nil }, set: { if !$0 { store.error = nil; review.error = nil } })) {
             Button("OK") { store.error = nil; review.error = nil }
         } message: { Text(store.error ?? review.error ?? "") }
-        .task { store.restore(); review.restore(workspace: store.workspacePath) }
+        .task {
+            store.restore()
+            if role == .review && review.groups.isEmpty { review.restore(workspace: store.workspacePath) }
+        }
         .onOpenURL { url in
             if url.lastPathComponent == "dataset.json" { store.openDataset(url) }
             else if url.pathExtension == "json" { review.load(url) }
@@ -63,8 +80,10 @@ struct MaterialToolRootView: View {
                             Text("Needs work").tag("needs_work")
                             Text("Reject").tag("reject")
                         }.frame(width: 240)
+                            .help("Record whether this candidate produces useful surface detail. A score alone cannot judge material quality.")
                         TextField("Detail, noise or relief observations", text: Binding(get: { review.notes[candidateId] ?? "" }, set: { review.notes[candidateId] = $0 }))
                         Button("Save Review…") { review.saveReview() }
+                            .help("Save decisions and notes to a separate file you can reopen. Original maps and selected models stay intact.")
                     }.padding(12)
                     Divider()
                     ReviewWorkbenchView(candidates: selected.candidates, blendURL: review.blendURL)
@@ -76,7 +95,9 @@ struct MaterialToolRootView: View {
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
                 Button("Open Review…", systemImage: "folder") { review.chooseManifest() }
+                    .help("Reopen saved review decisions or the review manifest produced by a checkpoint comparison.")
                 Button("Open Maps…", systemImage: "photo") { review.chooseMaps() }
+                    .help("Inspect original PNG or EXR maps at full source resolution.")
             }
         }
     }
@@ -84,11 +105,14 @@ struct MaterialToolRootView: View {
         VStack(spacing: 0) {
             HStack {
                 Button("Source Photo…", systemImage: "photo") { store.chooseSourceImage() }
+                    .help("Use one native crop, up to 2048 pixels per side, for every checkpoint. A selected dataset crop is used when no separate photo is chosen.")
                 Text(store.sourceImageURL?.lastPathComponent ?? store.selectedSampleId ?? "Choose a photo or dataset crop").foregroundStyle(.secondary)
                 Spacer()
                 Button("Choose Checkpoints…") { store.chooseCheckpoint() }
+                    .help("Select two or more saved checkpoints predicting the same map type. Their exact hashes are recorded with the results.")
                 Button("Run Comparison", systemImage: "play.fill") { store.compare() }
-                    .buttonStyle(.glassProminent).disabled(store.isBusy)
+                    .buttonStyle(.glassProminent).disabled(store.isBusy || !comparisonReady)
+                    .help("Run checked candidates one at a time on Metal, then inspect their matching full-resolution outputs.")
             }.padding()
             ScrollView(.horizontal) {
                 HStack {
@@ -99,6 +123,10 @@ struct MaterialToolRootView: View {
                     }
                 }.padding(.horizontal)
             }.disabled(store.isBusy)
+            if !comparisonReady && !store.isBusy {
+                Text("Choose a source photo or dataset crop, then select at least two checkpoints for the same map type.")
+                    .font(.caption).foregroundStyle(.secondary).padding(.horizontal).padding(.vertical, 8)
+            }
             Divider()
             if !store.comparisonCandidates.isEmpty { ReviewWorkbenchView(candidates: store.comparisonCandidates) }
             else { ContentUnavailableView("Compare two or more checkpoints", systemImage: "rectangle.split.2x1", description: Text("Every checkpoint sees the same source at its native resolution. Results open side by side with synchronized navigation.")) }
@@ -115,7 +143,7 @@ struct WorkbenchActivityView: View {
             Text(store.activity).lineLimit(2).font(.caption)
             Spacer()
             if let url = store.lastOutputURL { Button("Show Results") { NSWorkspace.shared.activateFileViewerSelecting([url]) } }
-            if store.isBusy { Button(store.isStopping ? "Saving…" : "Stop and Save") { store.stop() }.disabled(store.isStopping) }
+            if store.isBusy { Button(store.isStopping ? "Stopping…" : (store.isTraining ? "Stop and Save" : "Stop")) { store.stop() }.disabled(store.isStopping) }
         }.padding(12)
     }
 }
@@ -129,13 +157,17 @@ struct WorkbenchRuntimeView: View {
                 Section("Local Python and workspace") {
                     runtimeRow("Python", path: store.pythonPath, choose: store.choosePython)
                     runtimeRow("Workspace", path: store.workspacePath, choose: store.chooseWorkspace)
+                    Text("Choose a working folder for run logs, comparisons and checkpoints. Python must include PyTorch, OpenCV, OpenEXR and safetensors; an existing project .venv works.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Pinned encoder dependencies") {
                     runtimeRow("Encoder weights", path: store.modelDirectory, choose: store.chooseEncoder)
                     runtimeRow("Encoder source", path: store.codeDirectory, choose: store.chooseEncoderCode)
                     HStack {
                         Button("Download Pinned Encoder") { store.installEncoder() }.disabled(store.isBusy)
+                            .help("Download the matching DINOv2 Base weights and pinned source into app-managed storage. No photos are uploaded.")
                         Button("Remove Downloaded Encoder", role: .destructive) { store.removeDownloadedEncoder() }.disabled(store.isBusy)
+                            .help("Remove only the encoder downloaded by these tools. Located external copies and your trained checkpoints are retained.")
                     }
                     Text("The selected head runs with its pinned DINOv2 encoder on Metal. Missing dependencies are reported with their paths; inference never substitutes a different model.").font(.caption).foregroundStyle(.secondary)
                 }

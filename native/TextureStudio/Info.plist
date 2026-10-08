@@ -10,6 +10,7 @@
     <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSMinimumSystemVersion</key><string>$(MACOSX_DEPLOYMENT_TARGET)</string>
     <key>IPDEWorkspace</key><string>$(IPDE_WORKSPACE_PATH)</string>
+    <key>IPDEBuildConfiguration</key><string>$(CONFIGURATION)</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSAppTransportSecurity</key>
     <dict>

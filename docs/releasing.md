@@ -24,10 +24,11 @@ make build
 ```
 
 `make build` builds Release into `build/TextureStudio/Build/Products/Release`.
-The run script stops the existing app, builds Debug into the same DerivedData
-root, then launches the application bundle. Its optional modes are `--debug`,
+The run script builds and launches Release by default. Only `--debug` chooses
+Debug and LLDB. It stops only the matching app in this checkout/configuration;
+an installed app is left running. Its optional modes are `--debug`,
 `--logs`, `--telemetry`, and `--verify`. Extra app arguments follow `--`.
-The Codex **Run** action uses this script through
+The Codex **Run Release** action uses this script through
 `.codex/environments/environment.toml`.
 
 ```sh
@@ -67,9 +68,17 @@ make DESTDIR=/path/to/staging install
 
 Packaging verifies the app's signature, identity, and arm64 executable, then
 creates `dist/Texture-Studio-macos-arm64.zip` and its SHA-256 checksum. The app
-contains Apple's system framework dependencies, native resources, and the
-standalone Python worker source.
+contains native resources, the standalone Python worker source, and the four
+signed material tools under `Contents/Applications`. Children are signed before
+the parent bundle is sealed. The installer refuses Debug builds and refuses to
+replace a running installed parent or child; close them and rerun `make install`.
 Optional models are stored outside the application bundle.
+
+Primary development commits stay on `main`. Commit and push source changes after
+validation, build/package Release, and install in `/Applications` when the installed
+suite is closed. Model weights, datasets and generated outputs are excluded;
+configure Git LFS before embedding model binaries. Tags identify deliberately
+published versions; building a Release configuration does not publish a GitHub Release.
 
 The version must agree in `pyproject.toml`, `src/ipde/__init__.py`, and every
 `MARKETING_VERSION` entry in the Xcode project. The tag must be `v` followed by

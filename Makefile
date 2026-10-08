@@ -11,7 +11,7 @@ XCODEBUILD = xcodebuild -project "$(XCODE_PROJECT)" -scheme "$(XCODE_SCHEME)" \
 	-derivedDataPath "$(DERIVED_DATA)"
 .DEFAULT_GOAL := build
 
-.PHONY: check-toolchain setup configure build package install release-check run gui studio test test-native test-python smoke clean
+.PHONY: check-toolchain setup configure build package install install-if-closed release-check run gui studio debug test test-native test-python smoke clean
 
 check-toolchain:
 	./script/check_toolchain.sh
@@ -38,11 +38,17 @@ package: build
 install: package
 	"$(PYTHON)" scripts/install_macos.py "$(APP_BUNDLE)" --destdir "$(DESTDIR)"
 
+install-if-closed: package
+	"$(PYTHON)" scripts/install_macos.py "$(APP_BUNDLE)" --destdir "$(DESTDIR)" --if-closed
+
 release-check: package
 	"$(PYTHON)" scripts/check_release_version.py
 
 run gui studio:
 	./script/build_and_run.sh
+
+debug:
+	./script/build_and_run.sh --debug
 
 test: test-native test-python
 

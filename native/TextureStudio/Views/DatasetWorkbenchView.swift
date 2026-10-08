@@ -111,6 +111,7 @@ struct DatasetWorkbenchView: View {
                     Label("Open Full Quality", systemImage: "arrow.up.left.and.arrow.down.right")
                 }
                 .disabled(store.selectedMap == nil)
+                .help("Open the original map in an independent window with pixel zoom, pan, lossless export and GIMP access.")
             }
             HStack {
                 Picker("Map", selection: $store.selectedRole) {
@@ -143,14 +144,17 @@ struct DatasetWorkbenchView: View {
                     Text("Validation").tag("validation")
                 }
                 .frame(width: 185)
+                .help("Training crops update the model. Validation crops measure a separate region; moving a crop may be blocked if it creates overlap.")
                 Button(sample.status == "excluded" ? "Reapprove" : "Approve") {
                     store.curateSelected(status: "approved", note: reviewNote.isEmpty ? nil : reviewNote)
                 }
                 .disabled(sample.status == "approved")
+                .help("Include this crop in training or validation. The original map files remain unchanged.")
                 Button("Exclude") {
                     store.curateSelected(status: "excluded", note: reviewNote.isEmpty ? nil : reviewNote)
                 }
                 .disabled(sample.status == "excluded")
+                .help("Keep this crop and its files, but leave it out of training. Reapprove it at any time.")
             }
             HStack {
                 TextField("Review note", text: $reviewNote).textFieldStyle(.roundedBorder)

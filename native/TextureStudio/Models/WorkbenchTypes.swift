@@ -54,7 +54,24 @@ struct WorkbenchDataset: Decodable, Sendable {
     let indexSha256: String
     let materials: [WorkbenchMaterial]
     let validationScope: String?
+    let crossSizeValidationNotice: String?
+    let preparation: WorkbenchDatasetPreparation?
     var samples: [WorkbenchSample] { materials.flatMap(\.samples) }
+    func hasNativeSize(_ size: Int) -> Bool {
+        !samples.isEmpty && samples.allSatisfy { $0.width == size && $0.height == size }
+    }
+}
+
+struct WorkbenchDatasetPreparation: Decodable, Sendable {
+    let sourceDatasetPath: String
+    let sourceIndexSha256: String
+    let preparedDatasetPath: String
+    let cropSize: Int
+    let reused: Bool
+    let targetResized: Bool
+    let originalDatasetModified: Bool
+    let splitLineageChanged: Bool?
+    let crossSizeValidationNotice: String?
 }
 
 struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
@@ -65,7 +82,13 @@ struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
     let step: Int
     let compatible: Bool
     let variant: String?
-    var supportsTrainingWarmStart: Bool { variant != "lora" }
+    let warmStartSupported: Bool?
+    let refinementPolicy: String?
+    enum CodingKeys: String, CodingKey {
+        case checkpointPath, sha256, schema, target, step, compatible, variant, refinementPolicy
+        case warmStartSupported = "supportsTrainingWarmStart"
+    }
+    var supportsTrainingWarmStart: Bool { compatible && (warmStartSupported ?? (variant != "lora")) }
     var id: String { sha256 }
     var url: URL { URL(fileURLWithPath: checkpointPath) }
     var title: String { url.deletingLastPathComponent().lastPathComponent + " · " + url.lastPathComponent }
@@ -80,7 +103,23 @@ struct MaterialTrainingOptions: Equatable, Sendable {
     var allowUnreviewed = true
     var maskTransparency = true
     var useSelectedMaterialOnly = false
-    var useWarmStart = true
+    var useWarmStart = false
+}
+
+enum MaterialWorkbenchRuntime {
+    /// Reuse a located Studio runtime when a distribution has no repository
+    /// environment. Existence is only discovery; the backend verifies imports.
+    static func defaultPython(workspace: URL, registry: URL? = nil) -> String {
+        let repositoryPython = workspace.appendingPathComponent(".venv/bin/python")
+        if FileManager.default.isExecutableFile(atPath: repositoryPython.path) { return repositoryPython.path }
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let registryURL = registry ?? support.appendingPathComponent("Texture Studio/Runtimes/python-runtime.json")
+        if let data = try? Data(contentsOf: registryURL),
+           let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let path = record["path"] as? String, path.hasPrefix("/"),
+           FileManager.default.isExecutableFile(atPath: path) { return path }
+        return repositoryPython.path
+    }
 }
 
 struct MaterialInferenceResponse: Decodable, Sendable {

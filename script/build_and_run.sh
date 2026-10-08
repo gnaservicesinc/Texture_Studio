@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+DRY_RUN=false
+if [[ "${1:-}" == --dry-run ]]; then DRY_RUN=true; shift; fi
 MODE="${1:-run}"
 if (( $# > 0 )); then shift; fi
 case "$MODE" in
   run|--debug|debug|--logs|logs|--telemetry|telemetry|--verify|verify) ;;
-  *) echo "usage: $0 [run|--debug|--logs|--telemetry|--verify] [-- app arguments]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--dry-run] [run|--debug|--logs|--telemetry|--verify] [--tool studio|review|compare|dataset|train] [-- app arguments]" >&2; exit 2 ;;
 esac
 if [[ "${1:-}" == -- ]]; then shift; fi
 TOOL_ROLE="studio"
@@ -26,15 +28,27 @@ case "$TOOL_ROLE" in
   *) echo "Unknown material tool: $TOOL_ROLE" >&2; exit 2 ;;
 esac
 DERIVED_DATA="${TEXTURE_STUDIO_DERIVED_DATA:-$ROOT_DIR/build/TextureStudio}"
-APP_BUNDLE="$DERIVED_DATA/Build/Products/Debug/$APP_NAME.app"
+CONFIGURATION="Release"
+if [[ "$MODE" == --debug || "$MODE" == debug ]]; then CONFIGURATION="Debug"; fi
+PARENT_APP="$DERIVED_DATA/Build/Products/$CONFIGURATION/Texture Studio.app"
+APP_BUNDLE="$PARENT_APP"
+if [[ "$TOOL_ROLE" != studio ]]; then APP_BUNDLE="$PARENT_APP/Contents/Applications/$APP_NAME.app"; fi
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+if [[ "$DRY_RUN" == true ]]; then
+  printf 'configuration=%s\nrole=%s\nparent=%s\napplication=%s\n' "$CONFIGURATION" "$TOOL_ROLE" "$PARENT_APP" "$APP_BUNDLE"
+  exit 0
+fi
 
 "$ROOT_DIR/script/check_toolchain.sh"
-/usr/bin/pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+# Stop only this checkout/configuration/role when explicitly rebuilding and relaunching it.
+# A running installed Release app or another material tool keeps its process.
+while read -r PID EXECUTABLE; do
+  if [[ "$EXECUTABLE" == "$APP_BINARY" ]]; then kill "$PID" 2>/dev/null || true; fi
+done < <(/bin/ps -axo pid=,comm=)
 /usr/bin/xcodebuild -project "$ROOT_DIR/native/TextureStudio/TextureStudio.xcodeproj" \
-  -scheme TextureStudio -configuration Debug -destination 'platform=macOS,arch=arm64' \
+  -scheme TextureStudio -configuration "$CONFIGURATION" -destination 'platform=macOS,arch=arm64' \
   -derivedDataPath "$DERIVED_DATA" build
-"$ROOT_DIR/script/stage_material_apps.sh" "$DERIVED_DATA/Build/Products/Debug/Texture Studio.app"
+"$ROOT_DIR/script/stage_material_apps.sh" "$PARENT_APP"
 
 open_app() {
   if (( $# > 0 )); then /usr/bin/open -n "$APP_BUNDLE" --args "$@"
@@ -56,7 +70,7 @@ case "$MODE" in
   --verify|verify)
     open_app "$@"
     sleep 1
-    /usr/bin/pgrep -x "$APP_NAME" >/dev/null
-    echo "$APP_NAME launched: $APP_BUNDLE"
+    /bin/ps -axo comm= | /usr/bin/grep -Fqx "$APP_BINARY"
+    echo "$APP_NAME launched ($CONFIGURATION): $APP_BUNDLE"
     ;;
 esac

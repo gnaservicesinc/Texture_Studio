@@ -12,6 +12,31 @@ import subprocess
 import sys
 import tempfile
 
+TOOLS = {"review": "Material Review", "compare": "Checkpoint Compare",
+         "dataset": "Material Dataset", "train": "Material Trainer"}
+
+
+class RunningApplicationError(RuntimeError):
+    pass
+
+
+def validate_bundle(source: Path) -> None:
+    """Require one self-contained parent with all four directly launchable tools."""
+    apps = [(source, "org.ipde.texture-studio", "Texture Studio", None)]
+    apps.extend((source / "Contents/Applications" / f"{name}.app", f"org.ipde.material-{role}", name, role)
+                for role, name in TOOLS.items())
+    for app, identifier, name, role in apps:
+        info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+        if info.get("IPDEBuildConfiguration") != "Release":
+            raise ValueError(f"Install requires an optimized Release build: {app}")
+        if info.get("CFBundleIdentifier") != identifier or info.get("CFBundleExecutable") != name:
+            raise ValueError(f"Unexpected application identity: {app}")
+        executable = app / "Contents/MacOS" / name
+        if not executable.is_file() or not os.access(executable, os.X_OK):
+            raise ValueError(f"Application executable is missing: {executable}")
+        if role and (info.get("MaterialToolRole") != role or (app / "Contents/Applications").exists()):
+            raise ValueError(f"Invalid or recursively embedded material tool: {app}")
+
 
 def same_signed_build(source: Path, destination: Path) -> bool:
     """Compare the sealed app code/resources, then verify the installed copy."""
@@ -36,7 +61,7 @@ def ensure_closed(destination: Path) -> None:
     for line in processes.splitlines():
         fields = line.strip().split(None, 1)
         if len(fields) == 2 and fields[1].startswith(str(destination) + "/"):
-            raise RuntimeError(f"Close Texture Studio before installing (PID {fields[0]})")
+            raise RunningApplicationError(f"Close Texture Studio and its material tools before installing (PID {fields[0]})")
 
 
 def removable_tree(path: Path) -> bool:
@@ -111,23 +136,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
     parser.add_argument("--destdir", type=Path, default=Path("/"), help="Staging root; Applications is created below it")
+    parser.add_argument("--if-closed", action="store_true", help="Leave a running installation untouched and report a skipped install")
     args = parser.parse_args()
     if sys.platform != "darwin":
         parser.error("The install target currently supports macOS only")
     source = args.source.resolve()
     try:
-        info = plistlib.loads((source / "Contents/Info.plist").read_bytes())
-        if info.get("CFBundleIdentifier") != "org.ipde.texture-studio":
-            parser.error("Install requires the built Texture Studio app (run make package)")
-        executable = source / "Contents/MacOS" / info["CFBundleExecutable"]
-        if not executable.is_file():
-            parser.error("The app executable is missing")
+        validate_bundle(source)
     except (OSError, KeyError, ValueError) as error:
         parser.error(f"Install requires a complete Texture Studio bundle: {error}")
     destination = args.destdir.resolve() / "Applications/Texture Studio.app"
     if source == destination or source.is_relative_to(destination) or destination.is_relative_to(source):
         parser.error("Source and installed application must be separate")
-    install(source, destination)
+    try:
+        install(source, destination)
+    except RunningApplicationError as error:
+        if not args.if_closed:
+            raise
+        print(f"Installation skipped; running application unchanged: {error}")
 
 
 if __name__ == "__main__":

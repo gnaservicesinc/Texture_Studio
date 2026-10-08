@@ -2,6 +2,7 @@
 from pathlib import Path
 import importlib.util
 import subprocess
+import plistlib
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -14,6 +15,67 @@ _spec.loader.exec_module(installer)
 
 
 class NativeInstallTests(unittest.TestCase):
+    def test_running_nested_tool_blocks_install_without_stopping_it(self):
+        destination = Path("/Applications/Texture Studio.app")
+        child = destination / "Contents/Applications/Material Trainer.app/Contents/MacOS/Material Trainer"
+        with patch.object(installer.subprocess, "check_output", return_value=f" 124 {child}\n"):
+            with self.assertRaises(installer.RunningApplicationError):
+                installer.ensure_closed(destination)
+
+    def test_unrelated_app_with_similar_name_does_not_block_install(self):
+        with patch.object(installer.subprocess, "check_output", return_value="124 /Applications/Texture Studio.app.backup/Contents/MacOS/Texture Studio\n"):
+            installer.ensure_closed(Path("/Applications/Texture Studio.app"))
+
+    def test_bundle_requires_all_four_nonrecursive_role_identities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "Texture Studio.app"
+            self.suite_fixture(source)
+            installer.validate_bundle(source)
+            child = source / "Contents/Applications/Material Trainer.app"
+            (child / "Contents/Applications").mkdir()
+            with self.assertRaisesRegex(ValueError, "recursively embedded"):
+                installer.validate_bundle(source)
+            (child / "Contents/Applications").rmdir()
+            (child / "Contents/Info.plist").unlink()
+            with self.assertRaises(FileNotFoundError):
+                installer.validate_bundle(source)
+
+    def test_if_closed_skips_running_installation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "Texture Studio.app"
+            self.suite_fixture(source)
+            with patch.object(installer.sys, "argv", ["install", str(source), "--destdir", directory, "--if-closed"]), \
+                 patch.object(installer.sys, "platform", "darwin"), \
+                 patch.object(installer, "install", side_effect=installer.RunningApplicationError("PID 123")):
+                installer.main()
+
+    def test_install_validation_refuses_debug_and_unlabeled_bundles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "Texture Studio.app"
+            self.suite_fixture(source)
+            plist = source / "Contents/Info.plist"
+            info = plistlib.loads(plist.read_bytes())
+            for configuration in ("Debug", None):
+                if configuration is None: info.pop("IPDEBuildConfiguration", None)
+                else: info["IPDEBuildConfiguration"] = configuration
+                plist.write_bytes(plistlib.dumps(info))
+                with self.assertRaisesRegex(ValueError, "optimized Release"):
+                    installer.validate_bundle(source)
+
+    @staticmethod
+    def suite_fixture(source):
+        bundles = [(source, "Texture Studio", "org.ipde.texture-studio", None)]
+        bundles.extend((source / "Contents/Applications" / f"{name}.app", name, f"org.ipde.material-{role}", role)
+                       for role, name in installer.TOOLS.items())
+        for bundle, name, identifier, role in bundles:
+            executable = bundle / "Contents/MacOS" / name
+            executable.parent.mkdir(parents=True)
+            executable.write_text("binary")
+            executable.chmod(0o755)
+            info = {"CFBundleIdentifier": identifier, "CFBundleExecutable": name, "IPDEBuildConfiguration": "Release"}
+            if role: info["MaterialToolRole"] = role
+            (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
+
     def test_signature_failure_keeps_the_installed_app(self):
         with tempfile.TemporaryDirectory() as directory:
             source, destination = self.fixture(Path(directory))

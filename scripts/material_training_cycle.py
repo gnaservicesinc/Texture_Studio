@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import hashlib
+import io
 import json
 import math
 import os
@@ -30,6 +31,7 @@ from diagnose_material_curriculum import cpu_tree, mean_metrics, save_checkpoint
 from diagnose_material_fit import fit_metrics
 from frozen_dino_height import ARCHITECTURE, CODE_REVISION, DIAGNOSTIC_SCHEMA, MODEL_REVISION, MODEL_SHA256, ConditionedHeightNet, extract_features, load_frozen_encoder, state_sha256
 from material_dataset import read_png
+from material_fixed_adapters import POLICY as FIXED_ADAPTER_POLICY, adapter_sha256, apply_fixed_adapters, encoder_size as fixed_encoder_size, validate_adapters
 from material_height_model import squared_objective, weighted_mean
 from train_material_height import checked_relative, choose_device, digest, find_samples, load_pair, memory, opengl_normal_from_height, write_float_exr, write_json
 
@@ -83,11 +85,14 @@ def _encoder_contract(checkpoint: dict[str, Any]) -> None:
 
 def load_cycle_head(path: Path, device: torch.device, expected_sha256: str | None = None,
                     transfer_target: str | None = None) -> tuple[MaterialMapHead, dict[str, Any]]:
-    """Strict, explicit loader for cycle and historical frozen head checkpoints."""
-    checksum = digest(path)
+    """Load a native head and preserve any declared, fixed encoder adapters."""
+    if path.stat().st_size > 64 * 1024**2:
+        raise ValueError("Native material checkpoint exceeds its 64 MiB bound")
+    raw = path.read_bytes()
+    checksum = hashlib.sha256(raw).hexdigest()
     if expected_sha256 is not None and checksum != expected_sha256:
         raise ValueError(f"Warm-start checkpoint checksum mismatch: {path}")
-    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    checkpoint = torch.load(io.BytesIO(raw), map_location="cpu", weights_only=True)
     if isinstance(checkpoint, dict) and checkpoint.get("schema") == "texture-studio-material-inference-package-v1":
         checkpoint = checkpoint.get("inference_checkpoint")
         if not isinstance(checkpoint, dict):
@@ -100,8 +105,8 @@ def load_cycle_head(path: Path, device: torch.device, expected_sha256: str | Non
         config, state = checkpoint.get("model_config", {}), checkpoint.get("model_state", {})
         source_target = "height"
     elif schema in (SCHEMA, ADAPTATION_SCHEMA):
-        if schema == ADAPTATION_SCHEMA and (checkpoint.get("variant") != "frozen" or checkpoint.get("adapter_state")):
-            raise ValueError("Adapter checkpoints require their adapted encoder; they cannot be silently treated as frozen")
+        if checkpoint.get("variant", "frozen") not in ("frozen", "frozen_features", "lora"):
+            raise ValueError("Unknown checkpoint encoder variant")
         config, state = checkpoint.get("head_config", {}), checkpoint.get("head_state", {})
         source_target = checkpoint.get("target", config.get("target", "height"))
     else:
@@ -110,6 +115,9 @@ def load_cycle_head(path: Path, device: torch.device, expected_sha256: str | Non
     config.setdefault("target", source_target)
     if set(config) != {"base_channels", "feature_channels", "projection_channels", "target"} or config["feature_channels"] != 768 or config["target"] != source_target:
         raise ValueError("Checkpoint head configuration is incompatible")
+    if (type(config["base_channels"]) is not int or not 4 <= config["base_channels"] <= 64 or config["base_channels"] % 4
+            or type(config["projection_channels"]) is not int or not 1 <= config["projection_channels"] <= 64):
+        raise ValueError("Checkpoint head configuration exceeds bounded native dimensions")
     if not isinstance(state, dict) or not state or any(not isinstance(value, torch.Tensor) or value.dtype != torch.float32 or not torch.isfinite(value).all() for value in state.values()):
         raise ValueError("Head state must contain finite Float32 tensors")
     model = MaterialMapHead(**config)
@@ -120,10 +128,25 @@ def load_cycle_head(path: Path, device: torch.device, expected_sha256: str | Non
         body = {key: value for key, value in state.items() if not key.startswith("head.")}
         replacement.load_state_dict(dict(replacement.state_dict(), **body), strict=True)
         model, config = replacement, dict(config, target=transfer_target)
+    fixed_adapters = checkpoint.get("adapter_state", {})
+    if checkpoint.get("variant") == "lora":
+        validate_adapters(fixed_adapters)
+        size = fixed_encoder_size(checkpoint, path)
+    elif fixed_adapters:
+        raise ValueError("Frozen checkpoint contains unexplained encoder adapters")
+    else:
+        size = checkpoint.get("encoder_size", 518)
+    if schema == ADAPTATION_SCHEMA:
+        size = fixed_encoder_size(checkpoint, path)
+    if type(size) is not int or not 28 <= size <= 518 or size % 14:
+        raise ValueError("Checkpoint requires a bounded aligned encoder size")
+    model.fixed_adapter_state = cpu_tree(fixed_adapters)
     return model.to(device), {"checkpoint_path": str(path.resolve()), "checkpoint_sha256": checksum,
         "source_schema": schema, "source_step": checkpoint.get("step"), "source_target": source_target,
         "head_config": config, "output_layer_reset_for_new_target": reset_output,
-        "optimizer_reset": True, "source_encoder_size": checkpoint.get("encoder_size", 518)}
+        "optimizer_reset": True, "source_encoder_size": size,
+        "fixed_adapter_sha256": adapter_sha256(fixed_adapters) if fixed_adapters else None,
+        "encoder_refinement_policy": FIXED_ADAPTER_POLICY if fixed_adapters else "refine_material_head_with_frozen_encoder"}
 
 
 def load_target_pair(sample: dict[str, Any], device: torch.device, target: str,
@@ -256,9 +279,13 @@ class Guard:
 
 
 def select_samples(args: argparse.Namespace) -> tuple[list, list, dict, dict]:
-    found = find_samples(args.dataset, args.allow_unreviewed)
+    # Unselected materials' review state does not authorize or reject the
+    # requested selection. Scientific dataset/split checks still run globally.
+    found = find_samples(args.dataset, True)
     requested = sorted(set(args.materials or [s["metadata"]["material_id"] for s in found]))
     selected = sorted((s for s in found if s["metadata"]["material_id"] in requested), key=lambda s: s["metadata"]["sample_id"])
+    if not args.allow_unreviewed and any(s["metadata"]["status"] not in ("approved", "accepted") for s in selected):
+        raise ValueError("Selected samples need quality review or explicit --allow-unreviewed")
     training, validation = ([s for s in selected if s["metadata"]["split"] == split] for split in ("train", "validation"))
     if {s["metadata"]["material_id"] for s in selected} != set(requested) or not training or not validation:
         raise ValueError("Requested materials need eligible native training and validation crops")
@@ -350,7 +377,6 @@ def run_train(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
         raise ValueError("Choose a fresh warm start or optimizer resume, not both")
     device = choose_device(args.device)
     training, validation, bindings, manifests = select_samples(args)
-    identity = cycle_identity(args, training, validation, bindings)
     schedule = balanced_schedule(len(training), args.updates_per_crop, args.seed)
     warm = args.resume_checkpoint or args.warm_start
     if warm is None:
@@ -359,6 +385,15 @@ def run_train(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
         head_info = {"head_config": {"base_channels": args.base_channels, "feature_channels": 768, "projection_channels": args.projection_channels, "target": args.target}, "optimizer_reset": True, "from_scratch": True}
     else:
         head, head_info = head_loader(warm, device, args.warm_start_sha256, args.target)
+        args.encoder_size = head_info["source_encoder_size"]
+        if type(args.encoder_size) is not int or not 28 <= args.encoder_size <= 518 or args.encoder_size % 14:
+            raise ValueError("Selected checkpoint requires a bounded aligned encoder size")
+        head_info["encoder_size_policy"] = "selected_checkpoint_size_preserved"
+    fixed_adapters = getattr(head, "fixed_adapter_state", {})
+    fixed_hash = adapter_sha256(fixed_adapters) if fixed_adapters else None
+    identity = cycle_identity(args, training, validation, bindings)
+    if fixed_adapters:
+        identity["fixed_encoder_adapters_sha256"] = fixed_hash
     config = head_info["head_config"]
     initial = state_sha256(head.state_dict())
     optimizer = torch.optim.AdamW(head.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
@@ -386,7 +421,7 @@ def run_train(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
     implementation = args.output / "implementation"
     implementation.mkdir()
     code_hashes = {}
-    for name in ("material_training_cycle.py", "frozen_dino_height.py", "material_height_model.py", "train_material_height.py", "material_dataset.py", "diagnose_material_fit.py", "diagnose_material_curriculum.py"):
+    for name in ("material_training_cycle.py", "material_fixed_adapters.py", "probe_material_adapters.py", "frozen_dino_height.py", "material_height_model.py", "train_material_height.py", "material_dataset.py", "diagnose_material_fit.py", "diagnose_material_curriculum.py"):
         path = Path(__file__).parent / name
         (implementation / name).write_bytes(path.read_bytes())
         code_hashes[name] = digest(path)
@@ -398,6 +433,8 @@ def run_train(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
         "selection_policy": args.selection, "selection_note": "Final is user default; metrics are diagnostic. Explicit best-validation selection uses actual evaluated initial/final/periodic snapshots only.",
         "initial_head_state_sha256": initial, "requested_steps": len(schedule), "requested_updates_per_crop": args.updates_per_crop,
         "encoder_resize_only": True, "no_augmentation": True, "source_images_modified": False, "production_promotion": False,
+        "encoder_refinement_policy": FIXED_ADAPTER_POLICY if fixed_adapters else "refine_material_head_with_frozen_encoder",
+        "fixed_adapter_sha256": fixed_hash, "encoder_adapters_trained": False,
         "selected_crop_rectangles": {s["metadata"]["sample_id"]: s["metadata"]["crop_rectangle_top_left_xywh"] for s in training + validation},
         "implementation_sha256": code_hashes, "dataset_index_sha256_at_selection": digest(args.dataset / "dataset.json"), "device": str(device), "torch_version": str(torch.__version__),
         "started_from_step": step, "feature_cache": "Detached frozen encoder grids on CPU; one native source/target pair at a time",
@@ -408,6 +445,8 @@ def run_train(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
     status, stop_reason = "complete", None
     def payload() -> dict:
         return {"schema": SCHEMA, "head_config": config, "head_state": cpu_tree(head.state_dict()), "target": args.target,
+            "variant": "lora" if fixed_adapters else "frozen", "adapter_state": cpu_tree(fixed_adapters),
+            "encoder_refinement_policy": FIXED_ADAPTER_POLICY if fixed_adapters else "refine_material_head_with_frozen_encoder",
             "encoder": encoder_info, "encoder_size": args.encoder_size, "step": step, "identity": identity,
             "training_sample_ids": identity["training_sample_ids"], "validation_sample_ids": identity["validation_sample_ids"],
             "schedule": schedule, "per_crop_update_counts": counts, "optimizer_state": cpu_tree(optimizer.state_dict()),
@@ -448,6 +487,10 @@ def run_train(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
     try:
         guard.check("before encoder load")
         encoder, encoder_info = encoder_loader(args.model_directory, args.code_directory, device)
+        if fixed_adapters:
+            from probe_material_adapters import base_fingerprint
+            frozen_base_before = base_fingerprint(encoder)
+        fixed_modules = apply_fixed_adapters(encoder, fixed_adapters) if fixed_adapters else {}
         guard.check("after encoder load")
         for sample in training + validation:
             guard.check("feature cache before forward")
@@ -457,6 +500,16 @@ def run_train(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
             del x, y, mask
         if any(p.requires_grad or p.grad is not None for p in encoder.parameters()):
             raise ValueError("Frozen encoder acquired gradients")
+        if fixed_modules:
+            actual = {name: {field: getattr(module, field).detach().cpu() for field in ("lora_A", "lora_B")} for name, module in fixed_modules.items()}
+            if adapter_sha256(actual) != fixed_hash:
+                raise ValueError("Fixed encoder adapters changed during feature caching")
+            report["fixed_adapters_verified_unchanged"] = True
+            if base_fingerprint(encoder) != frozen_base_before:
+                raise ValueError("Original pretrained encoder changed during fixed-adapter feature caching")
+            report["pretrained_base_verified_unchanged"] = True
+            del actual
+        del fixed_modules
         del encoder
         if device.type == "mps":
             torch.mps.empty_cache()
@@ -583,6 +636,7 @@ def run_probe(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
     bindings[str(args.warm_start.resolve())] = digest(args.warm_start)
     verify_bindings(bindings)
     template, head_info = load_cycle_head(args.warm_start, torch.device("cpu"), args.warm_start_sha256, "height")
+    args.encoder_size = head_info["source_encoder_size"]
     initial = cpu_tree(template.state_dict())
     report = {"schema": SCHEMA + "-size-probe", "scope": "Native update timing/memory feasibility only; no quality or promotion", "warm_start": head_info, "sizes": {}, "selected_files_sha256": bindings, "implementation_sha256": {name: digest(Path(__file__).parent / name) for name in ("material_training_cycle.py", "frozen_dino_height.py", "material_height_model.py", "train_material_height.py")}}
     args.output.mkdir(parents=True, exist_ok=False)
@@ -591,6 +645,10 @@ def run_probe(args: argparse.Namespace, encoder_loader: Callable = load_frozen_e
     try:
         setup_guard.check("probe before encoder load")
         encoder, pins = encoder_loader(args.model_directory, args.code_directory, device)
+        fixed_adapters = getattr(template, "fixed_adapter_state", {})
+        if fixed_adapters:
+            args.encoder_size = head_info["source_encoder_size"]
+            apply_fixed_adapters(encoder, fixed_adapters)
         setup_guard.check("probe after encoder load")
         report["encoder"] = pins
     except (CycleLimit, RuntimeError) as error:

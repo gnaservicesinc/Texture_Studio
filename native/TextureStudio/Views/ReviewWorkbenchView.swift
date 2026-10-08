@@ -34,6 +34,9 @@ struct ReviewWorkbenchView: View {
     var body: some View {
         VStack(spacing: 0) {
             inspectionControls.padding(8).background(.bar)
+            Text("Drag or scroll to pan · Pinch or Option-scroll to zoom · 100% shows original pixels")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12).padding(.vertical, 5)
             if candidates.isEmpty {
                 ContentUnavailableView("Choose maps to compare", systemImage: "square.split.2x1")
             } else {
@@ -44,6 +47,7 @@ struct ReviewWorkbenchView: View {
                                 Text(candidate.label).font(.headline)
                                 Spacer()
                                 Button("Export Original…") { export(candidate) }.disabled(inspectedHashes[candidate.id] == nil)
+                                    .help("Copy the original PNG or EXR exactly, at its original resolution and precision. Display contrast has no effect on the export.")
                                 Menu {
                                     Button("Open Full Map in New Window") { ReviewWindowController.shared.open(candidates: [candidate]) }
                                     Button("Export Original…") { export(candidate) }.disabled(inspectedHashes[candidate.id] == nil)

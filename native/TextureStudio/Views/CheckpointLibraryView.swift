@@ -3,6 +3,7 @@ import AppKit
 
 struct CheckpointLibraryView: View {
     @Bindable var store: WorkbenchStore
+    var showsDismissButton = true
     @Environment(\.dismiss) private var dismiss
     @State private var showUpload = false
 
@@ -15,7 +16,7 @@ struct CheckpointLibraryView: View {
                         .font(.callout).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
+                if showsDismissButton { Button("Done") { dismiss() }.keyboardShortcut(.cancelAction) }
             }
             .padding(20)
             Divider()
@@ -105,16 +106,18 @@ struct CheckpointLibraryView: View {
             Section("Use this checkpoint") {
                 Button("Use in Texture Studio") { store.useSelectedInStudio() }
                     .disabled(store.isBusy || checkpoint.target != "height")
+                    .help("Save this exact checkpoint as Studio’s material-height source. In Studio choose Material checkpoint; its file is never replaced by this action.")
                 if checkpoint.target != "height" {
                     Text("Texture Studio currently uses displacement checkpoints. This model can be selected for its own training target.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("The trainer uses this selected checkpoint when Start from checkpoint is enabled.")
+                Text("Choose Refine a checkpoint in Train & Refine to start a new run from this model. Resume Saved Run instead restores the optimizer and exact data from an interrupted run.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Model package") {
                 Button("Export Package…") { store.exportSelectedCheckpoint() }
                     .disabled(store.isBusy)
+                    .help("Create a new portable package containing learned weights, a model card and dependency identities. Training photos and optimizer state stay local.")
                 if let package = store.lastPackageURL {
                     LabeledContent("Last exported package", value: package.lastPathComponent)
                     HStack {

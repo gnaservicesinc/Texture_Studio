@@ -11,7 +11,7 @@ make build
 
 Open `native/TextureStudio/TextureStudio.xcodeproj` in Xcode and choose the shared `TextureStudio` scheme, or use the Codex Run action. The default local app is `build/TextureStudio/Build/Products/Release/Texture Studio.app`. `make test-native` runs native regressions; `make smoke` exercises both EXR formats. `make package` produces an ad-hoc signed archive; this is not notarization or publication. There are no Windows or Linux application build targets.
 
-The build also produces **Material Review**, **Checkpoint Compare**, **Material Dataset**, and **Material Trainer** as independently launchable apps alongside Texture Studio. They provide full-resolution linked pan/zoom and pop-out inspection, original-map export/GIMP, comparisons of two or more exact checkpoints, metadata-only crop curation, native 1K/2K training with stop/save/resume, and explicit model packaging/upload. See [native material tools](docs/native-material-tools.md) for launch commands and checkpoint selection.
+Use **Model Training** in Texture Studio’s toolbar or sidebar for a guided workspace: prepare native crops, start from a base or saved model, compare checkpoints, inspect full-resolution details, and export or use a model in Studio. **Material Review**, **Checkpoint Compare**, **Material Dataset**, and **Material Trainer** are also bundled as independently launchable apps inside Texture Studio. Normal builds and Run actions use Release. Changing the training crop size automatically prepares matching crops from original maps. See [native material tools](docs/native-material-tools.md) for launch commands and checkpoint selection.
 
 ## Photo to material
 

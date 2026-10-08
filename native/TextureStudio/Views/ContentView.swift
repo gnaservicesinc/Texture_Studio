@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(\.openWindow) private var openWindow
     let models: ModelManager
     let adviser: OllamaDecisionService
     @State private var workspace: TextureWorkspace
@@ -41,6 +42,8 @@ struct ContentView: View {
             }
             ToolbarSpacer(.fixed)
             ToolbarItemGroup(placement: .automatic) {
+                Button { openWindow(id: "model-training") } label: { Label("Model Training", systemImage: "graduationcap") }
+                    .help("Prepare crops, refine a model, compare checkpoints and inspect full-resolution material maps.")
                 Button { workspace.showAdvice = true } label: { Label("Review Photo", systemImage: "eye") }
                     .help("Review bounded suggestions from local Clef")
                 Button { workspace.showModels = true } label: { Label("Models", systemImage: "shippingbox") }
@@ -80,6 +83,7 @@ struct ContentView: View {
         }
         .task {
             models.refresh()
+            if CommandLine.arguments.contains("--open-training") { openWindow(id: "model-training") }
             let args = CommandLine.arguments
             if let index = args.firstIndex(of: "--open"), index + 1 < args.count {
                 workspace.importPhoto(URL(fileURLWithPath: args[index + 1]))
@@ -89,6 +93,7 @@ struct ContentView: View {
 }
 
 struct StudioSidebar: View {
+    @Environment(\.openWindow) private var openWindow
     @Bindable var workspace: TextureWorkspace
 
     var body: some View {
@@ -103,6 +108,8 @@ struct StudioSidebar: View {
                 }
             }
             Section("Project") {
+                Button { openWindow(id: "model-training") } label: { Label("Model Training", systemImage: "graduationcap") }
+                    .help("Open the guided workspace for data preparation, training, comparison and model export.")
                 Button { workspace.saveRecipe() } label: { Label("Save Recipe…", systemImage: "doc.badge.arrow.up") }
                     .disabled(workspace.source == nil || workspace.isBusy)
                 Button { workspace.showModels = true } label: { Label("Local Models", systemImage: "shippingbox") }

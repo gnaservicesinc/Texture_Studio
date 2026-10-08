@@ -6,7 +6,7 @@ name = "Texture Studio"
 script = ""
 
 [[actions]]
-name = "Run"
+name = "Run Release"
 icon = "run"
 command = "./script/build_and_run.sh"
 
@@ -29,3 +29,8 @@ command = "./script/build_and_run.sh run --tool dataset"
 name = "Material Trainer"
 icon = "run"
 command = "./script/build_and_run.sh run --tool train"
+
+[[actions]]
+name = "Debug Texture Studio"
+icon = "run"
+command = "./script/build_and_run.sh --debug"

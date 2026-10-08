@@ -20,6 +20,10 @@ struct TextureStudioApp: App {
         }
         .defaultSize(width: 1320, height: 900)
         .commands { StudioCommands(); MaterialToolCommands() }
+        Window("Model Training", id: "model-training") {
+            ModelTrainingHubView(store: workbench)
+        }
+        .defaultSize(width: 1440, height: 940)
         Settings {
             if MaterialTool.launchRole != nil {
                 WorkbenchRuntimeView(store: workbench).frame(width: 710, height: 500)
@@ -32,8 +36,12 @@ struct TextureStudioApp: App {
 }
 
 struct MaterialToolCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
     var body: some Commands {
         CommandMenu("Material Tools") {
+            Button("Model Training…", systemImage: "graduationcap") { openWindow(id: "model-training") }
+                .keyboardShortcut("t", modifiers: [.command, .shift])
+            Divider()
             ForEach(MaterialTool.allCases) { role in
                 Button(role.title, systemImage: role.symbol) { MaterialToolLauncher.open(role) }
             }

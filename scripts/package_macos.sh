@@ -17,6 +17,10 @@ if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")" != or
   echo "Refusing to package an unrelated application." >&2
   exit 1
 fi
+if [[ "$(/usr/libexec/PlistBuddy -c 'Print :IPDEBuildConfiguration' "$PLIST" 2>/dev/null || true)" != Release ]]; then
+  echo "Package requires an optimized Release build (run make package)." >&2
+  exit 1
+fi
 if [[ "$(/usr/bin/lipo -archs "$APP_BINARY")" != arm64 ]]; then
   echo "Texture Studio package must contain the arm64 app." >&2
   exit 1
@@ -33,6 +37,30 @@ if [[ -n "$UNEXPECTED_RESOURCE" ]]; then
   echo "DA3 app resources must contain source and dependency pins only: $UNEXPECTED_RESOURCE" >&2
   exit 1
 fi
+UNEXPECTED_PAYLOAD="$(/usr/bin/find "$APP_BUNDLE/Contents" \( -name '*.safetensors' -o -name '*.pt' -o -name '*.pth' -o -name '*.ckpt' -o -name '*.onnx' -o -name '*.npy' -o -name '*.npz' -o -name '*.exr' -o -name '*.blend' -o -name '*.mlmodelc' -o -name '*.mlpackage' -o -name pyvenv.cfg \) -print -quit)"
+if [[ -n "$UNEXPECTED_PAYLOAD" ]]; then
+  echo "Application packaging excludes model weights, numeric experiment maps and runtimes: $UNEXPECTED_PAYLOAD" >&2
+  exit 1
+fi
+for ROLE in review compare dataset train; do
+  case "$ROLE" in
+    review) TOOL_NAME="Material Review" ;;
+    compare) TOOL_NAME="Checkpoint Compare" ;;
+    dataset) TOOL_NAME="Material Dataset" ;;
+    train) TOOL_NAME="Material Trainer" ;;
+  esac
+  TOOL_APP="$APP_BUNDLE/Contents/Applications/$TOOL_NAME.app"
+  TOOL_PLIST="$TOOL_APP/Contents/Info.plist"
+  if [[ ! -x "$TOOL_APP/Contents/MacOS/$TOOL_NAME" || ! -f "$TOOL_PLIST" ]] || \
+     [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$TOOL_PLIST")" != "org.ipde.material-$ROLE" ]] || \
+     [[ "$(/usr/libexec/PlistBuddy -c 'Print :MaterialToolRole' "$TOOL_PLIST")" != "$ROLE" ]] || \
+     [[ "$(/usr/libexec/PlistBuddy -c 'Print :IPDEBuildConfiguration' "$TOOL_PLIST" 2>/dev/null || true)" != Release ]] || \
+     [[ -e "$TOOL_APP/Contents/Applications" ]]; then
+    echo "Missing or malformed nested material tool: $TOOL_NAME (run make build)." >&2
+    exit 1
+  fi
+  /usr/bin/codesign --verify --deep --strict "$TOOL_APP"
+done
 /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
 mkdir -p "$OUTPUT_DIR"
 PACKAGE_DIR="$(/usr/bin/mktemp -d "$OUTPUT_DIR/.texture-studio-package.XXXXXX")"

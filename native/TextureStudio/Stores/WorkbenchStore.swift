@@ -16,7 +16,10 @@ final class WorkbenchStore {
     var error: String?
     private(set) var isBusy = false
     private(set) var isTraining = false
+    private(set) var isResumingTraining = false
     private(set) var isStopping = false
+    private(set) var isPreparingDataset = false
+    private(set) var datasetPreparationSummary = ""
     var lastOutputURL: URL?
     var lastLogURL: URL?
     var lastPackageURL: URL?
@@ -32,7 +35,10 @@ final class WorkbenchStore {
     @ObservationIgnored private var runner: WorkbenchProcess?
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var activeWorkerId: UUID?
-    @ObservationIgnored private let preferences = UserDefaults(suiteName: "org.ipde.material-tools")!
+    @ObservationIgnored private let preferences: UserDefaults
+    @ObservationIgnored private let workerOverride: (@MainActor ([String], String) async throws -> String)?
+    @ObservationIgnored private let managedWorkspaceURL: URL
+    @ObservationIgnored private var hasRestored = false
 
     var samples: [WorkbenchSample] { dataset?.samples ?? [] }
     var selectedSample: WorkbenchSample? { samples.first { $0.id == selectedSampleId } }
@@ -44,20 +50,26 @@ final class WorkbenchStore {
     var backendDirectory: URL { Bundle.main.resourceURL!.appendingPathComponent("MaterialBackend") }
     var dependencyArguments: [String] { ["--model-directory", modelDirectory, "--code-directory", codeDirectory] }
 
-    init() {
-        let defaults = UserDefaults(suiteName: "org.ipde.material-tools")!
+    init(preferences defaults: UserDefaults = UserDefaults(suiteName: "org.ipde.material-tools")!,
+         managedWorkspaceURL: URL? = nil,
+         workerOverride: (@MainActor ([String], String) async throws -> String)? = nil) {
+        preferences = defaults
+        self.workerOverride = workerOverride
+        self.managedWorkspaceURL = (managedWorkspaceURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Texture Studio/Material Workspace")).standardizedFileURL
         let local = Bundle.main.object(forInfoDictionaryKey: "IPDEWorkspace") as? String ?? ""
         let configuredWorkspace = defaults.string(forKey: "workspace") ?? local
-        let workspace = configuredWorkspace.isEmpty ? "" : URL(fileURLWithPath: configuredWorkspace).standardizedFileURL.path
+        let workspace = configuredWorkspace.isEmpty ? self.managedWorkspaceURL.path : URL(fileURLWithPath: configuredWorkspace).standardizedFileURL.path
         workspacePath = workspace
-        pythonPath = defaults.string(forKey: "python") ?? URL(fileURLWithPath: workspace).appendingPathComponent(".venv/bin/python").path
+        pythonPath = defaults.string(forKey: "python") ?? MaterialWorkbenchRuntime.defaultPython(workspace: URL(fileURLWithPath: workspace))
         let cache = URL(fileURLWithPath: workspace).appendingPathComponent("out/material-training/transfer-models")
         modelDirectory = defaults.string(forKey: "encoder") ?? cache.appendingPathComponent("dinov2-base-f9e44c814b77").path
         codeDirectory = defaults.string(forKey: "encoderCode") ?? cache.appendingPathComponent("dinov2-code-7764ea0f912e").path
     }
 
     func restore() {
-        guard !isBusy else { return }
+        guard !isBusy, !hasRestored else { return }
+        hasRestored = true
         let args = CommandLine.arguments
         var datasetPath = preferences.string(forKey: "dataset")
         if datasetPath == nil {
@@ -124,7 +136,7 @@ final class WorkbenchStore {
         }
     }
     func chooseWorkspace() {
-        chooseFolder(title: "Choose IPDE workspace") { url in self.workspacePath = url.path; self.saveConfiguration() }
+        chooseFolder(title: "Choose a working folder for material runs") { url in self.workspacePath = url.path; self.saveConfiguration() }
     }
     func chooseEncoder() {
         chooseFolder(title: "Locate the pinned DINOv2 encoder folder") { url in self.modelDirectory = url.path; self.saveConfiguration() }
@@ -135,9 +147,57 @@ final class WorkbenchStore {
 
     func loadDataset(_ url: URL) async throws {
         let result: WorkbenchDataset = try WorkbenchProcess.decode(WorkbenchDataset.self, output: await worker(["dataset", "--dataset", url.path]))
-        dataset = result
-        if !result.samples.contains(where: { $0.id == selectedSampleId }) { selectedSampleId = result.samples.first?.id }
+        adoptDataset(result)
+        datasetPreparationSummary = ""
         preferences.set(result.datasetPath, forKey: "dataset")
+    }
+
+    private func adoptDataset(_ result: WorkbenchDataset, preferredMaterial: String? = nil) {
+        let material = preferredMaterial ?? selectedMaterialId
+        dataset = result
+        if !result.samples.contains(where: { $0.id == selectedSampleId }) {
+            selectedSampleId = result.materials.first(where: { $0.id == material })?.samples.first?.id ?? result.samples.first?.id
+        }
+    }
+
+    func selectTrainingSize(_ size: Int) {
+        guard !isBusy else { return }
+        guard [1024, 2048].contains(size) else { error = "Choose 1024 or 2048 native pixels."; return }
+        training.size = size
+        prepareTrainingDataset()
+    }
+
+    func prepareTrainingDataset() {
+        guard !isBusy, dataset != nil else { return }
+        let size = training.size
+        guard dataset?.hasNativeSize(size) != true else { return }
+        operation("Preparing \(size) × \(size) native crops…") {
+            _ = try await self.ensureTrainingDataset(size: size)
+            self.activity = self.datasetPreparationSummary
+        }
+    }
+
+    private func ensureTrainingDataset(size: Int) async throws -> WorkbenchDataset {
+        guard let current = dataset else { throw StudioError("Open a material dataset first.") }
+        guard [1024, 2048].contains(size) else { throw StudioError("Choose 1024 or 2048 native pixels.") }
+        if current.hasNativeSize(size) { return current }
+        let material = selectedMaterialId
+        isPreparingDataset = true
+        activity = "Preparing \(size) × \(size) native crops from the original materials…"
+        defer { isPreparingDataset = false }
+        let result: WorkbenchDataset = try WorkbenchProcess.decode(WorkbenchDataset.self, output: await worker([
+            "prepare-size", "--dataset", current.datasetPath, "--size", String(size),
+            "--expected-index-sha256", current.indexSha256]))
+        guard result.hasNativeSize(size), let preparation = result.preparation,
+              preparation.cropSize == size, !preparation.targetResized, !preparation.originalDatasetModified,
+              URL(fileURLWithPath: preparation.preparedDatasetPath).standardizedFileURL == URL(fileURLWithPath: result.datasetPath).standardizedFileURL else {
+            throw StudioError("Crop preparation did not verify the requested native size and preserved originals. The previous dataset remains selected.")
+        }
+        try Task.checkCancellation()
+        adoptDataset(result, preferredMaterial: material)
+        preferences.set(result.datasetPath, forKey: "dataset")
+        datasetPreparationSummary = "\(preparation.reused ? "Opened existing" : "Prepared") \(size) × \(size) native crops. Original maps remain unchanged."
+        return result
     }
     func loadCheckpoint(_ url: URL) async throws {
         let checkpoint: WorkbenchCheckpoint = try WorkbenchProcess.decode(WorkbenchCheckpoint.self, output: await worker(["checkpoint", "--checkpoint", url.path]))
@@ -204,42 +264,91 @@ final class WorkbenchStore {
     }
 
     func startTraining() {
-        guard let dataset else { error = "Open a dataset first."; return }
-        var args = ["train", "--dataset", dataset.datasetPath, "--target", training.target,
-                    "--expected-size", String(training.size), "--updates-per-crop", String(training.updatesPerCrop),
-                    "--max-minutes", String(training.maxMinutes), "--max-driver-bytes", String(Int64(training.memoryGB * 1_000_000_000)),
-                    "--selection", "final", "--checkpoint-every", "100", "--evaluate-every", "400", "--prediction-limit", "2", "--device", "mps"]
-        if training.allowUnreviewed { args += ["--allow-unreviewed"] }
-        if training.maskTransparency { args += ["--mask-transparent-input"] }
-        if training.useSelectedMaterialOnly {
-            guard let material = selectedMaterialId else { error = "Select a material first."; return }
-            args += ["--material", material]
-        }
-        if training.useWarmStart, let checkpoint = selectedCheckpoint {
-            guard checkpoint.supportsTrainingWarmStart else {
-                error = "This trainer fits frozen-encoder heads. Choose a frozen checkpoint or turn off warm start; LoRA checkpoints remain available for comparison and Studio inference."; return
+        guard dataset != nil else { error = "Open a dataset first."; return }
+        let options = training, material = selectedMaterialId, checkpoint = selectedCheckpoint
+        if let issue = configurationIssue(options: options, checkpoint: checkpoint) { error = issue; return }
+        operation("Preparing the training run…") {
+            let prepared = try await self.ensureTrainingDataset(size: options.size)
+            if let issue = self.sampleIssue(dataset: prepared, options: options, material: material) { throw StudioError(issue) }
+            var args = ["train", "--dataset", prepared.datasetPath, "--target", options.target,
+                        "--expected-size", String(options.size), "--updates-per-crop", String(options.updatesPerCrop),
+                        "--max-minutes", String(options.maxMinutes), "--max-driver-bytes", String(Int64(options.memoryGB * 1_000_000_000)),
+                        "--selection", "final", "--checkpoint-every", "100", "--evaluate-every", "400", "--prediction-limit", "2", "--device", "mps"]
+            if options.allowUnreviewed { args += ["--allow-unreviewed"] }
+            if options.maskTransparency { args += ["--mask-transparent-input"] }
+            if options.useSelectedMaterialOnly, let material { args += ["--material", material] }
+            if options.useWarmStart, let checkpoint {
+                args += ["--warm-start", checkpoint.checkpointPath, "--warm-start-sha256", checkpoint.sha256]
             }
-            args += ["--warm-start", checkpoint.checkpointPath, "--warm-start-sha256", checkpoint.sha256]
+            try await self.runTraining(args, options: options)
         }
-        launchTraining(args)
+    }
+
+    var trainingConfigurationIssue: String? {
+        if let issue = configurationIssue(options: training, checkpoint: selectedCheckpoint) { return issue }
+        guard let dataset else { return "Open a prepared dataset to begin." }
+        // A different requested size is prepared from parents before training;
+        // it is an action the app handles, rather than a manual setup error.
+        return sampleIssue(dataset: dataset, options: training, material: selectedMaterialId)
+    }
+
+    private func configurationIssue(options: MaterialTrainingOptions, checkpoint: WorkbenchCheckpoint?) -> String? {
+        guard ["height", "roughness", "normal"].contains(options.target), [1024, 2048].contains(options.size) else { return "Choose a supported map target and native size." }
+        if let issue = resourceIssue(options: options) { return issue }
+        if options.useWarmStart {
+            guard let checkpoint else { return "Locate a checkpoint to refine, or choose Start from Base DINOv2." }
+            if !checkpoint.supportsTrainingWarmStart { return "This checkpoint cannot be refined by the selected backend. Choose a supported material checkpoint, or start from Base DINOv2." }
+        }
+        return nil
+    }
+
+    private func resourceIssue(options: MaterialTrainingOptions) -> String? {
+        guard options.memoryGB.isFinite, (2...30).contains(options.memoryGB), options.maxMinutes.isFinite,
+              (1...240).contains(options.maxMinutes), (1...10000).contains(options.updatesPerCrop) else { return "Choose 2–30 GB of memory, 1–240 minutes and 1–10,000 updates per crop." }
+        return nil
+    }
+
+    private func sampleIssue(dataset: WorkbenchDataset, options: MaterialTrainingOptions, material: String?) -> String? {
+        if options.useSelectedMaterialOnly && material == nil { return "Select the material to train." }
+        let candidates = options.useSelectedMaterialOnly ? dataset.materials.first(where: { $0.id == material })?.samples ?? [] : dataset.samples
+        if !options.allowUnreviewed && candidates.contains(where: { ["prepared", "unreviewed"].contains($0.status) }) {
+            return "Approve or exclude the crops awaiting review, or allow crops awaiting approval."
+        }
+        let eligible = candidates.filter { ["approved", "accepted"].contains($0.status) || (options.allowUnreviewed && ["prepared", "unreviewed"].contains($0.status)) }
+        if eligible.isEmpty { return "Approve crops or include prepared crops awaiting review." }
+        if eligible.contains(where: { $0.maps[options.target] == nil }) { return "Each selected crop needs its own \(options.target) target map." }
+        if !eligible.contains(where: { $0.split == "train" }) || !eligible.contains(where: { $0.split == "validation" }) { return "The selection needs training and validation crops." }
+        return nil
     }
     func chooseResumeCheckpoint() {
-        chooseFile(title: "Choose checkpoint.latest.pt with optimizer state") { url in
-            self.launchTraining(["resume", "--resume-checkpoint", url.path, "--updates-per-crop", String(self.training.updatesPerCrop),
-                                 "--max-minutes", String(self.training.maxMinutes), "--max-driver-bytes", String(Int64(self.training.memoryGB * 1_000_000_000))])
-        }
+        if let issue = resourceIssue(options: training) { error = issue; return }
+        chooseFile(title: "Choose checkpoint.latest.pt with optimizer state", selected: resumeTraining)
+    }
+    func resumeTraining(from url: URL) {
+        let options = training
+        if let issue = resourceIssue(options: options) { error = issue; return }
+        launchTraining(["resume", "--resume-checkpoint", url.path, "--updates-per-crop", String(options.updatesPerCrop),
+                        "--max-minutes", String(options.maxMinutes), "--max-driver-bytes", String(Int64(options.memoryGB * 1_000_000_000))])
     }
     private func launchTraining(_ args: [String]) {
+        let options = training
         operation("Training native material maps…", training: true) {
-            let output = try self.newOutputURL(prefix: "native-\(self.training.size)-\(self.training.target)")
-            self.lastOutputURL = output
-            let text = try await self.worker(args + ["--output", output.path] + self.dependencyArguments, script: "material_training_cycle.py")
-            let trainingLogURL = self.lastLogURL
-            defer { self.lastLogURL = trainingLogURL; self.logText = String(text.suffix(100000)) }
-            let checkpoint = output.appendingPathComponent("checkpoint.selected.pt")
-            if FileManager.default.fileExists(atPath: checkpoint.path) { try await self.loadCheckpoint(checkpoint) }
-            self.activity = "Training stopped or finished. Checkpoints and summary are in the run folder."
+            try await self.runTraining(args, options: options)
         }
+    }
+    private func runTraining(_ args: [String], options: MaterialTrainingOptions) async throws {
+        try Task.checkCancellation()
+        isTraining = true
+        isResumingTraining = args.first == "resume"
+        activity = isResumingTraining ? "Resuming the saved run’s crop selection and map target…" : "Training native material maps…"
+        let output = try self.newOutputURL(prefix: isResumingTraining ? "resumed-material-run" : "native-\(options.size)-\(options.target)")
+        self.lastOutputURL = output
+        let text = try await self.worker(args + ["--output", output.path] + self.dependencyArguments, script: "material_training_cycle.py")
+        let trainingLogURL = self.lastLogURL
+        defer { self.lastLogURL = trainingLogURL; self.logText = String(text.suffix(100000)) }
+        let checkpoint = output.appendingPathComponent("checkpoint.selected.pt")
+        if FileManager.default.fileExists(atPath: checkpoint.path) { try await self.loadCheckpoint(checkpoint) }
+        self.activity = "Training stopped or finished. Checkpoints and summary are in the run folder."
     }
     func stop() {
         guard isBusy else { return }
@@ -310,6 +419,11 @@ final class WorkbenchStore {
     func worker(_ args: [String], script: String = "material_workbench.py") async throws -> String {
         try Task.checkCancellation()
         guard !WorkbenchLifecycle.shared.isTerminating else { throw CancellationError() }
+        if let workerOverride {
+            let output = try await workerOverride(args, script)
+            try Task.checkCancellation()
+            return output
+        }
         guard FileManager.default.isExecutableFile(atPath: pythonPath) else { throw StudioError("Python is missing. Locate your PyTorch environment in Runtime settings.") }
         let worker = backendDirectory.appendingPathComponent(script)
         guard FileManager.default.fileExists(atPath: worker.path) else { throw StudioError("The bundled material backend is missing. Rebuild the apps.") }
@@ -341,18 +455,24 @@ final class WorkbenchStore {
         guard !isBusy else { return }
         isBusy = true; isTraining = training; isStopping = false; error = nil; activity = label; logText = ""
         task = Task {
-            defer { isBusy = false; isTraining = false; isStopping = false; task = nil }
+            defer { isBusy = false; isTraining = false; isResumingTraining = false; isStopping = false; isPreparingDataset = false; task = nil }
             do { try await body() }
             catch {
                 if Task.isCancelled || error is CancellationError {
                     let saved = lastOutputURL.map { FileManager.default.fileExists(atPath: $0.appendingPathComponent("checkpoint.latest.pt").path) } ?? false
-                    activity = training && saved ? "Stopped. Latest checkpoint and optimizer state were saved in the run folder." : "Operation stopped. See the log and output folder."
+                    activity = isTraining && saved ? "Stopped. Latest checkpoint and optimizer state were saved in the run folder." : "Operation stopped. See the log and output folder."
                 } else { self.error = error.localizedDescription; activity = "Operation stopped. See the error and log." }
             }
         }
     }
     private func newOutputURL(prefix: String) throws -> URL {
-        guard FileManager.default.fileExists(atPath: workspacePath) else { throw StudioError("Choose a workspace folder in Runtime settings.") }
+        if workspaceURL == managedWorkspaceURL, !FileManager.default.fileExists(atPath: workspacePath) {
+            try FileManager.default.createDirectory(at: managedWorkspaceURL, withIntermediateDirectories: true)
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: workspacePath, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw StudioError("The chosen working folder is missing. Locate it in Local runtime settings.")
+        }
         let root = workspaceURL.appendingPathComponent("out/material-training")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root.appendingPathComponent("\(prefix)-\(UUID().uuidString.prefix(8))")

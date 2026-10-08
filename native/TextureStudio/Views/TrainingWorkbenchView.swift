@@ -22,23 +22,7 @@ struct TrainingWorkbenchView: View {
         return nil
     }
     private var trainingIssue: String? {
-        if let resourceIssue { return resourceIssue }
-        guard let dataset = store.dataset else { return "Open a prepared material dataset." }
-        let candidates = store.training.useSelectedMaterialOnly ? selectedMaterial?.samples ?? [] : dataset.samples
-        let eligible = candidates.filter { sample in
-            sample.status == "approved" || (store.training.allowUnreviewed && ["prepared", "unreviewed"].contains(sample.status))
-        }
-        if eligible.isEmpty { return "Select eligible crops or approve the prepared crops first." }
-        if eligible.contains(where: { $0.width != store.training.size || $0.height != store.training.size }) {
-            return "Choose \(store.training.size) × \(store.training.size) native crops. Training does not resize source targets."
-        }
-        if eligible.contains(where: { $0.maps[store.training.target] == nil }) {
-            return "Every selected crop needs a \(store.training.target) map."
-        }
-        if !eligible.contains(where: { $0.split == "train" }) || !eligible.contains(where: { $0.split == "validation" }) {
-            return "The selection needs training and validation crops."
-        }
-        return nil
+        store.trainingConfigurationIssue
     }
 
     var body: some View {
@@ -54,6 +38,8 @@ struct TrainingWorkbenchView: View {
                                           material: selectedMaterial, checkpoint: store.selectedCheckpoint,
                                           checkpoints: store.checkpoints, selectedCheckpointId: $store.selectedCheckpointId,
                                           selectedSampleId: $store.selectedSampleId,
+                                          nativeSize: Binding(get: { store.training.size }, set: store.selectTrainingSize),
+                                          locateCheckpoint: store.chooseCheckpoint,
                                           disabled: store.isBusy)
                 Divider()
                 WorkbenchRuntimeControls(store: store)
@@ -73,27 +59,26 @@ struct TrainingWorkbenchView: View {
             CheckpointLibraryView(store: store)
                 .frame(minWidth: 780, minHeight: 560)
         }
-        .onChange(of: store.dataset?.indexSha256) { _, _ in
-            let sizes = Set(store.samples.filter { $0.width == $0.height }.map(\.width))
-            if sizes.count == 1, let size = sizes.first, [1024, 2048].contains(size) {
-                store.training.size = size
-            }
-        }
     }
 
     private var runControls: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(store.isTraining ? "Training in progress" : "Material training").font(.title3.bold())
-                    Text("Final saved checkpoint · native \(store.training.size) × \(store.training.size)")
+                    Text(store.isPreparingDataset ? "Preparing native crops" : (store.isTraining ? "Training in progress" : "Material training")).font(.title3.bold())
+                    Text(store.isResumingTraining ? "Restoring the saved run’s target and native crop size" : "Final saved checkpoint · native \(store.training.size) × \(store.training.size)")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button { showCheckpoints = true } label: { Label("Checkpoints", systemImage: "shippingbox") }
             }
             HStack {
-                if store.isTraining {
+                if store.isPreparingDataset {
+                    ProgressView().controlSize(.small)
+                    Text("Preparing \(store.training.size) × \(store.training.size)…").font(.callout)
+                    Button(store.isStopping ? "Stopping…" : "Stop Preparation") { store.stop() }
+                        .disabled(store.isStopping)
+                } else if store.isTraining {
                     ProgressView().controlSize(.small)
                     Button(store.isStopping ? "Saving checkpoint…" : "Stop & Save") { store.stop() }
                         .disabled(store.isStopping)
@@ -102,8 +87,10 @@ struct TrainingWorkbenchView: View {
                         .buttonStyle(.glassProminent)
                         .keyboardShortcut(.return, modifiers: .command)
                         .disabled(store.isBusy || trainingIssue != nil)
+                        .help("Prepare the selected native size if needed, then train with the starting point chosen below.")
                     Button("Resume Saved Run…") { store.chooseResumeCheckpoint() }
                         .disabled(store.isBusy || resourceIssue != nil)
+                        .help("Continue checkpoint.latest.pt with its saved optimizer state and original crop selection.")
                 }
                 Spacer()
             }
@@ -111,8 +98,12 @@ struct TrainingWorkbenchView: View {
                 Label(issue, systemImage: "info.circle")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Text("Resume restores saved optimizer state and source selections. Set updates per crop to the desired total before resuming.")
+            Text("Start Training uses the setup on the left. Resume restores a saved run’s optimizer and source selections; updates per crop becomes its desired total.")
                 .font(.caption).foregroundStyle(.secondary)
+            if !store.datasetPreparationSummary.isEmpty {
+                Label(store.datasetPreparationSummary, systemImage: "checkmark.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .padding(16)
     }
@@ -175,10 +166,16 @@ private struct TrainingConfigurationForm: View {
     let checkpoints: [WorkbenchCheckpoint]
     @Binding var selectedCheckpointId: String?
     @Binding var selectedSampleId: String?
+    @Binding var nativeSize: Int
+    let locateCheckpoint: () -> Void
     let disabled: Bool
 
     var body: some View {
         Form {
+            Section("Getting started") {
+                Text("Open a dataset, choose the map and native crop size, then choose a starting point. After training, inspect the saved maps and compare checkpoints visually before choosing one for Texture Studio.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
             Section("Source dataset") {
                 if let dataset {
                     Text(URL(fileURLWithPath: dataset.datasetPath).lastPathComponent)
@@ -190,8 +187,13 @@ private struct TrainingConfigurationForm: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    if let notice = dataset.crossSizeValidationNotice ?? dataset.preparation?.crossSizeValidationNotice, !notice.isEmpty {
+                        Label(notice, systemImage: "info.circle")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Toggle("Train only the selected material", isOn: $options.useSelectedMaterialOnly)
                         .disabled(material == nil)
+                        .help("Train and validate on the selected material’s eligible crops. Turn this off to include every eligible material.")
                     if options.useSelectedMaterialOnly {
                         Picker("Material", selection: Binding(get: { material?.id ?? "" }, set: { materialId in
                             selectedSampleId = dataset.materials.first { $0.id == materialId }?.samples.first?.id
@@ -212,37 +214,59 @@ private struct TrainingConfigurationForm: View {
                     Text("Roughness").tag("roughness")
                     Text("OpenGL Normal").tag("normal")
                 }
-                Picker("Native crop size", selection: $options.size) {
+                .help("Each target learns from its own supplied source map. Normals use the OpenGL +Y convention.")
+                Picker("Native crop size", selection: $nativeSize) {
                     Text("1024 × 1024").tag(1024)
                     Text("2048 × 2048").tag(2048)
                 }
-                Text("Crops train at their prepared native size. Choose a dataset with matching dimensions.")
+                Text("Changing size prepares matching crops from original material maps. Targets keep their native pixels; the original dataset stays intact. Larger crops need more memory and time.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Section("Training") {
                 Stepper("Updates per crop: \(options.updatesPerCrop)", value: $options.updatesPerCrop, in: 1...10_000, step: 25)
-                Toggle("Include prepared crops awaiting approval", isOn: $options.allowUnreviewed)
+                    .help("Every eligible training crop receives this many optimizer updates. A time or memory limit may stop the run earlier and save its progress.")
+                Toggle("Allow crops awaiting approval", isOn: $options.allowUnreviewed)
+                    .help("Allow prepared and unreviewed crops in the selection. Otherwise approve or exclude them before training. Excluded crops stay excluded.")
                 Toggle("Exclude transparent input pixels from the loss", isOn: $options.maskTransparency)
-                Toggle("Start from the selected checkpoint", isOn: $options.useWarmStart)
+                    .help("Ignore invalid photo pixels and their immediate boundary during supervision; source pixels remain unchanged.")
+                Picker("Starting point", selection: $options.useWarmStart) {
+                    Text("Base DINOv2 + new material head").tag(false)
+                    Text("Refine a checkpoint").tag(true)
+                }
+                .pickerStyle(.radioGroup)
                 if options.useWarmStart {
                     Picker("Checkpoint", selection: $selectedCheckpointId) {
-                        Text("New head").tag(String?.none)
-                        ForEach(checkpoints) { item in Text(item.title).tag(Optional(item.id)) }
+                        Text("Choose a checkpoint…").tag(String?.none)
+                        ForEach(checkpoints) { item in
+                            Text(item.title + (!item.supportsTrainingWarmStart ? " · inference only" : item.variant == "lora" ? " · fixed LoRA" : "")).tag(Optional(item.id))
+                        }
                     }
+                    Button("Locate Checkpoint…", systemImage: "folder", action: locateCheckpoint)
+                    Text(checkpoint?.variant == "lora" && checkpoint?.supportsTrainingWarmStart == true
+                         ? "Reuse the selected head and its saved LoRA adapters with a new optimizer. The encoder and adapters stay fixed; only the material head is refined."
+                         : "Reuse the selected material head and begin a new optimizer run. The pretrained DINOv2 Base encoder stays frozen.")
+                        .font(.caption).foregroundStyle(.secondary)
                     if let checkpoint {
                         Text(checkpoint.title)
                             .font(.caption)
                             .lineLimit(2)
                         if checkpoint.target != options.target {
-                            Text("The checkpoint supplies learned features; a new output head is created for \(options.target).")
+                            Text("The material head’s hidden layers are reused; its final output layer is replaced for \(options.target).")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        if !checkpoint.supportsTrainingWarmStart {
+                            Text("The selected backend has not verified refinement support for this checkpoint. Choose a supported checkpoint or start from Base DINOv2.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     } else {
-                        Text("Choose a checkpoint in the model library, or start a new head.")
+                        Text("Locate a checkpoint in the model library, or choose Base DINOv2 + new material head.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                } else {
+                    Text("Start a new material head using visual features from the pinned pretrained DINOv2 Base encoder. The encoder stays frozen; the head learns your displacement, roughness or normal targets.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             Section("Resource limits") {
@@ -281,7 +305,8 @@ struct WorkbenchRuntimeControls: View {
         DisclosureGroup("Local runtime") {
             VStack(alignment: .leading, spacing: 10) {
                 runtimeRow("Python environment", path: store.pythonPath, action: store.choosePython)
-                runtimeRow("Workspace", path: store.workspacePath, action: store.chooseWorkspace)
+                runtimeRow("Working folder", path: store.workspacePath, action: store.chooseWorkspace)
+                    .help("Saved training runs and comparisons go here. The default app-managed folder is created when first needed; a repository is not required.")
                 runtimeRow("DINOv2 encoder", path: store.modelDirectory, action: store.chooseEncoder)
                 runtimeRow("Encoder source", path: store.codeDirectory, action: store.chooseEncoderCode)
                 HStack {

@@ -25,6 +25,7 @@ import torch
 
 from frozen_dino_height import ARCHITECTURE, CODE_HASHES, CODE_REVISION, CONFIG_SHA256, DIAGNOSTIC_SCHEMA, MODEL_BYTES, MODEL_REVISION, MODEL_SHA256, extract_features, load_frozen_encoder
 from material_training_cycle import ADAPTATION_SCHEMA, SCHEMA as CYCLE_SCHEMA, MaterialMapHead
+from material_fixed_adapters import POLICY as FIXED_ADAPTER_POLICY, validate_adapters
 from train_material_height import checked_relative, choose_device, digest, linear_rgb, opengl_normal_from_height, write_float_exr
 
 SCHEMA = "texture-studio-material-workbench-v1"
@@ -153,7 +154,42 @@ def dataset_info(args) -> dict:
             width, height = sample.get("sample_pixel_dimensions", [None, None])
             material = materials.setdefault(sample["material_id"], {"material_id": sample["material_id"], "samples": []})
             material["samples"].append({"sample_id": sample["sample_id"], "status": sample["status"], "split": sample["split"], "width": width, "height": height, "maps": maps, "crop_rectangle": sample.get("crop_rectangle_top_left_xywh"), "note": sample.get("curation_note"), "metadata_path": str(path)})
-        return {"dataset_path": str(args.dataset.resolve()), "index_sha256": digest(args.dataset / "dataset.json"), "split_strategy": index.get("split_strategy"), "validation_scope": index.get("validation_scope"), "materials": [materials[key] for key in sorted(materials)]}
+        return {"dataset_path": str(args.dataset.resolve()), "index_sha256": digest(args.dataset / "dataset.json"), "split_strategy": index.get("split_strategy"), "validation_scope": index.get("validation_scope"), "cross_size_validation_notice": index.get("native_size_preparation", {}).get("cross_size_validation_notice"), "materials": [materials[key] for key in sorted(materials)]}
+
+
+def prepare_size(args) -> dict:
+    from material_native_size import PREPARATION_SCHEMA, prepare_from_records
+    supplied = canonical_dataset(args.dataset)
+    with dataset_lock(supplied):
+        supplied_index, _records = read_dataset(supplied)
+        lineage = supplied_index.get("native_size_preparation", {})
+        original = supplied
+        if lineage:
+            if lineage.get("schema") != PREPARATION_SCHEMA or not Path(lineage.get("source_dataset_path", "")).is_absolute():
+                raise ValueError("Native crop dataset has an invalid original-dataset lineage")
+            original = canonical_dataset(Path(lineage["source_dataset_path"]))
+            if original == supplied:
+                raise ValueError("Native crop dataset has circular original-dataset lineage")
+    # Always acquire the original before a derivative. Cached curation uses
+    # its own lock, so inverse locking could otherwise deadlock a size switch.
+    with contextlib.ExitStack() as stack:
+        for dataset in sorted({original, supplied}, key=str):
+            stack.enter_context(dataset_lock(dataset))
+        supplied_index, supplied_records = read_dataset(supplied)
+        if args.expected_index_sha256 and digest(supplied / "dataset.json") != args.expected_index_sha256:
+            raise ValueError("Dataset changed since selection; reload it before preparing native crops")
+        current_lineage = supplied_index.get("native_size_preparation", {})
+        if current_lineage != lineage:
+            raise ValueError("Native dataset lineage changed; reload it before preparing crops")
+        cache_lock = lambda path: contextlib.nullcontext() if path in (original, supplied) else dataset_lock(path)
+        if original == supplied:
+            prepared, information = prepare_from_records(original, supplied_index, supplied_records, args.size, cache_lock)
+        else:
+            original_index, original_records = read_dataset(original)
+            prepared, information = prepare_from_records(original, original_index, original_records, args.size, cache_lock)
+    result = dataset_info(argparse.Namespace(dataset=prepared))
+    result["preparation"] = information
+    return result
 
 
 def curate(args) -> dict:
@@ -218,6 +254,8 @@ def checkpoint_snapshot(path: Path, expected: str | None = None) -> tuple[dict, 
         payload = dict(payload, head_config=dict(payload["head_config"], target="height"), target="height")
     elif schema != CYCLE_SCHEMA:
         raise ValueError("Unsupported learned material checkpoint; no model fallback is permitted")
+    if payload.get("variant", "frozen") not in ("frozen", "lora", "frozen_features"):
+        raise ValueError("Unsupported declared encoder variant")
     config = payload.get("head_config", {})
     if set(config) != {"base_channels", "feature_channels", "projection_channels", "target"} or config.get("feature_channels") != 768 or config.get("target") not in ("height", "roughness", "normal") or payload.get("target") != config["target"]:
         raise ValueError("Unsupported material head configuration")
@@ -259,23 +297,9 @@ def checkpoint_snapshot(path: Path, expected: str | None = None) -> tuple[dict, 
     return payload, checksum
 
 
-def validate_adapters(adapters: dict) -> None:
-    expected = {f"blocks.{i}.attn.{part}": (output, incoming) for i in range(12) for part, output, incoming in (("qkv", 2304, 768), ("proj", 768, 768))}
-    if not isinstance(adapters, dict) or set(adapters) != set(expected):
-        raise ValueError("LoRA layer identities differ from rank-8 DINOv2 Base attention")
-    for name, (outgoing, incoming) in expected.items():
-        state = adapters[name]
-        if set(state) != {"lora_A", "lora_B"}:
-            raise ValueError("Unexpected LoRA tensor names")
-        for part, shape in (("lora_A", (8, incoming)), ("lora_B", (outgoing, 8))):
-            value = state[part]
-            if not isinstance(value, torch.Tensor) or value.shape != shape or value.dtype != torch.float32 or not torch.isfinite(value).all():
-                raise ValueError("Invalid LoRA tensor shape, precision or values")
-
-
 def checkpoint_info(args) -> dict:
     payload, checksum = checkpoint_snapshot(args.checkpoint, args.expected_sha256)
-    return {"checkpoint_path": str(args.checkpoint.resolve()), "sha256": checksum, "schema": payload["schema"], "target": payload["target"], "step": payload["step"], "head_config": payload["head_config"], "encoder": payload["encoder"], "variant": payload.get("variant", "frozen"), "compatible": True}
+    return {"checkpoint_path": str(args.checkpoint.resolve()), "sha256": checksum, "schema": payload["schema"], "target": payload["target"], "step": payload["step"], "head_config": payload["head_config"], "encoder": payload["encoder"], "encoder_size": payload["encoder_size"], "variant": payload.get("variant", "frozen"), "compatible": True, "supports_training_warm_start": True, "refinement_policy": FIXED_ADAPTER_POLICY if payload.get("variant") == "lora" else "refine_material_head_with_frozen_encoder"}
 
 
 def load_photo(path: Path, encoding: str) -> tuple[torch.Tensor, dict]:
@@ -353,7 +377,8 @@ def package(args) -> dict:
     compact["source_checkpoint_schema"] = payload["schema"]
     if payload.get("variant") != "lora":
         compact["schema"] = CYCLE_SCHEMA
-    compact.update(encoder_size=payload["encoder_size"], variant=payload.get("variant", "frozen"), adapter_state=payload.get("adapter_state", {}))
+    compact.update(encoder_size=payload["encoder_size"], variant="lora" if payload.get("variant") == "lora" else "frozen", adapter_state=payload.get("adapter_state", {}))
+    compact["encoder_refinement_policy"] = payload.get("encoder_refinement_policy", FIXED_ADAPTER_POLICY if compact["variant"] == "lora" else "refine_material_head_with_frozen_encoder")
     if payload.get("encoder_size_provenance"):
         compact["encoder_size_provenance"] = payload["encoder_size_provenance"]
     args.output.mkdir(parents=True, exist_ok=False)
@@ -502,7 +527,7 @@ def upload_package(args, api_factory=None) -> dict:
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     commands = p.add_subparsers(dest="command", required=True)
-    for name in ("dataset", "curate", "checkpoint", "infer", "package", "upload", "install-encoder", "remove-encoder"):
+    for name in ("dataset", "prepare-size", "curate", "checkpoint", "infer", "package", "upload", "install-encoder", "remove-encoder"):
         sub = commands.add_parser(name)
         if name == "upload":
             sub.add_argument("--package", type=Path, required=True)
@@ -512,8 +537,11 @@ def parser() -> argparse.ArgumentParser:
             sub.add_argument("--destination", type=Path, required=True)
         if name == "remove-encoder":
             sub.add_argument("--directory", type=Path, required=True)
-        if name in ("dataset", "curate"):
+        if name in ("dataset", "prepare-size", "curate"):
             sub.add_argument("--dataset", type=Path, required=True)
+        if name == "prepare-size":
+            sub.add_argument("--size", type=int, choices=(1024, 2048), required=True)
+            sub.add_argument("--expected-index-sha256")
         if name == "curate":
             sub.add_argument("--sample", required=True)
             sub.add_argument("--status", choices=("approved", "excluded", "unreviewed"), required=True)
@@ -538,11 +566,14 @@ def main() -> int:
     args = parser().parse_args()
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            result = {"dataset": dataset_info, "curate": curate, "checkpoint": checkpoint_info, "infer": infer, "package": package, "upload": upload_package, "install-encoder": install_encoder, "remove-encoder": remove_encoder}[args.command](args)
+            result = {"dataset": dataset_info, "prepare-size": prepare_size, "curate": curate, "checkpoint": checkpoint_info, "infer": infer, "package": package, "upload": upload_package, "install-encoder": install_encoder, "remove-encoder": remove_encoder}[args.command](args)
         print(json.dumps(dict(result, schema=SCHEMA if args.command != "checkpoint" else result["schema"], protocol_schema=SCHEMA, command=args.command, ok=True), allow_nan=False))
         return 0
     except (OSError, ValueError, TypeError, KeyError, RuntimeError, subprocess.SubprocessError) as error:
-        print(json.dumps({"schema": SCHEMA, "command": args.command, "ok": False, "error": {"code": type(error).__name__, "message": str(error)}}))
+        details = {"code": type(error).__name__, "message": str(error)}
+        if hasattr(error, "details"):
+            details["details"] = error.details
+        print(json.dumps({"schema": SCHEMA, "command": args.command, "ok": False, "error": details}))
         return 1
 
 
