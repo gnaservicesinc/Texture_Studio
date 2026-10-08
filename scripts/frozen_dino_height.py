@@ -8,9 +8,11 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any
+import warnings
 
 import torch
 from torch import nn
@@ -45,6 +47,42 @@ CODE_HASHES = {
 def file_sha256(path: Path) -> str:
     with path.open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def import_official_encoder(resolved: Path, device: torch.device):
+    """Select native attention without rewriting the checksum-pinned source.
+
+    Each worker uses one accelerator. DINOv2 selects optional xFormers kernels
+    by import availability, not tensor device; CPU and Metal use PyTorch SDPA.
+    Only the audited layer modules' exact optional-dependency notices are hidden.
+    """
+    native = device.type in ("mps", "cpu")
+    previous = os.environ.get("XFORMERS_DISABLED")
+    sys.path.insert(0, str(resolved))
+    try:
+        if native:
+            os.environ["XFORMERS_DISABLED"] = "1"
+        with warnings.catch_warnings():
+            if native:
+                warnings.filterwarnings("ignore", category=UserWarning,
+                    message=r"^xFormers is (?:disabled|not available) \((?:SwiGLU|Attention|Block)\)$",
+                    module=r"^dinov2\.layers\.(?:swiglu_ffn|attention|block)$")
+            official = importlib.import_module("dinov2.models.vision_transformer")
+        if native:
+            # A previous load from this same verified snapshot may already be
+            # cached. Its runtime switches must also select the native path.
+            for name in ("attention", "block", "swiglu_ffn"):
+                module = sys.modules.get("dinov2.layers." + name)
+                if module is not None and hasattr(module, "XFORMERS_AVAILABLE"):
+                    module.XFORMERS_AVAILABLE = False
+        return official
+    finally:
+        sys.path.remove(str(resolved))
+        if native:
+            if previous is None:
+                os.environ.pop("XFORMERS_DISABLED", None)
+            else:
+                os.environ["XFORMERS_DISABLED"] = previous
 
 
 def convert_hf_state(state: dict[str, torch.Tensor], expected: dict[str, torch.Tensor], depth: int = 12) -> dict[str, torch.Tensor]:
@@ -112,11 +150,7 @@ def load_frozen_encoder(model_directory: Path, code_directory: Path, device: tor
             location = getattr(module, "__file__", None)
             if location and not Path(location).resolve().is_relative_to(resolved):
                 raise ValueError(f"An unrelated DINOv2 module is already imported: {location}")
-    sys.path.insert(0, str(resolved))
-    try:
-        official = importlib.import_module("dinov2.models.vision_transformer")
-    finally:
-        sys.path.remove(str(resolved))
+    official = import_official_encoder(resolved, device)
     encoder = official.vit_base(img_size=518, patch_size=14, init_values=1.0, block_chunks=0, num_register_tokens=0, interpolate_antialias=False, interpolate_offset=0.1)
     from safetensors.torch import load_file
     state = load_file(str(checkpoint), device="cpu")
@@ -124,6 +158,12 @@ def load_frozen_encoder(model_directory: Path, code_directory: Path, device: tor
     encoder.load_state_dict(converted, strict=True)
     del state, converted
     encoder.requires_grad_(False).eval().to(device)
+    native = device.type in ("mps", "cpu")
+    if native:
+        print(json.dumps({"event": "encoder_runtime", "device": str(device),
+            "attention_backend": "pytorch_scaled_dot_product_attention",
+            "message": "DINOv2 uses native PyTorch attention on Metal; optional xFormers is not required."
+                if device.type == "mps" else "DINOv2 uses native PyTorch attention on CPU; optional xFormers is not required."}), flush=True)
     return encoder, {
         "repo": MODEL_REPO, "revision": MODEL_REVISION, "checkpoint_path": str(checkpoint.resolve()),
         "checkpoint_sha256": MODEL_SHA256, "checkpoint_bytes": MODEL_BYTES,
@@ -132,6 +172,8 @@ def load_frozen_encoder(model_directory: Path, code_directory: Path, device: tor
         "weight_mapping": "Strict complete HF-to-official-Meta mapping; Q,K,V concatenated in that order; mask token retained; no missing/extra/shape-mismatched tensors",
         "license": "Apache-2.0", "frozen_parameters": sum(parameter.numel() for parameter in encoder.parameters()),
         "all_encoder_parameters_frozen": all(not parameter.requires_grad for parameter in encoder.parameters()),
+        "attention_backend": "pytorch_scaled_dot_product_attention" if native else "upstream_device_default",
+        "device": str(device), "xformers_enabled": False if native else None,
     }
 
 
