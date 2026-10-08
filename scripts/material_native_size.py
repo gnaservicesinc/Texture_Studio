@@ -23,7 +23,7 @@ import numpy as np
 
 from material_dataset import (GENERATOR, MAP_NAMES, REGION_SPLIT_STRATEGY,
     REGION_VALIDATION_SCOPE, file_sha256, heldout_regions, pixel_sha256,
-    contained_path, read_png, rectangles_overlap, slugify, transformed_crop, write_json,
+    contained_path, png_image_header, read_png, rectangles_overlap, slugify, transformed_crop, write_json,
     write_png)
 
 PREPARATION_SCHEMA = "texture-studio-native-material-size-v1"
@@ -142,6 +142,20 @@ def curation_for_region(samples: list[dict], rectangle: list[int]) -> dict:
             "curation_note": text or None, "prior_crop_decisions": notes}
 
 
+def maps_have_native_dimensions(path: Path, sample: dict, size: int) -> bool:
+    """Every paired map must contain native pixels at the requested size."""
+    if sample.get("sample_pixel_dimensions") != [size, size] or not sample.get("maps"):
+        return False
+    for filename in sample["maps"].values():
+        try:
+            header = png_image_header(contained_path(path.parent, filename, "Native paired map"))
+        except (OSError, ValueError):
+            return False
+        if [header["width"], header["height"]] != [size, size]:
+            return False
+    return True
+
+
 def validate_cached(dataset: Path, size: int, proof: dict) -> None:
     index = json.loads((dataset / "dataset.json").read_text())
     binding = index.get("native_size_preparation", {})
@@ -160,6 +174,8 @@ def validate_cached(dataset: Path, size: int, proof: dict) -> None:
         sample = json.loads((folder / "sample.json").read_text())
         if any(sample.get(k) != item.get(k) for k in ("sample_id", "material_id", "split", "status")) or sample.get("sample_pixel_dimensions") != [size, size]:
             raise ValueError("Cached native sample/index identity changed inconsistently")
+        if not maps_have_native_dimensions(folder / "sample.json", sample, size):
+            raise ValueError("Cached native paired maps have different actual dimensions")
         immutable = {k:v for k,v in sample.items() if k not in CURATION_FIELDS}
         immutable_hash = hashlib.sha256(json.dumps(immutable, sort_keys=True).encode()).hexdigest()
         if artifacts["sample_immutable_sha256"].get(sample["sample_id"]) != immutable_hash:
@@ -261,7 +277,7 @@ def prepare_from_records(dataset: Path, index: dict, records: list[tuple[dict, P
     proof = snapshot(dataset, records)
     info = {"source_dataset_path": str(dataset), "source_index_sha256": proof["index_sha256"],
             "crop_size": size, "target_resized": False, "original_dataset_modified": False}
-    if not automatic_validation and all(s["sample_pixel_dimensions"] == [size, size] for _i, _p, s in records):
+    if not automatic_validation and all(maps_have_native_dimensions(p, s, size) for _i, p, s in records):
         return dataset, dict(info, prepared_dataset_path=str(dataset), reused=True,
             split_lineage_changed=False, cross_size_validation_notice=None)
     materials, problems = problems_for_sources(records, size, verify_files=False)
@@ -331,7 +347,8 @@ def prepare_from_records(dataset: Path, index: dict, records: list[tuple[dict, P
         material["existing"] = {}
         for region in material["regions"]:
             exact = next(((path, sample) for path, sample in material["records"]
-                          if sample["crop_rectangle_top_left_xywh"] == region["rectangle"]), None)
+                          if sample["crop_rectangle_top_left_xywh"] == region["rectangle"]
+                          and maps_have_native_dimensions(path, sample, size)), None)
             if exact:
                 material["existing"][tuple(region["rectangle"])] = exact
         if len(material["existing"]) != len(material["regions"]):

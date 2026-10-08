@@ -101,7 +101,8 @@ def test_real_head_refinement_retains_adapters_through_resume_and_package(tmp_pa
     packed,_=workbench.checkpoint_snapshot(Path(package['checkpoint_path']))
     assert packed['variant']=='lora' and adapter_sha256(packed['adapter_state'])==adapter_sha256(state)
     info=workbench.checkpoint_info(SimpleNamespace(checkpoint=Path(package['checkpoint_path']),expected_sha256=package['checkpoint_sha256']))
-    assert info['supports_training_warm_start'] and info['refinement_policy']==POLICY
+    assert not info['supports_training_warm_start'] and info['refinement_policy']==POLICY
+    assert info['retired'] and not info['production_eligible']
     assert digest(path)==expected
 
 

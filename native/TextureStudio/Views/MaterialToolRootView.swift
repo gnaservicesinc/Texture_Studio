@@ -33,9 +33,9 @@ struct MaterialToolRootView: View {
         .toolbar {
             ToolbarItemGroup {
                 Button { showModels = true } label: { Label("Checkpoints", systemImage: "shippingbox") }
-                    .help("Locate saved models, select Studio’s height model, or export a portable package.")
+                    .help("Inspect saved checkpoints, compare their outputs or export a portable package.")
                 Button { showRuntime = true } label: { Label("Runtime", systemImage: "gearshape") }
-                    .help("Locate Python and existing encoder files, or download and remove the managed encoder.")
+                    .help("Configure the local Python environment and working folder. Archived experiments have separate optional dependencies.")
                 Menu {
                     ForEach(MaterialTool.allCases) { tool in
                         Button(tool.title, systemImage: tool.symbol) { MaterialToolLauncher.open(tool) }
@@ -142,9 +142,6 @@ struct MaterialToolRootView: View {
             }.padding()
             ScrollView(.horizontal) {
                 HStack {
-                    Toggle("Include untrained DINOv2 base", isOn: $store.comparisonIncludesBase).toggleStyle(.checkbox)
-                        .help("DINOv2 Base is the feature encoder used for material training. Its fresh material head starts flat: 0.5 displacement/roughness or an OpenGL flat normal. This is the before-training baseline, not Depth Anything 3.")
-                    Divider().frame(height: 24)
                     ForEach(store.checkpoints) { checkpoint in
                         Toggle(isOn: Binding(get: { store.comparisonCheckpointIds.contains(checkpoint.id) }, set: { enabled in
                             if enabled { store.comparisonCheckpointIds.insert(checkpoint.id) } else { store.comparisonCheckpointIds.remove(checkpoint.id) }
@@ -152,13 +149,21 @@ struct MaterialToolRootView: View {
                     }
                 }.padding(.horizontal)
             }.disabled(store.isBusy)
+            if store.checkpoints.contains(where: { !$0.supportsStudioInference }) {
+                DisclosureGroup("Archive comparison options") {
+                    Toggle("Include the experiment’s original untrained baseline", isOn: $store.comparisonIncludesBase)
+                        .toggleStyle(.checkbox)
+                        .help("For archived DINOv2 experiments, the fresh material head starts flat: 0.5 displacement/roughness or a flat OpenGL normal. This records the original before-training baseline; it does not enable Studio inference.")
+                        .disabled(store.isBusy)
+                }.padding(.horizontal).padding(.vertical, 8)
+            }
             if !comparisonReady && !store.isBusy {
                 Text("Choose a photo or dataset crop, then select one checkpoint plus the untrained base, or two checkpoints for the same map type.")
                     .font(.caption).foregroundStyle(.secondary).padding(.horizontal).padding(.vertical, 8)
             }
             Divider()
             if !store.comparisonCandidates.isEmpty { ReviewWorkbenchView(candidates: store.comparisonCandidates) }
-            else { ContentUnavailableView("Compare material models", systemImage: "rectangle.split.2x1", description: Text("Compare a trained checkpoint with its untrained DINOv2 material head, or compare several checkpoints. Every result names its source sample, training step and model. Source photos and dataset targets are available in Maps.")) }
+            else { ContentUnavailableView("Compare material models", systemImage: "rectangle.split.2x1", description: Text("Compare saved checkpoints on the same photo and inspect matching details. Each result identifies its source sample, training step and exact model. Source photos and dataset targets are available in Maps.")) }
             WorkbenchActivityView(store: store)
         }
     }
@@ -186,20 +191,24 @@ struct WorkbenchRuntimeView: View {
                 Section("Local Python and workspace") {
                     runtimeRow("Python", path: store.pythonPath, choose: store.choosePython)
                     runtimeRow("Workspace", path: store.workspacePath, choose: store.chooseWorkspace)
-                    Text("Choose a working folder for run logs, comparisons and checkpoints. Python must include PyTorch, OpenCV, OpenEXR and safetensors; an existing project .venv works.")
+                    Text("Choose a working folder for datasets, results and logs. Use a local Python environment with the dependencies required by your model backend.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Section("Pinned encoder dependencies") {
-                    runtimeRow("Encoder weights", path: store.modelDirectory, choose: store.chooseEncoder)
-                    runtimeRow("Encoder source", path: store.codeDirectory, choose: store.chooseEncoderCode)
-                    HStack {
-                        Button("Download Pinned Encoder") { store.installEncoder() }.disabled(store.isBusy)
-                            .help("Download the matching DINOv2 Base weights and pinned source into app-managed storage. No photos are uploaded.")
-                        Button("Remove Downloaded Encoder", role: .destructive) { store.removeDownloadedEncoder() }.disabled(store.isBusy)
-                            .help("Remove only the encoder downloaded by these tools. Located external copies and your trained checkpoints are retained.")
+                if store.checkpoints.contains(where: { !$0.supportsStudioInference }) {
+                    DisclosureGroup("Archive · old experiment dependencies") {
+                        runtimeRow("DINOv2 archive weights", path: store.modelDirectory, choose: store.chooseEncoder)
+                        runtimeRow("DINOv2 archive source", path: store.codeDirectory, choose: store.chooseEncoderCode)
+                        HStack {
+                            Button("Download Archive Dependencies") { store.installEncoder() }.disabled(store.isBusy)
+                                .help("Obtain the pinned DINOv2 weights and source only for comparing archived experiments. This does not enable training or Studio inference.")
+                            Button("Remove Downloaded Archive Dependencies", role: .destructive) { store.removeDownloadedEncoder() }.disabled(store.isBusy)
+                                .help("Remove only the downloaded archive dependencies. External copies and saved checkpoints remain intact.")
+                        }
+                        Text("These dependencies are optional compatibility tools for archived experiments. Their original model identity is retained; no current production model is substituted.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-                    Text("The selected head runs with its pinned DINOv2 encoder on Metal. Missing dependencies are reported with their paths; inference never substitutes a different model.").font(.caption).foregroundStyle(.secondary)
                 }
+
             }.formStyle(.grouped)
             Button("Done") { store.saveConfiguration(); dismiss() }.keyboardShortcut(.defaultAction).padding()
         }

@@ -7,10 +7,10 @@ private enum TrainingDestination: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "Getting Started"
         case .dataset: "Dataset"
-        case .train: "Train & Refine"
+        case .train: "Training Status"
         case .compare: "Compare Checkpoints"
         case .review: "Review Details"
-        case .checkpoints: "Export & Use Model"
+        case .checkpoints: "Saved Models & Export"
         }
     }
     var symbol: String {
@@ -36,10 +36,10 @@ private enum TrainingDestination: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "A practical path from photographed surfaces to a reusable material model."
         case .dataset: "Inspect paired photos and maps. Exclude problem crops without deleting originals."
-        case .train: "Choose a starting point, map type and native crop size, then run a bounded experiment."
+        case .train: "See the current training backend and prepare native source crops."
         case .compare: "Run the same photo through two or more checkpoints and compare matching details."
         case .review: "Inspect original pixels, pan together and pop maps out for a closer look."
-        case .checkpoints: "Select the model Studio uses, or export a portable package for another workflow."
+        case .checkpoints: "Inspect and export saved experimental checkpoints. Retired models cannot run in Studio."
         }
     }
 }
@@ -113,20 +113,17 @@ struct ModelTrainingHubView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Label("Build a model for your materials", systemImage: "graduationcap")
+                    Label("Material models and source maps", systemImage: "graduationcap")
                         .font(.largeTitle.bold())
-                    Text("Teach a model useful relief and surface detail from matching photographs and maps. Start with a small experiment, inspect what it actually does, then keep refining the version you like.")
+                    Text("Material training requires a supported texture-height backend. Prepare source maps and inspect saved experiments here while the replacement is connected.")
                         .font(.title3).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 HStack(alignment: .top, spacing: 18) {
-                    startCard("Refine a checkpoint", symbol: "arrow.trianglehead.2.clockwise", description: "Continue from a material model you have already trained. A new run keeps the starting checkpoint intact.", button: "Choose & Refine…") {
-                        store.training.useWarmStart = true
-                        destination = .train
-                        if store.selectedCheckpoint == nil { store.chooseCheckpoint() }
+                    startCard("Prepare source maps", symbol: "square.stack.3d.up", description: "Keep native photo, displacement, roughness and normal pairs ready for a future texture-height model.", button: "Open Dataset") {
+                        destination = .dataset
                     }
-                    startCard("Start from the base", symbol: "leaf", description: "Use the pretrained DINOv2 Base encoder with a fresh material head. Your paired maps teach it height, roughness or normals.", button: "Set Up New Model") {
-                        store.training.useWarmStart = false
-                        destination = .train
+                    startCard("Review saved experiments", symbol: "shippingbox", description: "Archived experimental checkpoints remain available for comparison and export. Their files and original model identities stay intact.", button: "Saved Models") {
+                        destination = .checkpoints
                     }
                 }
                 GroupBox("Your workspace") {
@@ -141,17 +138,17 @@ struct ModelTrainingHubView: View {
                             Text(dataset.datasetPath).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                         }
                         Divider()
-                        Label(store.selectedCheckpoint.map { "Starting checkpoint: \($0.title)" } ?? "No starting checkpoint selected", systemImage: "shippingbox")
+                        Label(store.selectedCheckpoint.map { "Saved checkpoint: \($0.title)" } ?? "No saved checkpoint selected", systemImage: "shippingbox")
                         if store.isBusy { HStack { ProgressView().controlSize(.small); Text(store.activity).font(.caption) } }
                     }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
                 }
                 VStack(alignment: .leading, spacing: 14) {
                     Text("A workflow you can return to").font(.title2.bold())
                     workflowRow("1", .dataset, "Check your source maps", "Review matching diffuse, displacement, roughness and OpenGL normal crops. Keep original high-bit-depth data.")
-                    workflowRow("2", .train, "Fit or refine", "Choose 1K or 2K. Matching native crops are prepared automatically from the original sources. Set a time and memory budget.")
+                    workflowRow("2", .train, "Prepare native crops", "Choose 1K or 2K. Matching crops are prepared automatically from original sources. Training is paused until a replacement backend is connected.")
                     workflowRow("3", .compare, "Compare what changed", "Use the same photo for each checkpoint. Look for useful detail, noise, inversion and exaggerated relief.")
                     workflowRow("4", .review, "Inspect at full quality", "Use 100% zoom, linked dragging and pop-out windows. Export the untouched map or open an editable copy in GIMP.")
-                    workflowRow("5", .checkpoints, "Keep and use the result", "Choose the exact height checkpoint for Texture Studio. Export a package when you want to share or move it.")
+                    workflowRow("5", .checkpoints, "Keep the experiment", "Inspect the exact saved checkpoint and export a package for archival or another workflow. Each checkpoint shows its current availability.")
                 }
             }.padding(30).frame(maxWidth: 1100, alignment: .leading).frame(maxWidth: .infinity)
         }

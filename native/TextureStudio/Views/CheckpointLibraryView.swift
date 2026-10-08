@@ -10,8 +10,8 @@ struct CheckpointLibraryView: View {
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Material Checkpoints").font(.title2.bold())
-                    Text("Choose the exact saved model for training, comparison or Texture Studio.")
+                    Text("Saved Checkpoints").font(.title2.bold())
+                    Text("Inspect matching saved outputs and export the exact checkpoint for another workflow.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -111,19 +111,13 @@ struct CheckpointLibraryView: View {
                 Text(checkpoint.title).font(.headline).textSelection(.enabled)
                 LabeledContent("Target", value: targetTitle(checkpoint.target))
                 LabeledContent("Training base", value: checkpoint.trainingBaseLabel)
+                LabeledContent("Availability", value: checkpoint.availabilityLabel)
                 LabeledContent("Saved step", value: checkpoint.step.formatted())
                 LabeledContent("Interface", value: checkpoint.compatible ? "Compatible" : "Unsupported")
                 Text(checkpoint.schema).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             }
-            Section("Use this checkpoint") {
-                Button("Use in Texture Studio") { store.useSelectedInStudio() }
-                    .disabled(store.isBusy || checkpoint.target != "height")
-                    .help("Make this exact trained model the active surface-height source in Texture Studio.")
-                if checkpoint.target != "height" {
-                    Text("Texture Studio currently uses displacement checkpoints. This model can be selected for its own training target.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Text("Choose Refine a checkpoint in Train & Refine to start a new run from this model. Resume Saved Run instead restores the optimizer and exact data from an interrupted run.")
+            Section("Archived experiment") {
+                Text(MaterialTrainingPolicy.retirementNotice)
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Model package") {
@@ -162,7 +156,7 @@ struct CheckpointLibraryView: View {
                 }
                 Toggle("Public repository", isOn: $store.uploadPublic).disabled(store.isBusy)
                     .help("Off creates a private repository. Existing repository visibility must match this choice; the app never changes its visibility silently.")
-                Text("Upload packages the selected checkpoint and its model card automatically. Source photos, optimizer state and pretrained DINOv2 weights stay local.")
+                Text("Upload packages the selected checkpoint and its model card automatically. Source photos, optimizer state and separate pretrained encoder files stay local.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button { store.uploadPackage() } label: {
                     Label("Upload Selected Model", systemImage: "square.and.arrow.up")

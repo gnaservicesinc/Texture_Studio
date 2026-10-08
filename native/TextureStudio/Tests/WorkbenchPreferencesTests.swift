@@ -57,7 +57,8 @@ final class WorkbenchPreferencesTests: XCTestCase {
         var calls: [String] = []
         let restored = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources, workerOverride: { arguments, _ in
             calls.append(arguments[0])
-            if arguments.first == "dataset" { return Self.datasetJSON }
+            if arguments.first == "dataset" { return try Self.datasetJSON() }
+            if arguments.first == "prepare-size" { return try Self.datasetJSON(size: 2048, prepared: true) }
             let path = arguments[try XCTUnwrap(arguments.firstIndex(of: "--checkpoint")) + 1]
             let id = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
             return """
@@ -72,10 +73,11 @@ final class WorkbenchPreferencesTests: XCTestCase {
         XCTAssertEqual(restored.comparisonCheckpointIds, ["second"])
         XCTAssertFalse(restored.comparisonIncludesBase)
         XCTAssertEqual(restored.training.size, 2048, "Reopening a 1K dataset cannot reset the requested 2K size")
-        XCTAssertEqual(calls, ["dataset", "checkpoint", "checkpoint"])
+        XCTAssertEqual(calls, ["dataset", "prepare-size", "checkpoint", "checkpoint"])
+        XCTAssertTrue(restored.dataset?.hasNativeSize(2048) == true)
         XCTAssertEqual(fixture.defaults.stringArray(forKey: "checkpoints"), [firstPath.path, secondPath.path])
         restored.restore()
-        XCTAssertEqual(calls.count, 3, "A view appearing again must not reload and overwrite selections")
+        XCTAssertEqual(calls.count, 4, "A view appearing again must not reload and overwrite selections")
         let next = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
         XCTAssertEqual(next.selectedCheckpointId, "first")
         XCTAssertEqual(next.selectedSampleId, "soil_002")
@@ -166,9 +168,25 @@ final class WorkbenchPreferencesTests: XCTestCase {
         while store.isBusy, Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
         XCTAssertFalse(store.isBusy)
     }
-    private static let datasetJSON = """
-    {"dataset_path":"/dataset/dataset.json","index_sha256":"source-sha","materials":[{"material_id":"soil","samples":[{"sample_id":"soil_001","status":"approved","split":"train","width":1024,"height":1024,"maps":{"input":{"path":"/dataset/soil_001.png"},"height":{"path":"/dataset/soil_001-height.png"}}},{"sample_id":"soil_002","status":"approved","split":"train","width":1024,"height":1024,"maps":{"input":{"path":"/dataset/soil_002.png"},"height":{"path":"/dataset/soil_002-height.png"}}}]}]}
-    """
+    private static func datasetJSON(size: Int = 1024, prepared: Bool = false) throws -> String {
+        let source = "/dataset/dataset.json"
+        let path = prepared ? "/dataset/prepared-2048" : source
+        let samples: [[String: Any]] = ["soil_001", "soil_002"].map { sample in
+            ["sample_id": sample, "status": "approved", "split": "train", "width": size, "height": size,
+             "maps": ["input": ["path": "/dataset/\(sample).png", "width": size, "height": size],
+                      "height": ["path": "/dataset/\(sample)-height.png", "width": size, "height": size]]]
+        }
+        var document: [String: Any] = ["dataset_path": path, "index_sha256": prepared ? "prepared-sha" : "source-sha",
+            "materials": [["material_id": "soil", "samples": samples]]]
+        if prepared {
+            document["automatic_validation"] = ["policy": "automatic-material-check-5pct-v1", "material_ids": ["soil"]]
+            document["preparation"] = ["source_dataset_path": source, "source_index_sha256": "source-sha",
+                "prepared_dataset_path": path, "crop_size": size, "reused": true, "target_resized": false,
+                "original_dataset_modified": false, "split_lineage_changed": true]
+        }
+        return String(decoding: try JSONSerialization.data(withJSONObject: document), as: UTF8.self)
+    }
+
 }
 
 @MainActor private struct PreferencesFixture {

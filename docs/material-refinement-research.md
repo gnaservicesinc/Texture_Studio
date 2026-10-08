@@ -1,5 +1,7 @@
 # Material refinement research
 
+**Historical research and DINOv2 experiment record.** DINOv2 material training and Studio activation are retired. The technical evidence below remains a historical record; retained checkpoint files can still be reviewed, but these plans do not describe an active production training backend. See [current model vetting and acceptance checks](material-model-vetting.md) and [native material tools](native-material-tools.md) for the current workflow.
+
 Checked against primary project sources on 2026-10-07. This is an evaluation and training plan; the models below have not been integrated into Texture Studio or benchmarked on this Mac unless explicitly stated elsewhere in the validation report.
 
 ## What a material model should add

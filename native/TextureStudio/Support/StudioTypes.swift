@@ -24,13 +24,14 @@ enum DepthChoice: String, Codable, CaseIterable, Identifiable {
     case model = "Local ML depth"
     case materialCheckpoint = "Material checkpoint"
     var id: String { rawValue }
+    static let studioChoices: [DepthChoice] = [.photoDetail, .attached, .model]
 
     var title: String {
         switch self {
         case .photoDetail: "Flat surface"
         case .attached: "Attached height / depth map"
         case .model: "Camera-depth model (DA3 / custom)"
-        case .materialCheckpoint: "Trained material height (DINOv2)"
+        case .materialCheckpoint: "Retired DINOv2 material checkpoint"
         }
     }
 

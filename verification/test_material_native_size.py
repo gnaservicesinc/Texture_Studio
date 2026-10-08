@@ -217,6 +217,29 @@ def test_same_size_without_parents_is_valid_and_no_cache_allocated(dataset, monk
     assert result['dataset_path'] == str(dataset) and result['preparation']['reused']
     assert not (dataset / '.native-sizes').exists()
 
+def test_same_size_repair_checks_all_actual_map_dimensions(dataset):
+    folder = dataset / 'samples/surface_auto_001'
+    original = folder / 'normal.png'
+    codes, _ = read_png(original)
+    original.unlink()
+    write_png(original, codes[:512, :512])
+    sample = json.loads((folder / 'sample.json').read_text())
+    sample['map_metadata']['normal']['sample_sha256'] = digest(original)
+    write_json(folder / 'sample.json', sample)
+    reported = workbench.dataset_info(SimpleNamespace(dataset=dataset))
+    normal = reported['materials'][0]['samples'][0]['maps']['normal']
+    assert normal['width'] == normal['height'] == 512 and normal['dimensions_verified']
+    before = digest(original)
+    result = prepare(dataset, 1024)
+    assert result['dataset_path'] != str(dataset)
+    assert not result['preparation']['reused'] and result['preparation']['original_parents_required']
+    for crop in result['materials'][0]['samples']:
+        assert all(m['width'] == m['height'] == 1024 for m in crop['maps'].values())
+    repaired = next(c for c in result['materials'][0]['samples'] if c['sample_id']=='surface_auto_001')
+    returned, _ = read_png(repaired['maps']['normal']['path'])
+    assert np.array_equal(returned[:512, :512], codes[:512, :512])
+    assert digest(original) == before, 'Repair publishes a separate crop version, never changes the prior map'
+
 def test_valid_cache_reopens_without_original_parents(dataset):
     first = prepare(dataset)
     shutil.rmtree(dataset / 'sources')

@@ -116,6 +116,27 @@ def png_chunks(data: bytes):
     raise ValueError("PNG is missing IEND")
 
 
+def png_image_header(path: Path | str) -> dict:
+    """Inspect actual map dimensions without decoding or copying image pixels.
+
+    Dataset readiness must inspect each paired map, rather than relying on a
+    crop's JSON dimensions. Full CRC/pixel verification remains in read_png.
+    """
+    with Path(path).open("rb") as stream:
+        data = stream.read(33)
+    if (len(data) != 33 or data[:8] != PNG_SIGNATURE
+            or data[8:16] != b"\x00\x00\x00\rIHDR"):
+        raise ValueError(f"PNG is missing its native IHDR header: {path}")
+    if zlib.crc32(data[12:29]) & 0xFFFFFFFF != struct.unpack_from(">I", data, 29)[0]:
+        raise ValueError(f"Invalid PNG IHDR CRC: {path}")
+    width, height, bits, color, compression, filtering, interlace = struct.unpack(">IIBBBBB", data[16:29])
+    channels = {0: 1, 2: 3, 4: 2, 6: 4}.get(color)
+    if (width < 1 or height < 1 or bits not in (8, 16) or channels is None
+            or compression != 0 or filtering != 0 or interlace not in (0, 1)):
+        raise ValueError(f"Unsupported native PNG image header: {path}")
+    return {"width": width, "height": height, "sample_bits": bits, "channels": channels}
+
+
 def png_metadata(data: bytes) -> dict:
     result: dict = {"file_sha256": sha256_bytes(data), "file_md5": hashlib.md5(data, usedforsecurity=False).hexdigest(), "color_chunks": []}
     for kind, payload in png_chunks(data):

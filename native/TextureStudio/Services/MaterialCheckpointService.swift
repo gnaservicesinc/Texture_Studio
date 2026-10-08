@@ -7,6 +7,7 @@ final class MaterialCheckpointService {
     func cancel() { runner?.stop() }
 
     func predict(source: TextureSource, checkpoint: SelectedMaterialCheckpoint, size: Int) async throws -> TextureDepth {
+        guard checkpoint.supportsStudioInference else { throw StudioError(MaterialTrainingPolicy.retirementNotice) }
         guard !WorkbenchLifecycle.shared.isTerminating else { throw CancellationError() }
         guard checkpoint.target == "height" else { throw StudioError("Select a height checkpoint in Material Trainer.") }
         guard FileManager.default.fileExists(atPath: checkpoint.checkpointPath),

@@ -1,6 +1,15 @@
 import Foundation
 import Darwin
 
+/// The existing material checkpoint protocol is specific to the retired DINOv2
+/// feature-encoder/head experiment. Retain its readers for historical review and
+/// export; a replacement architecture must have its own verified production path.
+enum MaterialTrainingPolicy {
+    static let isTrainingAvailable = false
+    static let retirementNotice = "DINOv2 material-height models are retired. Their checkpoints remain available for comparison and export, but Texture Studio no longer runs them. Attach a height map or explicitly choose another height source."
+    static let trainingIssue = "The previous material trainer has been retired. Your datasets and saved checkpoints remain intact. A replacement photo-to-material training backend is being evaluated before it is connected here."
+}
+
 enum MaterialTool: String, CaseIterable, Identifiable {
     case review, compare, dataset, train
     var id: String { rawValue }
@@ -28,6 +37,8 @@ struct WorkbenchMap: Decodable, Identifiable, Sendable {
     let sha256: String?
     let sourceBits: Int?
     let encoding: String?
+    let width: Int?
+    let height: Int?
     var id: String { path }
     var url: URL { URL(fileURLWithPath: path) }
 }
@@ -65,7 +76,10 @@ struct WorkbenchDataset: Decodable, Sendable {
         return policy.quickFitMaterialId == nil
     }
     func hasNativeSize(_ size: Int) -> Bool {
-        !samples.isEmpty && samples.allSatisfy { $0.width == size && $0.height == size }
+        !samples.isEmpty && samples.allSatisfy { sample in
+            sample.width == size && sample.height == size && !sample.maps.isEmpty &&
+                sample.maps.values.allSatisfy { $0.width == size && $0.height == size }
+        }
     }
 }
 
@@ -101,7 +115,9 @@ struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
         case checkpointPath, sha256, schema, target, step, compatible, variant, refinementPolicy
         case warmStartSupported = "supportsTrainingWarmStart"
     }
-    var supportsTrainingWarmStart: Bool { compatible && (warmStartSupported ?? (variant != "lora")) }
+    var supportsTrainingWarmStart: Bool { false }
+    var supportsStudioInference: Bool { false }
+    var availabilityLabel: String { "Retired · review and export only" }
     var id: String { sha256 }
     var url: URL { URL(fileURLWithPath: checkpointPath) }
     var title: String { url.deletingLastPathComponent().lastPathComponent + " · " + url.lastPathComponent }
@@ -222,6 +238,7 @@ struct SelectedMaterialCheckpoint: Codable, Sendable {
     let codeDirectory: String
     var displayName: String? = nil
     var modelSummary: String? = nil
+    var supportsStudioInference: Bool { false }
     var selectionIdentity: String { checkpointPath + "|" + sha256 }
     var title: String {
         displayName ?? (URL(fileURLWithPath: checkpointPath).deletingLastPathComponent().lastPathComponent

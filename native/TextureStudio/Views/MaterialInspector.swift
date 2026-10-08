@@ -67,9 +67,14 @@ struct MaterialInspector: View {
             }
             Section("Height / displacement source") {
                 Picker("Source", selection: $workspace.depthChoice) {
-                    ForEach(DepthChoice.allCases) { choice in
+                    ForEach(DepthChoice.studioChoices) { choice in
                         Text(choice.title).tag(choice)
                     }
+                }
+                if let notice = workspace.heightSourceNotice {
+                    Label("A previous material model was archived. The current height source is shown above.", systemImage: "info.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .help(notice)
                 }
                 if workspace.depthChoice == .attached {
                     Button(workspace.depthURL == nil ? "Attach Depth Map…" : "Replace Depth Map…") { workspace.chooseDepth() }
@@ -102,16 +107,6 @@ struct MaterialInspector: View {
                 if workspace.depthChoice == .photoDetail {
                     Text("No inferred relief: displacement stays neutral and normals stay flat unless you explicitly add brightness relief below.")
                         .font(.caption).foregroundStyle(.secondary)
-                }
-                if workspace.depthChoice == .materialCheckpoint {
-                    if let checkpoint = workspace.selectedMaterialCheckpoint {
-                        Text(checkpoint.title).font(.headline).textSelection(.enabled)
-                        Text(checkpoint.modelSummary ?? "DINOv2 Base features + trained material-height head")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Text("SHA256 \(checkpoint.sha256.prefix(12)) · native height, no range normalization").font(.caption).foregroundStyle(.secondary)
-                    } else { Text("Choose a height checkpoint in Material Trainer.").foregroundStyle(.secondary) }
-                    Button("Choose Material Checkpoint…") { MaterialToolLauncher.open(.train) }
-                    Text("Predicts surface height using your trained material head and DINOv2 features. DA3 is a separate source. Native inference supports 1024 or 2048 output.").font(.caption).foregroundStyle(.secondary)
                 }
             }
             Section("Surface maps") {
@@ -157,9 +152,7 @@ struct MaterialInspector: View {
                 .help("16-bit float uses less disk space; 32-bit float preserves the pipeline's numeric precision. Both store linear map data.")
                 Text("Diffuse: 8-bit sRGB PNG. Roughness, normal and displacement: linear EXR.")
                     .font(.caption).foregroundStyle(.secondary)
-                Text(workspace.depthChoice == .materialCheckpoint
-                    ? "This material model supports native 1024 or 2048 output. Choose either size for this checkpoint."
-                    : "Camera-depth model resolution is set separately. Larger output maps do not add detail absent from the height prediction.")
+                Text("Camera-depth model resolution is set separately. Larger output maps do not add detail absent from the height prediction.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("Export Material…", systemImage: "square.and.arrow.up") { workspace.chooseExport(models: models) }
                     .buttonStyle(.borderedProminent)

@@ -46,7 +46,23 @@ def test_dataset_selection_exact_ids_paths_precision_including_excluded(tmp_path
     crop = result["materials"][0]["samples"][0]
     assert crop["width"] == crop["height"] == 32
     assert crop["maps"]["height"]["sha256"] == digest(Path(crop["maps"]["height"]["path"]))
+    assert all(item["width"] == item["height"] == 32 and item["dimensions_verified"] for item in crop["maps"].values())
     assert workbench.dataset_info(args(dataset=dataset / "dataset.json"))["dataset_path"] == str(dataset.resolve())
+
+def test_dataset_reports_actual_dimensions_and_keeps_repairable_missing_maps_loadable(tmp_path):
+    dataset = tmp_path / "dataset"
+    dataset_with_two_corners(dataset)
+    chosen = workbench.dataset_info(args(dataset=dataset))["materials"][0]["samples"][0]
+    height = Path(chosen["maps"]["height"]["path"])
+    height.unlink()
+    write_png(height, np.zeros((16, 16, 1), dtype=np.uint16))
+    result = workbench.dataset_info(args(dataset=dataset))["materials"][0]["samples"][0]
+    assert result["width"] == result["height"] == 32, "Crop metadata stays available for repair"
+    assert result["maps"]["height"]["width"] == result["maps"]["height"]["height"] == 16
+    height.unlink()
+    result = workbench.dataset_info(args(dataset=dataset))["materials"][0]["samples"][0]
+    assert result["maps"]["height"]["dimensions_verified"] is False
+    assert result["maps"]["height"]["width"] is None and result["maps"]["height"]["dimension_issue"]
 
 
 def test_curate_exact_selected_crop_preserves_all_image_bytes(tmp_path, monkeypatch):
@@ -112,6 +128,8 @@ def test_checkpoint_schema_hash_shapes_no_silent_fallback(tmp_path):
     path = checkpoint(tmp_path)
     info = workbench.checkpoint_info(args(checkpoint=path, expected_sha256=digest(path)))
     assert info["step"] == 7 and info["target"] == "height" and info["compatible"]
+    assert info["retired"] and not info["production_eligible"]
+    assert not info["supports_training_warm_start"]
     with pytest.raises(ValueError, match="SHA256"):
         workbench.checkpoint_snapshot(path, "0" * 64)
     payload = torch.load(path, weights_only=True)

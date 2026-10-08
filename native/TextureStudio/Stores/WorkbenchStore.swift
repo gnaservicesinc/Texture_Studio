@@ -55,6 +55,19 @@ final class WorkbenchStore {
     var selectedCheckpoint: WorkbenchCheckpoint? { checkpoints.first { $0.id == selectedCheckpointId } }
     var selectedMap: WorkbenchMap? { selectedSample?.maps[selectedRole] }
     var datasetURL: URL? { dataset.map { URL(fileURLWithPath: $0.datasetPath) } }
+    var datasetDisplayURL: URL? {
+        guard let canonical = datasetURL else { return nil }
+        guard let saved = preferences.string(forKey: "dataset") else { return canonical }
+        let located = URL(fileURLWithPath: saved)
+        return located.resolvingSymlinksInPath().standardizedFileURL == canonical.resolvingSymlinksInPath().standardizedFileURL
+            ? located : canonical
+    }
+    var datasetNativeSizeLabel: String {
+        guard let dataset, let first = dataset.samples.first?.maps.values.first,
+              let width = first.width, let height = first.height else { return "Map dimensions not verified" }
+        let matching = dataset.samples.allSatisfy { !$0.maps.isEmpty && $0.maps.values.allSatisfy { $0.width == width && $0.height == height } }
+        return matching ? "\(width.formatted()) × \(height.formatted()) native maps" : "Mixed native map sizes"
+    }
     var workspaceURL: URL { URL(fileURLWithPath: workspacePath).standardizedFileURL }
     var backendDirectory: URL { Bundle.main.resourceURL!.appendingPathComponent("MaterialBackend") }
     var dependencyArguments: [String] { ["--model-directory", modelDirectory, "--code-directory", codeDirectory] }
@@ -128,6 +141,9 @@ final class WorkbenchStore {
             defer { self.isRestoringPreferences = false; self.saveUserSettings() }
             if let datasetPath, FileManager.default.fileExists(atPath: datasetPath) {
                 try await self.loadDataset(URL(fileURLWithPath: datasetPath))
+                if self.dataset?.hasNativeSize(self.training.size) != true {
+                    _ = try await self.ensureTrainingDataset(size: self.training.size)
+                }
             }
             for path in paths where FileManager.default.fileExists(atPath: path) {
                 do { try await self.loadCheckpoint(URL(fileURLWithPath: path), select: false) }
@@ -164,7 +180,12 @@ final class WorkbenchStore {
     }
     func openDataset(_ url: URL) {
         guard !isBusy else { error = "Stop the current operation before changing datasets."; return }
-        operation("Reading dataset…") { try await self.loadDataset(url) }
+        operation("Reading dataset…") {
+            try await self.loadDataset(url)
+            if self.dataset?.hasNativeSize(self.training.size) != true {
+                _ = try await self.ensureTrainingDataset(size: self.training.size)
+            }
+        }
     }
     func openCheckpoint(_ url: URL) {
         guard !isBusy else { error = "Stop the current operation before changing checkpoints."; return }
@@ -202,7 +223,16 @@ final class WorkbenchStore {
         let result: WorkbenchDataset = try WorkbenchProcess.decode(WorkbenchDataset.self, output: await worker(["dataset", "--dataset", url.path]))
         adoptDataset(result)
         datasetPreparationSummary = ""
-        preferences.set(result.datasetPath, forKey: "dataset")
+        saveDatasetLocation(result, requested: url)
+    }
+
+    private func saveDatasetLocation(_ result: WorkbenchDataset, requested: URL? = nil) {
+        let canonical = URL(fileURLWithPath: result.datasetPath)
+        let located = requested ?? preferences.string(forKey: "dataset").map { URL(fileURLWithPath: $0) }
+        let selected = located.flatMap {
+            $0.resolvingSymlinksInPath().standardizedFileURL == canonical.resolvingSymlinksInPath().standardizedFileURL ? $0 : nil
+        } ?? canonical
+        preferences.set(selected.path, forKey: "dataset")
     }
 
     private func adoptDataset(_ result: WorkbenchDataset, preferredMaterial: String? = nil) {
@@ -252,7 +282,7 @@ final class WorkbenchStore {
         }
         try Task.checkCancellation()
         adoptDataset(result, preferredMaterial: material)
-        preferences.set(result.datasetPath, forKey: "dataset")
+        saveDatasetLocation(result)
         datasetPreparationSummary = "\(preparation.reused ? "Opened existing" : "Prepared") \(size) × \(size) native crops and automatic check samples. Original maps remain unchanged."
         return result
     }
@@ -360,93 +390,19 @@ final class WorkbenchStore {
     }
 
     func startTraining() {
-        guard dataset != nil else { error = "Open a dataset first."; return }
-        let options = training, material = selectedMaterialId, checkpoint = selectedCheckpoint
-        if let issue = configurationIssue(options: options, checkpoint: checkpoint) { error = issue; return }
-        operation("Preparing the training run…") {
-            let prepared = try await self.ensureTrainingDataset(size: options.size)
-            if let issue = self.sampleIssue(dataset: prepared, options: options, material: material) { throw StudioError(issue) }
-            var args = ["train", "--dataset", prepared.datasetPath, "--target", options.target,
-                        "--expected-size", String(options.size), "--updates-per-crop", String(options.updatesPerCrop),
-                        "--max-minutes", String(options.maxMinutes), "--max-driver-bytes", String(self.resources.trainingMemoryBytes(options.memoryGB)),
-                        "--selection", "final", "--checkpoint-every", "100", "--evaluate-every", "400", "--prediction-limit", "2", "--device", "mps"]
-            if options.allowUnreviewed { args += ["--allow-unreviewed"] }
-            if options.maskTransparency { args += ["--mask-transparent-input"] }
-            if options.useSelectedMaterialOnly, let material { args += ["--material", material] }
-            if options.useWarmStart, let checkpoint {
-                args += ["--warm-start", checkpoint.checkpointPath, "--warm-start-sha256", checkpoint.sha256]
-            }
-            try await self.runTraining(args, options: options)
-        }
+        error = MaterialTrainingPolicy.trainingIssue
     }
 
-    var trainingConfigurationIssue: String? {
-        if let issue = configurationIssue(options: training, checkpoint: selectedCheckpoint) { return issue }
-        guard let dataset else { return "Open a prepared dataset to begin." }
-        // A different requested size is prepared from parents before training;
-        // it is an action the app handles, rather than a manual setup error.
-        return sampleIssue(dataset: dataset, options: training, material: selectedMaterialId)
-    }
+    var trainingConfigurationIssue: String? { MaterialTrainingPolicy.trainingIssue }
 
-    private func configurationIssue(options: MaterialTrainingOptions, checkpoint: WorkbenchCheckpoint?) -> String? {
-        guard ["height", "roughness", "normal"].contains(options.target), [1024, 2048].contains(options.size) else { return "Choose a supported map target and native size." }
-        if let issue = resourceIssue(options: options) { return issue }
-        if options.useWarmStart {
-            guard let checkpoint else { return "Locate a checkpoint to refine, or choose Start from Base DINOv2." }
-            if !checkpoint.supportsTrainingWarmStart { return "This checkpoint cannot be refined by the selected backend. Choose a supported material checkpoint, or start from Base DINOv2." }
-        }
-        return nil
-    }
-
-    private func resourceIssue(options: MaterialTrainingOptions) -> String? {
-        if let issue = resources.trainingMemoryIssue(options.memoryGB) { return issue }
-        guard options.maxMinutes.isFinite, (1...240).contains(options.maxMinutes),
-              (1...10000).contains(options.updatesPerCrop) else { return "Choose 1–240 minutes and 1–10,000 updates per crop." }
-        return nil
-    }
-
-    private func sampleIssue(dataset: WorkbenchDataset, options: MaterialTrainingOptions, material: String?) -> String? {
-        if options.useSelectedMaterialOnly && material == nil { return "Select the material to train." }
-        let all = options.useSelectedMaterialOnly ? dataset.materials.first(where: { $0.id == material })?.samples ?? [] : dataset.samples
-        let candidates = all.filter { $0.split == "train" }
-        if !options.allowUnreviewed && candidates.contains(where: { ["prepared", "unreviewed"].contains($0.status) }) {
-            return "Approve or exclude the crops awaiting review, or turn on Train with unreviewed crops."
-        }
-        let eligible = candidates.filter { ["approved", "accepted"].contains($0.status) || (options.allowUnreviewed && ["prepared", "unreviewed"].contains($0.status)) }
-        if eligible.isEmpty { return "Approve usable crops or turn on Train with unreviewed crops." }
-        if eligible.contains(where: { $0.maps[options.target] == nil }) { return "Each selected crop needs its own \(options.target) target map." }
-        return nil
-    }
     func chooseResumeCheckpoint() {
-        if let issue = resourceIssue(options: training) { error = issue; return }
-        chooseFile(title: "Choose checkpoint.latest.pt with optimizer state", selected: resumeTraining)
+        error = MaterialTrainingPolicy.trainingIssue
     }
+
     func resumeTraining(from url: URL) {
-        let options = training
-        if let issue = resourceIssue(options: options) { error = issue; return }
-        launchTraining(["resume", "--resume-checkpoint", url.path, "--updates-per-crop", String(options.updatesPerCrop),
-                        "--max-minutes", String(options.maxMinutes), "--max-driver-bytes", String(self.resources.trainingMemoryBytes(options.memoryGB))])
+        error = MaterialTrainingPolicy.trainingIssue
     }
-    private func launchTraining(_ args: [String]) {
-        let options = training
-        operation("Training native material maps…", training: true) {
-            try await self.runTraining(args, options: options)
-        }
-    }
-    private func runTraining(_ args: [String], options: MaterialTrainingOptions) async throws {
-        try Task.checkCancellation()
-        isTraining = true
-        isResumingTraining = args.first == "resume"
-        activity = isResumingTraining ? "Resuming the saved run’s crop selection and map target…" : "Training native material maps…"
-        let output = try self.newOutputURL(prefix: isResumingTraining ? "resumed-material-run" : "native-\(options.size)-\(options.target)")
-        self.lastOutputURL = output
-        let text = try await self.worker(args + ["--output", output.path] + self.dependencyArguments, script: "material_training_cycle.py")
-        let trainingLogURL = self.lastLogURL
-        defer { self.lastLogURL = trainingLogURL; self.logText = String(text.suffix(100000)) }
-        let checkpoint = output.appendingPathComponent("checkpoint.selected.pt")
-        if FileManager.default.fileExists(atPath: checkpoint.path) { try await self.loadCheckpoint(checkpoint) }
-        self.activity = "Training stopped or finished. Checkpoints and summary are in the run folder."
-    }
+
     func stop() {
         guard isBusy else { return }
         isStopping = true
@@ -456,14 +412,7 @@ final class WorkbenchStore {
     }
 
     func useSelectedInStudio() {
-        guard let checkpoint = selectedCheckpoint, checkpoint.target == "height" else { error = "Select a height checkpoint for Texture Studio."; return }
-        do {
-            let record = SelectedMaterialCheckpoint(checkpointPath: checkpoint.checkpointPath, sha256: checkpoint.sha256, target: checkpoint.target,
-                pythonPath: pythonPath, workspacePath: workspacePath, modelDirectory: modelDirectory, codeDirectory: codeDirectory,
-                displayName: checkpoint.title, modelSummary: checkpoint.modelSummary)
-            try record.save(to: selectedCheckpointRegistryURL)
-            activity = "Active in Texture Studio: \(checkpoint.title). Its surface-height source switches automatically. Update Preview to see it on your photo."
-        } catch { self.error = error.localizedDescription }
+        error = MaterialTrainingPolicy.retirementNotice
     }
     func exportSelectedCheckpoint() {
         guard let checkpoint = selectedCheckpoint else { return }

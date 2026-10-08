@@ -9,7 +9,6 @@ final class StudioWorkflowTests: XCTestCase {
         let root = try directory()
         defer { try? FileManager.default.removeItem(at: root) }
         let registry = root.appendingPathComponent("selected.json")
-        try checkpoint(root.appendingPathComponent("model.pt"), sha: "model-a").save(to: registry)
         var predictions = 0
         var processedSizes: [Int] = []
         let workspace = TextureWorkspace(checkpointRegistryURL: registry, checkpointPredictor: { _, _, size in
@@ -20,13 +19,16 @@ final class StudioWorkflowTests: XCTestCase {
             return Self.material(source, settings: settings)
         })
         workspace.source = source(root.appendingPathComponent("surface.png"))
+        workspace.attachedDepth = try TextureDepth(width: 2, height: 2, values: [0.45, 0.5, 0.55, 0.6],
+            sourceLabel: "Attached height", interpretation: .surfaceHeight)
+        workspace.depthChoice = .attached
         workspace.settings.outputSize = 2048
         workspace.selectedPreview = .height
         let models = ModelManager()
         workspace.updatePreview(models: models)
         try await finish(workspace)
         XCTAssertNil(workspace.notice)
-        XCTAssertEqual(predictions, 1)
+        XCTAssertEqual(predictions, 0)
         XCTAssertEqual(processedSizes, [2048])
         XCTAssertFalse(workspace.materialNeedsUpdate)
         XCTAssertTrue(workspace.fullQualityAvailable)
@@ -52,7 +54,7 @@ final class StudioWorkflowTests: XCTestCase {
         try await finish(workspace)
         XCTAssertNil(workspace.notice)
         try FloatEXRWriter.verifyChannelPrecision(at: root.appendingPathComponent("float16/displacement.exr"), expected: .float16)
-        XCTAssertEqual(predictions, 1)
+        XCTAssertEqual(predictions, 0)
         XCTAssertEqual(processedSizes, [2048])
 
         workspace.settings.lightingStrength = 0.3
@@ -61,21 +63,21 @@ final class StudioWorkflowTests: XCTestCase {
         workspace.updatePreview(models: models)
         try await finish(workspace)
         XCTAssertNil(workspace.notice)
-        XCTAssertEqual(predictions, 1, "Lighting edits reuse the source height prediction")
+        XCTAssertEqual(predictions, 0, "An attached map never runs the retired checkpoint model")
         XCTAssertEqual(processedSizes, [2048, 2048])
 
         workspace.settings.outputSize = 1024
         workspace.updatePreview(models: models)
         try await finish(workspace)
         XCTAssertNil(workspace.notice)
-        XCTAssertEqual(predictions, 2, "A different native inference size invalidates the height cache")
+        XCTAssertEqual(predictions, 0, "A different output size resamples the attached map without legacy inference")
         XCTAssertEqual(processedSizes, [2048, 2048, 1024])
-        try checkpoint(root.appendingPathComponent("other.pt"), sha: "model-b").save(to: registry)
-        workspace.reloadSelectedCheckpoint()
+        workspace.attachedDepth = try TextureDepth(width: 2, height: 2, values: [0.5, 0.6, 0.7, 0.8],
+            sourceLabel: "Replacement attached height", interpretation: .surfaceHeight)
         XCTAssertTrue(workspace.materialNeedsUpdate)
         workspace.updatePreview(models: models)
         try await finish(workspace)
-        XCTAssertEqual(predictions, 3)
+        XCTAssertEqual(predictions, 0)
         XCTAssertEqual(processedSizes, [2048, 2048, 1024, 1024])
     }
 
@@ -123,7 +125,7 @@ final class StudioWorkflowTests: XCTestCase {
         return MaterialResult(diffuse: gray, roughness: gray,
             normal: CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 1)).cropped(to: extent), height: gray,
             crop: source.orientedImage.extent, warnings: [], outputSize: settings.outputSize,
-            depthOrigin: "Fixture material checkpoint", settings: settings, sourceURL: source.url, camera: source.camera)
+            depthOrigin: "Fixture attached height", settings: settings, sourceURL: source.url, camera: source.camera)
     }
     private func source(_ url: URL) -> TextureSource {
         TextureSource(url: url, orientedImage: CIImage(color: .gray).cropped(to: CGRect(x: 0, y: 0, width: 32, height: 32)),

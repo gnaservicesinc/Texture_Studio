@@ -1,5 +1,9 @@
 # Material quality, review, and training
 
+**Historical DINOv2 experiment workflow.** DINOv2 training and production Studio inference are retired. Current dataset preparation and review are documented in [native material tools](native-material-tools.md); replacement models must pass [model vetting](material-model-vetting.md). The commands and measurements below preserve earlier experiments, not a current production recommendation. Some referenced local runs may have been removed during cleanup.
+
+Archival `material_training_cycle.py train`, `resume` and `probe` commands now require **`--allow-retired-experiment`**. Add it after the subcommand when deliberately reproducing an older experiment. Without it, the CLI rejects the launch before checkpoint loading, dataset setup or model allocation. Opting in prints a retirement warning; it does not make the result eligible for Studio activation.
+
 The goal is useful, realistic materials made from a photograph. Height-reference error, correlations, and gradient energy are diagnostics, not a quality verdict. Select candidates by visible relief, preservation of useful surface detail, noise/artifacts, plausible roughness, and how the maps work together. Do not promote a checkpoint automatically because its loss is lower.
 
 ## What to inspect
@@ -27,10 +31,10 @@ Repeat `--material` for other source families. Both training corners are used wh
 
 The prepared four-material pilot contains 8 training crops and 4 disjoint review crops, about 752 MiB for all original-precision maps. Its 12 samples were independently decoded and compared against the corresponding source regions. Larger native crops include more original surface pixels; this is different from training on the provider's scaled 2K view of the whole material. Do not mix provider resolutions into the historical split without checking their shared surface footprints.
 
-## Run or resume training
+## Reproduce archived training
 
 ```sh
-.venv/bin/python scripts/material_training_cycle.py train \
+.venv/bin/python scripts/material_training_cycle.py train --allow-retired-experiment \
   --dataset /opt/ipde/material-dataset/pilots/native-2k-four-material-01 \
   --target height --expected-size 2048 --updates-per-crop 100 \
   --warm-start out/material-training/four-material-adaptation-01/frozen/checkpoint.final.pt \
@@ -43,7 +47,7 @@ This balances every selected training corner, caches only the coarse frozen feat
 Checkpoints retain optimizer state, exact crop/file identities, target type, encoder pins, and the balanced schedule. Ctrl+C saves completed updates. Resume into a **new** output directory:
 
 ```sh
-.venv/bin/python scripts/material_training_cycle.py resume \
+.venv/bin/python scripts/material_training_cycle.py resume --allow-retired-experiment \
   --resume-checkpoint out/material-training/my-2k-height-01/checkpoint.latest.pt \
   --output out/material-training/my-2k-height-01-resumed
 ```
@@ -55,35 +59,35 @@ For separate roughness and direct normal heads, run the same training command wi
 The native-size probe also runs actual forward/backward/AdamW steps:
 
 ```sh
-.venv/bin/python scripts/material_training_cycle.py probe \
+.venv/bin/python scripts/material_training_cycle.py probe --allow-retired-experiment \
   --dataset-1024 /opt/ipde/material-dataset \
   --dataset-2048 /opt/ipde/material-dataset/pilots/native-2k-four-material-01 \
   --warm-start out/material-training/four-material-adaptation-01/frozen/checkpoint.final.pt \
   --steps 3 --output out/material-training/my-size-probe --allow-unreviewed
 ```
 
-On this M2 Max/64 GB Mac, the current head measured 0.163 seconds/update at 1K and 0.611 at 2K, with sampled Metal driver allocations of 2.60 and 8.56 GB. This is a short feasibility test, not an OS-wide memory-pressure measurement or output-quality result. The trainer has sampled time and 30 GB driver guards; an in-flight allocation can occur before the next guard check.
+On this M2 Max/64 GB Mac, the current head measured 0.163 seconds/update at 1K and 0.611 at 2K, with sampled Metal driver allocations of 2.60 and 8.56 GB. This is a short feasibility test, not an OS-wide memory-pressure measurement or output-quality result. That historical run used sampled time and 30 GB driver guards; an in-flight allocation can occur before the next guard check.
 
-## Completed 2K round and next actions
+## Historical 2K round and reproduction steps
 
 The first native 2K round completed **800 updates**, 100 on each of the eight training corners, in **827.68 seconds** including input verification, evaluation and export. Sampled Metal driver allocation peaked at **8.79 GB**. The full training cycle is slower than the short compute probe because it loads and verifies native maps for each update. Four disjoint 2K regions were exported without resizing. This round used a frozen DINOv2 encoder and trained the material head; it did not retrain LoRA. Larger crop coverage, both corners, and further updates changed together, so this experiment does not isolate resolution as the sole cause of improvement.
 
 The review is `/opt/ipde/ipde/out/material-training/quality-review-2k-20261008/index.html`, with a packed Blender scene beside it. It contains 64 whole-material renders plus 12 native detail views of stucco and soil. In the fixed-strength displaced-photo/clay views, brick regains substantial mortar relief and stucco has stronger pitting. Brick remains somewhat irregular/soft; stucco's finest grain is still smoother than the reference; soil needs scrutiny for extra roughness. These are visual observations, not production approval or fresh-material generalization.
 
 1. Open the 2K review, compare `starting_head` and `trained_2k` with `flat` and `target`, and record useful changes and misplaced relief. Save the edited review JSON. Judge at an appropriate shared artistic displacement scale; the default 3% width is an inspection setting, not measured material dimensions.
-2. If further fitting is useful, resume the completed optimizer into a new run. This extends each crop from 100 to 200 updates:
+2. For historical reproduction only, resume the completed optimizer into a new run. This extends each crop from 100 to 200 updates:
 
    ```sh
-   .venv/bin/python scripts/material_training_cycle.py resume \
+   .venv/bin/python scripts/material_training_cycle.py resume --allow-retired-experiment \
      --resume-checkpoint out/material-training/native-2k-material-cycle-01/checkpoint.latest.pt \
      --updates-per-crop 200 --max-minutes 20 \
      --output out/material-training/native-2k-height-continued-02
    ```
 
-3. Start a separate roughness experiment; change `roughness` to `normal` and use a new output directory for independent normal supervision:
+3. To reproduce an archived roughness experiment, change `roughness` to `normal` and use a new output directory for independent normal supervision:
 
    ```sh
-   .venv/bin/python scripts/material_training_cycle.py train \
+   .venv/bin/python scripts/material_training_cycle.py train --allow-retired-experiment \
      --dataset /opt/ipde/material-dataset/pilots/native-2k-four-material-01 \
      --target roughness --expected-size 2048 --updates-per-crop 100 \
      --selection final --prediction-limit 4 --max-minutes 20 \

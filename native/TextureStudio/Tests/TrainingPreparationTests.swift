@@ -40,7 +40,7 @@ final class TrainingPreparationTests: XCTestCase {
     }
 
     func testInvalidPreparationProofRetainsSelectedDatasetAndRequestedSize() async throws {
-        for fault in ["wrong-size", "resized", "modified", "wrong-path", "missing-proof"] {
+        for fault in ["wrong-size", "wrong-normal-size", "resized", "modified", "wrong-path", "missing-proof"] {
             let fixture = try Fixture()
             defer { fixture.remove() }
             let store = fixture.store { args, _ in
@@ -72,7 +72,7 @@ final class TrainingPreparationTests: XCTestCase {
         }
         try await store.loadDataset(fixture.original)
         store.training.size = 2048
-        store.startTraining()
+        store.prepareTrainingDataset()
         let deadline = ContinuousClock.now.advanced(by: .seconds(3))
         while gate.continuation == nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
         guard let continuation = gate.continuation else { XCTFail("Preparation did not reach its worker"); store.stop(); return }
@@ -89,92 +89,64 @@ final class TrainingPreparationTests: XCTestCase {
         XCTAssertFalse(store.isPreparingDataset)
     }
 
-    func testStartPreparesRequestedNativeSizeBeforeLaunchingNewBaseHead() async throws {
+    func testPreparingRequestedNativeSizeRemainsAvailableWithoutTraining() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let recorder = WorkerRecorder()
         let store = fixture.store { args, script in
             recorder.arguments.append(args)
             recorder.scripts.append(script)
-            if args.first == "train" { return "saved test run\n" }
-            return try fixture.result(size: args.first == "prepare-size" ? 2048 : 1024, prepared: args.first == "prepare-size")
+            return try fixture.result(size: args.first == "prepare-size" ? 2048 : 1024,
+                                      prepared: args.first == "prepare-size")
         }
         try await store.loadDataset(fixture.original)
-        XCTAssertFalse(store.training.useWarmStart)
-        store.training.size = 2048 // Also cover callers that bypass the picker.
+        store.training.size = 2048
         store.training.useSelectedMaterialOnly = true
         store.selectedSampleId = "stucco-1024-validation"
-        store.startTraining()
+        store.prepareTrainingDataset()
         try await settled(store)
         XCTAssertNil(store.error)
-        XCTAssertEqual(recorder.arguments.compactMap(\.first), ["dataset", "prepare-size", "train"])
-        let train = try XCTUnwrap(recorder.arguments.last)
-        XCTAssertEqual(value("--dataset", in: train), fixture.prepared.path)
-        XCTAssertEqual(value("--expected-size", in: train), "2048")
-        XCTAssertEqual(value("--material", in: train), "stucco")
-        XCTAssertFalse(train.contains("--warm-start"))
-        XCTAssertEqual(recorder.scripts.last, "material_training_cycle.py")
+        XCTAssertEqual(recorder.arguments.compactMap(\.first), ["dataset", "prepare-size"])
+        let prepare = try XCTUnwrap(recorder.arguments.last)
+        XCTAssertEqual(value("--dataset", in: prepare), fixture.original.path)
+        XCTAssertEqual(value("--size", in: prepare), "2048")
+        XCTAssertEqual(value("--material", in: prepare), "stucco")
+        XCTAssertEqual(store.dataset?.datasetPath, fixture.prepared.path)
+        XCTAssertTrue(store.dataset?.hasNativeSize(2048) == true)
+        XCTAssertFalse(recorder.scripts.contains("material_training_cycle.py"))
     }
 
-    func testRefinementRequiresCheckpointAndUsesExactSelectedIdentity() async throws {
+    func testRetiredTrainingNeverLaunchesWithOrWithoutASelectedCheckpoint() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let recorder = WorkerRecorder()
-        let store = fixture.store { args, _ in
-            recorder.arguments.append(args)
-            return args.first == "train" ? "finished\n" : try fixture.result(size: 1024)
-        }
+        let store = fixture.store { args, _ in recorder.arguments.append(args); return try fixture.result(size: 1024) }
         try await store.loadDataset(fixture.original)
         store.training.useWarmStart = true
         store.startTraining()
-        XCTAssertTrue(store.error?.contains("Locate a checkpoint") == true)
-        XCTAssertEqual(recorder.arguments.count, 1)
+        XCTAssertEqual(store.error, MaterialTrainingPolicy.trainingIssue)
         let checkpoint = try WorkbenchProcess.decode(WorkbenchCheckpoint.self, output: "{\"checkpoint_path\":\"/chosen/head.pt\",\"sha256\":\"chosen-sha\",\"schema\":\"material-native-map-cycle-v1\",\"target\":\"height\",\"step\":800,\"compatible\":true,\"variant\":\"frozen\"}")
         store.checkpoints = [checkpoint]
         store.selectedCheckpointId = checkpoint.id
         store.startTraining()
         try await settled(store)
-        XCTAssertNil(store.error)
-        let train = try XCTUnwrap(recorder.arguments.last)
-        XCTAssertEqual(value("--warm-start", in: train), checkpoint.checkpointPath)
-        XCTAssertEqual(value("--warm-start-sha256", in: train), checkpoint.sha256)
+        XCTAssertEqual(store.error, MaterialTrainingPolicy.trainingIssue)
+        XCTAssertEqual(recorder.arguments.compactMap(\.first), ["dataset"])
+        XCTAssertNil(store.lastOutputURL)
     }
 
-    func testLoRAHeadRefinementRequiresBackendCapabilityAndKeepsExactCheckpoint() async throws {
-        let fixture = try Fixture()
-        defer { fixture.remove() }
-        func checkpoint(variant: String, supported: Bool?) throws -> WorkbenchCheckpoint {
-            var document: [String: Any] = ["checkpoint_path": "/chosen/adapted.pt", "sha256": "adapted-sha",
-                "schema": "material-adaptation-diagnostic-v1", "target": "height", "step": 1200,
-                "compatible": true, "variant": variant]
-            if let supported { document["supports_training_warm_start"] = supported }
-            document["refinement_policy"] = "refine_material_head_with_frozen_lora_encoder"
-            return try WorkbenchProcess.decode(WorkbenchCheckpoint.self,
-                output: String(decoding: JSONSerialization.data(withJSONObject: document), as: UTF8.self))
+    func testLegacyLoRAAndFrozenCheckpointsCannotAdvertiseRetiredRefinement() throws {
+        for variant in ["lora", "frozen"] {
+            for supported in [true, false] {
+                let document: [String: Any] = ["checkpoint_path": "/chosen/adapted.pt", "sha256": "adapted-sha",
+                    "schema": "material-adaptation-diagnostic-v1", "target": "height", "step": 1200,
+                    "compatible": true, "variant": variant, "supports_training_warm_start": supported]
+                let checkpoint = try WorkbenchProcess.decode(WorkbenchCheckpoint.self,
+                    output: String(decoding: JSONSerialization.data(withJSONObject: document), as: UTF8.self))
+                XCTAssertFalse(checkpoint.supportsTrainingWarmStart,
+                               "Saved backend capability cannot reactivate the removed DINO training route")
+            }
         }
-        XCTAssertFalse(try checkpoint(variant: "lora", supported: nil).supportsTrainingWarmStart,
-                       "Legacy responses must not silently discard adapted encoder weights")
-        XCTAssertFalse(try checkpoint(variant: "frozen", supported: false).supportsTrainingWarmStart)
-        XCTAssertTrue(try checkpoint(variant: "frozen", supported: nil).supportsTrainingWarmStart)
-        let adapted = try checkpoint(variant: "lora", supported: true)
-        XCTAssertTrue(adapted.supportsTrainingWarmStart)
-        XCTAssertEqual(adapted.refinementPolicy, "refine_material_head_with_frozen_lora_encoder")
-        let recorder = WorkerRecorder()
-        let store = fixture.store { args, _ in recorder.arguments.append(args); return args.first == "train" ? "finished\n" : try fixture.result(size: 1024) }
-        try await store.loadDataset(fixture.original)
-        store.training.useWarmStart = true
-        store.checkpoints = [try checkpoint(variant: "lora", supported: nil)]
-        store.selectedCheckpointId = adapted.id
-        store.startTraining()
-        XCTAssertNotNil(store.error)
-        XCTAssertEqual(recorder.arguments.count, 1)
-        store.checkpoints = [adapted]
-        store.startTraining()
-        try await settled(store)
-        XCTAssertNil(store.error)
-        let train = try XCTUnwrap(recorder.arguments.last)
-        XCTAssertEqual(value("--warm-start", in: train), adapted.checkpointPath)
-        XCTAssertEqual(value("--warm-start-sha256", in: train), adapted.sha256)
     }
 
     func testRestoreRunsOnlyOnceWithoutResettingSelectionOrTrainingOptions() async throws {
@@ -212,7 +184,7 @@ final class TrainingPreparationTests: XCTestCase {
         XCTAssertEqual(recorder.arguments.count, 1)
     }
 
-    func test64GiBResourceCeilingIsAcceptedAndPassedExactlyToTrainingAndResume() async throws {
+    func testHardwareResourceAllowancePersistsWithoutReactivatingRetiredTraining() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let recorder = WorkerRecorder()
@@ -220,51 +192,40 @@ final class TrainingPreparationTests: XCTestCase {
                                          metalRecommendedBytes: 52 * MachineResources.gibibyte)
         let store = fixture.store(resources: resources) { args, _ in
             recorder.arguments.append(args)
-            return args.first == "dataset" ? try fixture.result(size: 1024) : "finished\n"
+            return try fixture.result(size: 1024)
         }
         XCTAssertEqual(store.training.memoryGB, 51.2, accuracy: 0.000_001)
         try await store.loadDataset(fixture.original)
-        store.training.memoryGB = 56
-        XCTAssertNil(store.trainingConfigurationIssue)
-        store.startTraining()
-        try await settled(store)
-        XCTAssertNil(store.error)
-        XCTAssertEqual(value("--max-driver-bytes", in: try XCTUnwrap(recorder.arguments.last)), "60129542144")
-        store.resumeTraining(from: fixture.root.appendingPathComponent("checkpoint.latest.pt"))
-        try await settled(store)
-        XCTAssertNil(store.error)
-        XCTAssertEqual(value("--max-driver-bytes", in: try XCTUnwrap(recorder.arguments.last)), "60129542144")
-        store.training.memoryGB = 64
-        let count = recorder.arguments.count
-        store.startTraining()
-        XCTAssertNotNil(store.error)
-        XCTAssertEqual(recorder.arguments.count, count)
+        for memory in [56.0, 64.0] {
+            store.training.memoryGB = memory
+            XCTAssertEqual(store.trainingConfigurationIssue, MaterialTrainingPolicy.trainingIssue)
+            store.startTraining()
+            store.resumeTraining(from: fixture.root.appendingPathComponent("checkpoint.latest.pt"))
+            try await settled(store)
+            XCTAssertEqual(store.error, MaterialTrainingPolicy.trainingIssue)
+            XCTAssertEqual(recorder.arguments.compactMap(\.first), ["dataset"])
+        }
     }
 
-    func testReviewRequirementAppliesToSelectedMaterialsBeforeLaunching() async throws {
+    func testSelectedMaterialAndReviewOptionsCannotBypassTrainingRetirement() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let recorder = WorkerRecorder()
         let store = fixture.store { args, _ in
             recorder.arguments.append(args)
-            return args.first == "train" ? "finished\n" : try fixture.result(size: 1024, fault: "unreviewed-stucco")
+            return try fixture.result(size: 1024, fault: "unreviewed-stucco")
         }
         try await store.loadDataset(fixture.original)
         store.training.allowUnreviewed = false
-        XCTAssertTrue(store.trainingConfigurationIssue?.contains("awaiting review") == true)
-        store.startTraining()
-        try await settled(store)
-        XCTAssertNotNil(store.error)
-        XCTAssertEqual(recorder.arguments.count, 1)
-        store.training.useSelectedMaterialOnly = true
-        store.selectedSampleId = "soil-1024-train"
-        XCTAssertNil(store.trainingConfigurationIssue, "Unselected materials do not block an approved selected material")
-        store.startTraining()
-        try await settled(store)
-        XCTAssertNil(store.error)
-        let train = try XCTUnwrap(recorder.arguments.last)
-        XCTAssertEqual(value("--material", in: train), "soil")
-        XCTAssertFalse(train.contains("--allow-unreviewed"))
+        for selectedOnly in [false, true] {
+            store.training.useSelectedMaterialOnly = selectedOnly
+            store.selectedSampleId = "soil-1024-train"
+            XCTAssertEqual(store.trainingConfigurationIssue, MaterialTrainingPolicy.trainingIssue)
+            store.startTraining()
+            try await settled(store)
+            XCTAssertEqual(store.error, MaterialTrainingPolicy.trainingIssue)
+            XCTAssertEqual(recorder.arguments.compactMap(\.first), ["dataset"])
+        }
     }
 
     func testRuntimeDiscoveryReusesExecutableStudioRuntimeWithoutClaimingMissingOne() throws {
@@ -279,32 +240,23 @@ final class TrainingPreparationTests: XCTestCase {
         XCTAssertEqual(MaterialWorkbenchRuntime.defaultPython(workspace: fixture.root, registry: registry), fixture.root.appendingPathComponent(".venv/bin/python").path)
     }
 
-    func testResumeRestoresSavedRunInsteadOfApplyingVisibleDatasetTargetOrWarmStart() async throws {
+    func testResumeNeverStartsTheRetiredWorkerRegardlessOfSavedFormOptions() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let recorder = WorkerRecorder()
-        let store = fixture.store { args, _ in recorder.arguments.append(args); return "saved resumed run\n" }
-        store.training.memoryGB = .infinity
-        store.resumeTraining(from: fixture.root.appendingPathComponent("checkpoint.latest.pt"))
-        XCTAssertNotNil(store.error)
-        XCTAssertTrue(recorder.arguments.isEmpty)
-        store.training.memoryGB = 12
-        store.training.target = "normal"
-        store.training.size = 1024
-        store.training.useWarmStart = true // A separate form choice does not affect Resume.
-        store.training.updatesPerCrop = 900
-        let checkpoint = fixture.root.appendingPathComponent("checkpoint.latest.pt")
-        store.resumeTraining(from: checkpoint)
-        try await settled(store)
-        XCTAssertNil(store.error)
-        let args = try XCTUnwrap(recorder.arguments.last)
-        XCTAssertEqual(args.first, "resume")
-        XCTAssertEqual(value("--resume-checkpoint", in: args), checkpoint.path)
-        XCTAssertEqual(value("--updates-per-crop", in: args), "900")
-        XCTAssertEqual(value("--max-driver-bytes", in: args), "12884901888")
-        for flag in ["--dataset", "--expected-size", "--target", "--warm-start"] { XCTAssertFalse(args.contains(flag)) }
-        XCTAssertTrue(store.lastOutputURL?.lastPathComponent.hasPrefix("resumed-material-run-") == true)
-        XCTAssertFalse(store.isResumingTraining)
+        let store = fixture.store { args, _ in recorder.arguments.append(args); return "unexpected retired worker" }
+        for memory in [Double.infinity, 12.0] {
+            store.training.memoryGB = memory
+            store.training.target = "normal"
+            store.training.useWarmStart = true
+            store.training.updatesPerCrop = 900
+            store.resumeTraining(from: fixture.root.appendingPathComponent("checkpoint.latest.pt"))
+            try await settled(store)
+            XCTAssertEqual(store.error, MaterialTrainingPolicy.trainingIssue)
+            XCTAssertTrue(recorder.arguments.isEmpty)
+            XCTAssertNil(store.lastOutputURL)
+            XCTAssertFalse(store.isResumingTraining)
+        }
     }
 
     func testReopenedNativeDatasetRetainsCrossSizeValidationNotice() async throws {
@@ -317,30 +269,28 @@ final class TrainingPreparationTests: XCTestCase {
         XCTAssertTrue(store.dataset?.hasNativeSize(2048) == true)
     }
 
-    func testFirstRunCreatesOnlyItsManagedWorkingFolderLazily() async throws {
+    func testRetiredResumeDoesNotCreateManagedOrUserSelectedWorkingFolders() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
-        fixture.preferences.set("", forKey: "workspace") // Unconfigured distribution; do not use the Debug build's repository.
+        fixture.preferences.set("", forKey: "workspace")
         let managed = fixture.root.appendingPathComponent("Application Support/Material Workspace")
+        let recorder = WorkerRecorder()
         let store = WorkbenchStore(preferences: fixture.preferences, managedWorkspaceURL: managed,
-                                   workerOverride: { _, _ in "saved resumed run\n" })
+                                   workerOverride: { args, _ in recorder.arguments.append(args); return "unexpected retired worker" })
         XCTAssertEqual(store.workspaceURL, managed.standardizedFileURL)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: managed.path), "Discovery must not create a working folder")
         store.resumeTraining(from: fixture.root.appendingPathComponent("checkpoint.latest.pt"))
         try await settled(store)
-        XCTAssertNil(store.error)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: managed.appendingPathComponent("out/material-training").path))
-
+        XCTAssertEqual(store.error, MaterialTrainingPolicy.trainingIssue)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: managed.path))
         let missing = fixture.root.appendingPathComponent("missing-explicit-working-folder")
         fixture.preferences.set(missing.path, forKey: "workspace")
-        let recorder = WorkerRecorder()
         let explicit = WorkbenchStore(preferences: fixture.preferences, managedWorkspaceURL: managed,
-                                     workerOverride: { args, _ in recorder.arguments.append(args); return "unexpected worker" })
+                                     workerOverride: { args, _ in recorder.arguments.append(args); return "unexpected retired worker" })
         explicit.resumeTraining(from: fixture.root.appendingPathComponent("checkpoint.latest.pt"))
         try await settled(explicit)
-        XCTAssertTrue(explicit.error?.contains("working folder is missing") == true)
+        XCTAssertEqual(explicit.error, MaterialTrainingPolicy.trainingIssue)
         XCTAssertTrue(recorder.arguments.isEmpty)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path), "A missing user-selected folder must not be silently recreated elsewhere")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path))
     }
 
     func testSameSizeAlsoPreparesAutomaticChecksWithoutLosingOtherMaterials() async throws {
@@ -356,10 +306,10 @@ final class TrainingPreparationTests: XCTestCase {
         try await store.loadDataset(fixture.original)
         store.training.useSelectedMaterialOnly = true
         store.selectedSampleId = "stucco-1024-train"
-        store.startTraining()
+        store.prepareTrainingDataset()
         try await settled(store)
         XCTAssertNil(store.error)
-        XCTAssertEqual(recorder.arguments.compactMap(\.first), ["dataset", "prepare-size", "train"])
+        XCTAssertEqual(recorder.arguments.compactMap(\.first), ["dataset", "prepare-size"])
         let prepare = recorder.arguments[1]
         XCTAssertTrue(prepare.contains("--automatic-validation"))
         XCTAssertEqual(value("--material", in: prepare), "stucco")
@@ -412,13 +362,16 @@ final class TrainingPreparationTests: XCTestCase {
     }
     func result(size: Int, prepared isPrepared: Bool = false, fault: String? = nil) throws -> String {
         let actualSize = fault == "wrong-size" ? 1024 : size
+        let normalSize = fault == "wrong-normal-size" ? 1024 : actualSize
         let path = size == 2048 ? prepared : original
         let materials: [[String: Any]] = ["soil", "stucco"].map { material in
             ["material_id": material, "samples": ["train", "validation"].map { split in
                 ["sample_id": "\(material)-\(actualSize)-\(split)", "status": material == "stucco" && fault == "unreviewed-stucco" ? "unreviewed" : "approved", "split": split,
                  "width": actualSize, "height": actualSize,
-                 "maps": ["input": ["path": "/test/input.png"], "height": ["path": "/test/height.png"],
-                          "normal": ["path": "/test/normal.png"], "roughness": ["path": "/test/roughness.png"]]] as [String: Any]
+                 "maps": ["input": ["path": "/test/input.png", "width": actualSize, "height": actualSize],
+                          "height": ["path": "/test/height.png", "width": actualSize, "height": actualSize],
+                          "normal": ["path": "/test/normal.png", "width": normalSize, "height": normalSize],
+                          "roughness": ["path": "/test/roughness.png", "width": actualSize, "height": actualSize]]] as [String: Any]
             }] as [String: Any]
         }
         var document: [String: Any] = ["dataset_path": path.path, "index_sha256": size == 2048 ? "prepared-sha" : "source-sha", "materials": materials, "automatic_validation": ["policy": "automatic-material-check-5pct-v1", "material_ids": ["soil", "stucco"]]]

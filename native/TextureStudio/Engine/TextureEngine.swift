@@ -14,6 +14,7 @@ actor TextureEngine {
     private let linear = CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!
     private let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
     private var kernels: Kernels?
+    private var preparedHDR: (source: CIImage, color: CIImage)?
 
     init(libraryURL: URL? = nil) {
         let metal = MTLCreateSystemDefaultDevice()
@@ -129,7 +130,20 @@ actor TextureEngine {
                                                  offsetX: settings.cropOffsetX, offsetY: settings.cropOffsetY)
         let output = CGRect(x:0,y:0,width:settings.outputSize,height:settings.outputSize)
         let usesHDR = settings.useHDRGainMap && source.hdrImage != nil
-        let processingPhoto = usesHDR ? source.hdrImage! : source.orientedImage
+        let processingPhoto: CIImage
+        if usesHDR, let hdr = source.hdrImage {
+            if preparedHDR?.source === hdr { processingPhoto = preparedHDR!.color }
+            else {
+                // Apple's lazy RAW/HDR decoding can change exposure under ROI
+                // cropping. Decode the complete frame once before any transform.
+                let color = try LinearColorFrame(hdr, context: context).color
+                preparedHDR = (hdr, color)
+                processingPhoto = color
+            }
+        } else {
+            preparedHDR = nil
+            processingPhoto = source.orientedImage
+        }
         let evidence: PhotoEvidenceResult
         if settings.useSupportingViews, !source.supportingViews.isEmpty {
             var evidenceSource = source
@@ -142,7 +156,13 @@ actor TextureEngine {
             evidence = try await PhotoEvidenceService.fuse(source:evidenceSource)
         } else { evidence = PhotoEvidenceResult(image:processingPhoto,warnings:[]) }
         let lensPhoto = try lensCorrect(evidence.image, amount:settings.lensDistortion, kernels:kernels)
-        let warped = transform(lensPhoto, corners: corners, crop: crop, size: settings.outputSize)
+        var warped = transform(lensPhoto, corners: corners, crop: crop, size: settings.outputSize)
+        if usesHDR {
+            let reference = transform(try lensCorrect(source.orientedImage, amount: settings.lensDistortion, kernels: kernels),
+                corners: corners, crop: crop, size: settings.outputSize)
+            let gain = LinearColorFrame.exposureGain(reference: reference, hdr: warped, context: context)
+            warped = warped.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: log2(gain)])
+        }
         let photo: CIImage
         if settings.noiseReduction > 0 {
             photo = warped.applyingFilter("CINoiseReduction", parameters: ["inputNoiseLevel":settings.noiseReduction,
@@ -150,11 +170,15 @@ actor TextureEngine {
         } else { photo = warped }
         let lighting = photo.clampedToExtent().applyingGaussianBlur(sigma: Double(settings.lightingRadius) * Double(settings.outputSize)).cropped(to:output)
         let target = try meanLuminance(photo)
-        guard let diffuse = kernels.delight.apply(extent:output, arguments:[photo,lighting,target,settings.lightingStrength,usesHDR ? Float(1) : Float(0)]) else {
+        guard let diffuseGraph = kernels.delight.apply(extent:output, arguments:[photo,lighting,target,settings.lightingStrength,usesHDR ? Float(1) : Float(0)]) else {
             throw TextureError.processing("Metal lighting correction failed.")
         }
         let detailRadius = max(2.0, Double(settings.outputSize) * 0.015)
-        let linearDiffuse = LinearImageProvider.image(diffuse,context:context)
+        // First-write PNG evaluation of a lazy HDR graph can introduce a red
+        // tile. Freeze the linear result before encoding or numeric-map work.
+        let diffuseFrame = try LinearColorFrame(diffuseGraph, context: context)
+        let diffuse = diffuseFrame.color
+        let linearDiffuse = diffuseFrame.numeric
         let lowPhoto = linearDiffuse.clampedToExtent().applyingGaussianBlur(sigma:detailRadius).cropped(to:output)
         var depthOrigin = "Flat relief: no surface depth supplied"
         var warnings = ["Roughness is an editable contrast estimate; a single photograph does not determine physical roughness.",
@@ -162,15 +186,15 @@ actor TextureEngine {
                         "Height is relative material relief, with neutral level 0.5; originals and source depth remain unchanged.",
                         "Maps are not automatically seamless. Inspect edges before using a repeating material."]
         warnings.append(contentsOf:evidence.warnings)
-        if usesHDR { warnings.append("Apple's HDR gain map contributes highlight information; derived diffuse receives a smooth highlight rolloff for 8-bit sRGB PNG. Source data stays untouched.") }
+        if usesHDR { warnings.append("HDR detail is decoded at full precision before cropping, with midtone exposure matched to the base photo and a smooth highlight rolloff for 8-bit sRGB PNG. Source data stays untouched.") }
         // Portrait depth is useful metadata, but its coarse object edges are unsuitable
         // for texture relief. The material pipeline never selects it, including old recipes.
         var baseHeight = CIImage(color:CIColor(red:0.5,green:0.5,blue:0.5)).cropped(to:output)
         if let selected = attachedDepth {
             let aligned = try lensCorrect(resize(selected.image,to:extent.size),amount:settings.lensDistortion,kernels:kernels)
             if selected.interpretation == .surfaceHeight {
-                // A supervised material head already predicts height units. Camera
-                // distance percentile normalization would destroy its learned amplitude.
+                // Supplied surface height already carries its intended relief.
+                // Camera-distance normalization would destroy that amplitude.
                 let native = transform(aligned,corners:corners,crop:crop,size:settings.outputSize)
                 let gain = settings.heightStrength * (settings.heightInvert ? -1 : 1)
                 let offset = Float(0.5) * (1 - gain)
@@ -180,7 +204,7 @@ actor TextureEngine {
                     "inputBVector":CIVector(x:CGFloat(gain),y:0,z:0,w:0),
                     "inputBiasVector":CIVector(x:CGFloat(offset),y:CGFloat(offset),z:CGFloat(offset),w:0)])
                 depthOrigin = selected.sourceLabel
-                warnings.append("Selected material-checkpoint height keeps its learned range and amplitude. Perspective/crop and explicit relief contrast apply; camera-depth normalization, plane removal and depth cleanup are bypassed.")
+                warnings.append("Supplied surface height keeps its original range and amplitude. Perspective/crop and explicit relief contrast apply; camera-depth normalization, plane removal and depth cleanup are bypassed.")
             } else {
             // Keep existing prediction detail through cleanup. The working-memory
             // estimate accounts for these float buffers instead of silently
@@ -391,7 +415,8 @@ actor TextureEngine {
         // sorting scratch, and output of the depth-only cleanup path. Include
         // them in addition to the lazy Core Image/output-writer estimate.
         let cleanupBytes = UInt64(cleanupSide)*UInt64(cleanupSide)*24
-        return UInt64(outputSize)*UInt64(outputSize)*48 + sourcePixels*16 +
+        // Includes the stable RGBA Float32 diffuse frame retained through export.
+        return UInt64(outputSize)*UInt64(outputSize)*64 + sourcePixels*16 +
             cleanupBytes + 256*1024*1024
     }
 

@@ -24,22 +24,21 @@ struct ModelLibraryView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Local Models").font(.title2.bold())
-                    Text("Choose trained surface height or a separate camera-depth model. Photos stay on this Mac.").foregroundStyle(.secondary)
+                    Text("Manage local inference models. Photos stay on this Mac.").foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    trainedMaterialSection
-                    Divider()
+                    archivedMaterialSection
                     if let runtime {
                         PythonRuntimeControls(runtime: runtime)
                         Divider()
                     }
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("Camera-depth alternatives").font(.headline)
-                        Text("DA3 estimates camera distance. It is separate from the DINOv2 material-height model trained in Model Training.")
+                        Text("Camera-depth models").font(.headline)
+                        Text("Camera depth describes distance from the camera. Use an attached material height map when you already have surface-detail data.")
                             .font(.callout).foregroundStyle(.secondary)
                     }
                     ForEach(models.catalog) { descriptor in
@@ -73,29 +72,24 @@ struct ModelLibraryView: View {
         }
     }
 
-    private var trainedMaterialSection: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Label("Trained material height", systemImage: "square.3.layers.3d").font(.headline)
-            if let workspace {
-                Text("Active source: \(workspace.activeHeightSourceLabel)").font(.callout.bold()).textSelection(.enabled)
+    @ViewBuilder
+    private var archivedMaterialSection: some View {
+        if let checkpoint = workspace?.selectedMaterialCheckpoint ?? selectedCheckpoint, !checkpoint.supportsStudioInference {
+            DisclosureGroup("Archive · previously selected material model") {
+                VStack(alignment: .leading, spacing: 9) {
+                    Text("This checkpoint is retained for review and export. It is not an active Studio model.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Text(checkpoint.title).font(.headline).textSelection(.enabled)
+                    Text(checkpoint.modelSummary ?? "Archived DINOv2 material-height experiment")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Text("SHA256 \(checkpoint.sha256.prefix(12))")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text(checkpoint.checkpointPath).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                    Button("Open Saved Checkpoints…") { openWindow(id: "model-training") }
+                        .help("Open this archive for comparison and export. Historical files remain intact.")
+                }.padding(.top, 8)
             }
-            if let checkpoint = workspace?.selectedMaterialCheckpoint ?? selectedCheckpoint {
-                Text(checkpoint.title).font(.headline).textSelection(.enabled)
-                Text(checkpoint.modelSummary ?? "DINOv2 Base + trained material head · surface height / displacement")
-                    .font(.callout).foregroundStyle(.secondary)
-                Text("SHA256 \(checkpoint.sha256.prefix(12)) · local PyTorch / Metal")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text(checkpoint.checkpointPath).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
-                if let workspace, workspace.depthChoice != .materialCheckpoint {
-                    Button("Use This Material Model") { workspace.reloadSelectedCheckpoint(activate: true) }
-                        .help("Switch this photo to the selected trained height model. Update Preview to render its result.")
-                }
-            } else {
-                Text("No trained material model selected. Train or locate a height checkpoint, then choose Use in Texture Studio.")
-                    .font(.callout).foregroundStyle(.secondary)
-            }
-            Button("Choose / Train Material Model…") { openWindow(id: "model-training") }
-                .help("Open Model Training to select a trained surface-height checkpoint or refine the DINOv2-based material model.")
+            Divider()
         }
     }
 }
@@ -157,7 +151,7 @@ struct MissingModelView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Label("Depth model unavailable", systemImage: "shippingbox").font(.title2.bold())
-            Text("Locate or download DA3-GIANT-1.1, or continue with a flat surface. Portrait depth and the retired small V2 model are not used for material relief.")
+            Text("Locate or download the selected depth model, or continue with a flat surface. You can also attach your own height map.")
                 .foregroundStyle(.secondary)
             if let descriptor = models.catalog.first(where: { $0.id == workspace.modelID }) {
                 Text(models.status(for: descriptor.id).message).font(.caption)

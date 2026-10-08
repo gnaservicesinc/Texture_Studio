@@ -25,7 +25,7 @@ struct DatasetWorkbenchView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Materials").font(.headline)
                         if let dataset = store.dataset {
-                            Text("\(dataset.materials.count) materials · \(dataset.samples.filter { $0.split == "train" }.count) training crops")
+                            Text("\(dataset.materials.count) materials · \(dataset.samples.filter { $0.split == "train" }.count) training crops · \(store.datasetNativeSizeLabel)")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }

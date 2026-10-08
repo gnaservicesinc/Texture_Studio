@@ -126,7 +126,7 @@ def training_active(dataset: Path) -> bool:
         if len(fields) != 2 or int(fields[0]) == os.getpid():
             continue
         command = fields[1]
-        if not any(name in command for name in ("material_training_cycle.py", "train_material_height.py", "diagnose_material_")):
+        if not any(name in command for name in ("material_training_cycle.py", "train_material_height.py", "train_material_pbrnxt.py", "diagnose_material_")):
             continue
         try:
             tokens = shlex.split(command)
@@ -143,6 +143,7 @@ def training_active(dataset: Path) -> bool:
 
 
 def dataset_info(args) -> dict:
+    from material_dataset import png_image_header
     args.dataset = canonical_dataset(args.dataset)
     with dataset_lock(args.dataset):
         index, records = read_dataset(args.dataset)
@@ -151,7 +152,16 @@ def dataset_info(args) -> dict:
             maps = {}
             for role, filename in sample.get("maps", {}).items():
                 details = sample.get("map_metadata", {}).get(role, {})
-                maps[role] = {"path": str(checked_relative(path.parent, filename)), "sha256": details.get("sample_sha256"), "source_bits": details.get("sample_bits", details.get("source", {}).get("sample_bits")), "encoding": details.get("encoding")}
+                map_path = checked_relative(path.parent, filename)
+                try:
+                    header = png_image_header(map_path)
+                    actual = {"width": header["width"], "height": header["height"], "dimensions_verified": True}
+                except (OSError, ValueError) as error:
+                    # Let automatic preparation rebuild from original parents;
+                    # loading a dataset with a repairable map is still useful.
+                    actual = {"width": None, "height": None, "dimensions_verified": False,
+                              "dimension_issue": str(error)}
+                maps[role] = {"path": str(map_path), "sha256": details.get("sample_sha256"), "source_bits": details.get("sample_bits", details.get("source", {}).get("sample_bits")), "encoding": details.get("encoding"), **actual}
             width, height = sample.get("sample_pixel_dimensions", [None, None])
             material = materials.setdefault(sample["material_id"], {"material_id": sample["material_id"], "samples": []})
             material["samples"].append({"sample_id": sample["sample_id"], "status": sample["status"], "split": sample["split"], "width": width, "height": height, "maps": maps, "crop_rectangle": sample.get("crop_rectangle_top_left_xywh"), "note": sample.get("curation_note"), "metadata_path": str(path)})
@@ -302,7 +312,7 @@ def checkpoint_snapshot(path: Path, expected: str | None = None) -> tuple[dict, 
 
 def checkpoint_info(args) -> dict:
     payload, checksum = checkpoint_snapshot(args.checkpoint, args.expected_sha256)
-    return {"checkpoint_path": str(args.checkpoint.resolve()), "sha256": checksum, "schema": payload["schema"], "target": payload["target"], "step": payload["step"], "head_config": payload["head_config"], "encoder": payload["encoder"], "encoder_size": payload["encoder_size"], "variant": payload.get("variant", "frozen"), "compatible": True, "supports_training_warm_start": True, "refinement_policy": FIXED_ADAPTER_POLICY if payload.get("variant") == "lora" else "refine_material_head_with_frozen_encoder"}
+    return {"checkpoint_path": str(args.checkpoint.resolve()), "sha256": checksum, "schema": payload["schema"], "target": payload["target"], "step": payload["step"], "head_config": payload["head_config"], "encoder": payload["encoder"], "encoder_size": payload["encoder_size"], "variant": payload.get("variant", "frozen"), "compatible": True, "supports_training_warm_start": False, "retired": True, "production_eligible": False, "refinement_policy": FIXED_ADAPTER_POLICY if payload.get("variant") == "lora" else "refine_material_head_with_frozen_encoder"}
 
 
 def load_photo(path: Path, encoding: str) -> tuple[torch.Tensor, dict]:

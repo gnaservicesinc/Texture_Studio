@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Train native 1K/2K material maps with frozen, pinned DINOv2 features.
+"""Reproduce archived native 1K/2K DINOv2 material experiments.
+
+DINOv2 material training and production Studio inference are retired. CLI train,
+resume and probe require --allow-retired-experiment for historical reproduction.
 
 All selected training corners receive equal updates. Source PNGs are read only;
 only the encoder view is resized. Final weights are the default user selection,
@@ -19,6 +22,7 @@ import os
 from pathlib import Path
 import random
 import signal
+import sys
 import time
 from typing import Any, Callable
 
@@ -42,6 +46,11 @@ TARGETS = ("height", "roughness", "normal")
 # Compatibility for scripts importing this name; the limit is machine-derived.
 MAX_DRIVER_BYTES = training_resources()["maximum_training_bytes"]
 ADAPTATION_SCHEMA = "texture-studio-four-material-adaptation-diagnostic-v1"
+RETIREMENT_NOTICE = (
+    "DINOv2 material training is retired. Use --allow-retired-experiment only "
+    "to reproduce a historical experiment; its checkpoints cannot activate "
+    "production Texture Studio inference."
+)
 
 
 class MaterialMapHead(ConditionedHeightNet):
@@ -791,6 +800,8 @@ def parser() -> argparse.ArgumentParser:
     sub = main.add_subparsers(dest="command", required=True)
     for command in ("train", "resume", "probe"):
         p = sub.add_parser(command)
+        p.add_argument("--allow-retired-experiment", action="store_true",
+                       help="Explicitly run the retired DINOv2 experiment for archival reproduction; not a production training backend")
         p.add_argument("--output", type=Path, required=True)
         p.add_argument("--device", choices=("mps", "cpu"), default="mps")
         p.add_argument("--model-directory", type=Path, default=ROOT / "out/material-training/transfer-models" / ("dinov2-base-" + MODEL_REVISION[:12]))
@@ -832,9 +843,11 @@ def parser() -> argparse.ArgumentParser:
 def main() -> None:
     arguments = parser()
     args = arguments.parse_args()
+    if not args.allow_retired_experiment:
+        arguments.error(RETIREMENT_NOTICE)
+    print("WARNING: " + RETIREMENT_NOTICE, file=sys.stderr, flush=True)
     if args.command == "resume":
         # Resume inherits identity settings unless a flag was explicitly given.
-        import sys
         stored = torch.load(args.resume_checkpoint, map_location="cpu", weights_only=True)
         explicit_flags = {token.split("=", 1)[0] for token in sys.argv[1:] if token.startswith("--")}
         for key, value in stored.get("run_settings", {}).items():

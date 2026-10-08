@@ -40,6 +40,19 @@ def independent_png(path: Path, values: np.ndarray, gamma: float | None = None, 
 
 
 class PNGPrecisionTests(unittest.TestCase):
+    def test_fast_header_checks_actual_dimensions_and_ihdr_crc_without_pixel_decode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "normal.png"
+            independent_png(source, np.zeros((16, 32, 3), dtype=np.uint16))
+            with mock.patch.object(MODULE.cv2, "imdecode", side_effect=AssertionError("Header inspection must not decode pixels")):
+                self.assertEqual(MODULE.png_image_header(source),
+                                 {"width": 32, "height": 16, "sample_bits": 16, "channels": 3})
+            corrupted = bytearray(source.read_bytes())
+            corrupted[19] ^= 1
+            source.write_bytes(corrupted)
+            with self.assertRaisesRegex(ValueError, "IHDR CRC"):
+                MODULE.png_image_header(source)
+
     def test_adjacent_rgb16_and_scalar_codes_survive_decode_encode(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
