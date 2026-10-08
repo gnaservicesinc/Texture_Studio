@@ -2,27 +2,10 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct MapReviewCandidate: Identifiable, Hashable {
-    let id: String
-    let label: String
-    let mapURL: URL
-    let numeric: Bool
-    let sampleLabel: String?
-    let detail: String?
-    let role: String
-    init(id: String? = nil, label: String, mapURL: URL, numeric: Bool,
-         sampleLabel: String? = nil, detail: String? = nil, role: String = "map") {
-        self.id = id ?? mapURL.path + "|" + label
-        self.label = label; self.mapURL = mapURL; self.numeric = numeric
-        self.sampleLabel = sampleLabel; self.detail = detail; self.role = role
-    }
-    var accessibleLabel: String { [sampleLabel, label, detail].compactMap { $0 }.joined(separator: " · ") }
-    var exportFilename: String {
-        guard let sampleLabel else { return mapURL.lastPathComponent }
-        let stem = (sampleLabel + "-" + label + (role == "checkpoint" ? "-" + String(id.prefix(12)) : ""))
-            .replacingOccurrences(of: "[^A-Za-z0-9._-]+", with: "-", options: .regularExpression)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-._"))
-        return String(stem.prefix(180)) + "." + mapURL.pathExtension
+private struct ReviewPaneHeaderHeights: PreferenceKey {
+    static let defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
     }
 }
 
@@ -35,11 +18,14 @@ struct ReviewWorkbenchView: View {
     @State private var visibleIDs: Set<String> = []
     @State private var exportedURL: URL?
     @State private var isExporting = false
-    private let preferences = UserDefaults(suiteName: "org.ipde.material-tools")!
-    init(candidates: [MapReviewCandidate], blendURL: URL? = nil) {
+    @State private var paneHeaderHeight: CGFloat = 0
+    private let preferences: UserDefaults
+    init(candidates: [MapReviewCandidate], blendURL: URL? = nil,
+         preferences: UserDefaults = UserDefaults(suiteName: "org.ipde.material-tools")!) {
         self.candidates = candidates
         self.blendURL = blendURL
-        _viewport = State(initialValue: InspectionViewport(preferences: UserDefaults(suiteName: "org.ipde.material-tools")))
+        self.preferences = preferences
+        _viewport = State(initialValue: InspectionViewport(preferences: preferences))
     }
     static func selectionPreferenceKey(_ candidates: [MapReviewCandidate]) -> String {
         // Persist pane choices only for this exact set of files and candidate
@@ -52,7 +38,7 @@ struct ReviewWorkbenchView: View {
         return selected.isEmpty ? Self.initialCandidates(candidates) : selected
     }
     static func initialCandidates(_ candidates: [MapReviewCandidate]) -> [MapReviewCandidate] {
-        let predictions = candidates.filter { ["base", "checkpoint"].contains($0.role) }
+        let predictions = candidates.filter { ["base", "checkpoint", "model"].contains($0.role) }
         if !predictions.isEmpty {
             // Keep every requested model visible. Source/reference maps remain
             // available in Maps without silently hiding a selected checkpoint.
@@ -95,30 +81,54 @@ struct ReviewWorkbenchView: View {
                 ContentUnavailableView("Choose maps to compare", systemImage: "square.split.2x1")
             } else {
                 HSplitView {
-                    ForEach(visibleCandidates) { candidate in
+                    ForEach(Array(visibleCandidates.enumerated()), id: \.element.id) { position, candidate in
                         VStack(spacing: 0) {
-                            HStack(alignment: .top) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(candidate.label).font(.headline).textSelection(.enabled)
-                                    if let detail = candidate.detail {
-                                        Text(detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                                    }
-                                    Text(candidate.mapURL.lastPathComponent).font(.caption2).foregroundStyle(.secondary)
-                                        .lineLimit(1).truncationMode(.middle).help(candidate.mapURL.path)
-                                }.accessibilityElement(children: .ignore).accessibilityLabel(candidate.accessibleLabel)
-                                Spacer()
-                                Menu {
-                                    Button("Open Full Map in New Window") { ReviewWindowController.shared.open(candidates: [candidate]) }
-                                    Button("Show Original in Finder") { NSWorkspace.shared.activateFileViewerSelecting([candidate.mapURL]) }
-                                } label: { Image(systemName: "ellipsis.circle") }
-                            }.padding(10)
-                            ViewThatFits(in: .horizontal) {
-                                HStack { exportControls(candidate); Spacer(minLength: 0) }
-                                VStack(alignment: .leading) { exportControls(candidate) }.frame(maxWidth: .infinity, alignment: .leading)
-                            }.font(.caption).padding(.horizontal, 10).padding(.bottom, 8).disabled(isExporting)
+                            VStack(spacing: 0) {
+                                HStack(alignment: .top) {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                            Text("\(position + 1)").font(.caption.bold()).foregroundStyle(.secondary)
+                                                .accessibilityLabel("Pane \(position + 1)")
+                                            Text(candidate.label).font(.headline).textSelection(.enabled)
+                                        }
+                                        if let detail = candidate.detail {
+                                            Text(detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                                        }
+                                        Text(candidate.mapURL.lastPathComponent).font(.caption2).foregroundStyle(.secondary)
+                                            .lineLimit(1).truncationMode(.middle).help(candidate.mapURL.path)
+                                    }.accessibilityElement(children: .ignore).accessibilityLabel(candidate.accessibleLabel)
+                                    Spacer()
+                                    Menu {
+                                        Button("Open Full Map in New Window") { ReviewWindowController.shared.open(candidates: [candidate]) }
+                                        Button("Show Original in Finder") { NSWorkspace.shared.activateFileViewerSelecting([candidate.mapURL]) }
+                                    } label: { Image(systemName: "ellipsis.circle") }
+                                }.padding(10)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .layoutPriority(2)
+                                    .background(.bar)
+                                ViewThatFits(in: .horizontal) {
+                                    HStack { exportControls(candidate); Spacer(minLength: 0) }
+                                    VStack(alignment: .leading) { exportControls(candidate) }.frame(maxWidth: .infinity, alignment: .leading)
+                                }.font(.caption).padding(.horizontal, 10).padding(.bottom, 8).disabled(isExporting)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .layoutPriority(1)
+                                    .background(.bar)
+                            }
+                            .fixedSize(horizontal: false, vertical: true)
+                            .background {
+                                GeometryReader { geometry in
+                                    Color.clear.preference(key: ReviewPaneHeaderHeights.self,
+                                        value: [candidate.id: geometry.size.height])
+                                }
+                            }
+                            .frame(minHeight: paneHeaderHeight, alignment: .top)
+                            .layoutPriority(2)
+                            .background(.bar)
+                            Divider()
                             MapInspectionView(url: candidate.mapURL, numeric: candidate.numeric, viewport: viewport, onLoad: { value in
                                 inspectedHashes[candidate.id] = value?.sourceSHA256
-                            })
+                            }).frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
                         }.frame(minWidth: 240)
                     }
                 }
@@ -128,6 +138,13 @@ struct ReviewWorkbenchView: View {
             Button("OK") { notice = nil }
         } message: { Text(notice ?? "") }
         .onAppear { restoreVisibleMaps() }
+        .onPreferenceChange(ReviewPaneHeaderHeights.self) { heights in
+            // Keep linked image coordinates aligned even when one checkpoint
+            // has a longer identity than its neighbors. Measure before padding
+            // to the shared height so resizing can also shrink the header.
+            let height = heights.values.max() ?? 0
+            if abs(height - paneHeaderHeight) > 0.5 { paneHeaderHeight = height }
+        }
         .onChange(of: Self.selectionPreferenceKey(candidates)) { _, _ in restoreVisibleMaps() }
         .onChange(of: visibleIDs) { _, selected in
             preferences.set(Array(selected), forKey: Self.selectionPreferenceKey(candidates))

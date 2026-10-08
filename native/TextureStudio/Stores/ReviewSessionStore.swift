@@ -80,11 +80,15 @@ final class ReviewSessionStore {
     }
     func writeReview(to url: URL) throws {
         let materials: [[String: Any]] = groups.map { group in
-            ["material_id": group.id, "variants": group.candidates.map {
-                ["candidate_id": $0.id, "name": $0.label, "path": $0.mapURL.path,
-                 "numeric": $0.numeric,
-                 "sample_label": $0.sampleLabel ?? group.id, "detail": $0.detail ?? "", "role": $0.role,
-                 "decision": decisions[$0.id] ?? "unreviewed", "note": notes[$0.id] ?? ""] as [String: Any]
+            ["material_id": group.id, "variants": group.candidates.map { candidate in
+                var fields: [String: Any] = ["candidate_id": candidate.id, "name": candidate.label, "path": candidate.mapURL.path,
+                 "numeric": candidate.numeric,
+                 "sample_label": candidate.sampleLabel ?? group.id, "detail": candidate.detail ?? "", "role": candidate.role,
+                 "decision": decisions[candidate.id] ?? "unreviewed", "note": notes[candidate.id] ?? ""]
+                if let identity = candidate.modelIdentity {
+                    fields.merge(identity.manifestFields) { _, recorded in recorded }
+                }
+                return fields
             }]
         }
         let review: [String: Any] = ["schema": "texture-studio-native-material-review-v1",
@@ -111,20 +115,22 @@ final class ReviewSessionStore {
                     let candidateId = variant["candidate_id"] as? String ?? "\(id)/\(name)"
                     if let decision = variant["decision"] as? String { parsedDecisions[candidateId] = decision }
                     if let note = variant["note"] as? String { parsedNotes[candidateId] = note }
-                    let role = variant["role"] as? String ?? (name == "target" ? "target" : name == "flat" ? "base" : variant["checkpoint"] != nil ? "checkpoint" : "map")
-                    let title = name == "target" ? "Reference \(target == "height" ? "displacement" : target)" : name == "flat" ? "Flat baseline" : name.replacingOccurrences(of: "_", with: " ")
-                    var details: [String] = []
-                    if let checkpoint = variant["checkpoint"] as? String {
-                        let file = URL(fileURLWithPath: checkpoint)
-                        details.append(file.deletingLastPathComponent().lastPathComponent + " · " + file.lastPathComponent)
+                    let identity = Self.modelIdentity(variant, target: target, relativeTo: url)
+                    let deepBump = (identity.modelName ?? name).localizedCaseInsensitiveContains("deepbump")
+                    let role = variant["role"] as? String ?? (name == "target" ? "target" : name == "flat" ? "base" : identity.checkpointPath != nil ? "checkpoint" : deepBump ? "model" : "map")
+                    let title = Self.candidateTitle(name: name, role: role, identity: identity, deepBump: deepBump)
+                    var details = identity.recordedDetails
+                    if role == "checkpoint", identity.architecture == nil { details.append("Architecture not recorded") }
+                    if role == "target" {
+                        details.insert("Dataset reference · not a model output", at: 0)
+                        if let bits = material["target_original_bits"] as? Int { details.append("\(bits)-bit source · linear data") }
                     }
-                    if let step = variant["checkpoint_step"] as? Int { details.append("Step \(step.formatted())") }
-                    if let checksum = variant["checkpoint_sha256"] as? String { details.append("SHA256 \(checksum.prefix(12))") }
-                    if name == "target", let bits = material["target_original_bits"] as? Int { details.append("\(bits)-bit source · linear data") }
-                    if name == "flat" { details.append("No surface relief; comparison reference") }
-                    let detail = variant["detail"] as? String ?? (details.isEmpty ? nil : details.joined(separator: " · "))
+                    if name == "flat" { details.append("Constant height · no model inference") }
+                    if deepBump { details.append("DeepBump model output · not the dataset reference") }
+                    let savedDetail = Self.nonemptyString(variant["detail"])
+                    let detail = savedDetail ?? (details.isEmpty ? nil : details.joined(separator: " · "))
                     return MapReviewCandidate(id: candidateId, label: title, mapURL: map, numeric: variant["numeric"] as? Bool ?? true,
-                        sampleLabel: variant["sample_label"] as? String ?? id, detail: detail, role: role)
+                        sampleLabel: variant["sample_label"] as? String ?? id, detail: detail, role: role, modelIdentity: identity)
                 }
                 if !candidates.contains(where: { $0.role == "source" }), let source = material["diffuse"] as? String {
                     let map = source.hasPrefix("/") ? URL(fileURLWithPath: source) : url.deletingLastPathComponent().appendingPathComponent(source)
@@ -151,5 +157,43 @@ final class ReviewSessionStore {
             blendURL = ([explicit].compactMap { $0 } + [nearby, legacy]).first { FileManager.default.fileExists(atPath: $0.path) }
             preferences.set(url.path, forKey: "reviewManifest")
         } catch { self.error = error.localizedDescription }
+    }
+
+    private static func nonemptyString(_ value: Any?) -> String? {
+        guard let string = value as? String, !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return string
+    }
+
+    private static func modelIdentity(_ variant: [String: Any], target: String, relativeTo manifest: URL) -> MapReviewModelIdentity {
+        let checkpoint = nonemptyString(variant["checkpoint"]).map { path in
+            path.hasPrefix("/") ? path : manifest.deletingLastPathComponent().appendingPathComponent(path).path
+        }
+        // Architecture must be recorded explicitly. Filenames and old trial
+        // aliases do not establish whether the model is DINOv2, DA3 or another.
+        let architecture = nonemptyString(variant["model_architecture"]) ?? nonemptyString(variant["model_summary"])
+            ?? nonemptyString(variant["base_encoder"])
+        return MapReviewModelIdentity(checkpointPath: checkpoint,
+            checkpointSHA256: nonemptyString(variant["checkpoint_sha256"]),
+            checkpointStep: variant["checkpoint_step"] as? Int, architecture: architecture,
+            mapType: nonemptyString(variant["map_type"]) ?? target, modelName: nonemptyString(variant["model_name"]))
+    }
+
+    private static func candidateTitle(name: String, role: String, identity: MapReviewModelIdentity, deepBump: Bool) -> String {
+        let map = identity.mapType == "height" ? "displacement" : identity.mapType ?? "map"
+        if name == "target" { return "Reference \(map)" }
+        if name == "flat" { return "Flat baseline · no model" }
+        if deepBump { return "DeepBump · \(map)" }
+        var title: String
+        switch name {
+        case "starting_head": title = "Starting trained \(map)"
+        case "trained_2k": title = "Trained 2K \(map)"
+        // Preserve native/saved descriptive labels exactly, including a run's
+        // underscores. Only the known legacy aliases above need translation.
+        default: title = name
+        }
+        if role == "checkpoint", let run = identity.runName, !title.contains(run) {
+            title += " · " + run
+        }
+        return title
     }
 }

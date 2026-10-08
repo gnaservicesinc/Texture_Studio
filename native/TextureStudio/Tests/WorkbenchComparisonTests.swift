@@ -38,8 +38,15 @@ final class WorkbenchComparisonTests: XCTestCase {
         let base = try XCTUnwrap(store.comparisonCandidates.first { $0.role == "base" })
         XCTAssertTrue(base.label.contains("untrained"))
         XCTAssertTrue(base.detail?.contains("not a pretrained depth estimator") == true)
+        XCTAssertEqual(base.modelIdentity?.architecture, "DINOv2 Base + untrained material head")
+        XCTAssertNil(base.modelIdentity?.checkpointStep, "The untrained baseline does not inherit a trained checkpoint's step")
         let trained = try XCTUnwrap(store.comparisonCandidates.first { $0.role == "checkpoint" })
         XCTAssertTrue(trained.detail?.contains("step 42") == true)
+        XCTAssertEqual(trained.modelIdentity?.checkpointPath, "/runs/material-2k/checkpoint.selected.pt")
+        XCTAssertEqual(trained.modelIdentity?.checkpointSHA256, "exact-sha")
+        XCTAssertEqual(trained.modelIdentity?.checkpointStep, 42)
+        XCTAssertEqual(trained.modelIdentity?.architecture, "DINOv2 Base + trained material head")
+        XCTAssertEqual(trained.modelIdentity?.mapType, "height")
         XCTAssertTrue(trained.accessibleLabel.contains("soil_crop_002"))
         XCTAssertTrue(trained.exportFilename.contains("soil_crop_002"))
         XCTAssertTrue(trained.exportFilename.contains("exact-sha"))
@@ -54,6 +61,13 @@ final class WorkbenchComparisonTests: XCTestCase {
         XCTAssertEqual(review.groups.first?.id, "soil_crop_002")
         XCTAssertEqual(review.groups.first?.candidates.map(\.role), ["source", "target", "base", "checkpoint"])
         XCTAssertEqual(review.groups.first?.candidates.last?.detail, trained.detail)
+        XCTAssertEqual(review.groups.first?.candidates.last?.modelIdentity, trained.modelIdentity)
+        XCTAssertEqual(review.groups.first?.candidates.first { $0.role == "base" }?.modelIdentity, base.modelIdentity)
+        let reviewed = root.appendingPathComponent("decisions.json")
+        try review.writeReview(to: reviewed)
+        review.load(reviewed)
+        XCTAssertEqual(review.groups.first?.candidates.last?.modelIdentity, trained.modelIdentity,
+            "Saving decisions must retain the inspected live model identity")
     }
 
     func testEverySelectedCheckpointIsInitiallyVisibleAndSourceCanBeEnabled() {

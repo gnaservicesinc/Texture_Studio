@@ -53,11 +53,15 @@ struct MapInspectionView: View {
         VStack(spacing: 0) {
             if let loaded {
                 InspectionCanvas(image: loaded.image, viewport: viewport)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
                 HStack {
                     Text("\(loaded.pixelWidth) × \(loaded.pixelHeight) • full source resolution")
                     Spacer()
                     Text(numeric ? "8-bit display only • original precision retained • shared contrast" : "Color display • original file retained")
                 }.font(.caption).foregroundStyle(.secondary).padding(8)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .background(.bar)
             } else if let failure {
                 ContentUnavailableView("Map could not be opened", systemImage: "exclamationmark.triangle", description: Text(failure))
             } else { ProgressView("Loading full map…").frame(maxWidth: .infinity, maxHeight: .infinity) }
@@ -93,6 +97,14 @@ struct InspectionCanvas: NSViewRepresentable {
     var image: CGImage?
     var viewport: InspectionViewport?
     private var lastDrag: CGPoint?
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        clipsToBounds = true
+    }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        clipsToBounds = true
+    }
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
     private var scale: CGFloat {
@@ -101,14 +113,21 @@ struct InspectionCanvas: NSViewRepresentable {
             viewSize: bounds.size, backingScale: window?.backingScaleFactor ?? 1)
     }
     override func draw(_ dirtyRect: NSRect) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        context.saveGState()
+        defer { context.restoreGState() }
+        // Native-pixel images extend beyond this viewport when zoomed/panned.
+        // Clip their drawing explicitly so they cannot cover pane identity,
+        // export controls, or a neighboring comparison image.
+        context.clip(to: bounds)
         NSColor.textBackgroundColor.setFill(); bounds.fill()
-        guard let image, let viewport, let context = NSGraphicsContext.current?.cgContext else { return }
+        guard let image, let viewport else { return }
         let width = CGFloat(image.width) * scale, height = CGFloat(image.height) * scale
         let rect = CGRect(x: bounds.midX - viewport.normalizedCenter.x * width,
                           y: bounds.midY - viewport.normalizedCenter.y * height, width: width, height: height)
-        context.saveGState(); context.interpolationQuality = .none
+        context.interpolationQuality = .none
         context.translateBy(x: rect.minX, y: rect.maxY); context.scaleBy(x: 1, y: -1)
-        context.draw(image, in: CGRect(origin: .zero, size: rect.size)); context.restoreGState()
+        context.draw(image, in: CGRect(origin: .zero, size: rect.size))
     }
     override func setFrameSize(_ newSize: NSSize) { super.setFrameSize(newSize); needsDisplay = true }
     override func mouseDown(with event: NSEvent) { window?.makeFirstResponder(self); lastDrag = convert(event.locationInWindow, from: nil) }

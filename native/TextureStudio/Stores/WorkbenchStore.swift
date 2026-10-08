@@ -303,11 +303,13 @@ final class WorkbenchStore {
             self.lastOutputURL = parent
             self.comparisonCandidates = []
             var candidates = [MapReviewCandidate(id: "source|" + image.path, label: "Source photo", mapURL: image, numeric: false,
-                sampleLabel: sampleLabel, detail: image.path, role: "source")]
+                sampleLabel: sampleLabel, detail: image.path, role: "source",
+                modelIdentity: MapReviewModelIdentity(mapType: "input"))]
             if let referenceMap {
                 candidates.append(MapReviewCandidate(id: "target|" + referenceMap.path, label: "Reference \(targetLabel.lowercased())",
                     mapURL: referenceMap.url, numeric: true, sampleLabel: sampleLabel,
-                    detail: "Dataset target · \(referenceMap.sourceBits.map { "\($0)-bit source" } ?? "original source precision") · linear data", role: "target"))
+                    detail: "Dataset target · \(referenceMap.sourceBits.map { "\($0)-bit source" } ?? "original source precision") · linear data", role: "target",
+                    modelIdentity: MapReviewModelIdentity(mapType: target, modelName: "Dataset reference")))
             }
             if includeBase, let reference = selected.first {
                 self.activity = "Creating the untrained DINOv2 material-head baseline"
@@ -319,7 +321,9 @@ final class WorkbenchStore {
                 }
                 candidates.append(MapReviewCandidate(id: "base|" + reference.id, label: "DINOv2 Base · untrained \(targetLabel.lowercased()) head",
                     mapURL: URL(fileURLWithPath: map.path), numeric: true, sampleLabel: sampleLabel,
-                    detail: "Before material training · \(target == "normal" ? "flat OpenGL normal" : "flat 0.5 output") · DINOv2 supplies features; it is not a pretrained depth estimator", role: "base"))
+                    detail: "Before material training · \(target == "normal" ? "flat OpenGL normal" : "flat 0.5 output") · DINOv2 supplies features; it is not a pretrained depth estimator", role: "base",
+                    modelIdentity: MapReviewModelIdentity(architecture: "DINOv2 Base + untrained material head",
+                        mapType: target, modelName: "Untrained material-head baseline")))
             }
             for (i, checkpoint) in selected.enumerated() {
                 self.activity = "Running checkpoint \(i + 1)/\(selected.count): \(checkpoint.title)"
@@ -332,7 +336,10 @@ final class WorkbenchStore {
                 }
                 candidates.append(MapReviewCandidate(id: checkpoint.id, label: "\(checkpoint.url.deletingLastPathComponent().lastPathComponent) · \(targetLabel)",
                     mapURL: URL(fileURLWithPath: map.path), numeric: true, sampleLabel: sampleLabel,
-                    detail: "\(checkpoint.url.lastPathComponent) · step \(checkpoint.step.formatted()) · SHA256 \(checkpoint.sha256.prefix(12))", role: "checkpoint"))
+                    detail: "\(checkpoint.trainingBaseLabel) · \(checkpoint.url.lastPathComponent) · step \(checkpoint.step.formatted()) · SHA256 \(checkpoint.sha256.prefix(12))", role: "checkpoint",
+                    modelIdentity: MapReviewModelIdentity(checkpointPath: checkpoint.checkpointPath,
+                        checkpointSHA256: checkpoint.sha256, checkpointStep: checkpoint.step,
+                        architecture: checkpoint.trainingBaseLabel, mapType: checkpoint.target)))
             }
             self.comparisonCandidates = candidates
             self.lastOutputURL = parent
@@ -341,8 +348,8 @@ final class WorkbenchStore {
                     "variants": candidates.filter { $0.role != "source" }.map { candidate in
                         var item: [String: Any] = ["name": candidate.label, "candidate_id": candidate.id, target: candidate.mapURL.path,
                             "sample_label": sampleLabel, "detail": candidate.detail ?? "", "role": candidate.role, "numeric": candidate.numeric]
-                        if let checkpoint = selected.first(where: { $0.id == candidate.id }) {
-                            item["checkpoint"] = checkpoint.checkpointPath; item["checkpoint_sha256"] = checkpoint.sha256; item["checkpoint_step"] = checkpoint.step
+                        if let identity = candidate.modelIdentity {
+                            item.merge(identity.manifestFields) { _, recorded in recorded }
                         }
                         if candidate.role == "base" { item["baseline_untrained"] = true; item["base_encoder"] = "facebook/dinov2-base" }
                         return item
