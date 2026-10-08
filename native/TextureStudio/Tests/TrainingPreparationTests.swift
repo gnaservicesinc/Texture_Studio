@@ -314,6 +314,29 @@ final class TrainingPreparationTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path), "A missing user-selected folder must not be silently recreated elsewhere")
     }
 
+    func testSameSizeAlsoPreparesAutomaticChecksWithoutLosingOtherMaterials() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let recorder = WorkerRecorder()
+        let store = fixture.store { args, _ in
+            recorder.arguments.append(args)
+            if args.first == "train" { return "finished\n" }
+            return try fixture.result(size: 1024, prepared: args.first == "prepare-size",
+                                      fault: args.first == "dataset" ? "missing-automatic" : nil)
+        }
+        try await store.loadDataset(fixture.original)
+        store.training.useSelectedMaterialOnly = true
+        store.selectedSampleId = "stucco-1024-train"
+        store.startTraining()
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(recorder.arguments.compactMap(\.first), ["dataset", "prepare-size", "train"])
+        let prepare = recorder.arguments[1]
+        XCTAssertTrue(prepare.contains("--automatic-validation"))
+        XCTAssertEqual(value("--material", in: prepare), "stucco")
+        XCTAssertEqual(store.dataset?.materials.map(\.id), ["soil", "stucco"])
+    }
+
     private func settled(_ store: WorkbenchStore) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(3))
         while store.isBusy, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
@@ -369,7 +392,8 @@ final class TrainingPreparationTests: XCTestCase {
                           "normal": ["path": "/test/normal.png"], "roughness": ["path": "/test/roughness.png"]]] as [String: Any]
             }] as [String: Any]
         }
-        var document: [String: Any] = ["dataset_path": path.path, "index_sha256": size == 2048 ? "prepared-sha" : "source-sha", "materials": materials]
+        var document: [String: Any] = ["dataset_path": path.path, "index_sha256": size == 2048 ? "prepared-sha" : "source-sha", "materials": materials, "automatic_validation": ["policy": "automatic-material-check-5pct-v1", "material_ids": ["soil", "stucco"]]]
+        if fault == "missing-automatic" { document.removeValue(forKey: "automatic_validation") }
         if size == 2048 { document["cross_size_validation_notice"] = "Separate native crop size uses a separate split lineage." }
         if isPrepared, fault != "missing-proof" {
             document["preparation"] = ["source_dataset_path": original.path, "source_index_sha256": "source-sha",

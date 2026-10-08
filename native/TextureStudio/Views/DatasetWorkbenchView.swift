@@ -7,7 +7,9 @@ struct DatasetWorkbenchView: View {
     @State private var viewport = InspectionViewport()
 
     private var matchingMaterials: [WorkbenchMaterial] {
-        guard let materials = store.dataset?.materials else { return [] }
+        guard let original = store.dataset?.materials else { return [] }
+        let materials = original.map { WorkbenchMaterial(materialId: $0.id, samples: $0.samples.filter { $0.split == "train" }) }
+            .filter { !$0.samples.isEmpty }
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return materials }
         return materials.filter { material in
@@ -23,7 +25,7 @@ struct DatasetWorkbenchView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Materials").font(.headline)
                         if let dataset = store.dataset {
-                            Text("\(dataset.materials.count) materials · \(dataset.samples.count) crops")
+                            Text("\(dataset.materials.count) materials · \(dataset.samples.filter { $0.split == "train" }.count) training crops")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -48,16 +50,25 @@ struct DatasetWorkbenchView: View {
                             .disabled(store.isBusy)
                     }
                 } else {
-                    List(selection: $store.selectedSampleId) {
-                        ForEach(matchingMaterials) { material in
-                            Section(material.materialId.replacingOccurrences(of: "_", with: " ")) {
-                                ForEach(material.samples) { sample in
-                                    DatasetCropRow(sample: sample).tag(sample.id)
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 3) {
+                                ForEach(matchingMaterials) { material in
+                                    Text(material.materialId.replacingOccurrences(of: "_", with: " "))
+                                        .font(.caption.bold()).foregroundStyle(.secondary).padding(.top, 12).padding(.horizontal, 10)
+                                    ForEach(material.samples) { sample in
+                                        MaterialSidebarRow(selected: store.selectedSampleId == sample.id,
+                                                           action: { store.selectedSampleId = sample.id }) {
+                                            DatasetCropRow(sample: sample)
+                                        }.id(sample.id)
+                                    }
                                 }
-                            }
+                            }.padding(8)
                         }
+                        .focusable().focusEffectDisabled()
+                        .onKeyPress(.downArrow) { moveSelection(1, proxy: proxy); return .handled }
+                        .onKeyPress(.upArrow) { moveSelection(-1, proxy: proxy); return .handled }
                     }
-                    .listStyle(.sidebar)
                     .disabled(store.isBusy)
                 }
             }
@@ -92,9 +103,21 @@ struct DatasetWorkbenchView: View {
             }
         }
         .onChange(of: store.dataset?.indexSha256) { _, _ in
+            selectVisibleCrop()
             reviewNote = store.selectedSample?.note ?? ""
         }
-        .onAppear { reviewNote = store.selectedSample?.note ?? "" }
+        .onAppear { selectVisibleCrop(); reviewNote = store.selectedSample?.note ?? "" }
+    }
+
+    private func selectVisibleCrop() {
+        if store.selectedSample?.split != "train" {
+            store.selectedSampleId = matchingMaterials.first?.samples.first?.id
+        }
+    }
+    private func moveSelection(_ direction: Int, proxy: ScrollViewProxy) {
+        let ids = matchingMaterials.flatMap(\.samples).map(\.id)
+        store.selectedSampleId = MaterialSidebarSelection.next(store.selectedSampleId, in: ids, direction: direction)
+        if let id = store.selectedSampleId { proxy.scrollTo(id) }
     }
 
     private func cropHeader(_ sample: WorkbenchSample) -> some View {
@@ -137,19 +160,11 @@ struct DatasetWorkbenchView: View {
                 Label(reviewStatus(sample.status), systemImage: sample.status == "excluded" ? "eye.slash" : sample.status == "approved" ? "checkmark.circle" : "circle.dotted")
                     .foregroundStyle(sample.status == "excluded" ? .secondary : .primary)
                 Spacer()
-                Picker("Split", selection: Binding(get: { sample.split }, set: { split in
-                    store.curateSelected(status: editableStatus(sample.status), split: split)
-                })) {
-                    Text("Training").tag("train")
-                    Text("Validation").tag("validation")
-                }
-                .frame(width: 185)
-                .help("Training crops update the model. Validation crops measure a separate region; moving a crop may be blocked if it creates overlap.")
                 Button(sample.status == "excluded" ? "Reapprove" : "Approve") {
                     store.curateSelected(status: "approved", note: reviewNote.isEmpty ? nil : reviewNote)
                 }
                 .disabled(sample.status == "approved")
-                .help("Include this crop in training or validation. The original map files remain unchanged.")
+                .help("Mark this crop as reviewed and suitable for training. The original map files remain unchanged.")
                 Button("Exclude") {
                     store.curateSelected(status: "excluded", note: reviewNote.isEmpty ? nil : reviewNote)
                 }
@@ -167,7 +182,7 @@ struct DatasetWorkbenchView: View {
                 } label: { Label("More Review Actions", systemImage: "ellipsis") }
                 .menuStyle(.borderlessButton).fixedSize().help("Mark this crop for another review")
             }
-            Text("Review status and split update metadata. Original image and map files stay in place.")
+            Text("Approve usable crops or exclude problems. A small automatic check sample is managed in the background; original files stay in place.")
                 .font(.caption).foregroundStyle(.secondary)
             if let map = store.selectedMap {
                 DisclosureGroup("Original file") {
@@ -209,7 +224,7 @@ private struct DatasetCropRow: View {
             Image(systemName: sample.status == "excluded" ? "eye.slash" : "photo").foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Crop \(sample.id.components(separatedBy: "_").last ?? sample.id)").lineLimit(1)
-                Text("\(sample.split == "train" ? "Training" : "Validation") · \(sample.width) × \(sample.height)")
+                Text("\(sample.width) × \(sample.height)")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
         }

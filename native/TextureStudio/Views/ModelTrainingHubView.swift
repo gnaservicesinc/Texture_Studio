@@ -51,15 +51,19 @@ struct ModelTrainingHubView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $destination) {
-                Section("Model Training") {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Model Training").font(.caption.bold()).foregroundStyle(.secondary).padding(10)
                     ForEach(TrainingDestination.allCases) { item in
-                        Label(item.title, systemImage: item.symbol).tag(item)
-                            .help(item.guidance)
+                        MaterialSidebarRow(selected: destination == item, action: { destination = item }) {
+                            Label(item.title, systemImage: item.symbol)
+                        }.help(item.guidance)
                     }
-                }
+                }.padding(8)
             }
-            .listStyle(.sidebar)
+            .focusable().focusEffectDisabled()
+            .onKeyPress(.downArrow) { destination = MaterialSidebarSelection.next(destination, in: TrainingDestination.allCases, direction: 1); return .handled }
+            .onKeyPress(.upArrow) { destination = MaterialSidebarSelection.next(destination, in: TrainingDestination.allCases, direction: -1); return .handled }
             .navigationSplitViewColumnWidth(min: 190, ideal: 225, max: 270)
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 6) {

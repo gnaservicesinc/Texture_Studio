@@ -86,6 +86,38 @@ def dataset(tmp_path, original_fixture):
 def prepare(dataset, size=2048, expected=None):
     return workbench.prepare_size(SimpleNamespace(dataset=dataset, size=size, expected_index_sha256=expected))
 
+def automatic(dataset, size=1024, material=None):
+    return workbench.prepare_size(SimpleNamespace(dataset=dataset, size=size, expected_index_sha256=None,
+        automatic_validation=True, material=material, workers=2))
+
+def test_same_size_automatic_checks_copy_exact_maps_without_original_parents(dataset, monkeypatch):
+    before = digest(dataset / 'dataset.json')
+    shutil.rmtree(dataset / 'sources')
+    monkeypatch.setattr(native, 'read_png', lambda *_a, **_k: pytest.fail('Exact native files should not be decoded/recompressed'))
+    result = automatic(dataset)
+    assert result['dataset_path'] != str(dataset)
+    assert result['automatic_validation']['material_ids'] == ['surface']
+    assert not result['preparation']['original_parents_required']
+    assert digest(dataset / 'dataset.json') == before
+    for sample in result['materials'][0]['samples']:
+        source = dataset / 'samples' / sample['sample_id']
+        for role, details in sample['maps'].items():
+            assert digest(Path(details['path'])) == digest(source / MAP_NAMES[role])
+    assert automatic(dataset)['preparation']['reused']
+
+def test_quick_fit_switch_preserves_review_exclusions_and_reuses_native_pixels(dataset, monkeypatch):
+    first = automatic(dataset, 2048)
+    folder = Path(first['dataset_path'])
+    chosen = next(s for s in first['materials'][0]['samples'] if s['split']=='train')
+    monkeypatch.setattr(workbench, 'training_active', lambda _p:False)
+    workbench.curate(SimpleNamespace(dataset=folder, sample=chosen['sample_id'], status='excluded', split=None,
+        note='Preserve this exclusion across scope changes', expected_index_sha256=first['index_sha256']))
+    monkeypatch.setattr(native, 'read_png', lambda *_a, **_k: pytest.fail('Prepared 2K crops should be reused'))
+    quick = automatic(folder, 2048, 'surface')
+    assert quick['automatic_validation']['quick_fit_material_id'] == 'surface'
+    excluded = next(s for s in quick['materials'][0]['samples'] if s['sample_id']==chosen['sample_id'])
+    assert excluded['status']=='excluded' and 'across scope changes' in excluded['note']
+
 def test_real_2k_crops_preserve_raw_16bit_codes_and_reversible_normal(dataset):
     original = {str(p.relative_to(dataset)): digest(p) for p in dataset.rglob('*') if p.is_file()}
     result = prepare(dataset / 'dataset.json', expected=digest(dataset / 'dataset.json'))
@@ -266,7 +298,7 @@ def test_dangling_native_cache_symlink_is_preserved_and_refused(dataset):
     index, records = workbench.read_dataset(dataset)
     proof = native.snapshot(dataset, records)
     import hashlib
-    key = hashlib.sha256(json.dumps({'schema': native.PREPARATION_SCHEMA, 'size': 2048, 'snapshot': proof}, sort_keys=True).encode()).hexdigest()
+    key = hashlib.sha256(json.dumps({'schema': native.PREPARATION_SCHEMA, 'size': 2048, 'snapshot': proof, 'automatic_validation': None, 'png_compression':3, 'review_overlay':[]}, sort_keys=True).encode()).hexdigest()
     cache = dataset / '.native-sizes'
     cache.mkdir()
     link = cache / ('2048-' + key[:20])

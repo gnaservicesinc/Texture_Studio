@@ -281,8 +281,10 @@ def _chunk(kind: bytes, payload: bytes) -> bytes:
     return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
 
 
-def write_png(path: Path | str, array: np.ndarray, metadata: dict | None = None) -> None:
+def write_png(path: Path | str, array: np.ndarray, metadata: dict | None = None, compression: int = 3) -> None:
     """Losslessly encode native integer samples and preserve declared color tags."""
+    if type(compression) is not int or not 0 <= compression <= 9:
+        raise ValueError("PNG compression must be an integer between 0 and 9")
     if array.dtype not in (np.dtype("uint8"), np.dtype("uint16")) or array.ndim != 3:
         raise ValueError("PNG output requires uint8/uint16 HWC samples")
     channels = array.shape[2]
@@ -294,7 +296,7 @@ def write_png(path: Path | str, array: np.ndarray, metadata: dict | None = None)
             raise ValueError("PNG dimensions must be positive")
         header = struct.pack(">IIBBBBB", width, height, array.dtype.itemsize * 8, 4, 0, 0, 0)
         rows = b"".join(b"\0" + row.astype(array.dtype.newbyteorder(">"), copy=False).tobytes() for row in array)
-        png_data = PNG_SIGNATURE + _chunk(b"IHDR", header) + _chunk(b"IDAT", zlib.compress(rows, 6)) + _chunk(b"IEND", b"")
+        png_data = PNG_SIGNATURE + _chunk(b"IHDR", header) + _chunk(b"IDAT", zlib.compress(rows, compression)) + _chunk(b"IEND", b"")
     elif channels == 1:
         encoded_array = array[:, :, 0]
     elif channels == 3:
@@ -304,7 +306,7 @@ def write_png(path: Path | str, array: np.ndarray, metadata: dict | None = None)
     else:
         raise ValueError("PNG encoder supports grayscale, grayscale+alpha, RGB and RGBA")
     if channels != 2:
-        success, encoded = cv2.imencode(".png", np.ascontiguousarray(encoded_array), [cv2.IMWRITE_PNG_COMPRESSION, 6])
+        success, encoded = cv2.imencode(".png", np.ascontiguousarray(encoded_array), [cv2.IMWRITE_PNG_COMPRESSION, compression])
         if not success:
             raise ValueError("PNG encoder failed")
         png_data = encoded.tobytes()

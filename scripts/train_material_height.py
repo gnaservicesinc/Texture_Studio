@@ -92,7 +92,18 @@ def verify_region_split(samples: list[dict[str, Any]], index: dict[str, Any]) ->
                 if split != other_split and rectangles_overlap(rectangle, other_rectangle):
                     raise ValueError(f"Training/validation source regions overlap: {identity} and {other_id}")
             sources.setdefault(source_hash, []).append((identity, split, rectangle))
-    incomplete = [material for material, splits in by_material.items() if splits != {"train", "validation"}]
+    policy = index.get("automatic_validation")
+    if policy:
+        from material_validation_policy import POLICY
+        if policy.get("policy") != POLICY or policy.get("fraction") != 0.05:
+            raise ValueError("Unknown automatic material-check policy")
+        expected = set(policy.get("material_ids", []))
+        if not expected or expected - {entry["material_id"] for entry in index["samples"]}:
+            raise ValueError("Automatic check material identities are invalid")
+        incomplete = [material for material, splits in by_material.items()
+                      if splits != ({"train", "validation"} if material in expected else {"train"})]
+    else:
+        incomplete = [material for material, splits in by_material.items() if splits != {"train", "validation"}]
     if incomplete:
         raise ValueError(f"Region validation requires training and validation regions of every material: {incomplete}")
 

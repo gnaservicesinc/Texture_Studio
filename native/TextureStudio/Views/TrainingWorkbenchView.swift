@@ -181,19 +181,12 @@ private struct TrainingConfigurationForm: View {
                     Text(URL(fileURLWithPath: dataset.datasetPath).lastPathComponent)
                         .font(.headline).lineLimit(2).help(dataset.datasetPath)
                     LabeledContent("Materials", value: dataset.materials.count.formatted())
-                    LabeledContent("Crops", value: dataset.samples.count.formatted())
-                    if let scope = dataset.validationScope {
-                        Text(scope.replacingOccurrences(of: "_", with: " "))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    if let notice = dataset.crossSizeValidationNotice ?? dataset.preparation?.crossSizeValidationNotice, !notice.isEmpty {
-                        Label(notice, systemImage: "info.circle")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Toggle("Train only the selected material", isOn: $options.useSelectedMaterialOnly)
-                        .disabled(material == nil)
-                        .help("Train and validate on the selected material’s eligible crops. Turn this off to include every eligible material.")
+                    LabeledContent("Training crops", value: dataset.samples.filter { $0.split == "train" }.count.formatted())
+                    Picker("What to train on", selection: $options.useSelectedMaterialOnly) {
+                        Text("All materials in this dataset").tag(false)
+                        Text("One material for a quick fit").tag(true)
+                    }.pickerStyle(.radioGroup)
+                        .help("All materials teaches the broader collection. One material checks how well the model can fit the surface you choose below.")
                     if options.useSelectedMaterialOnly {
                         Picker("Material", selection: Binding(get: { material?.id ?? "" }, set: { materialId in
                             selectedSampleId = dataset.materials.first { $0.id == materialId }?.samples.first?.id
@@ -202,7 +195,14 @@ private struct TrainingConfigurationForm: View {
                                 Text(item.materialId.replacingOccurrences(of: "_", with: " ")).tag(item.id)
                             }
                         }
+                        Text("Only \(material?.materialId.replacingOccurrences(of: "_", with: " ") ?? "the material you choose") updates the model in this run. Other materials remain in the dataset. This tests fitting one surface, not performance on new photos.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("All usable training crops update the model. This takes longer but teaches the variety in your collection. Excluded crops are always skipped.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
+                    Text("A unique crop from a repeatable random 5% of sources checks progress automatically. Quick fits use a check crop from the chosen material. Judge the result visually on new photographs later.")
+                        .font(.caption).foregroundStyle(.secondary)
                 } else {
                     Text("Choose a dataset to configure its training run.")
                         .foregroundStyle(.secondary)
@@ -226,8 +226,12 @@ private struct TrainingConfigurationForm: View {
             Section("Training") {
                 Stepper("Updates per crop: \(options.updatesPerCrop)", value: $options.updatesPerCrop, in: 1...10_000, step: 25)
                     .help("Every eligible training crop receives this many optimizer updates. A time or memory limit may stop the run earlier and save its progress.")
-                Toggle("Allow crops awaiting approval", isOn: $options.allowUnreviewed)
-                    .help("Allow prepared and unreviewed crops in the selection. Otherwise approve or exclude them before training. Excluded crops stay excluded.")
+                Toggle("Train with unreviewed crops", isOn: $options.allowUnreviewed)
+                    .help("On: train on approved and not-yet-reviewed crops. Off: review the training crops first. Excluded crops are always skipped.")
+                Text(options.allowUnreviewed
+                     ? "Approved crops and crops you have not reviewed yet can train. Use Dataset → Exclude for any problem crop; exclusions are always respected."
+                     : "Review the chosen training crops in Dataset first: approve usable crops and exclude problems before starting.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Toggle("Exclude transparent input pixels from the loss", isOn: $options.maskTransparency)
                     .help("Ignore invalid photo pixels and their immediate boundary during supervision; source pixels remain unchanged.")
                 Picker("Starting point", selection: $options.useWarmStart) {

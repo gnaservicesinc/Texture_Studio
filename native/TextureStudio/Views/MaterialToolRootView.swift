@@ -63,9 +63,18 @@ struct MaterialToolRootView: View {
 
     private var reviewView: some View {
         NavigationSplitView {
-            List(review.groups, selection: $review.selectedGroupId) { group in
-                Label(group.id.replacingOccurrences(of: "_", with: " "), systemImage: "square.3.layers.3d").tag(group.id)
-            }.navigationSplitViewColumnWidth(min: 180, ideal: 230)
+            ScrollView {
+                LazyVStack(spacing: 4) {
+                    ForEach(review.groups) { group in
+                        MaterialSidebarRow(selected: review.selectedGroupId == group.id, action: { review.selectedGroupId = group.id }) {
+                            Label(group.id.replacingOccurrences(of: "_", with: " "), systemImage: "square.3.layers.3d")
+                        }
+                    }
+                }.padding(8)
+            }.focusable().focusEffectDisabled()
+                .onKeyPress(.downArrow) { review.selectedGroupId = MaterialSidebarSelection.next(review.selectedGroupId, in: review.groups.map(\.id), direction: 1); return .handled }
+                .onKeyPress(.upArrow) { review.selectedGroupId = MaterialSidebarSelection.next(review.selectedGroupId, in: review.groups.map(\.id), direction: -1); return .handled }
+                .navigationSplitViewColumnWidth(min: 180, ideal: 230)
         } detail: {
             if let selected = review.selected {
                 VStack(spacing: 0) {

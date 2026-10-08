@@ -33,8 +33,10 @@ struct CheckpointLibraryView: View {
                                 .disabled(store.isBusy)
                         }
                     } else {
-                        List(selection: $store.selectedCheckpointId) {
+                        ScrollView {
+                          LazyVStack(spacing: 4) {
                             ForEach(store.checkpoints) { checkpoint in
+                              MaterialSidebarRow(selected: store.selectedCheckpointId == checkpoint.id, action: { store.selectedCheckpointId = checkpoint.id }) {
                                 HStack(spacing: 9) {
                                     Image(systemName: "shippingbox").foregroundStyle(.secondary)
                                     VStack(alignment: .leading, spacing: 3) {
@@ -43,10 +45,13 @@ struct CheckpointLibraryView: View {
                                             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                                     }
                                 }
-                                .tag(checkpoint.id)
+                              }
                             }
+                          }.padding(8)
                         }
-                        .listStyle(.sidebar)
+                        .focusable().focusEffectDisabled()
+                        .onKeyPress(.downArrow) { store.selectedCheckpointId = MaterialSidebarSelection.next(store.selectedCheckpointId, in: store.checkpoints.map(\.id), direction: 1); return .handled }
+                        .onKeyPress(.upArrow) { store.selectedCheckpointId = MaterialSidebarSelection.next(store.selectedCheckpointId, in: store.checkpoints.map(\.id), direction: -1); return .handled }
                         .disabled(store.isBusy)
                     }
                     Divider()

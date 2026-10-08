@@ -170,7 +170,8 @@ final class WorkbenchStore {
     func prepareTrainingDataset() {
         guard !isBusy, dataset != nil else { return }
         let size = training.size
-        guard dataset?.hasNativeSize(size) != true else { return }
+        let material = training.useSelectedMaterialOnly ? selectedMaterialId : nil
+        guard dataset?.readyForTraining(size: size, material: material) != true else { return }
         operation("Preparing \(size) × \(size) native crops…") {
             _ = try await self.ensureTrainingDataset(size: size)
             self.activity = self.datasetPreparationSummary
@@ -180,15 +181,18 @@ final class WorkbenchStore {
     private func ensureTrainingDataset(size: Int) async throws -> WorkbenchDataset {
         guard let current = dataset else { throw StudioError("Open a material dataset first.") }
         guard [1024, 2048].contains(size) else { throw StudioError("Choose 1024 or 2048 native pixels.") }
-        if current.hasNativeSize(size) { return current }
         let material = selectedMaterialId
+        let checkMaterial = training.useSelectedMaterialOnly ? material : nil
+        if current.readyForTraining(size: size, material: checkMaterial) { return current }
         isPreparingDataset = true
         activity = "Preparing \(size) × \(size) native crops from the original materials…"
         defer { isPreparingDataset = false }
-        let result: WorkbenchDataset = try WorkbenchProcess.decode(WorkbenchDataset.self, output: await worker([
+        var arguments = [
             "prepare-size", "--dataset", current.datasetPath, "--size", String(size),
-            "--expected-index-sha256", current.indexSha256]))
-        guard result.hasNativeSize(size), let preparation = result.preparation,
+            "--automatic-validation", "--expected-index-sha256", current.indexSha256]
+        if let checkMaterial { arguments += ["--material", checkMaterial] }
+        let result: WorkbenchDataset = try WorkbenchProcess.decode(WorkbenchDataset.self, output: await worker(arguments))
+        guard result.readyForTraining(size: size, material: checkMaterial), let preparation = result.preparation,
               preparation.cropSize == size, !preparation.targetResized, !preparation.originalDatasetModified,
               URL(fileURLWithPath: preparation.preparedDatasetPath).standardizedFileURL == URL(fileURLWithPath: result.datasetPath).standardizedFileURL else {
             throw StudioError("Crop preparation did not verify the requested native size and preserved originals. The previous dataset remains selected.")
@@ -196,7 +200,7 @@ final class WorkbenchStore {
         try Task.checkCancellation()
         adoptDataset(result, preferredMaterial: material)
         preferences.set(result.datasetPath, forKey: "dataset")
-        datasetPreparationSummary = "\(preparation.reused ? "Opened existing" : "Prepared") \(size) × \(size) native crops. Original maps remain unchanged."
+        datasetPreparationSummary = "\(preparation.reused ? "Opened existing" : "Prepared") \(size) × \(size) native crops and automatic check samples. Original maps remain unchanged."
         return result
     }
     func loadCheckpoint(_ url: URL) async throws {
@@ -310,14 +314,14 @@ final class WorkbenchStore {
 
     private func sampleIssue(dataset: WorkbenchDataset, options: MaterialTrainingOptions, material: String?) -> String? {
         if options.useSelectedMaterialOnly && material == nil { return "Select the material to train." }
-        let candidates = options.useSelectedMaterialOnly ? dataset.materials.first(where: { $0.id == material })?.samples ?? [] : dataset.samples
+        let all = options.useSelectedMaterialOnly ? dataset.materials.first(where: { $0.id == material })?.samples ?? [] : dataset.samples
+        let candidates = all.filter { $0.split == "train" }
         if !options.allowUnreviewed && candidates.contains(where: { ["prepared", "unreviewed"].contains($0.status) }) {
-            return "Approve or exclude the crops awaiting review, or allow crops awaiting approval."
+            return "Approve or exclude the crops awaiting review, or turn on Train with unreviewed crops."
         }
         let eligible = candidates.filter { ["approved", "accepted"].contains($0.status) || (options.allowUnreviewed && ["prepared", "unreviewed"].contains($0.status)) }
-        if eligible.isEmpty { return "Approve crops or include prepared crops awaiting review." }
+        if eligible.isEmpty { return "Approve usable crops or turn on Train with unreviewed crops." }
         if eligible.contains(where: { $0.maps[options.target] == nil }) { return "Each selected crop needs its own \(options.target) target map." }
-        if !eligible.contains(where: { $0.split == "train" }) || !eligible.contains(where: { $0.split == "validation" }) { return "The selection needs training and validation crops." }
         return nil
     }
     func chooseResumeCheckpoint() {

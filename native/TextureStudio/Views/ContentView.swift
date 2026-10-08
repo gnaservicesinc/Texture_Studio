@@ -97,13 +97,13 @@ struct StudioSidebar: View {
     @Bindable var workspace: TextureWorkspace
 
     var body: some View {
-        List(selection: Binding<MaterialPreview?>(get: { workspace.selectedPreview }, set: { selection in
-            if let selection { workspace.selectPreview(selection) }
-        })) {
+        ScrollView {
+          VStack(alignment: .leading, spacing: 4) {
             Section("Surface material") {
                 ForEach(MaterialPreview.allCases) { preview in
-                    Label(preview.rawValue, systemImage: preview.symbol)
-                    .tag(preview)
+                    MaterialSidebarRow(selected: workspace.selectedPreview == preview, action: { workspace.selectPreview(preview) }) {
+                        Label(preview.rawValue, systemImage: preview.symbol)
+                    }
                     .disabled(workspace.source == nil || workspace.isBusy)
                 }
             }
@@ -114,8 +114,8 @@ struct StudioSidebar: View {
                     .disabled(workspace.source == nil || workspace.isBusy)
                 Button { workspace.showModels = true } label: { Label("Local Models", systemImage: "shippingbox") }
             }
+          }.padding(10)
         }
-        .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
             VStack(alignment: .leading, spacing: 5) {
                 Text("Texture Studio").font(.headline)

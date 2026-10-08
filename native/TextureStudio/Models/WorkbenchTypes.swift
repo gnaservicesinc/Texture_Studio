@@ -56,10 +56,23 @@ struct WorkbenchDataset: Decodable, Sendable {
     let validationScope: String?
     let crossSizeValidationNotice: String?
     let preparation: WorkbenchDatasetPreparation?
+    let automaticValidation: WorkbenchAutomaticValidation?
     var samples: [WorkbenchSample] { materials.flatMap(\.samples) }
+    func readyForTraining(size: Int, material: String?) -> Bool {
+        guard hasNativeSize(size), let policy = automaticValidation,
+              policy.policy == "automatic-material-check-5pct-v1" else { return false }
+        if let material { return policy.materialIds.contains(material) }
+        return policy.quickFitMaterialId == nil
+    }
     func hasNativeSize(_ size: Int) -> Bool {
         !samples.isEmpty && samples.allSatisfy { $0.width == size && $0.height == size }
     }
+}
+
+struct WorkbenchAutomaticValidation: Decodable, Sendable {
+    let policy: String
+    let materialIds: [String]
+    let quickFitMaterialId: String?
 }
 
 struct WorkbenchDatasetPreparation: Decodable, Sendable {

@@ -154,7 +154,7 @@ def dataset_info(args) -> dict:
             width, height = sample.get("sample_pixel_dimensions", [None, None])
             material = materials.setdefault(sample["material_id"], {"material_id": sample["material_id"], "samples": []})
             material["samples"].append({"sample_id": sample["sample_id"], "status": sample["status"], "split": sample["split"], "width": width, "height": height, "maps": maps, "crop_rectangle": sample.get("crop_rectangle_top_left_xywh"), "note": sample.get("curation_note"), "metadata_path": str(path)})
-        return {"dataset_path": str(args.dataset.resolve()), "index_sha256": digest(args.dataset / "dataset.json"), "split_strategy": index.get("split_strategy"), "validation_scope": index.get("validation_scope"), "cross_size_validation_notice": index.get("native_size_preparation", {}).get("cross_size_validation_notice"), "materials": [materials[key] for key in sorted(materials)]}
+        return {"dataset_path": str(args.dataset.resolve()), "index_sha256": digest(args.dataset / "dataset.json"), "split_strategy": index.get("split_strategy"), "validation_scope": index.get("validation_scope"), "cross_size_validation_notice": index.get("native_size_preparation", {}).get("cross_size_validation_notice"), "automatic_validation": index.get("automatic_validation"), "materials": [materials[key] for key in sorted(materials)]}
 
 
 def prepare_size(args) -> dict:
@@ -182,11 +182,13 @@ def prepare_size(args) -> dict:
         if current_lineage != lineage:
             raise ValueError("Native dataset lineage changed; reload it before preparing crops")
         cache_lock = lambda path: contextlib.nullcontext() if path in (original, supplied) else dataset_lock(path)
+        options = dict(automatic_validation=getattr(args, "automatic_validation", False),
+                       validation_material=getattr(args, "material", None), workers=getattr(args, "workers", None))
         if original == supplied:
-            prepared, information = prepare_from_records(original, supplied_index, supplied_records, args.size, cache_lock)
+            prepared, information = prepare_from_records(original, supplied_index, supplied_records, args.size, cache_lock, **options)
         else:
             original_index, original_records = read_dataset(original)
-            prepared, information = prepare_from_records(original, original_index, original_records, args.size, cache_lock)
+            prepared, information = prepare_from_records(original, original_index, original_records, args.size, cache_lock, review_records=supplied_records if options["automatic_validation"] else None, **options)
     result = dataset_info(argparse.Namespace(dataset=prepared))
     result["preparation"] = information
     return result
@@ -542,6 +544,9 @@ def parser() -> argparse.ArgumentParser:
         if name == "prepare-size":
             sub.add_argument("--size", type=int, choices=(1024, 2048), required=True)
             sub.add_argument("--expected-index-sha256")
+            sub.add_argument("--automatic-validation", action="store_true")
+            sub.add_argument("--material", help="Prepare one automatic check crop for this quick-fit material, retaining all training materials")
+            sub.add_argument("--workers", type=int, help="Optional upper bound; CPU/memory limits still apply")
         if name == "curate":
             sub.add_argument("--sample", required=True)
             sub.add_argument("--status", choices=("approved", "excluded", "unreviewed"), required=True)

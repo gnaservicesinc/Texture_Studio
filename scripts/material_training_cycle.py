@@ -284,7 +284,7 @@ def select_samples(args: argparse.Namespace) -> tuple[list, list, dict, dict]:
     found = find_samples(args.dataset, True)
     requested = sorted(set(args.materials or [s["metadata"]["material_id"] for s in found]))
     selected = sorted((s for s in found if s["metadata"]["material_id"] in requested), key=lambda s: s["metadata"]["sample_id"])
-    if not args.allow_unreviewed and any(s["metadata"]["status"] not in ("approved", "accepted") for s in selected):
+    if not args.allow_unreviewed and any(s["metadata"]["split"] == "train" and s["metadata"]["status"] not in ("approved", "accepted") for s in selected):
         raise ValueError("Selected samples need quality review or explicit --allow-unreviewed")
     training, validation = ([s for s in selected if s["metadata"]["split"] == split] for split in ("train", "validation"))
     if {s["metadata"]["material_id"] for s in selected} != set(requested) or not training or not validation:
