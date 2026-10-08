@@ -18,11 +18,27 @@ import train_material_pbrnxt as trainer
 from material_pbrnxt_data import digest, numeric_height
 
 
+class TinyGenerator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.m_head = nn.Conv2d(3, 4, 1)
+        self.noise = nn.Dropout(.9)
+        self.m_dec_3 = nn.Conv2d(4, 4, 1)
+        self.m_dec_3.register_buffer("relative_position_index", torch.arange(16).reshape(4, 4))
+        self.m_dec_3.register_buffer("relative_coords_table", torch.arange(16, dtype=torch.float32).reshape(4, 4) / 16)
+        self.m_tail_3 = nn.Conv2d(4, 4, 1)
+        self.m_dec_0 = nn.Conv2d(4, 4, 1)
+
+    def forward(self, rgb):
+        shared = self.noise(self.m_head(rgb))
+        return self.m_tail_3(self.m_dec_3(shared)) + self.m_dec_0(shared)
+
+
 class TinyPretrained(nn.Module):
     """Small CPU architecture fixture; tests the actual optimizer/state path."""
     def __init__(self):
         super().__init__()
-        self.gen = nn.Sequential(nn.Conv2d(3, 4, 1), nn.Dropout(.9))
+        self.gen = TinyGenerator()
         self.ups = nn.ModuleList(nn.Conv2d(4, 1, 1) for _ in range(4))
         self.provenance = {"fixture": "pretrained structure", "native_grid": 64}
         with torch.no_grad():
@@ -39,9 +55,9 @@ def settings(**overrides):
     return SimpleNamespace(**values)
 
 
-def checkpoint_fixture(tmp_path):
+def checkpoint_fixture(tmp_path, scope="final-height"):
     model = TinyPretrained()
-    parameters = trainer.configure_refinement(model)
+    parameters = trainer.configure_refinement(model, scope)
     optimizer = torch.optim.AdamW(parameters, lr=.03, weight_decay=0)
     rgb, target = torch.full((1, 3, 256, 256), .4), torch.full((1, 1, 256, 256), .6)
     initial = trainer.predict(model, rgb).detach().clone()
@@ -49,7 +65,7 @@ def checkpoint_fixture(tmp_path):
     loss.backward()
     optimizer.step()
     path = tmp_path / "checkpoint.pt"
-    trainer.save_checkpoint(path, model, optimizer, 1, {"dataset": {"index_sha256": "test-index"}}, settings())
+    trainer.save_checkpoint(path, model, optimizer, 1, {"dataset": {"index_sha256": "test-index"}}, settings(scope=scope))
     return model, optimizer, path, rgb, initial
 
 
@@ -65,7 +81,7 @@ def test_only_existing_pretrained_final_height_parameters_receive_optimizer_upda
     expected_names = {name for name, _ in model.named_parameters() if name.startswith("ups.3.")}
     actual_names = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
     assert actual_names == expected_names and len(parameters) == 2
-    assert not model.training and not model.gen[1].training
+    assert not model.training and not model.gen.noise.training
     optimizer = torch.optim.AdamW(parameters, lr=.03, weight_decay=0)
     rgb = torch.full((1, 3, 256, 256), .4)
     prediction = trainer.predict(model, rgb)
@@ -90,6 +106,7 @@ def test_delta_checkpoint_roundtrip_reproduces_refined_numeric_height_without_ch
     assert saved["image_padding"] is saved["image_resizing"] is False
     assert saved["target_transfer"] == "UInt16 linear numeric codes /65535"
     assert saved["experimental"] and not saved["production_eligible"]
+    assert "_snapshot_sha256" not in saved
     restored = TinyPretrained()
     trainer.configure_refinement(restored)
     frozen = {name: tensor.clone() for name, tensor in restored.state_dict().items() if not name.startswith("ups.3.")}
@@ -99,6 +116,170 @@ def test_delta_checkpoint_roundtrip_reproduces_refined_numeric_height_without_ch
     torch.testing.assert_close(trainer.predict(restored, rgb), trainer.predict(refined, rgb), rtol=0, atol=0)
     assert not torch.equal(trainer.predict(restored, rgb), initial)
     assert not list(tmp_path.glob("*.partial"))
+
+
+def test_evaluation_labels_loaded_checkpoint_snapshot_when_path_is_replaced(tmp_path, monkeypatch):
+    refined, _, checkpoint, rgb, _ = checkpoint_fixture(tmp_path)
+    original_checksum = digest(checkpoint)
+    replacement_state = torch.load(checkpoint, weights_only=True)
+    replacement_state["height_decoder_state"]["ups.3.bias"].add_(.2)
+    replacement_state["step"] = 2
+    pair = {"dimensions": [256, 256], "metadata": {"sample_id": "surface_001"}}
+    monkeypatch.setattr(trainer, "select_pairs", lambda *_args: ([pair], [], {"fixture": "dataset"}))
+    monkeypatch.setattr(trainer, "load_complete_pretrained", lambda *_args, **_kwargs: TinyPretrained())
+    monkeypatch.setattr(trainer.signal, "signal", lambda *_args: None)
+
+    def export_snapshot(model, _pairs, _cache, folder, label, _device, size, _seed):
+        if label == "pretrained-base":
+            replacement = tmp_path / "replacement.pt"
+            torch.save(replacement_state, replacement)
+            replacement.replace(checkpoint)
+        else:
+            torch.testing.assert_close(trainer.predict(model, rgb), trainer.predict(refined, rgb), rtol=0, atol=0)
+        return [{"sample": "surface_001", "model_label": label, "native_size": size,
+                 "source_rectangle": [0, 0, size, size], "source_png": str(folder / "source.png"),
+                 "reference_exr": str(folder / "reference.exr"), "height_exr": str(folder / f"{label}.exr")}]
+
+    monkeypatch.setattr(trainer, "export_comparison", export_snapshot)
+    output = tmp_path / "evaluation"
+    assert trainer.main(["evaluate", "--dataset", str(tmp_path / "dataset"), "--output", str(output),
+                         "--checkpoint", str(checkpoint), "--source-dir", str(tmp_path / "source"),
+                         "--weights", str(tmp_path / "weights"), "--size", "256", "--memory-gib", "48",
+                         "--cache-gib", "0", "--device", "cpu"]) == 0
+    assert digest(checkpoint) != original_checksum
+    report = json.loads((output / "run.json").read_text())
+    assert report["parent"]["sha256"] == report["checkpoint_sha256"] == original_checksum
+    assert report["saved_step"] == report["parent"]["step"] == 1
+    variants = json.loads((output / "review-manifest.json").read_text())["materials"][0]["variants"]
+    assert all(variant["checkpoint_sha256"] == original_checksum for variant in variants if variant.get("checkpoint"))
+    assert "_snapshot_sha256" not in report
+
+
+def test_height_decoder_scope_updates_only_existing_pretrained_height_path():
+    model = TinyPretrained()
+    before = {name: value.clone() for name, value in model.state_dict().items()}
+    parameters = trainer.configure_refinement(model, "height-decoder")
+    prefixes = ("gen.m_dec_3.", "gen.m_tail_3.", "ups.3.")
+    expected = {name for name, _parameter in model.named_parameters() if name.startswith(prefixes)}
+    assert len(parameters) == 6
+    assert {name for name, value in model.named_parameters() if value.requires_grad} == expected
+    optimizer = torch.optim.AdamW(parameters, lr=.03, weight_decay=0)
+    trainer.predict(model, torch.full((1, 3, 256, 256), .4)).sub(.6).square().mean().backward()
+    optimizer.step()
+    assert all(not torch.equal(before[name], model.state_dict()[name]) for name in expected)
+    assert all(torch.equal(before[name], model.state_dict()[name]) for name in before if name not in expected)
+    assert all(parameter.grad is None for name, parameter in model.named_parameters() if name not in expected)
+    assert not model.gen.noise.training
+
+
+def test_height_decoder_delta_roundtrip_preserves_generator_state_for_evaluation(tmp_path):
+    refined, _, path, rgb, _ = checkpoint_fixture(tmp_path, "height-decoder")
+    saved = trainer.read_refinement_checkpoint(path)
+    assert saved["refinement_scope"] == saved["configuration"]["scope"] == "height-decoder"
+    assert saved["trainable_prefixes"] == ["gen.m_dec_3.", "gen.m_tail_3.", "ups.3."]
+    assert set(saved["height_decoder_state"]) == {name for name in refined.state_dict()
+                                                if name.startswith(tuple(saved["trainable_prefixes"]))}
+    assert trainer.resolve_scope("evaluate", None, saved) == "height-decoder"
+    assert trainer.resolve_scope("refine", None, saved) == "height-decoder"
+    assert saved["height_decoder_state"]["gen.m_dec_3.relative_position_index"].dtype == torch.int64
+    restored = TinyPretrained()
+    before = {name: value.clone() for name, value in restored.state_dict().items()}
+    trainer.restore_refinement(restored, path)
+    torch.testing.assert_close(trainer.predict(restored.eval(), rgb), trainer.predict(refined, rgb), rtol=0, atol=0)
+    assert all(torch.equal(before[name], restored.state_dict()[name]) for name in before
+               if name not in saved["height_decoder_state"])
+    with pytest.raises(ValueError, match="cannot be narrowed"):
+        trainer.resolve_scope("refine", "final-height", saved)
+
+
+def test_legacy_final_height_checkpoint_can_widen_without_losing_parent_weights(tmp_path):
+    refined, _, path, rgb, _ = checkpoint_fixture(tmp_path)
+    saved = torch.load(path, weights_only=True)
+    saved.pop("refinement_scope")
+    saved.pop("trainable_prefixes")
+    saved["configuration"].pop("scope")
+    torch.save(saved, path)
+    assert trainer.checkpoint_scope(saved) == "final-height"
+    assert trainer.resolve_scope("train", None, None) == "final-height"
+    assert trainer.resolve_scope("refine", None, saved) == "final-height"
+    scope = trainer.resolve_scope("refine", "height-decoder", saved)
+    widened = TinyPretrained()
+    generator = {name: value.clone() for name, value in widened.state_dict().items() if name.startswith("gen.")}
+    trainer.configure_refinement(widened, scope)
+    trainer.restore_refinement(widened, path)
+    assert all(torch.equal(value, widened.state_dict()[name]) for name, value in generator.items())
+    torch.testing.assert_close(trainer.predict(widened, rgb), trainer.predict(refined, rgb), rtol=0, atol=0)
+    optimizer = torch.optim.AdamW([value for value in widened.parameters() if value.requires_grad], lr=.01)
+    widened_path = tmp_path / "widened.pt"
+    trainer.save_checkpoint(widened_path, widened, optimizer, 1, {"dataset": {}}, settings(scope=scope))
+    widened_saved = trainer.read_refinement_checkpoint(widened_path)
+    assert widened_saved["refinement_scope"] == "height-decoder"
+    assert "gen.m_dec_3.weight" in widened_saved["height_decoder_state"]
+    assert torch.equal(widened_saved["height_decoder_state"]["ups.3.weight"], saved["height_decoder_state"]["ups.3.weight"])
+    with pytest.raises(ValueError, match="Evaluate uses"):
+        trainer.resolve_scope("evaluate", "height-decoder", saved)
+
+
+@pytest.mark.parametrize("mutation", ["unknown-scope", "not-string", "wrong-prefix", "missing-prefixes", "missing-scope", "configuration-mismatch", "missing-configuration-scope"])
+def test_invalid_scope_metadata_rejected_before_model_mutation(tmp_path, mutation):
+    _, _, path, _, _ = checkpoint_fixture(tmp_path, "height-decoder")
+    saved = torch.load(path, weights_only=True)
+    if mutation == "unknown-scope":
+        saved["refinement_scope"] = "all-network"
+    elif mutation == "not-string":
+        saved["refinement_scope"] = []
+    elif mutation == "wrong-prefix":
+        saved["trainable_prefixes"].append("gen.m_head.")
+    elif mutation == "missing-prefixes":
+        saved.pop("trainable_prefixes")
+    elif mutation == "missing-scope":
+        saved.pop("refinement_scope")
+    elif mutation == "configuration-mismatch":
+        saved["configuration"]["scope"] = "final-height"
+    elif mutation == "missing-configuration-scope":
+        saved["configuration"].pop("scope")
+    torch.save(saved, path)
+    model = TinyPretrained()
+    before = {name: value.clone() for name, value in model.state_dict().items()}
+    with pytest.raises(ValueError, match="scope"):
+        trainer.restore_refinement(model, path)
+    assert_same_weights(before, model.state_dict())
+
+
+def test_height_decoder_requires_every_pretrained_branch_before_changing_trainability():
+    model = TinyPretrained()
+    del model.gen.m_tail_3
+    before = [value.requires_grad for value in model.parameters()]
+    with pytest.raises(ValueError, match="Pretrained height decoder"):
+        trainer.configure_refinement(model, "height-decoder")
+    assert [value.requires_grad for value in model.parameters()] == before
+    with pytest.raises(ValueError, match="Refinement scope"):
+        trainer.configure_refinement(model, "all-network")
+
+
+@pytest.mark.parametrize("buffer", ["relative_position_index", "relative_coords_table"])
+def test_height_decoder_checkpoint_rejects_changed_pretrained_layout_buffer(tmp_path, buffer):
+    _, _, path, _, _ = checkpoint_fixture(tmp_path, "height-decoder")
+    saved = torch.load(path, weights_only=True)
+    saved["height_decoder_state"][f"gen.m_dec_3.{buffer}"][0, 0] += 1
+    torch.save(saved, path)
+    model = TinyPretrained()
+    before = {name: value.clone() for name, value in model.state_dict().items()}
+    with pytest.raises(ValueError, match="layout buffers"):
+        trainer.restore_refinement(model, path)
+    assert_same_weights(before, model.state_dict())
+
+
+def test_review_manifest_declares_actual_model_input_diffuse_transfer(tmp_path):
+    record = {"sample": "surface_001", "source_png": "/review/source.png", "reference_exr": "/review/reference.exr",
+              "model_label": "pretrained-base", "height_exr": "/review/base.exr", "native_size": 1024,
+              "source_rectangle": [0, 0, 1024, 1024]}
+    path = tmp_path / "review.json"
+    trainer.write_review_manifest({"comparison": [record]}, path)
+    group = json.loads(path.read_text())["materials"][0]
+    assert group["diffuse_encoding"] == "sRGB"
+    assert group["target_original_bits"] == 16
+    assert group["variants"][1]["checkpoint_sha256"] == trainer.WEIGHTS_SHA256
 
 
 @pytest.mark.parametrize("field,value", [
@@ -167,6 +348,13 @@ def test_resource_guard_rejects_too_large_native_grid_before_dataset_or_model_lo
         trainer.resource_plan(1000, 56, 4)
     with pytest.raises(ValueError, match="4GiB for macOS"):
         trainer.resource_plan(1024, 61, 4)
+    wider = trainer.resource_plan(1024, 56, 4, "height-decoder")
+    assert wider["driver_estimate_gib"] > plan["driver_estimate_gib"]
+    assert wider["combined_estimate_gib"] == 41 and wider["refinement_scope"] == "height-decoder"
+    assert "Measured1024" in wider["estimate_basis"]
+    with pytest.raises(ValueError, match="smaller real training crop"):
+        trainer.main(["train", "--dataset", str(tmp_path / "missing"), "--output", str(output),
+                      "--size", "2048", "--memory-gib", "56", "--cache-gib", "4", "--device", "cpu", "--scope", "height-decoder"])
 
 
 @pytest.mark.parametrize("problem", ["small-grid", "extra-channel", "nan"])

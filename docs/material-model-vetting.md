@@ -10,6 +10,10 @@ The complete network has **86,763,756 pretrained parameters**. All 2,896 state k
 
 At native 512, the complete mapping responds to photographed stucco chips and brick pores. Broad relief can be shallow or inverted and boundaries have artifacts. A small supervised fitting trial is appropriate; production quality has not been established. Refinement first trains the existing final height branch (5,059,745 parameters) while preserving the complete pretrained material core. A saved delta is not a standalone small model: it requires the exact 349MB pretrained base and its notices.
 
+The first actual native 1024 trial completed 40 updates on four paired stucco/brick crops. Its lower fitting loss did **not** improve material quality: all four native comparisons lost relief. For example, interior stucco height standard deviation fell from 0.00858 in the base to 0.00188 after refinement, while the reference is 0.04558. Brick still turned some bright color flecks into false raised bumps. This checkpoint is rejected for Studio use; repeating the same final-branch-only configuration is not justified.
+
+The next bounded experiment widens refinement to the existing pretrained height decoder and tail (`gen.m_dec_3`, `gen.m_tail_3`) plus the final height branch. This makes 18,288,455 parameters trainable without adding a random head. The shared encoder/body/fusion and other task decoder parameters remain frozen. Fusion remains differentiable, so changing the height decoder can also affect intermediate material features; no claim is made that other outputs stay identical. The loss, crop policy and source values stay the same so the scope change can be judged directly.
+
 Upstream [preprocessing](https://github.com/aaf6aa/PBRnxt/blob/73ab49a0cc0de5ea70e7aa94fb1a7234dd59ab35/scripts/dataset_preprocess.py) writes UInt8 JPEG training references. Our refinement bypasses it, retaining the original **UInt16 linear numeric height codes**, mapped to Float32 by division by65535 only. No target gamma, min/max stretching, source padding or rescaling occurs. Float32 computation/export preserves those codes' distinctions; it cannot add missing source information.
 
 ## Actual training size and resources
@@ -18,22 +22,26 @@ The active `/opt/ipde/material-dataset-2048` dataset contains genuine 2048 paire
 
 A complete native 1024 forward/backward on the 64GiB M2 Max took 10.40/7.64 seconds and 18.67GiB sampled Metal driver memory. The fitting run settles around 25GiB including optimizer/workspace caching. Memory estimates, CPU cache, driver cap and actual native crop are recorded. The driver limit follows the selected unified-memory budget with room for host cache and macOS. Native 2048 training is not qualified: its activation estimate exceeds this Mac's comfortable budget. Choose a lower real crop; never manufacture border pixels or upscale a 1K target.
 
+The wider pretrained height decoder also passed an actual native 1024 forward/backward/AdamW step: 10.41 seconds forward, 17.41 seconds backward, 34.28GiB sampled driver memory, finite gradients. These are measured probes, not a promise about peak usage over a complete training run. The resource preflight distinguishes the two refinement scopes.
+
 The reusable research entry point is [train_material_pbrnxt.py](../scripts/train_material_pbrnxt.py). It supports train-from-base, refine-from-checkpoint and evaluation, saves exact identities and raw Float32 EXRs, and produces labeled native review manifests. It does not automatically mark results production-ready or change Studio's model. The native training interface stays paused while this replacement is evaluated.
 
 ```sh
 .venv/bin/python scripts/train_material_pbrnxt.py train \
   --dataset /opt/ipde/material-dataset-2048 \
   --output out/material-training/my-pbrnxt-run \
-  --download --size 1024 --updates 194 --memory-gib 56
+  --download --scope height-decoder --size 1024 --updates 40 --memory-gib 56
 
 .venv/bin/python scripts/train_material_pbrnxt.py refine \
   --dataset /opt/ipde/material-dataset-2048 \
   --output out/material-training/my-pbrnxt-refinement \
   --checkpoint out/material-training/my-pbrnxt-run/checkpoint.latest.pt \
-  --size 1024 --updates 194 --learning-rate 0.00001 --memory-gib 56
+  --scope height-decoder --size 1024 --updates 40 --learning-rate 0.00003 --memory-gib 56
 ```
 
 Use spaces between each option and its value (for example `--size 1024`). Use new output folders; previous runs are preserved. Base source/licenses/weights can be downloaded with `--download`, or supplied through both `--source-dir` and `--weights`. No models, datasets or generated maps enter Git.
+
+`final-height` means only the existing final RRDB output branch. `height-decoder` also refines the upstream pretrained height task decoder. Refining/evaluating a saved checkpoint inherits its recorded scope unless explicitly widening a final-height checkpoint. A narrower scope cannot silently discard already-refined decoder weights. Neither scope is production-approved merely because training finishes.
 
 ## Excluded or secondary candidates
 

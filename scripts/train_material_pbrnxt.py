@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 import math
 import os
@@ -26,7 +27,41 @@ from material_pbrnxt_data import PairCache, crop_pair, digest, height_loss, sele
 
 SCHEMA = "texture-studio-pbrnxt-height-refinement-v1"
 ROOT = Path(__file__).resolve().parents[1]
-DECODER_PREFIXES = ("ups.3.",)
+REFINEMENT_SCOPES = {
+    "final-height": ("ups.3.",),
+    "height-decoder": ("gen.m_dec_3.", "gen.m_tail_3.", "ups.3."),
+}
+DECODER_PREFIXES = REFINEMENT_SCOPES["final-height"]
+
+
+def scope_prefixes(scope: str) -> tuple[str, ...]:
+    if not isinstance(scope, str) or scope not in REFINEMENT_SCOPES:
+        raise ValueError("Refinement scope must be final-height or height-decoder")
+    return REFINEMENT_SCOPES[scope]
+
+
+def checkpoint_scope(saved: dict) -> str:
+    """Old v1 deltas contain only ups.3.; new ones explicitly bind their scope."""
+    scope = saved.get("refinement_scope", "final-height")
+    prefixes = scope_prefixes(scope)
+    if "refinement_scope" not in saved:
+        if "trainable_prefixes" in saved or "scope" in saved.get("configuration", {}):
+            raise ValueError("Checkpoint refinement scope metadata is incomplete")
+    elif (saved.get("trainable_prefixes") != list(prefixes)
+          or saved.get("configuration", {}).get("scope") != scope):
+        raise ValueError("Checkpoint refinement scope and permitted prefixes disagree")
+    return scope
+
+
+def resolve_scope(command: str, requested: str | None, previous: dict | None) -> str:
+    previous_scope = checkpoint_scope(previous) if previous is not None else None
+    scope = requested or previous_scope or "final-height"
+    scope_prefixes(scope)
+    if previous_scope == "height-decoder" and scope != previous_scope:
+        raise ValueError("A height-decoder checkpoint cannot be narrowed and lose its learned generator state; omit --scope to inherit it")
+    if command == "evaluate" and previous_scope is not None and scope != previous_scope:
+        raise ValueError("Evaluate uses the checkpoint's recorded refinement scope; omit --scope")
+    return scope
 
 
 def write_json(path: Path, payload: dict) -> None:
@@ -39,13 +74,17 @@ def write_json(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
-def configure_refinement(model: torch.nn.Module) -> list[torch.nn.Parameter]:
+def configure_refinement(model: torch.nn.Module, scope: str = "final-height") -> list[torch.nn.Parameter]:
     # Eval disables stochastic upstream noise and drop-path, not autograd.
     # Every trainable tensor belongs to the existing pretrained height decoder.
+    prefixes = scope_prefixes(scope)
+    named = list(model.named_parameters())
+    if any(not any(name.startswith(prefix) for name, _parameter in named) for prefix in prefixes):
+        raise ValueError("Pretrained height decoder is missing; no random replacement head is permitted")
     model.eval()
     selected = []
-    for name, parameter in model.named_parameters():
-        parameter.requires_grad_(name.startswith(DECODER_PREFIXES))
+    for name, parameter in named:
+        parameter.requires_grad_(name.startswith(prefixes))
         if parameter.requires_grad:
             selected.append(parameter)
     if not selected:
@@ -53,7 +92,8 @@ def configure_refinement(model: torch.nn.Module) -> list[torch.nn.Parameter]:
     return selected
 
 
-def resource_plan(size: int, memory_gib: float, cache_gib: float) -> dict:
+def resource_plan(size: int, memory_gib: float, cache_gib: float, scope: str = "final-height") -> dict:
+    scope_prefixes(scope)
     if size < 256 or size % 64:
         raise ValueError("Choose a native crop of at least256 pixels, divisible by64; no padding or resizing")
     physical = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 1024 ** 3
@@ -64,18 +104,23 @@ def resource_plan(size: int, memory_gib: float, cache_gib: float) -> dict:
     # Measured on the64GiB M2 Max: complete native1024 final-height-branch
     # forward/backward allocated18.67GiB driver memory. Reserve optimizer,
     # CPU decoded-pair cache and modest runtime overhead separately.
-    driver_estimate = 2 + 17 * (size / 1024) ** 2
+    # The generator height decoder also retains upstream decoder/fusion
+    # activations for gradients. A real1024 forward/backward/AdamW probe used
+    # 34.28GiB driver memory; allow additional allocator/workspace overhead.
+    driver_estimate = 2 + (17 if scope == "final-height" else 34) * (size / 1024) ** 2
     combined = driver_estimate + cache_gib + 1
     if combined > memory_gib:
         raise ValueError(f"Native{size} training estimates{combined:.1f}GiB above the{memory_gib:.1f}GiB budget. "
                          "Choose a smaller real training crop; keep the dataset unchanged. No padding/resizing is used.")
     return {"physical_gib": physical, "budget_gib": memory_gib, "cpu_cache_gib": cache_gib,
             "driver_estimate_gib": driver_estimate, "combined_estimate_gib": combined,
-            "estimate_basis": "Measured1024 M2 Max complete native final-height-branch forward/backward; estimate, not a peak guarantee"}
+            "refinement_scope": scope,
+            "estimate_basis": ("Measured1024 M2 Max complete native final-height-branch forward/backward; estimate, not a peak guarantee"
+                               if scope == "final-height" else
+                               "Measured1024 M2 Max native height-decoder forward/backward/AdamW34.28GiB plus allocator reserve; estimate, not a peak guarantee")}
 
 
-def restore_refinement(model: torch.nn.Module, checkpoint: Path) -> dict:
-    saved = torch.load(checkpoint, map_location="cpu", weights_only=True)
+def validate_checkpoint_metadata(saved: dict) -> str:
     if (not isinstance(saved, dict) or saved.get("schema") != SCHEMA or saved.get("base_sha256") != WEIGHTS_SHA256
             or saved.get("base_revision") != REVISION or saved.get("image_padding") is not False
             or saved.get("image_resizing") is not False or saved.get("target") != "height"):
@@ -85,16 +130,44 @@ def restore_refinement(model: torch.nn.Module, checkpoint: Path) -> dict:
             or not isinstance(configuration, dict) or type(configuration.get("size")) is not int
             or configuration["size"] != size or type(step) is not int or step < 0):
         raise ValueError("Checkpoint crop grid, configuration or completed step is invalid")
+    return checkpoint_scope(saved)
+
+
+def read_refinement_checkpoint(checkpoint: Path) -> dict:
+    # A training process can atomically replace checkpoint.latest.pt while our
+    # comparisons run. Bind identity to the exact bytes loaded, not the later
+    # contents of its path. This private field is never saved into learned state.
+    snapshot = checkpoint.read_bytes()
+    saved = torch.load(io.BytesIO(snapshot), map_location="cpu", weights_only=True)
+    validate_checkpoint_metadata(saved)
+    saved["_snapshot_sha256"] = hashlib.sha256(snapshot).hexdigest()
+    return saved
+
+
+def restore_refinement(model: torch.nn.Module, checkpoint: Path, *, saved: dict | None = None) -> dict:
+    saved = read_refinement_checkpoint(checkpoint) if saved is None else saved
+    scope = validate_checkpoint_metadata(saved)
     state = saved.get("height_decoder_state")
-    expected = {name for name in model.state_dict() if name.startswith(DECODER_PREFIXES)}
+    prefixes = scope_prefixes(scope)
+    expected = {name for name in model.state_dict() if name.startswith(prefixes)}
     if not expected or not isinstance(state, dict) or set(state) != expected:
         raise ValueError("Checkpoint height decoder differs from the pretrained architecture")
     original = model.state_dict()
+    parameter_names = set(dict(model.named_parameters()))
     for name, tensor in state.items():
         if (not isinstance(tensor, torch.Tensor) or tensor.shape != original[name].shape
-                or tensor.dtype != original[name].dtype or not tensor.is_floating_point()
-                or not torch.isfinite(tensor).all()):
+                or tensor.dtype != original[name].dtype):
             raise ValueError("Checkpoint contains invalid pretrained decoder tensors")
+        if tensor.is_floating_point():
+            if not torch.isfinite(tensor).all():
+                raise ValueError("Checkpoint contains invalid pretrained decoder tensors")
+        if name in parameter_names:
+            if not tensor.is_floating_point():
+                raise ValueError("Checkpoint contains invalid pretrained decoder tensors")
+        elif not torch.equal(tensor, original[name].cpu()):
+            # SCUNet's positional layout includes Int64 indices and Float32
+            # coordinate tables. Neither buffer represents learned values.
+            raise ValueError("Checkpoint contains changed pretrained decoder layout buffers")
     original.update(state)
     model.load_state_dict(original, strict=True)
     return saved
@@ -102,16 +175,20 @@ def restore_refinement(model: torch.nn.Module, checkpoint: Path) -> dict:
 
 def save_checkpoint(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer,
                     step: int, report: dict, args: argparse.Namespace) -> None:
+    scope = getattr(args, "scope", None) or "final-height"
+    prefixes = scope_prefixes(scope)
     saved = {"schema": SCHEMA, "target": "height", "model_name": "PBRnxt material displacement refinement",
              "base_revision": REVISION, "base_sha256": WEIGHTS_SHA256,
              "step": step, "experimental": True, "production_eligible": False,
              "training_crop_size": args.size, "image_padding": False, "image_resizing": False,
              "input_transfer": "sRGB diffuse codes", "target_transfer": "UInt16 linear numeric codes /65535",
              "height_units": "relative source values", "normal_convention": "OpenGL +Y",
+             "refinement_scope": scope, "trainable_prefixes": list(prefixes),
              "provenance": model.provenance, "dataset_identity": report["dataset"],
-             "configuration": {name: getattr(args, name) for name in ("size", "seed", "learning_rate", "weight_decay", "memory_gib", "cache_gib")},
+             "configuration": {**{name: getattr(args, name) for name in ("size", "seed", "learning_rate", "weight_decay", "memory_gib", "cache_gib")},
+                               "scope": scope},
              "height_decoder_state": {name: value.detach().cpu().clone() for name, value in model.state_dict().items()
-                                      if name.startswith(DECODER_PREFIXES)},
+                                      if name.startswith(prefixes)},
              "optimizer_state": optimizer.state_dict()}
     temporary = path.with_suffix(path.suffix + ".partial")
     torch.save(saved, temporary)
@@ -190,7 +267,7 @@ def write_review_manifest(report: dict, path: Path) -> None:
     groups = {}
     for record in report["comparison"]:
         group = groups.setdefault(record["sample"], {"material_id": record["sample"],
-            "diffuse": record["source_png"], "target_original_bits": 16,
+            "diffuse": record["source_png"], "diffuse_encoding": "sRGB", "target_original_bits": 16,
             "variants": [{"name": "target", "role": "target", "height": record["reference_exr"],
                           "sample_label": record["sample"], "detail": "Original UInt16 height codes in Float32 EXR · no gamma or stretching"}]})
         label = record["model_label"]
@@ -226,6 +303,8 @@ def parser() -> argparse.ArgumentParser:
     cli.add_argument("--weights", type=Path)
     cli.add_argument("--download", action="store_true")
     cli.add_argument("--checkpoint", type=Path)
+    cli.add_argument("--scope", choices=tuple(REFINEMENT_SCOPES),
+                     help="Train existing pretrained final height branch or also its generator height decoder. New training defaults to final-height; refine/evaluate inherit the checkpoint scope. No random heads.")
     cli.add_argument("--materials", nargs="+")
     cli.add_argument("--size", type=int, default=1024, help="Actual real-pixel training crop, separate from dataset crop size")
     cli.add_argument("--updates", type=int, default=194)
@@ -251,7 +330,9 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(f"{name} must be finite and nonnegative")
     if args.learning_rate <= 0 or args.max_minutes <= 0 or args.updates < 1 or args.check_count < 1:
         raise ValueError("Update count, check count, learning rate and time limit must be positive")
-    plan = resource_plan(args.size, args.memory_gib, args.cache_gib)
+    previous = read_refinement_checkpoint(args.checkpoint) if args.checkpoint else None
+    args.scope = resolve_scope(args.command, args.scope, previous)
+    plan = resource_plan(args.size, args.memory_gib, args.cache_gib, args.scope)
     if args.output.exists() and any(args.output.iterdir()):
         raise FileExistsError("Choose a new run folder; existing experiments are not overwritten")
     training, checks, identity = select_pairs(args.dataset, args.materials)
@@ -276,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
         driver_budget = max(1, args.memory_gib - args.cache_gib - 2) * 1024 ** 3
         torch.mps.set_per_process_memory_fraction(driver_budget / torch.mps.recommended_max_memory())
     model = load_complete_pretrained(source, weights, device=device)
-    parameters = configure_refinement(model)
+    parameters = configure_refinement(model, args.scope)
     cache = PairCache(int(args.cache_gib * 1024 ** 3))
     report = {"schema": SCHEMA, "status": "running", "started_utc": datetime.now(timezone.utc).isoformat(),
               "experimental": True, "production_eligible": False, "base": model.provenance,
@@ -284,17 +365,22 @@ def main(argv: list[str] | None = None) -> int:
               "dataset_crop_sizes": sorted({pair["dimensions"][0] for pair in training}),
               "image_padding": False, "image_resizing": False, "resources": plan,
               "trainable_parameters": sum(parameter.numel() for parameter in parameters),
-              "training_policy": "Refine pretrained final RRDB height output branch; complete material generator and other output branches frozen",
+              "refinement_scope": args.scope, "trainable_prefixes": list(scope_prefixes(args.scope)),
+              "training_policy": ("Refine pretrained final RRDB height output branch; complete material generator and other output branches frozen"
+                                  if args.scope == "final-height" else
+                                  "Refine pretrained generator height decoder/tail and final RRDB height branch; shared encoder/body/fusion and other material branches frozen"),
               "boundary_policy": "Loss excludes64 outer pixels, but inputs/targets contain only real source pixels",
               "device": str(device), "steps": [], "comparison": []}
     print(json.dumps({"event": "configuration", "base": "PBRnxt86.76M complete pretrained material network, native-scale adaptation", "training_crop": args.size,
-                      "dataset_crop": report["dataset_crop_sizes"], "trainable_parameters": report["trainable_parameters"], "resources": plan}), flush=True)
+                      "dataset_crop": report["dataset_crop_sizes"], "refinement_scope": args.scope,
+                      "trainable_parameters": report["trainable_parameters"], "resources": plan}), flush=True)
     report["comparison"] += export_comparison(model, inspection, cache, args.output / "comparison", "pretrained-base", device, args.size, args.seed)
     parent_step = 0
     if args.checkpoint:
-        previous = restore_refinement(model, args.checkpoint)
+        previous = restore_refinement(model, args.checkpoint, saved=previous)
         parent_step = previous["step"]
-        report["parent"] = {"path": str(args.checkpoint.resolve()), "sha256": digest(args.checkpoint), "step": parent_step}
+        report["parent"] = {"path": str(args.checkpoint.resolve()), "sha256": previous["_snapshot_sha256"], "step": parent_step,
+                            "refinement_scope": checkpoint_scope(previous)}
         report["comparison"] += export_comparison(model, inspection, cache, args.output / "comparison", "starting-checkpoint", device, args.size, args.seed)
     write_json(args.output / "run.json", report)
     optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, weight_decay=args.weight_decay)
@@ -354,8 +440,12 @@ def main(argv: list[str] | None = None) -> int:
         report["status"] = "stopped" if stop_requested else "completed"
         report["finished_utc"] = datetime.now(timezone.utc).isoformat()
         report["saved_step"] = parent_step + completed_updates
-        report["checkpoint"] = str(latest.resolve()) if latest.exists() else str(args.checkpoint.resolve())
-        report["checkpoint_sha256"] = digest(Path(report["checkpoint"]))
+        if args.command == "evaluate":
+            report["checkpoint"] = str(args.checkpoint.resolve())
+            report["checkpoint_sha256"] = previous["_snapshot_sha256"]
+        else:
+            report["checkpoint"] = str(latest.resolve())
+            report["checkpoint_sha256"] = digest(latest)
         write_json(args.output / "run.json", report)
         write_review_manifest(report, args.output / "review-manifest.json")
         print(json.dumps({"status": report["status"], "checkpoint": report["checkpoint"], "step": report["saved_step"],
