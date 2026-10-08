@@ -234,7 +234,7 @@ private struct TrainingConfigurationForm: View {
                 Toggle("Exclude transparent input pixels from the loss", isOn: $options.maskTransparency)
                     .help("Ignore invalid photo pixels and their immediate boundary during supervision; source pixels remain unchanged.")
                 Picker("Starting point", selection: $options.useWarmStart) {
-                    Text("Base DINOv2 + new material head").tag(false)
+                    Text("New material head · DINOv2 Base features").tag(false)
                     Text("Refine a checkpoint").tag(true)
                 }
                 .pickerStyle(.radioGroup)
@@ -263,12 +263,12 @@ private struct TrainingConfigurationForm: View {
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     } else {
-                        Text("Locate a checkpoint in the model library, or choose Base DINOv2 + new material head.")
+                        Text("Locate a checkpoint in the model library, or start a new material head with DINOv2 Base features.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 } else {
-                    Text("Start a new material head using visual features from the pinned pretrained DINOv2 Base encoder. The encoder stays frozen; the head learns your displacement, roughness or normal targets.")
+                    Text("DINOv2 Base supplies pretrained visual features; it has no pretrained height output. Your new material head learns displacement, roughness or normals from your paired maps. DA3 camera depth is a separate Studio option.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

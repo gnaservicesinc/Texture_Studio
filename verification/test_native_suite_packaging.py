@@ -13,6 +13,8 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = {"review": "Material Review", "compare": "Checkpoint Compare",
          "dataset": "Material Dataset", "train": "Material Trainer"}
+TOOL_ICONS = {"review": "MaterialReview", "compare": "CheckpointCompare",
+              "dataset": "MaterialDataset", "train": "MaterialTrainer"}
 
 
 class BuildRunDefaultsTests(unittest.TestCase):
@@ -42,6 +44,9 @@ class NativeSuitePackagingTests(unittest.TestCase):
         cls.binary = Path(cls.binary_directory.name) / "tiny-app"
         subprocess.run(["/usr/bin/clang", "-arch", "arm64", "-x", "c", "-", "-o", str(cls.binary)],
                        input="int main(void) { return 0; }", text=True, check=True, capture_output=True)
+        cls.icons = Path(cls.binary_directory.name) / "Icons"
+        subprocess.run(["xcrun", "swift", str(ROOT / "scripts/generate_app_icons.swift"), str(cls.icons)],
+                       check=True, capture_output=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -55,8 +60,10 @@ class NativeSuitePackagingTests(unittest.TestCase):
         (app / "Contents/Info.plist").write_bytes(plistlib.dumps({
             "CFBundleIdentifier": "org.ipde.texture-studio", "CFBundleExecutable": "Texture Studio",
             "CFBundleName": "Texture Studio", "CFBundleDisplayName": "Texture Studio",
+            "CFBundleIconFile": "TextureStudio.icns",
             "IPDEBuildConfiguration": "Release",
             "CFBundlePackageType": "APPL", "CFBundleVersion": "1", "CFBundleShortVersionString": "0.9.3"}))
+        shutil.copytree(self.icons, app / "Contents/Resources", dirs_exist_ok=True)
         resources = app / "Contents/Resources/DA3Backend"
         for name in ("worker.py", "setup_runtime.py", "requirements.txt", "UPSTREAM_LICENSE", "UPSTREAM_REVISION",
                      "upstream/depth_anything_3/api.py", "upstream/depth_anything_3/configs/da3-giant.yaml"):
@@ -86,6 +93,9 @@ class NativeSuitePackagingTests(unittest.TestCase):
                 self.assertEqual(info["CFBundleIdentifier"], f"org.ipde.material-{role}")
                 self.assertEqual(info["MaterialToolRole"], role)
                 self.assertEqual(info["CFBundleExecutable"], name)
+                self.assertEqual(info["CFBundleIconFile"], f"{TOOL_ICONS[role]}.icns")
+                self.assertEqual(sorted(file.name for file in (child / "Contents/Resources").glob("*.icns")),
+                                 [f"{TOOL_ICONS[role]}.icns"])
                 self.assertFalse((child / "Contents/Applications").exists())
             for application in [app, *children]:
                 subprocess.run(["codesign", "--verify", "--deep", "--strict", str(application)], check=True,
@@ -94,6 +104,23 @@ class NativeSuitePackagingTests(unittest.TestCase):
                                         check=True, capture_output=True)
                 self.assertTrue(plistlib.loads(result.stdout)["com.apple.security.network.client"])
             self.assertFalse(list(Path(directory).glob(".material-suite.*")))
+
+    def test_generated_icons_decode_at_every_standard_mac_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ["TextureStudio", *TOOL_ICONS.values()]:
+                icon = self.icons / f"{name}.icns"
+                self.assertLess(icon.stat().st_size, 2 * 1024 * 1024)
+                iconset = Path(directory) / f"{name}.iconset"
+                subprocess.run(["iconutil", "--convert", "iconset", "--output", str(iconset), str(icon)],
+                               check=True, capture_output=True)
+                for size in (16, 32, 128, 256, 512):
+                    for scale in (1, 2):
+                        suffix = "@2x" if scale == 2 else ""
+                        image = iconset / f"icon_{size}x{size}{suffix}.png"
+                        result = subprocess.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(image)],
+                                                check=True, capture_output=True, text=True)
+                        self.assertIn(f"pixelWidth: {size * scale}", result.stdout)
+                        self.assertIn(f"pixelHeight: {size * scale}", result.stdout)
 
     def test_package_contains_four_sealed_children_and_checksum(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -107,6 +134,7 @@ class NativeSuitePackagingTests(unittest.TestCase):
                 names = set(stream.namelist())
             for name in TOOLS.values():
                 self.assertIn(f"Texture Studio.app/Contents/Applications/{name}.app/Contents/MacOS/{name}", names)
+            self.assertIn("Texture Studio.app/Contents/Resources/TextureStudio.icns", names)
             expected = (output / "Texture-Studio-macos-arm64.sha256").read_text().split()[0]
             self.assertEqual(hashlib.sha256(archive.read_bytes()).hexdigest(), expected)
 
@@ -152,6 +180,20 @@ class NativeSuitePackagingTests(unittest.TestCase):
             result = subprocess.run(command, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("excludes model weights", result.stderr)
+
+    def test_missing_child_icon_does_not_publish_an_incomplete_suite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.fixture(directory)
+            (app / "Contents/Resources/MaterialReview.icns").unlink()
+            before = {str(file.relative_to(app)): hashlib.sha256(file.read_bytes()).hexdigest()
+                      for file in app.rglob("*") if file.is_file()}
+            result = subprocess.run(["bash", str(ROOT / "script/stage_material_apps.sh"), str(app)],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Missing Material Review icon", result.stderr)
+            after = {str(file.relative_to(app)): hashlib.sha256(file.read_bytes()).hexdigest()
+                     for file in app.rglob("*") if file.is_file()}
+            self.assertEqual(before, after)
 
 
 if __name__ == "__main__":

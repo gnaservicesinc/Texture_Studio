@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+from types import SimpleNamespace
 import shlex
 import shutil
 import subprocess
@@ -336,6 +337,36 @@ def infer(args, encoder_loader=load_frozen_encoder) -> dict:
     payload, checksum = checkpoint_snapshot(args.checkpoint, args.expected_sha256)
     image_checksum = digest(args.image)
     source, photo = load_photo(args.image, args.input_encoding)
+    if getattr(args, "baseline", False):
+        # The pretrained DINOv2 encoder supplies features, not a pretrained
+        # depth head. Every fresh material output layer starts at a constant:
+        # 0.5 for scalar maps, and OpenGL (0.5, 0.5, 1) for normals. Export that
+        # exact baseline without wasting an encoder inference on a flat map.
+        target = payload["target"]
+        height, width = source.shape[-2:]
+        value = np.full((height, width), 0.5, dtype=np.float32)
+        normal = np.zeros((height, width, 3), dtype=np.float32)
+        normal[...] = (0.5, 0.5, 1.0)
+        if digest(args.checkpoint) != checksum or digest(args.image) != image_checksum:
+            raise ValueError("Selected input/checkpoint changed during baseline inference")
+        args.output.mkdir(parents=True, exist_ok=False)
+        outputs = {}
+        for role, array in ((target, normal if target == "normal" else value),):
+            path = args.output / (role + ".float32.exr")
+            write_float_exr(path, array)
+            outputs[role] = {"path": str(path.resolve()), "sha256": digest(path), "encoding": "linear_data", "storage": "FLOAT32", "blender_color_space": "Non-Color"}
+        if target == "height":
+            path = args.output / "normal.float32.exr"
+            write_float_exr(path, normal)
+            outputs["normal"] = {"path": str(path.resolve()), "sha256": digest(path), "encoding": "linear_data", "storage": "FLOAT32", "blender_color_space": "Non-Color"}
+        report = dict(photo, outputs=outputs, checkpoint_sha256=checksum, checkpoint_step=0,
+            reference_checkpoint_step=payload["step"], target=target,
+            baseline="dinov2-fresh-material-head-v1", baseline_untrained=True,
+            baseline_description="DINOv2 Base features + untrained material head; scalar output 0.5, flat OpenGL normal. DINOv2 is a feature encoder, not a pretrained depth estimator.",
+            encoder_pins=payload["encoder"], image_sha256=image_checksum,
+            normal_convention="OpenGL +Y", source_bytes_modified=False)
+        atomic_bytes(args.output / "inference.json", json_bytes(report))
+        return report
     device = choose_device(args.device)
     encoder, pins = encoder_loader(args.model_directory, args.code_directory, device)
     if payload.get("variant") == "lora":
@@ -492,6 +523,32 @@ def remove_encoder(args) -> dict:
     return {"directory": str(directory), "removed": True, "external_model_directories_modified": False}
 
 
+def hub_api(api_factory=None):
+    if api_factory is None:
+        try:
+            from huggingface_hub import HfApi
+        except ImportError:
+            raise ValueError("Hugging Face support is missing from this Python environment; install huggingface_hub, then retry") from None
+        api_factory = HfApi
+    return api_factory()
+
+
+def hub_account(_args=None, api_factory=None) -> dict:
+    """Read saved authentication without exposing tokens or creating anything."""
+    try:
+        api = hub_api(api_factory)
+    except ValueError as error:
+        return {"authenticated": False, "username": None, "message": str(error)}
+    try:
+        identity = api.whoami()
+    except Exception:
+        return {"authenticated": False, "username": None, "message": "Could not verify a saved Hugging Face login. Run hf auth login in Terminal, then click Refresh Account."}
+    name = identity.get("name") if isinstance(identity, dict) else None
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+        return {"authenticated": False, "username": None, "message": "Hugging Face did not return an account name. Run hf auth login, then click Refresh Account."}
+    return {"authenticated": True, "username": name, "message": "Signed in as " + name}
+
+
 def upload_package(args, api_factory=None) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", args.repo):
         raise ValueError("Choose an explicit Hugging Face repository as owner/model-name")
@@ -505,10 +562,10 @@ def upload_package(args, api_factory=None) -> dict:
         if path.is_symlink() or not path.is_file() or digest(path) != checksum:
             raise ValueError("Package changed since export; re-export it before upload")
     checkpoint_snapshot(root / "material-head.pt")
-    if api_factory is None:
-        from huggingface_hub import HfApi
-        api_factory = HfApi
-    api = api_factory()
+    source_checksum = json.loads((root / "config.json").read_text()).get("source_checkpoint_sha256")
+    if getattr(args, "expected_source_sha256", None) and source_checksum != args.expected_source_sha256:
+        raise ValueError("This package belongs to a different checkpoint; export the selected model before upload")
+    api = hub_api(api_factory)
     try:
         api.whoami()  # Saved/environment token; never print or return it.
     except Exception:
@@ -523,16 +580,29 @@ def upload_package(args, api_factory=None) -> dict:
         raise
     except Exception as error:
         raise ValueError(f"Hugging Face upload failed ({type(error).__name__}); verify repository access and retry") from None
-    return {"repository": args.repo, "private": not args.public, "url": f"https://huggingface.co/{args.repo}", "commit_url": getattr(commit, "commit_url", None), "source_photos_uploaded": False}
+    return {"repository": args.repo, "private": not args.public, "url": f"https://huggingface.co/{args.repo}", "commit_url": getattr(commit, "commit_url", None), "source_checkpoint_sha256": source_checksum, "source_photos_uploaded": False}
+
+
+def upload_selected(args, api_factory=None) -> dict:
+    """Always package the explicitly selected model; never reuse a prior export."""
+    # Validate destination before writing a package, then capture/verify the model
+    # identity again inside package(). Existing output directories are refused.
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", args.repo):
+        raise ValueError("Choose a Hugging Face repository as owner/model-name")
+    exported = package(args)
+    uploaded = upload_package(SimpleNamespace(package=args.output, repo=args.repo, public=args.public,
+        expected_source_sha256=exported["source_checkpoint_sha256"]), api_factory)
+    return dict(uploaded, package_path=exported["package_path"], target=exported["target"])
 
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     commands = p.add_subparsers(dest="command", required=True)
-    for name in ("dataset", "prepare-size", "curate", "checkpoint", "infer", "package", "upload", "install-encoder", "remove-encoder"):
+    for name in ("dataset", "prepare-size", "curate", "checkpoint", "infer", "package", "upload", "upload-selected", "hub-account", "install-encoder", "remove-encoder"):
         sub = commands.add_parser(name)
-        if name == "upload":
-            sub.add_argument("--package", type=Path, required=True)
+        if name in ("upload", "upload-selected"):
+            if name == "upload":
+                sub.add_argument("--package", type=Path, required=True)
             sub.add_argument("--repo", required=True)
             sub.add_argument("--public", action="store_true")
         if name == "install-encoder":
@@ -553,13 +623,14 @@ def parser() -> argparse.ArgumentParser:
             sub.add_argument("--split", choices=("train", "validation"))
             sub.add_argument("--note")
             sub.add_argument("--expected-index-sha256")
-        if name in ("checkpoint", "infer", "package"):
+        if name in ("checkpoint", "infer", "package", "upload-selected"):
             sub.add_argument("--checkpoint", type=Path, required=True)
             sub.add_argument("--expected-sha256")
-        if name in ("infer", "package"):
+        if name in ("infer", "package", "upload-selected"):
             sub.add_argument("--output", type=Path, required=True)
         if name == "infer":
             sub.add_argument("--image", type=Path, required=True)
+            sub.add_argument("--baseline", action="store_true", help="Compare with the exact flat untrained material-head output; --checkpoint supplies matching architecture and provenance")
             sub.add_argument("--device", choices=("mps", "cpu"), default="mps")
             sub.add_argument("--input-encoding", choices=("auto", "srgb", "linear"), default="auto")
             sub.add_argument("--model-directory", type=Path, default=ROOT / "out/material-training/transfer-models" / ("dinov2-base-" + MODEL_REVISION[:12]))
@@ -571,7 +642,7 @@ def main() -> int:
     args = parser().parse_args()
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            result = {"dataset": dataset_info, "prepare-size": prepare_size, "curate": curate, "checkpoint": checkpoint_info, "infer": infer, "package": package, "upload": upload_package, "install-encoder": install_encoder, "remove-encoder": remove_encoder}[args.command](args)
+            result = {"dataset": dataset_info, "prepare-size": prepare_size, "curate": curate, "checkpoint": checkpoint_info, "infer": infer, "package": package, "upload": upload_package, "upload-selected": upload_selected, "hub-account": hub_account, "install-encoder": install_encoder, "remove-encoder": remove_encoder}[args.command](args)
         print(json.dumps(dict(result, schema=SCHEMA if args.command != "checkpoint" else result["schema"], protocol_schema=SCHEMA, command=args.command, ok=True), allow_nan=False))
         return 0
     except (OSError, ValueError, TypeError, KeyError, RuntimeError, subprocess.SubprocessError) as error:

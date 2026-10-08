@@ -5,7 +5,7 @@ import CoreImage
 @MainActor
 final class WorkspaceTests: XCTestCase {
     func testDefaultUsesDA3AndExcludesPortraitDepth() {
-        let workspace = TextureWorkspace()
+        let workspace = TextureWorkspace(checkpointRegistryURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
         XCTAssertEqual(workspace.depthChoice, .model)
         XCTAssertEqual(workspace.modelID, LocalModelDescriptor.da3GiantID)
         XCTAssertEqual(workspace.settings.heightDetail, 0)

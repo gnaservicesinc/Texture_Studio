@@ -174,6 +174,46 @@ def test_photo_size_never_silently_reduced(tmp_path):
         workbench.load_photo(path, "srgb")
 
 
+@pytest.mark.parametrize("role", ["height", "roughness", "normal"])
+def test_untrained_base_comparison_matches_fresh_output_without_loading_encoder(tmp_path, monkeypatch, role):
+    path = checkpoint(tmp_path, role)
+    image = tmp_path / "input.png"
+    write_png(image, np.full((32, 40, 3), 120, dtype=np.uint8))
+    original = {str(p): p.read_bytes() for p in (image, path)}
+    def unwanted_encoder(*_args):
+        pytest.fail("The flat fresh head does not need an encoder pass or a model download")
+    monkeypatch.setattr(workbench, "extract_features", unwanted_encoder)
+    result = workbench.infer(args(checkpoint=path, expected_sha256=digest(path), image=image,
+        input_encoding="srgb", output=tmp_path / "baseline", device="cpu", model_directory=tmp_path / "missing",
+        code_directory=tmp_path / "missing-code", baseline=True), encoder_loader=unwanted_encoder)
+    assert result["baseline_untrained"] is True
+    assert result["baseline"] == "dinov2-fresh-material-head-v1"
+    assert result["checkpoint_sha256"] == digest(path)
+    assert result["checkpoint_step"] == 0 and result["reference_checkpoint_step"] == 7
+    assert result["native_dimensions"] == [40, 32]
+    assert result["encoder_pins"]["checkpoint_sha256"] == MODEL_SHA256
+    assert "not a pretrained depth estimator" in result["baseline_description"]
+    import OpenEXR
+    channels = OpenEXR.File(result["outputs"][role]["path"], separate_channels=True).channels()
+    if role == "normal":
+        actual = np.stack([channels[name].pixels for name in ("R", "G", "B")], axis=-1)
+    else:
+        actual = channels["Y"].pixels[..., None]
+    fresh_head = MaterialMapHead(4, 768, 4, role).eval()
+    with torch.no_grad():
+        expected = fresh_head(torch.randn(1, 3, 32, 40), torch.randn(1, 768, 2, 2))[0].numpy().transpose(1, 2, 0)
+    np.testing.assert_array_equal(actual, expected)
+    assert {str(p): p.read_bytes() for p in (image, path)} == original
+
+
+def test_untrained_base_keeps_exact_checkpoint_identity_and_parser_choice(tmp_path):
+    parsed = workbench.parser().parse_args(["infer", "--baseline", "--checkpoint", "head.pt", "--image", "photo.png", "--output", "result"])
+    assert parsed.baseline and parsed.checkpoint == Path("head.pt")
+    path = checkpoint(tmp_path)
+    with pytest.raises(ValueError, match="SHA256"):
+        workbench.infer(args(checkpoint=path, expected_sha256="0" * 64, image=tmp_path / "unused.png", device="cpu", baseline=True))
+
+
 def test_upload_requires_exact_private_package_and_saved_auth_without_network(tmp_path):
     path = checkpoint(tmp_path)
     package = tmp_path / "package"
@@ -195,6 +235,85 @@ def test_upload_requires_exact_private_package_and_saved_auth_without_network(tm
     (package / "extra-photo.png").write_bytes(b"Never upload this file")
     with pytest.raises(ValueError, match="bounded"):
         workbench.upload_package(args(package=package, repo="test/head", public=False), FakeAPI)
+
+
+def test_hub_account_is_read_only_and_never_exposes_auth_errors():
+    class SignedIn:
+        def whoami(self):
+            return {"name": "texture-artist", "auth": {"token": "never return me"}}
+    assert workbench.hub_account(api_factory=SignedIn) == {
+        "authenticated": True, "username": "texture-artist", "message": "Signed in as texture-artist"}
+    class MissingLogin:
+        def whoami(self):
+            raise ValueError("hf_private-secret-do-not-display")
+    missing = workbench.hub_account(api_factory=MissingLogin)
+    assert not missing["authenticated"] and missing["username"] is None
+    assert "hf auth login" in missing["message"] and "private-secret" not in str(missing)
+
+
+def test_upload_selected_packages_exact_model_without_reusing_stale_export(tmp_path):
+    selected = checkpoint(tmp_path)
+    checksum = digest(selected)
+    stale = tmp_path / "old-export"
+    workbench.package(args(checkpoint=selected, expected_sha256=checksum, output=stale))
+    payload = torch.load(selected, weights_only=True)
+    payload["step"] = 25
+    payload["head_state"]["head.weight"] += 0.02
+    torch.save(payload, selected)
+    selected_checksum = digest(selected)
+    calls = []
+    class FakeAPI:
+        def whoami(self):
+            return {"name": "artist"}
+        def create_repo(self, **kwargs):
+            calls.append(("create", kwargs))
+        def repo_info(self, **kwargs):
+            return args(private=True)
+        def upload_folder(self, **kwargs):
+            calls.append(("upload", kwargs))
+            return args(commit_url="https://huggingface.co/artist/current/commit/test")
+    fresh = tmp_path / "fresh-upload"
+    result = workbench.upload_selected(args(checkpoint=selected, expected_sha256=selected_checksum,
+        output=fresh, repo="artist/current", public=False), FakeAPI)
+    assert result["source_checkpoint_sha256"] == selected_checksum != checksum
+    assert result["package_path"] == str(fresh.resolve())
+    assert calls[0][1]["private"] and calls[1][1]["folder_path"] == str(fresh)
+    assert json.loads((fresh / "config.json").read_text())["step"] == 25
+    assert json.loads((stale / "config.json").read_text())["step"] == 7
+
+
+def test_upload_rejects_wrong_selected_identity_before_remote_writes(tmp_path):
+    selected = checkpoint(tmp_path)
+    packaged = tmp_path / "export"
+    workbench.package(args(checkpoint=selected, expected_sha256=digest(selected), output=packaged))
+    def never_network():
+        pytest.fail("Identity failures must not contact the Hub")
+    with pytest.raises(ValueError, match="different checkpoint"):
+        workbench.upload_package(args(package=packaged, repo="artist/model", public=False,
+            expected_source_sha256="0" * 64), never_network)
+    fresh = tmp_path / "new-export"
+    with pytest.raises(ValueError, match="SHA256 changed"):
+        workbench.upload_selected(args(checkpoint=selected, expected_sha256="0" * 64,
+            output=fresh, repo="artist/model", public=False), never_network)
+    assert not fresh.exists()
+
+
+def test_upload_does_not_change_existing_repository_visibility(tmp_path):
+    selected = checkpoint(tmp_path)
+    writes = []
+    class PublicAPI:
+        def whoami(self):
+            return {"name": "artist"}
+        def create_repo(self, **kwargs):
+            assert kwargs["exist_ok"] and kwargs["private"]
+        def repo_info(self, **kwargs):
+            return args(private=False)
+        def upload_folder(self, **kwargs):
+            writes.append(kwargs)
+    with pytest.raises(ValueError, match="visibility differs"):
+        workbench.upload_selected(args(checkpoint=selected, expected_sha256=digest(selected),
+            output=tmp_path / "upload", repo="artist/model", public=False), PublicAPI)
+    assert not writes
 
 
 def test_owned_encoder_remove_refuses_external_and_added_files(tmp_path, monkeypatch):

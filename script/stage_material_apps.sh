@@ -24,10 +24,10 @@ mkdir "$STAGING/Applications"
 SIGN_IDENTITY="${TEXTURE_STUDIO_SIGN_IDENTITY:--}"
 for ROLE in review compare dataset train; do
   case "$ROLE" in
-    review) TOOL_NAME="Material Review" ;;
-    compare) TOOL_NAME="Checkpoint Compare" ;;
-    dataset) TOOL_NAME="Material Dataset" ;;
-    train) TOOL_NAME="Material Trainer" ;;
+    review) TOOL_NAME="Material Review"; ICON_NAME=MaterialReview ;;
+    compare) TOOL_NAME="Checkpoint Compare"; ICON_NAME=CheckpointCompare ;;
+    dataset) TOOL_NAME="Material Dataset"; ICON_NAME=MaterialDataset ;;
+    train) TOOL_NAME="Material Trainer"; ICON_NAME=MaterialTrainer ;;
   esac
   TOOL_APP="$STAGING/Applications/$TOOL_NAME.app"
   /usr/bin/ditto "$PARENT_APP" "$TOOL_APP"
@@ -37,6 +37,17 @@ for ROLE in review compare dataset train; do
   /usr/libexec/PlistBuddy -c "Set :CFBundleName $TOOL_NAME" "$PLIST"
   /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $TOOL_NAME" "$PLIST"
   /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier org.ipde.material-$ROLE" "$PLIST"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile $ICON_NAME.icns" "$PLIST"
+  if [[ ! -s "$TOOL_APP/Contents/Resources/$ICON_NAME.icns" ]]; then
+    echo "Missing $TOOL_NAME icon; rebuild Texture Studio before staging tools." >&2; exit 1
+  fi
+  # The parent keeps all role artwork for restaging. Each child needs only its
+  # own icon, avoiding twenty redundant full-resolution copies in the suite.
+  for OTHER_ICON in TextureStudio MaterialReview CheckpointCompare MaterialDataset MaterialTrainer; do
+    if [[ "$OTHER_ICON" != "$ICON_NAME" ]]; then
+      rm -f "$TOOL_APP/Contents/Resources/$OTHER_ICON.icns"
+    fi
+  done
   /usr/libexec/PlistBuddy -c "Delete :MaterialToolRole" "$PLIST" 2>/dev/null || true
   /usr/libexec/PlistBuddy -c "Add :MaterialToolRole string $ROLE" "$PLIST"
   /usr/bin/codesign --force --sign "$SIGN_IDENTITY" --preserve-metadata=entitlements,flags,runtime "$TOOL_APP" >/dev/null

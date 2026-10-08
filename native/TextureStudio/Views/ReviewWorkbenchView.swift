@@ -7,9 +7,22 @@ struct MapReviewCandidate: Identifiable, Hashable {
     let label: String
     let mapURL: URL
     let numeric: Bool
-    init(id: String? = nil, label: String, mapURL: URL, numeric: Bool) {
+    let sampleLabel: String?
+    let detail: String?
+    let role: String
+    init(id: String? = nil, label: String, mapURL: URL, numeric: Bool,
+         sampleLabel: String? = nil, detail: String? = nil, role: String = "map") {
         self.id = id ?? mapURL.path + "|" + label
         self.label = label; self.mapURL = mapURL; self.numeric = numeric
+        self.sampleLabel = sampleLabel; self.detail = detail; self.role = role
+    }
+    var accessibleLabel: String { [sampleLabel, label, detail].compactMap { $0 }.joined(separator: " · ") }
+    var exportFilename: String {
+        guard let sampleLabel else { return mapURL.lastPathComponent }
+        let stem = (sampleLabel + "-" + label + (role == "checkpoint" ? "-" + String(id.prefix(12)) : ""))
+            .replacingOccurrences(of: "[^A-Za-z0-9._-]+", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-._"))
+        return String(stem.prefix(180)) + "." + mapURL.pathExtension
     }
 }
 
@@ -25,6 +38,12 @@ struct ReviewWorkbenchView: View {
         return selected.isEmpty ? Self.initialCandidates(candidates) : selected
     }
     static func initialCandidates(_ candidates: [MapReviewCandidate]) -> [MapReviewCandidate] {
+        let predictions = candidates.filter { ["base", "checkpoint"].contains($0.role) }
+        if !predictions.isEmpty {
+            // Keep every requested model visible. Source/reference maps remain
+            // available in Maps without silently hiding a selected checkpoint.
+            return candidates.filter { $0.role == "target" } + predictions
+        }
         guard let target = candidates.first(where: { $0.label.lowercased() == "target" }) else {
             return Array(candidates.prefix(2))
         }
@@ -33,6 +52,13 @@ struct ReviewWorkbenchView: View {
     }
     var body: some View {
         VStack(spacing: 0) {
+            if let sample = candidates.compactMap(\.sampleLabel).first {
+                HStack(alignment: .firstTextBaseline) {
+                    Label("Sample: \(sample)", systemImage: "photo").font(.headline).textSelection(.enabled)
+                    Spacer()
+                    Text("\(candidates.count) maps · same source").font(.caption).foregroundStyle(.secondary)
+                }.padding(.horizontal, 12).padding(.vertical, 8).background(.bar)
+            }
             inspectionControls.padding(8).background(.bar)
             Text("Drag or scroll to pan · Pinch or Option-scroll to zoom · 100% shows original pixels")
                 .font(.caption).foregroundStyle(.secondary)
@@ -43,8 +69,15 @@ struct ReviewWorkbenchView: View {
                 HSplitView {
                     ForEach(visibleCandidates) { candidate in
                         VStack(spacing: 0) {
-                            HStack {
-                                Text(candidate.label).font(.headline)
+                            HStack(alignment: .top) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(candidate.label).font(.headline).textSelection(.enabled)
+                                    if let detail = candidate.detail {
+                                        Text(detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                                    }
+                                    Text(candidate.mapURL.lastPathComponent).font(.caption2).foregroundStyle(.secondary)
+                                        .lineLimit(1).truncationMode(.middle).help(candidate.mapURL.path)
+                                }.accessibilityElement(children: .ignore).accessibilityLabel(candidate.accessibleLabel)
                                 Spacer()
                                 Button("Export Original…") { export(candidate) }.disabled(inspectedHashes[candidate.id] == nil)
                                     .help("Copy the original PNG or EXR exactly, at its original resolution and precision. Display contrast has no effect on the export.")
@@ -85,6 +118,7 @@ struct ReviewWorkbenchView: View {
                         }))
                     }
                 }
+                .help("Show the source photo, reference target, base model or checkpoint outputs. Every pane keeps its name and source identity when popped out.")
                 Button("Pop Out Comparison") { ReviewWindowController.shared.open(candidates: visibleCandidates, blendURL: blendURL) }
                 if let blendURL { Button("Open Displaced Surface in Blender") { NSWorkspace.shared.open(blendURL) } }
         }.help("Drag or scroll to pan. Pinch, or hold Option/Command while scrolling, to zoom. Pan and zoom are linked across maps.")
@@ -107,7 +141,7 @@ struct ReviewWorkbenchView: View {
     private func export(_ candidate: MapReviewCandidate) {
         guard let expectedHash = inspectedHashes[candidate.id] else { return }
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = candidate.mapURL.lastPathComponent
+        panel.nameFieldStringValue = candidate.exportFilename
         if let type = UTType(filenameExtension: candidate.mapURL.pathExtension) { panel.allowedContentTypes = [type] }
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         Task {
@@ -126,7 +160,7 @@ struct ReviewWorkbenchView: View {
             do {
                 let directory = FileManager.default.temporaryDirectory.appendingPathComponent("TextureStudio-Editor-\(UUID().uuidString)", isDirectory: true)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                let copy = directory.appendingPathComponent(candidate.mapURL.lastPathComponent)
+                let copy = directory.appendingPathComponent(candidate.exportFilename)
                 try await Task.detached {
                     try ReviewImageLoader.exportOriginal(candidate.mapURL, expectedSHA256: expectedHash, to: copy)
                 }.value

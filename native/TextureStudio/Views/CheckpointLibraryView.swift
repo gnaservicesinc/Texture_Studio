@@ -5,7 +5,6 @@ struct CheckpointLibraryView: View {
     @Bindable var store: WorkbenchStore
     var showsDismissButton = true
     @Environment(\.dismiss) private var dismiss
-    @State private var showUpload = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -93,10 +92,17 @@ struct CheckpointLibraryView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
         }
-        .sheet(isPresented: $showUpload) {
-            CheckpointUploadSheet(store: store)
-                .frame(width: 560)
+        .task {
+            // Workspace restoration may still be reconnecting checkpoints.
+            // Account discovery is read-only and never uploads anything.
+            while store.isBusy {
+                do { try await Task.sleep(for: .milliseconds(100)) }
+                catch { return }
+            }
+            if !store.uploadAccountChecked { store.refreshUploadAccount() }
         }
+        .onChange(of: store.uploadRepo) { _, _ in store.saveUploadConfiguration() }
+        .onChange(of: store.uploadPublic) { _, _ in store.saveUploadConfiguration() }
     }
 
     private func checkpointDetail(_ checkpoint: WorkbenchCheckpoint) -> some View {
@@ -104,6 +110,7 @@ struct CheckpointLibraryView: View {
             Section("Selected model") {
                 Text(checkpoint.title).font(.headline).textSelection(.enabled)
                 LabeledContent("Target", value: targetTitle(checkpoint.target))
+                LabeledContent("Training base", value: checkpoint.trainingBaseLabel)
                 LabeledContent("Saved step", value: checkpoint.step.formatted())
                 LabeledContent("Interface", value: checkpoint.compatible ? "Compatible" : "Unsupported")
                 Text(checkpoint.schema).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
@@ -111,7 +118,7 @@ struct CheckpointLibraryView: View {
             Section("Use this checkpoint") {
                 Button("Use in Texture Studio") { store.useSelectedInStudio() }
                     .disabled(store.isBusy || checkpoint.target != "height")
-                    .help("Save this exact checkpoint as Studio’s material-height source. In Studio choose Material checkpoint; its file is never replaced by this action.")
+                    .help("Make this exact trained model the active surface-height source in Texture Studio.")
                 if checkpoint.target != "height" {
                     Text("Texture Studio currently uses displacement checkpoints. This model can be selected for its own training target.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -123,15 +130,48 @@ struct CheckpointLibraryView: View {
                 Button("Export Package…") { store.exportSelectedCheckpoint() }
                     .disabled(store.isBusy)
                     .help("Create a new portable package containing learned weights, a model card and dependency identities. Training photos and optimizer state stay local.")
-                if let package = store.lastPackageURL {
-                    LabeledContent("Last exported package", value: package.lastPathComponent)
-                    HStack {
-                        Button("Show Package") { NSWorkspace.shared.activateFileViewerSelecting([package]) }
-                        Button("Upload Exported Package…") { showUpload = true }.disabled(store.isBusy)
+                if store.lastPackageCheckpointId == checkpoint.id, let package = store.lastPackageURL {
+                    LabeledContent("Export of this model", value: package.lastPathComponent)
+                    Button("Show Package") { NSWorkspace.shared.activateFileViewerSelecting([package]) }
+                }
+            }
+            Section("Upload to Hugging Face") {
+                HStack(alignment: .firstTextBaseline) {
+                    LabeledContent("Account", value: store.uploadAccount ?? "Not signed in")
+                    Button("Refresh Account") { store.refreshUploadAccount() }.disabled(store.isBusy)
+                        .help("Check the saved Hugging Face CLI login in this Python environment. No files are uploaded.")
+                }
+                if store.uploadAccount == nil {
+                    Text(store.uploadAccountMessage).font(.caption).foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    Button("Copy Login Command") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString("hf auth login", forType: .string)
+                    }.help("Paste this command into Terminal to sign in, then click Refresh Account.")
+                }
+                TextField("Repository (automatic when blank)", text: $store.uploadRepo,
+                          prompt: Text(store.suggestedUploadRepo.isEmpty ? "owner/model-name" : store.suggestedUploadRepo))
+                    .help("Leave blank to create a separate repository for this selected model in your account, or enter owner/model-name to use a particular repository. This choice is saved.")
+                    .disabled(store.isBusy)
+                if !store.effectiveUploadRepo.isEmpty {
+                    LabeledContent("Destination", value: store.effectiveUploadRepo).textSelection(.enabled)
+                    if !HuggingFaceUpload.validRepository(store.effectiveUploadRepo) {
+                        Text("Use owner/model-name with letters, numbers, underscores, dots or single hyphens.")
+                            .font(.caption).foregroundStyle(.red)
                     }
-                } else {
-                    Text("Export the checkpoint and model card before uploading to Hugging Face.")
-                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Toggle("Public repository", isOn: $store.uploadPublic).disabled(store.isBusy)
+                    .help("Off creates a private repository. Existing repository visibility must match this choice; the app never changes its visibility silently.")
+                Text("Upload packages the selected checkpoint and its model card automatically. Source photos, optimizer state and pretrained DINOv2 weights stay local.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button { store.uploadPackage() } label: {
+                    Label("Upload Selected Model", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(.glassProminent)
+                .disabled(store.isBusy || !store.canUploadSelectedCheckpoint)
+                .help("Upload this selected model directly to the destination shown above. A fresh, checksum-verified package is created first. No additional confirmation is shown.")
+                if let uploaded = store.lastUploadURL {
+                    Link("Open Last Uploaded Model", destination: uploaded)
                 }
             }
             Section("File identity") {
@@ -146,51 +186,10 @@ struct CheckpointLibraryView: View {
 
     private func targetTitle(_ value: String) -> String {
         switch value {
-        case "height": "Displacement"
+        case "height": "Surface height / displacement"
         case "roughness": "Roughness"
         case "normal": "OpenGL Normal"
         default: value.capitalized
         }
-    }
-}
-
-private struct CheckpointUploadSheet: View {
-    @Bindable var store: WorkbenchStore
-    @Environment(\.dismiss) private var dismiss
-
-    private var validRepository: Bool {
-        let pieces = store.uploadRepo.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "/", omittingEmptySubsequences: false)
-        return pieces.count == 2 && pieces.allSatisfy { part in
-            !part.isEmpty && part.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == ".") }
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Label("Upload model package", systemImage: "square.and.arrow.up").font(.title2.bold())
-            if let package = store.lastPackageURL {
-                LabeledContent("Package", value: package.lastPathComponent)
-                Text(package.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-            }
-            TextField("Hugging Face repository: owner/model-name", text: $store.uploadRepo)
-                .textFieldStyle(.roundedBorder)
-            Toggle("Make the repository public", isOn: $store.uploadPublic)
-            Text(store.uploadPublic
-                 ? "The exported model package will be uploaded to the public repository you enter."
-                 : "The exported model package will be uploaded to a private repository. Authenticate your local Hugging Face CLI first.")
-                .font(.caption).foregroundStyle(.secondary)
-            HStack {
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Spacer()
-                Button("Upload Package") {
-                    store.uploadRepo = store.uploadRepo.trimmingCharacters(in: .whitespacesAndNewlines)
-                    store.uploadPackage()
-                    dismiss()
-                }
-                .buttonStyle(.glassProminent)
-                .disabled(store.lastPackageURL == nil || !validRepository || store.isBusy)
-            }
-        }
-        .padding(24)
     }
 }

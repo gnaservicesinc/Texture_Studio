@@ -15,7 +15,7 @@ struct MaterialToolRootView: View {
         store.checkpoints.filter { store.comparisonCheckpointIds.contains($0.id) }
     }
     private var comparisonReady: Bool {
-        comparisonSelection.count >= 2 && Set(comparisonSelection.map(\.target)).count == 1
+        !comparisonSelection.isEmpty && comparisonSelection.count + (store.comparisonIncludesBase ? 1 : 0) >= 2 && Set(comparisonSelection.map(\.target)).count == 1
             && (store.sourceImageURL != nil || store.selectedSample?.maps["input"] != nil)
     }
 
@@ -79,10 +79,15 @@ struct MaterialToolRootView: View {
             if let selected = review.selected {
                 VStack(spacing: 0) {
                     HStack {
+                        Label("Sample: \(selected.id)", systemImage: "photo").font(.headline).textSelection(.enabled)
+                        Spacer()
+                    }.padding(.horizontal, 12).padding(.top, 12)
+                    HStack {
                         let candidateId = selected.candidates.first(where: { $0.id == review.selectedCandidateId })?.id ?? selected.candidates.last!.id
                         Picker("Candidate", selection: Binding(get: { candidateId }, set: { review.selectedCandidateId = $0 })) {
                             ForEach(selected.candidates) { candidate in Text(candidate.label).tag(candidate.id) }
-                        }.frame(width: 230)
+                        }.frame(minWidth: 260, idealWidth: 350)
+                            .help("The decision and note apply to this named candidate for the sample shown above. Map pane titles identify each visible result.")
                         Picker("Decision", selection: Binding(get: { review.decisions[candidateId] ?? "unreviewed" }, set: { review.decisions[candidateId] = $0 })) {
                             Text("Unreviewed").tag("unreviewed")
                             Text("Usable").tag("usable")
@@ -118,13 +123,16 @@ struct MaterialToolRootView: View {
                 Text(store.sourceImageURL?.lastPathComponent ?? store.selectedSampleId ?? "Choose a photo or dataset crop").foregroundStyle(.secondary)
                 Spacer()
                 Button("Choose Checkpoints…") { store.chooseCheckpoint() }
-                    .help("Select two or more saved checkpoints predicting the same map type. Their exact hashes are recorded with the results.")
+                    .help("Select one checkpoint to compare with its untrained base, or multiple saved checkpoints predicting the same map type. Their exact hashes are recorded with the results.")
                 Button("Run Comparison", systemImage: "play.fill") { store.compare() }
                     .buttonStyle(.glassProminent).disabled(store.isBusy || !comparisonReady)
                     .help("Run checked candidates one at a time on Metal, then inspect their matching full-resolution outputs.")
             }.padding()
             ScrollView(.horizontal) {
                 HStack {
+                    Toggle("Include untrained DINOv2 base", isOn: $store.comparisonIncludesBase).toggleStyle(.checkbox)
+                        .help("DINOv2 Base is the feature encoder used for material training. Its fresh material head starts flat: 0.5 displacement/roughness or an OpenGL flat normal. This is the before-training baseline, not Depth Anything 3.")
+                    Divider().frame(height: 24)
                     ForEach(store.checkpoints) { checkpoint in
                         Toggle(isOn: Binding(get: { store.comparisonCheckpointIds.contains(checkpoint.id) }, set: { enabled in
                             if enabled { store.comparisonCheckpointIds.insert(checkpoint.id) } else { store.comparisonCheckpointIds.remove(checkpoint.id) }
@@ -133,12 +141,12 @@ struct MaterialToolRootView: View {
                 }.padding(.horizontal)
             }.disabled(store.isBusy)
             if !comparisonReady && !store.isBusy {
-                Text("Choose a source photo or dataset crop, then select at least two checkpoints for the same map type.")
+                Text("Choose a photo or dataset crop, then select one checkpoint plus the untrained base, or two checkpoints for the same map type.")
                     .font(.caption).foregroundStyle(.secondary).padding(.horizontal).padding(.vertical, 8)
             }
             Divider()
             if !store.comparisonCandidates.isEmpty { ReviewWorkbenchView(candidates: store.comparisonCandidates) }
-            else { ContentUnavailableView("Compare two or more checkpoints", systemImage: "rectangle.split.2x1", description: Text("Every checkpoint sees the same source at its native resolution. Results open side by side with synchronized navigation.")) }
+            else { ContentUnavailableView("Compare material models", systemImage: "rectangle.split.2x1", description: Text("Compare a trained checkpoint with its untrained DINOv2 material head, or compare several checkpoints. Every result names its source sample, training step and model. Source photos and dataset targets are available in Maps.")) }
             WorkbenchActivityView(store: store)
         }
     }

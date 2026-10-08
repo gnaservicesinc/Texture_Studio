@@ -8,7 +8,7 @@ struct PythonRuntimeControls: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             Text("PyTorch · Metal runtime").font(.headline)
-            Text("DA3 uses a local Python environment with PyTorch/MPS. It is independent of the old studio and does not need a Core ML conversion.")
+            Text("DA3 camera depth uses this local PyTorch / Metal runtime. Trained material-height checkpoints use the Python environment selected in Model Training → Runtime. Neither requires Core ML conversion.")
                 .font(.callout).foregroundStyle(.secondary)
             Text(runtime.runtimeStatus.message).font(.caption).foregroundStyle(.secondary)
             if let python = runtime.pythonURL {

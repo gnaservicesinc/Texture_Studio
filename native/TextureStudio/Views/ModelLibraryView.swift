@@ -5,13 +5,18 @@ struct ModelLibraryView: View {
     @Bindable var models: ModelManager
     let adviser: OllamaDecisionService?
     let runtime: PythonDepthService?
+    var workspace: TextureWorkspace?
+    @Environment(\.openWindow) private var openWindow
     @Environment(\.dismiss) private var dismiss
     @State private var pendingRemoval: LocalModelDescriptor?
+    @State private var selectedCheckpoint = try? SelectedMaterialCheckpoint.read()
 
-    init(models: ModelManager, adviser: OllamaDecisionService? = nil, runtime: PythonDepthService? = nil) {
+    init(models: ModelManager, adviser: OllamaDecisionService? = nil, runtime: PythonDepthService? = nil,
+         workspace: TextureWorkspace? = nil) {
         self.models = models
         self.adviser = adviser
         self.runtime = runtime
+        self.workspace = workspace
     }
 
     var body: some View {
@@ -19,16 +24,23 @@ struct ModelLibraryView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Local Models").font(.title2.bold())
-                    Text("Optional enhancement. Photos stay on this Mac.").foregroundStyle(.secondary)
+                    Text("Choose trained surface height or a separate camera-depth model. Photos stay on this Mac.").foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
+                    trainedMaterialSection
+                    Divider()
                     if let runtime {
                         PythonRuntimeControls(runtime: runtime)
                         Divider()
+                    }
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Camera-depth alternatives").font(.headline)
+                        Text("DA3 estimates camera distance. It is separate from the DINOv2 material-height model trained in Model Training.")
+                            .font(.callout).foregroundStyle(.secondary)
                     }
                     ForEach(models.catalog) { descriptor in
                         ModelRow(models: models, descriptor: descriptor) { pendingRemoval = descriptor }
@@ -42,7 +54,13 @@ struct ModelLibraryView: View {
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(24)
-        .onAppear { models.refresh() }
+        .onAppear { models.refresh(); selectedCheckpoint = try? SelectedMaterialCheckpoint.read() }
+        .onReceive(NotificationCenter.default.publisher(for: SelectedMaterialCheckpoint.changeNotification)) { _ in
+            selectedCheckpoint = try? SelectedMaterialCheckpoint.read()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            selectedCheckpoint = try? SelectedMaterialCheckpoint.read()
+        }
         .confirmationDialog("Remove this model?", isPresented: Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }), titleVisibility: .visible) {
             Button("Remove Model", role: .destructive) {
                 guard let descriptor = pendingRemoval else { return }
@@ -52,6 +70,32 @@ struct ModelLibraryView: View {
             Button("Cancel", role: .cancel) { pendingRemoval = nil }
         } message: {
             Text("Managed downloads will be deleted. External model files will remain on disk.")
+        }
+    }
+
+    private var trainedMaterialSection: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Label("Trained material height", systemImage: "square.3.layers.3d").font(.headline)
+            if let workspace {
+                Text("Active source: \(workspace.activeHeightSourceLabel)").font(.callout.bold()).textSelection(.enabled)
+            }
+            if let checkpoint = workspace?.selectedMaterialCheckpoint ?? selectedCheckpoint {
+                Text(checkpoint.title).font(.headline).textSelection(.enabled)
+                Text(checkpoint.modelSummary ?? "DINOv2 Base + trained material head · surface height / displacement")
+                    .font(.callout).foregroundStyle(.secondary)
+                Text("SHA256 \(checkpoint.sha256.prefix(12)) · local PyTorch / Metal")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(checkpoint.checkpointPath).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                if let workspace, workspace.depthChoice != .materialCheckpoint {
+                    Button("Use This Material Model") { workspace.reloadSelectedCheckpoint(activate: true) }
+                        .help("Switch this photo to the selected trained height model. Update Preview to render its result.")
+                }
+            } else {
+                Text("No trained material model selected. Train or locate a height checkpoint, then choose Use in Texture Studio.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            Button("Choose / Train Material Model…") { openWindow(id: "model-training") }
+                .help("Open Model Training to select a trained surface-height checkpoint or refine the DINOv2-based material model.")
         }
     }
 }

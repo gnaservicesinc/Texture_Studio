@@ -12,6 +12,7 @@ final class TextureWorkspace {
     var depthURL: URL?
     var settings = TextureSettings()
     var depthChoice = DepthChoice.model
+    private(set) var selectedMaterialCheckpoint: SelectedMaterialCheckpoint?
     var modelID = LocalModelDescriptor.da3GiantID
     var customInverseDepth = true
     var selectedPreview = MaterialPreview.diffuse
@@ -40,9 +41,43 @@ final class TextureWorkspace {
     private var generatedResolution: Int?
     private var generatedModelPath: String?
     private var generatedFileSignature: String?
+    private var sourcePreview: CGImage?
+    private var recipeCheckpoint: MaterialCheckpointIdentity?
+    private var lastRegistrySelectionIdentity: String?
+    private let checkpointRegistryURL: URL
+    @ObservationIgnored private var selectionObserver: MaterialSelectionObserver?
+    @ObservationIgnored private var pendingCheckpointActivation = false
 
-    init(pythonDepthService: PythonDepthService = PythonDepthService()) {
+    init(pythonDepthService: PythonDepthService = PythonDepthService(),
+         checkpointRegistryURL: URL = SelectedMaterialCheckpoint.registryURL) {
         self.pythonDepthService = pythonDepthService
+        self.checkpointRegistryURL = checkpointRegistryURL
+        selectedMaterialCheckpoint = try? SelectedMaterialCheckpoint.read(from: checkpointRegistryURL)
+        lastRegistrySelectionIdentity = selectedMaterialCheckpoint?.selectionIdentity
+        if selectedMaterialCheckpoint?.target == "height" { depthChoice = .materialCheckpoint }
+        selectionObserver = MaterialSelectionObserver { [weak self] in self?.reloadSelectedCheckpoint(activate: true) }
+    }
+
+    func reloadSelectedCheckpoint(activate: Bool = false) {
+        let selected = try? SelectedMaterialCheckpoint.read(from: checkpointRegistryURL)
+        let changed = selected?.selectionIdentity != lastRegistrySelectionIdentity
+        lastRegistrySelectionIdentity = selected?.selectionIdentity
+        if activate || changed { recipeCheckpoint = nil }
+        if let recipeCheckpoint, let selected { selectedMaterialCheckpoint = recipeCheckpoint.resolve(using: selected) }
+        else { selectedMaterialCheckpoint = selected }
+        guard (activate || changed), selected?.target == "height" else { return }
+        if isBusy { pendingCheckpointActivation = true; return }
+        depthChoice = .materialCheckpoint
+        invalidateModelDepth()
+    }
+
+    var activeHeightSourceLabel: String {
+        switch depthChoice {
+        case .materialCheckpoint: selectedMaterialCheckpoint?.title ?? "Choose a trained material-height checkpoint"
+        case .model: modelID == LocalModelDescriptor.da3GiantID ? "DA3 GIANT 1.1 · camera depth" : "Custom local depth model"
+        case .attached: depthURL?.lastPathComponent ?? "Attached height / depth map"
+        case .photoDetail: "Flat surface"
+        }
     }
 
     func choosePhoto() {
@@ -62,6 +97,8 @@ final class TextureWorkspace {
             let preview = try await self.engine.preview(imported.orientedImage)
             try Task.checkCancellation()
             self.source = imported
+            self.sourcePreview = preview
+            self.recipeCheckpoint = nil
             self.attachedDepth = nil
             self.generatedDepth = nil
             self.generatedProvenance = nil
@@ -72,7 +109,9 @@ final class TextureWorkspace {
             self.result = nil
             self.recipeURL = nil
             self.exportURL = nil
-            self.depthChoice = (try? SelectedMaterialCheckpoint.read()) == nil ? .model : .materialCheckpoint
+            self.selectedMaterialCheckpoint = try? SelectedMaterialCheckpoint.read(from: self.checkpointRegistryURL)
+            self.lastRegistrySelectionIdentity = self.selectedMaterialCheckpoint?.selectionIdentity
+            self.depthChoice = self.selectedMaterialCheckpoint?.target == "height" ? .materialCheckpoint : .model
             self.modelID = LocalModelDescriptor.da3GiantID
             self.settings = TextureSettings()
             self.hasEdits = false
@@ -109,6 +148,10 @@ final class TextureWorkspace {
     func markEdited() {
         hasEdits = true
         result = nil
+        if renderedPreview != .source {
+            preview = sourcePreview
+            renderedPreview = .source
+        }
     }
 
     func updatePreview(models: ModelManager) {
@@ -173,9 +216,10 @@ final class TextureWorkspace {
         switch depthChoice {
         case .materialCheckpoint:
             let record: SelectedMaterialCheckpoint
-            do { record = try SelectedMaterialCheckpoint.read() }
+            do { record = try currentMaterialCheckpoint() }
             catch { throw StudioError("No material checkpoint is selected. Open Material Trainer → Checkpoints, locate a height checkpoint, then choose Use in Texture Studio.") }
             activity = "Predicting native surface height with the selected material checkpoint…"
+            selectedMaterialCheckpoint = record
             return try await materialCheckpointService.predict(source: source!, checkpoint: record, size: settings.outputSize)
         case .photoDetail: return nil
         case .attached:
@@ -283,6 +327,9 @@ final class TextureWorkspace {
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 try encoder.encode(provenance).write(to: staging.appendingPathComponent("depth-source.json"), options: .atomic)
             }
+            if self.depthChoice == .materialCheckpoint {
+                try self.materialCheckpointProvenance().write(to: staging.appendingPathComponent("depth-source.json"), options: .atomic)
+            }
             if let decision = self.decision {
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 try encoder.encode(decision).write(to: staging.appendingPathComponent("photo-review.json"), options: .atomic)
@@ -303,8 +350,7 @@ final class TextureWorkspace {
         panel.begin { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
             do {
-                let recipe = TextureRecipe(photoPath: source.url.path, depthPath: self.depthURL?.path,
-                    depthChoice: self.depthChoice, modelID: self.modelID, customInverseDepth: self.customInverseDepth, settings: self.settings)
+                let recipe = try self.makeRecipe()
                 let encoder = JSONEncoder()
                 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 try encoder.encode(recipe).write(to: url, options: .atomic)
@@ -312,6 +358,29 @@ final class TextureWorkspace {
                 self.hasEdits = false
             } catch { self.report(error) }
         }
+    }
+
+    private func currentMaterialCheckpoint() throws -> SelectedMaterialCheckpoint {
+        let runtime = try SelectedMaterialCheckpoint.read(from: checkpointRegistryURL)
+        return recipeCheckpoint?.resolve(using: runtime) ?? runtime
+    }
+
+    func makeRecipe() throws -> TextureRecipe {
+        guard let source else { throw StudioError("Import a photo before saving a recipe.") }
+        var recipe = TextureRecipe(photoPath: source.url.path, depthPath: depthURL?.path,
+            depthChoice: depthChoice, modelID: modelID, customInverseDepth: customInverseDepth, settings: settings)
+        if depthChoice == .materialCheckpoint { recipe.materialCheckpoint = MaterialCheckpointIdentity(try currentMaterialCheckpoint()) }
+        return recipe
+    }
+
+    func materialCheckpointProvenance() throws -> Data {
+        let checkpoint = try currentMaterialCheckpoint()
+        return try JSONSerialization.data(withJSONObject: [
+            "backend": "PyTorch / Metal", "model_type": "DINOv2 features + trained material-height head",
+            "base_encoder": "facebook/dinov2-base", "checkpoint_path": checkpoint.checkpointPath,
+            "checkpoint_sha256": checkpoint.sha256, "target": checkpoint.target,
+            "model_name": checkpoint.title, "height_interpretation": "surface height; no camera-depth normalization"
+        ], options: [.prettyPrinted, .sortedKeys])
     }
 
     func chooseRecipe() {
@@ -327,7 +396,15 @@ final class TextureWorkspace {
         guard !isBusy else { return }
         run("Opening texture recipe…") {
             let recipe = try JSONDecoder().decode(TextureRecipe.self, from: Data(contentsOf: url))
-            guard [1, 2].contains(recipe.version) else { throw StudioError("This recipe version is not supported.") }
+            guard [1, 2, 3].contains(recipe.version) else { throw StudioError("This recipe version is not supported.") }
+            if recipe.version >= 3, recipe.depthChoice == .materialCheckpoint, recipe.materialCheckpoint == nil {
+                throw StudioError("This material recipe is missing its checkpoint identity. Reconnect the intended model in Model Training.")
+            }
+            let runtime = try? SelectedMaterialCheckpoint.read(from: self.checkpointRegistryURL)
+            let pinnedCheckpoint = recipe.depthChoice == .materialCheckpoint ? recipe.materialCheckpoint : nil
+            if pinnedCheckpoint != nil && runtime == nil {
+                throw StudioError("This recipe retains its trained model identity. Configure the local Python runtime in Model Training and select a material checkpoint before reopening it.")
+            }
             let photoURL = URL(fileURLWithPath: recipe.photoPath)
             guard FileManager.default.fileExists(atPath: photoURL.path) else {
                 throw StudioError("The original photo has moved. Import its new location, then reapply the saved settings.")
@@ -345,6 +422,10 @@ final class TextureWorkspace {
             let preview = try await self.engine.preview(source.orientedImage)
             try Task.checkCancellation()
             self.source = source
+            self.sourcePreview = preview
+            self.recipeCheckpoint = pinnedCheckpoint
+            self.lastRegistrySelectionIdentity = runtime?.selectionIdentity
+            self.selectedMaterialCheckpoint = pinnedCheckpoint.flatMap { pin in runtime.map { pin.resolve(using: $0) } } ?? runtime
             self.settings = recipe.settings
             self.settings.useEmbeddedDepth = false
             if recipe.version == 1 {
@@ -423,7 +504,13 @@ final class TextureWorkspace {
         let previousPath = generatedModelPath
         let previousSignature = generatedFileSignature
         operation = Task {
-            defer { self.isBusy = false; self.activity = ""; self.operation = nil }
+            defer {
+                self.isBusy = false; self.activity = ""; self.operation = nil
+                if self.pendingCheckpointActivation {
+                    self.pendingCheckpointActivation = false
+                    self.reloadSelectedCheckpoint(activate: true)
+                }
+            }
             do {
                 try Task.checkCancellation()
                 try await work()

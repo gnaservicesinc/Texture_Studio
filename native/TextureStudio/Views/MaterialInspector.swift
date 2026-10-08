@@ -51,10 +51,10 @@ struct MaterialInspector: View {
                 Text("Broad illumination is reduced while retaining photo detail. Clipped highlights and hidden shadow detail need review.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("Depth enhancement") {
+            Section("Height / displacement source") {
                 Picker("Source", selection: $workspace.depthChoice) {
                     ForEach(DepthChoice.allCases) { choice in
-                        Text(choice.rawValue).tag(choice)
+                        Text(choice.title).tag(choice)
                     }
                 }
                 if workspace.depthChoice == .attached {
@@ -90,12 +90,14 @@ struct MaterialInspector: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if workspace.depthChoice == .materialCheckpoint {
-                    if let checkpoint = try? SelectedMaterialCheckpoint.read() {
-                        Text(URL(fileURLWithPath: checkpoint.checkpointPath).lastPathComponent).font(.headline)
+                    if let checkpoint = workspace.selectedMaterialCheckpoint {
+                        Text(checkpoint.title).font(.headline).textSelection(.enabled)
+                        Text(checkpoint.modelSummary ?? "DINOv2 Base features + trained material-height head")
+                            .font(.caption).foregroundStyle(.secondary)
                         Text("SHA256 \(checkpoint.sha256.prefix(12)) · native height, no range normalization").font(.caption).foregroundStyle(.secondary)
                     } else { Text("Choose a height checkpoint in Material Trainer.").foregroundStyle(.secondary) }
                     Button("Choose Material Checkpoint…") { MaterialToolLauncher.open(.train) }
-                    Text("Uses the exact selected local PyTorch checkpoint and pinned encoder. Native inference supports 1024 or 2048 output. It does not use portrait depth.").font(.caption).foregroundStyle(.secondary)
+                    Text("Predicts surface height using your trained material head and DINOv2 features. DA3 is a separate source. Native inference supports 1024 or 2048 output.").font(.caption).foregroundStyle(.secondary)
                 }
             }
             Section("Surface maps") {
@@ -148,7 +150,7 @@ struct MaterialInspector: View {
             }
         }
         .formStyle(.grouped)
-        .disabled(workspace.source == nil || workspace.isBusy)
+        .disabled(workspace.isBusy)
         .onChange(of: workspace.settings) { workspace.markEdited() }
         .onChange(of: workspace.depthChoice) { workspace.markEdited() }
         .onChange(of: workspace.modelID) { workspace.invalidateModelDepth() }
@@ -163,7 +165,7 @@ struct FloatControl: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack { Text(title); Spacer(); Text(value, format: .number.precision(.fractionLength(2))).monospacedDigit().foregroundStyle(.secondary) }
-            Slider(value: $value, in: range).accessibilityLabel(title)
+            Slider(value: $value, in: range).labelsHidden().accessibilityLabel(title)
         }
     }
 }
@@ -180,10 +182,11 @@ struct DoubleControl: View {
                 Spacer()
                 TextField(title, value: $value, format: .number.precision(.fractionLength(2)))
                     .multilineTextAlignment(.trailing).frame(width: 68)
+                    .labelsHidden()
                     .accessibilityLabel(title)
                 if !suffix.isEmpty { Text(suffix).foregroundStyle(.secondary) }
             }
-            Slider(value: $value, in: range).accessibilityLabel(title)
+            Slider(value: $value, in: range).labelsHidden().accessibilityLabel(title)
         }
     }
 }

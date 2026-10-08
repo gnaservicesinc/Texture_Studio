@@ -51,7 +51,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $workspace.showModels) {
-            ModelLibraryView(models: models, adviser: adviser, runtime: workspace.pythonDepthService)
+            ModelLibraryView(models: models, adviser: adviser, runtime: workspace.pythonDepthService, workspace: workspace)
                 .frame(width: 660, height: 570)
         }
         .sheet(isPresented: $workspace.showModelRecovery) {
@@ -75,7 +75,7 @@ struct ContentView: View {
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("Large float maps can use several gigabytes of unified memory. Core ML stays at the model’s small input size. Export is refused if the available memory budget is too low.")
+            Text("Large float maps can use several gigabytes of unified memory. Inference capacity depends on the selected model. Export is refused if the available memory budget is too low.")
         }
         .onOpenURL { url in
             if url.pathExtension.lowercased() == "json" { workspace.openRecipe(url) }
@@ -83,11 +83,15 @@ struct ContentView: View {
         }
         .task {
             models.refresh()
+            workspace.reloadSelectedCheckpoint()
             if CommandLine.arguments.contains("--open-training") { openWindow(id: "model-training") }
             let args = CommandLine.arguments
             if let index = args.firstIndex(of: "--open"), index + 1 < args.count {
                 workspace.importPhoto(URL(fileURLWithPath: args[index + 1]))
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            workspace.reloadSelectedCheckpoint()
         }
     }
 }

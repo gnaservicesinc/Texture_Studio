@@ -105,6 +105,13 @@ struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
     var id: String { sha256 }
     var url: URL { URL(fileURLWithPath: checkpointPath) }
     var title: String { url.deletingLastPathComponent().lastPathComponent + " · " + url.lastPathComponent }
+    var trainingBaseLabel: String {
+        variant == "lora" ? "DINOv2 Base + encoder adapters + material head" : "DINOv2 Base + trained material head"
+    }
+    var modelSummary: String {
+        let map = target == "height" ? "Surface height / displacement" : target.capitalized
+        return "\(map) · \(trainingBaseLabel) · step \(step.formatted())"
+    }
 }
 
 struct MaterialTrainingOptions: Equatable, Sendable {
@@ -150,17 +157,30 @@ struct SelectedMaterialCheckpoint: Codable, Sendable {
     let workspacePath: String
     let modelDirectory: String
     let codeDirectory: String
+    var displayName: String? = nil
+    var modelSummary: String? = nil
+    var selectionIdentity: String { checkpointPath + "|" + sha256 }
+    var title: String {
+        displayName ?? (URL(fileURLWithPath: checkpointPath).deletingLastPathComponent().lastPathComponent
+            + " · " + URL(fileURLWithPath: checkpointPath).lastPathComponent)
+    }
+    static let changeNotification = Notification.Name("org.ipde.texture-studio.material-selection-changed")
     static var registryURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Texture Studio/selected-material-checkpoint.json")
     }
-    static func read() throws -> Self { try JSONDecoder().decode(Self.self, from: Data(contentsOf: registryURL)) }
+    static func read(from url: URL = registryURL) throws -> Self { try JSONDecoder().decode(Self.self, from: Data(contentsOf: url)) }
 
     func save(to url: URL = registryURL) throws {
         try Self.withRegistryLock(at: url) {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             try encoder.encode(self).write(to: url, options: .atomic)
+        }
+        if url.standardizedFileURL == Self.registryURL.standardizedFileURL {
+            let information = ["selectionID": UUID().uuidString]
+            NotificationCenter.default.post(name: Self.changeNotification, object: nil, userInfo: information)
+            DistributedNotificationCenter.default().postNotificationName(Self.changeNotification, object: nil, userInfo: information, deliverImmediately: true)
         }
     }
 

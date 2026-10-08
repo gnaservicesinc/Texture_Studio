@@ -10,6 +10,7 @@ final class WorkbenchStore {
     var checkpoints: [WorkbenchCheckpoint] = []
     var selectedCheckpointId: String?
     var comparisonCheckpointIds: Set<String> = []
+    var comparisonIncludesBase = true
     var training = MaterialTrainingOptions()
     var activity = ""
     var logText = ""
@@ -28,6 +29,10 @@ final class WorkbenchStore {
     var comparisonCandidates: [MapReviewCandidate] = []
     var uploadRepo = ""
     var uploadPublic = false
+    private(set) var uploadAccount: String?
+    private(set) var uploadAccountMessage = "Checking your saved Hugging Face login…"
+    private(set) var uploadAccountChecked = false
+    private(set) var lastUploadURL: URL?
     var workspacePath: String
     var pythonPath: String
     var modelDirectory: String
@@ -39,6 +44,7 @@ final class WorkbenchStore {
     @ObservationIgnored private let preferences: UserDefaults
     @ObservationIgnored private let workerOverride: (@MainActor ([String], String) async throws -> String)?
     @ObservationIgnored private let managedWorkspaceURL: URL
+    @ObservationIgnored private let selectedCheckpointRegistryURL: URL
     @ObservationIgnored private var hasRestored = false
 
     var samples: [WorkbenchSample] { dataset?.samples ?? [] }
@@ -54,9 +60,13 @@ final class WorkbenchStore {
     init(preferences defaults: UserDefaults = UserDefaults(suiteName: "org.ipde.material-tools")!,
          managedWorkspaceURL: URL? = nil,
          resources: MachineResources = .current,
+         selectedCheckpointRegistryURL: URL = SelectedMaterialCheckpoint.registryURL,
          workerOverride: (@MainActor ([String], String) async throws -> String)? = nil) {
         preferences = defaults
+        uploadRepo = defaults.string(forKey: "uploadRepository") ?? ""
+        uploadPublic = defaults.bool(forKey: "uploadPublic")
         self.resources = resources
+        self.selectedCheckpointRegistryURL = selectedCheckpointRegistryURL
         self.workerOverride = workerOverride
         self.managedWorkspaceURL = (managedWorkspaceURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Texture Studio/Material Workspace")).standardizedFileURL
@@ -98,6 +108,7 @@ final class WorkbenchStore {
         preferences.set(pythonPath, forKey: "python")
         preferences.set(modelDirectory, forKey: "encoder")
         preferences.set(codeDirectory, forKey: "encoderCode")
+        saveUploadConfiguration()
         if refreshSelectedRuntime {
             do {
                 try SelectedMaterialCheckpoint.refreshRuntime(pythonPath: pythonPath, workspacePath: workspacePath,
@@ -238,15 +249,38 @@ final class WorkbenchStore {
             error = "Choose a source photo or select a dataset crop first."; return
         }
         let selected = checkpoints.filter { comparisonCheckpointIds.contains($0.id) }
-        guard selected.count >= 2, Set(selected.map(\.target)).count == 1 else {
-            error = "Choose at least two checkpoints predicting the same map type."; return
+        let includeBase = comparisonIncludesBase
+        guard !selected.isEmpty, selected.count + (includeBase ? 1 : 0) >= 2, Set(selected.map(\.target)).count == 1 else {
+            error = "Select one checkpoint plus the untrained base, or two checkpoints, predicting the same map type."; return
         }
-        operation("Comparing \(selected.count) checkpoints at the source resolution…") {
+        let target = selected[0].target
+        let sampleLabel = sourceImageURL == nil ? selectedSampleId ?? image.lastPathComponent : image.lastPathComponent
+        let referenceMap = sourceImageURL == nil ? selectedSample?.maps[target] : nil
+        let targetLabel = target == "height" ? "Displacement" : target.capitalized
+        operation("Comparing \(selected.count + (includeBase ? 1 : 0)) models at the source resolution…") {
             let parent = try self.newOutputURL(prefix: "comparison")
             try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
             self.lastOutputURL = parent
             self.comparisonCandidates = []
-            var candidates: [MapReviewCandidate] = []
+            var candidates = [MapReviewCandidate(id: "source|" + image.path, label: "Source photo", mapURL: image, numeric: false,
+                sampleLabel: sampleLabel, detail: image.path, role: "source")]
+            if let referenceMap {
+                candidates.append(MapReviewCandidate(id: "target|" + referenceMap.path, label: "Reference \(targetLabel.lowercased())",
+                    mapURL: referenceMap.url, numeric: true, sampleLabel: sampleLabel,
+                    detail: "Dataset target · \(referenceMap.sourceBits.map { "\($0)-bit source" } ?? "original source precision") · linear data", role: "target"))
+            }
+            if includeBase, let reference = selected.first {
+                self.activity = "Creating the untrained DINOv2 material-head baseline"
+                let result: MaterialInferenceResponse = try WorkbenchProcess.decode(MaterialInferenceResponse.self, output: await self.worker([
+                    "infer", "--baseline", "--checkpoint", reference.checkpointPath, "--expected-sha256", reference.sha256,
+                    "--image", image.path, "--output", parent.appendingPathComponent("base-untrained").path, "--device", "mps"] + self.dependencyArguments))
+                guard result.checkpointSha256 == reference.sha256, let map = result.outputs[target] else {
+                    throw StudioError("The base comparison did not match the selected checkpoint architecture and map type.")
+                }
+                candidates.append(MapReviewCandidate(id: "base|" + reference.id, label: "DINOv2 Base · untrained \(targetLabel.lowercased()) head",
+                    mapURL: URL(fileURLWithPath: map.path), numeric: true, sampleLabel: sampleLabel,
+                    detail: "Before material training · \(target == "normal" ? "flat OpenGL normal" : "flat 0.5 output") · DINOv2 supplies features; it is not a pretrained depth estimator", role: "base"))
+            }
             for (i, checkpoint) in selected.enumerated() {
                 self.activity = "Running checkpoint \(i + 1)/\(selected.count): \(checkpoint.title)"
                 let child = parent.appendingPathComponent("candidate-\(i + 1)")
@@ -256,15 +290,22 @@ final class WorkbenchStore {
                 guard result.checkpointSha256 == checkpoint.sha256, let map = result.outputs[checkpoint.target] else {
                     throw StudioError("The comparison did not use the selected checkpoint or map type.")
                 }
-                candidates.append(MapReviewCandidate(id: checkpoint.id, label: "\(checkpoint.title) · step \(checkpoint.step)", mapURL: URL(fileURLWithPath: map.path), numeric: true))
+                candidates.append(MapReviewCandidate(id: checkpoint.id, label: "\(checkpoint.url.deletingLastPathComponent().lastPathComponent) · \(targetLabel)",
+                    mapURL: URL(fileURLWithPath: map.path), numeric: true, sampleLabel: sampleLabel,
+                    detail: "\(checkpoint.url.lastPathComponent) · step \(checkpoint.step.formatted()) · SHA256 \(checkpoint.sha256.prefix(12))", role: "checkpoint"))
             }
             self.comparisonCandidates = candidates
             self.lastOutputURL = parent
-            let manifest: [String: Any] = ["schema": "texture-studio-material-quality-review-v1", "comparison_target": selected[0].target,
-                "materials": [["material_id": image.lastPathComponent, "diffuse": image.path,
-                    "variants": zip(selected, candidates).map { checkpoint, candidate in
-                        ["name": candidate.label, selected[0].target: candidate.mapURL.path,
-                         "checkpoint": checkpoint.checkpointPath, "checkpoint_sha256": checkpoint.sha256] as [String: Any]
+            let manifest: [String: Any] = ["schema": "texture-studio-material-quality-review-v1", "comparison_target": target,
+                "materials": [["material_id": sampleLabel, "diffuse": image.path,
+                    "variants": candidates.filter { $0.role != "source" }.map { candidate in
+                        var item: [String: Any] = ["name": candidate.label, "candidate_id": candidate.id, target: candidate.mapURL.path,
+                            "sample_label": sampleLabel, "detail": candidate.detail ?? "", "role": candidate.role, "numeric": candidate.numeric]
+                        if let checkpoint = selected.first(where: { $0.id == candidate.id }) {
+                            item["checkpoint"] = checkpoint.checkpointPath; item["checkpoint_sha256"] = checkpoint.sha256; item["checkpoint_step"] = checkpoint.step
+                        }
+                        if candidate.role == "base" { item["baseline_untrained"] = true; item["base_encoder"] = "facebook/dinov2-base" }
+                        return item
                     }]]]
             try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
                 .write(to: parent.appendingPathComponent("review-manifest.json"), options: .atomic)
@@ -371,9 +412,10 @@ final class WorkbenchStore {
         guard let checkpoint = selectedCheckpoint, checkpoint.target == "height" else { error = "Select a height checkpoint for Texture Studio."; return }
         do {
             let record = SelectedMaterialCheckpoint(checkpointPath: checkpoint.checkpointPath, sha256: checkpoint.sha256, target: checkpoint.target,
-                pythonPath: pythonPath, workspacePath: workspacePath, modelDirectory: modelDirectory, codeDirectory: codeDirectory)
-            try record.save()
-            activity = "Selected for Texture Studio: \(checkpoint.title). Choose Material checkpoint in its depth controls."
+                pythonPath: pythonPath, workspacePath: workspacePath, modelDirectory: modelDirectory, codeDirectory: codeDirectory,
+                displayName: checkpoint.title, modelSummary: checkpoint.modelSummary)
+            try record.save(to: selectedCheckpointRegistryURL)
+            activity = "Active in Texture Studio: \(checkpoint.title). Its surface-height source switches automatically. Update Preview to see it on your photo."
         } catch { self.error = error.localizedDescription }
     }
     func exportSelectedCheckpoint() {
@@ -388,14 +430,57 @@ final class WorkbenchStore {
             }
         }
     }
+    var suggestedUploadRepo: String {
+        guard let uploadAccount, let checkpoint = selectedCheckpoint else { return "" }
+        return HuggingFaceUpload.repository(account: uploadAccount, checkpoint: checkpoint)
+    }
+    var effectiveUploadRepo: String {
+        let configured = uploadRepo.trimmingCharacters(in: .whitespacesAndNewlines)
+        return configured.isEmpty ? suggestedUploadRepo : configured
+    }
+    var canUploadSelectedCheckpoint: Bool {
+        selectedCheckpoint?.compatible == true && uploadAccount != nil && HuggingFaceUpload.validRepository(effectiveUploadRepo)
+    }
+    func saveUploadConfiguration() {
+        preferences.set(uploadRepo, forKey: "uploadRepository")
+        preferences.set(uploadPublic, forKey: "uploadPublic")
+    }
+    func refreshUploadAccount() {
+        guard !isBusy else { return }
+        operation("Checking saved Hugging Face account…") {
+            let result = try WorkbenchProcess.decode(HuggingFaceAccountResponse.self,
+                output: await self.worker(["hub-account"]))
+            self.uploadAccount = result.authenticated ? result.username : nil
+            self.uploadAccountChecked = true
+            self.uploadAccountMessage = result.message
+            self.activity = result.message
+        }
+    }
     func uploadPackage() {
-        guard let package = lastPackageURL else { error = "Export a model package before uploading it."; return }
-        guard uploadRepo.split(separator: "/").count == 2 else { error = "Enter a Hugging Face repository as owner/model-name."; return }
-        operation("Uploading the exported package to Hugging Face…") {
-            var args = ["upload", "--package", package.path, "--repo", self.uploadRepo]
-            if self.uploadPublic { args += ["--public"] }
-            _ = try await self.worker(args)
-            self.activity = "Upload completed: \(self.uploadRepo)"
+        guard let checkpoint = selectedCheckpoint else { error = "Select a model checkpoint to upload."; return }
+        let repository = effectiveUploadRepo, isPublic = uploadPublic
+        guard uploadAccount != nil else {
+            uploadAccountMessage = "Run hf auth login in Terminal, then click Refresh Account."
+            return
+        }
+        guard HuggingFaceUpload.validRepository(repository) else {
+            error = "Enter a Hugging Face repository as owner/model-name."; return
+        }
+        saveUploadConfiguration()
+        operation("Packaging and uploading \(checkpoint.title)…") {
+            let package = try self.newOutputURL(prefix: "upload-\(checkpoint.target)")
+            var args = ["upload-selected", "--checkpoint", checkpoint.checkpointPath,
+                "--expected-sha256", checkpoint.sha256, "--output", package.path, "--repo", repository]
+            if isPublic { args += ["--public"] }
+            let result = try WorkbenchProcess.decode(HuggingFaceUploadResponse.self, output: await self.worker(args))
+            guard result.sourceCheckpointSha256 == checkpoint.sha256, result.repository == repository,
+                  result.private == !isPublic else {
+                throw StudioError("The upload response did not match the selected checkpoint and destination. See the operation log.")
+            }
+            self.lastPackageURL = URL(fileURLWithPath: result.packagePath)
+            self.lastPackageCheckpointId = checkpoint.id
+            self.lastUploadURL = URL(string: result.commitUrl ?? result.url)
+            self.activity = "Uploaded \(checkpoint.title) to \(repository) (\(isPublic ? "public" : "private"))."
         }
     }
     var managedEncoderURL: URL {

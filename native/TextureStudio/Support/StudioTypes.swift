@@ -25,6 +25,15 @@ enum DepthChoice: String, Codable, CaseIterable, Identifiable {
     case materialCheckpoint = "Material checkpoint"
     var id: String { rawValue }
 
+    var title: String {
+        switch self {
+        case .photoDetail: "Flat surface"
+        case .attached: "Attached height / depth map"
+        case .model: "Camera-depth model (DA3 / custom)"
+        case .materialCheckpoint: "Trained material height (DINOv2)"
+        }
+    }
+
     init(from decoder: Decoder) throws {
         let value = try decoder.singleValueContainer().decode(String.self)
         switch value {
@@ -39,13 +48,36 @@ enum DepthChoice: String, Codable, CaseIterable, Identifiable {
 }
 
 struct TextureRecipe: Codable {
-    var version = 2
+    var version = 3
     var photoPath: String
     var depthPath: String?
     var depthChoice: DepthChoice
     var modelID: String
     var customInverseDepth: Bool
     var settings: TextureSettings
+    var materialCheckpoint: MaterialCheckpointIdentity? = nil
+}
+
+/// Recipes identify model data, never an executable or a Python environment.
+struct MaterialCheckpointIdentity: Codable, Sendable {
+    let checkpointPath: String
+    let sha256: String
+    let displayName: String?
+    let modelSummary: String?
+
+    init(_ checkpoint: SelectedMaterialCheckpoint) {
+        checkpointPath = checkpoint.checkpointPath
+        sha256 = checkpoint.sha256
+        displayName = checkpoint.displayName
+        modelSummary = checkpoint.modelSummary
+    }
+
+    func resolve(using runtime: SelectedMaterialCheckpoint) -> SelectedMaterialCheckpoint {
+        SelectedMaterialCheckpoint(checkpointPath: checkpointPath, sha256: sha256, target: "height",
+            pythonPath: runtime.pythonPath, workspacePath: runtime.workspacePath,
+            modelDirectory: runtime.modelDirectory, codeDirectory: runtime.codeDirectory,
+            displayName: displayName, modelSummary: modelSummary)
+    }
 }
 
 struct StudioNotice: Identifiable {
