@@ -9,9 +9,28 @@ import SwiftUI
     var displayContrast: Double = 1 { didSet { persistDisplay() } }
     var displayMidpoint: Double = 0.5 { didSet { persistDisplay() } }
     private let preferences: UserDefaults?
-    init(preferences: UserDefaults? = nil) {
+    @ObservationIgnored private var displayPreferenceKey: String?
+    @ObservationIgnored private var isRestoringDisplay = false
+    init(preferences: UserDefaults? = nil, preferenceKey: String? = nil) {
         self.preferences = preferences
-        if let stored = preferences?.dictionary(forKey: "reviewDisplay") {
+        displayPreferenceKey = preferenceKey
+        restoreDisplay()
+    }
+    func useDisplayContext(_ key: String?) {
+        guard key != displayPreferenceKey else { return }
+        displayPreferenceKey = key
+        restoreDisplay()
+    }
+    private func restoreDisplay() {
+        // Loading a context must not save intermediate defaults over either
+        // context. Unknown legacy global settings cannot identify which maps
+        // they belonged to, so leave them untouched and start new maps neutral.
+        isRestoringDisplay = true
+        defer { isRestoringDisplay = false }
+        zoom = 1; fitToView = false
+        displayContrast = 1; displayMidpoint = 0.5
+        normalizedCenter = CGPoint(x: 0.5, y: 0.5)
+        if let displayPreferenceKey, let stored = preferences?.dictionary(forKey: displayPreferenceKey) {
             if let value = stored["zoom"] as? Double, value.isFinite { zoom = min(32, max(0.02, value)) }
             fitToView = stored["fit"] as? Bool ?? false
             if let value = stored["contrast"] as? Double, value.isFinite { displayContrast = min(32, max(1, value)) }
@@ -19,8 +38,9 @@ import SwiftUI
         }
     }
     private func persistDisplay() {
+        guard !isRestoringDisplay, let displayPreferenceKey else { return }
         preferences?.set(["zoom": Double(zoom), "fit": fitToView,
-                          "contrast": displayContrast, "midpoint": displayMidpoint], forKey: "reviewDisplay")
+                          "contrast": displayContrast, "midpoint": displayMidpoint], forKey: displayPreferenceKey)
     }
     func setActualSize() { zoom = 1; fitToView = false }
     func fit() { normalizedCenter = CGPoint(x: 0.5, y: 0.5); fitToView = true }
@@ -56,7 +76,7 @@ struct MapInspectionView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
                 HStack {
-                    Text("\(loaded.pixelWidth) × \(loaded.pixelHeight) • full source resolution")
+                    Text("\(loaded.pixelWidth) × \(loaded.pixelHeight) · \(loaded.storageDescription)")
                     Spacer()
                     Text(numeric ? "8-bit display only • original precision retained • shared contrast" : "Color display • original file retained")
                 }.font(.caption).foregroundStyle(.secondary).padding(8)

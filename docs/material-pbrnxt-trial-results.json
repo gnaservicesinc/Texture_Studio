@@ -30,6 +30,87 @@
   "target_pixels_verified_equal_to_literal_source_crops": true,
   "source_crop_max_pixel_difference": 0.0,
   "source_bit_depth": 16,
-  "artifact_directory": "out/material-training/pbrnxt-native-1024-refine-02",
-  "source_crop_proof": "source-crop-proof.json"
+  "failed_artifacts_deleted": true,
+  "failed_artifact_directories": [
+    "out/material-training/pbrnxt-native-1024-fit-01",
+    "out/material-training/pbrnxt-native-1024-refine-02"
+  ],
+  "crop_proof": [
+    {
+      "sample": "broken_brick_wall_auto_001",
+      "source_pixels": [
+        2048,
+        2048
+      ],
+      "crop_xywh": [
+        848,
+        621,
+        1024,
+        1024
+      ],
+      "saved_shape": [
+        1024,
+        1024
+      ],
+      "exact_pixel_match": true,
+      "max_absolute_difference": 0.0
+    },
+    {
+      "sample": "broken_brick_wall_auto_002",
+      "source_pixels": [
+        2048,
+        2048
+      ],
+      "crop_xywh": [
+        848,
+        621,
+        1024,
+        1024
+      ],
+      "saved_shape": [
+        1024,
+        1024
+      ],
+      "exact_pixel_match": true,
+      "max_absolute_difference": 0.0
+    },
+    {
+      "sample": "white_stucco_02_auto_001",
+      "source_pixels": [
+        2048,
+        2048
+      ],
+      "crop_xywh": [
+        848,
+        621,
+        1024,
+        1024
+      ],
+      "saved_shape": [
+        1024,
+        1024
+      ],
+      "exact_pixel_match": true,
+      "max_absolute_difference": 0.0
+    },
+    {
+      "sample": "white_stucco_02_auto_002",
+      "source_pixels": [
+        2048,
+        2048
+      ],
+      "crop_xywh": [
+        848,
+        621,
+        1024,
+        1024
+      ],
+      "saved_shape": [
+        1024,
+        1024
+      ],
+      "exact_pixel_match": true,
+      "max_absolute_difference": 0.0
+    }
+  ]
 }

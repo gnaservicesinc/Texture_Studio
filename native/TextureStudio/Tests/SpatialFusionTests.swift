@@ -41,7 +41,7 @@ private enum SpatialFusionFixture {
     }
     static func source(reference: CIImage, companion: CIImage) -> TextureSource {
         TextureSource(url:URL(fileURLWithPath:"/tmp/spatial-surface.heic"),orientedImage:reference,
-            embeddedDepth:nil,camera:CameraMetadata(),pixelWidth:side,pixelHeight:side,supportingViews:[companion])
+            camera:CameraMetadata(),pixelWidth:side,pixelHeight:side,supportingViews:[companion])
     }
     static func pixels(_ image: CIImage) -> [Float] {
         let space = CGColorSpace(name:CGColorSpace.extendedLinearSRGB)!

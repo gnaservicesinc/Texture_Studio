@@ -251,6 +251,36 @@ def test_geometric_augmentation_only_reorders_real_target_codes():
     assert torch.equal(augmented.flatten().sort().values, expected.flatten().sort().values)
 
 
+def test_whole_rectangular_maps_retain_every_real_pixel_without_padding_or_resizing():
+    codes = np.arange(512 * 1024, dtype=np.uint32).reshape(512, 1024).astype(np.uint16)
+    height = torch.from_numpy(data.numeric_height(codes)[None, None])
+    rgb = height.repeat(1, 3, 1, 1)
+    full_rgb, full_height, rectangle = data.crop_pair(rgb, height, 1024, random.Random(7), whole_maps=True)
+    assert rectangle == [0, 0, 1024, 512]
+    assert torch.equal(full_rgb, rgb) and torch.equal(full_height, height)
+    shapes = set()
+    for seed in range(8):
+        transformed_rgb, transformed_height, source_rectangle = data.crop_pair(
+            rgb, height, 1024, random.Random(seed), augment=True, whole_maps=True)
+        assert source_rectangle == rectangle
+        assert transformed_rgb.shape[-2:] == transformed_height.shape[-2:]
+        assert torch.equal(torch.sort(transformed_height.flatten()).values, torch.sort(height.flatten()).values)
+        shapes.add(tuple(transformed_height.shape[-2:]))
+    assert shapes == {(512, 1024), (1024, 512)}
+
+
+@pytest.mark.parametrize("dimensions,size,message", [
+    ((512, 1024), 512, "maximum edge"),
+    ((128, 1024), 1024, "at least256"),
+    ((480, 1024), 1024, "divisible by64"),
+])
+def test_whole_maps_reject_unusable_native_dimensions_without_repair(dimensions, size, message):
+    height = torch.zeros(1, 1, *dimensions)
+    rgb = height.repeat(1, 3, 1, 1)
+    with pytest.raises(ValueError, match=message):
+        data.crop_pair(rgb, height, size, random.Random(7), whole_maps=True)
+
+
 def test_relief_loss_penalizes_missing_fine_detail_and_inversion_with_gradients():
     yy, xx = torch.meshgrid(torch.arange(64), torch.arange(64), indexing="ij")
     grain = ((xx + yy) % 2).to(torch.float32) * .08 - .04

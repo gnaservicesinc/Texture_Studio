@@ -57,22 +57,75 @@ final class MapInspectionTests: XCTestCase {
         let name = "MapInspectionPreferences-\(UUID().uuidString)"
         let preferences = try XCTUnwrap(UserDefaults(suiteName: name))
         defer { preferences.removePersistentDomain(forName: name) }
-        let viewport = InspectionViewport(preferences: preferences)
+        let context = "reviewDisplay.exact-comparison-fixture"
+        let viewport = InspectionViewport(preferences: preferences, preferenceKey: context)
         viewport.setZoom(2)
         viewport.displayContrast = 12
         viewport.displayMidpoint = 0.42
-        let reopened = InspectionViewport(preferences: preferences)
+        let reopened = InspectionViewport(preferences: preferences, preferenceKey: context)
         XCTAssertEqual(reopened.zoom, 2)
         XCTAssertFalse(reopened.fitToView)
         XCTAssertEqual(reopened.displayContrast, 12)
         XCTAssertEqual(reopened.displayMidpoint, 0.42)
         reopened.fit()
-        XCTAssertTrue(InspectionViewport(preferences: preferences).fitToView)
-        preferences.set(["zoom": -20, "contrast": 99, "midpoint": -1], forKey: "reviewDisplay")
-        let clamped = InspectionViewport(preferences: preferences)
+        XCTAssertTrue(InspectionViewport(preferences: preferences, preferenceKey: context).fitToView)
+        preferences.set(["zoom": -20, "contrast": 99, "midpoint": -1], forKey: context)
+        let clamped = InspectionViewport(preferences: preferences, preferenceKey: context)
         XCTAssertEqual(clamped.zoom, 0.02)
         XCTAssertEqual(clamped.displayContrast, 32)
         XCTAssertEqual(clamped.displayMidpoint, 0)
+    }
+
+    @MainActor func testDisplaySettingsStayWithExactComparisonAndNewFullSourceStartsNeutral() throws {
+        let suite = "scoped-review-display-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let legacy: [String: Any] = ["zoom": 8.0, "fit": true, "contrast": 32.0, "midpoint": 0.9]
+        preferences.set(legacy, forKey: "reviewDisplay")
+        let reference = MapReviewCandidate(id: "real-reference", label: "Source displacement · reference",
+            mapURL: URL(fileURLWithPath: "/crop/reference.exr"), numeric: true, role: "target",
+            sourceIdentity: MapReviewSourceIdentity(path: "/original/source-displacement-4k.png"))
+        let first = [reference, MapReviewCandidate(id: "checkpoint-first-sha", label: "First model",
+            mapURL: URL(fileURLWithPath: "/run-1/height.exr"), numeric: true, role: "checkpoint")]
+        let second = [reference, MapReviewCandidate(id: "checkpoint-second-sha", label: "Second model",
+            mapURL: URL(fileURLWithPath: "/run-2/height.exr"), numeric: true, role: "checkpoint")]
+        let firstKey = ReviewWorkbenchView.displayPreferenceKey(first)
+        let secondKey = ReviewWorkbenchView.displayPreferenceKey(second)
+        let fullKey = ReviewWorkbenchView.displayPreferenceKey([try XCTUnwrap(reference.fullSourceReference)])
+        XCTAssertNotEqual(firstKey, secondKey)
+        XCTAssertNotEqual(firstKey, fullKey)
+        XCTAssertEqual(firstKey, ReviewWorkbenchView.displayPreferenceKey(Array(first.reversed())))
+        let viewport = InspectionViewport(preferences: preferences, preferenceKey: firstKey)
+        XCTAssertEqual(viewport.displayContrast, 1, "Unbound global contrast must not burn a new reference display")
+        XCTAssertEqual(viewport.displayMidpoint, 0.5)
+        XCTAssertEqual(viewport.zoom, 1)
+        XCTAssertFalse(viewport.fitToView)
+        viewport.displayContrast = 32; viewport.displayMidpoint = 0.73; viewport.setZoom(2)
+        let firstSaved = try XCTUnwrap(preferences.dictionary(forKey: firstKey)) as NSDictionary
+        let reopened = InspectionViewport(preferences: preferences, preferenceKey: firstKey)
+        XCTAssertEqual(reopened.displayContrast, 32)
+        XCTAssertEqual(reopened.displayMidpoint, 0.73)
+        XCTAssertEqual(reopened.zoom, 2)
+        let full = InspectionViewport(preferences: preferences, preferenceKey: fullKey)
+        XCTAssertEqual(full.displayContrast, 1)
+        XCTAssertEqual(full.displayMidpoint, 0.5)
+        XCTAssertNil(preferences.dictionary(forKey: fullKey), "Merely loading defaults must not write a context")
+        viewport.useDisplayContext(secondKey)
+        XCTAssertEqual(viewport.displayContrast, 1)
+        XCTAssertEqual(viewport.displayMidpoint, 0.5)
+        XCTAssertEqual(viewport.zoom, 1)
+        XCTAssertTrue(firstSaved.isEqual(try XCTUnwrap(preferences.dictionary(forKey: firstKey)) as NSDictionary))
+        XCTAssertNil(preferences.dictionary(forKey: secondKey))
+        viewport.displayContrast = 8; viewport.displayMidpoint = 0.42
+        viewport.useDisplayContext(firstKey)
+        XCTAssertEqual(viewport.displayContrast, 32)
+        XCTAssertEqual(viewport.displayMidpoint, 0.73)
+        XCTAssertEqual(viewport.zoom, 2)
+        viewport.useDisplayContext(secondKey)
+        XCTAssertEqual(viewport.displayContrast, 8)
+        XCTAssertEqual(viewport.displayMidpoint, 0.42)
+        XCTAssertTrue((legacy as NSDictionary).isEqual(try XCTUnwrap(preferences.dictionary(forKey: "reviewDisplay")) as NSDictionary),
+                      "Legacy global preferences are preserved without assigning them to unrelated images")
     }
 
     @MainActor func testVisibleMapPreferencesAreScopedToExactCandidateIdentitiesAndFiles() {
@@ -101,6 +154,8 @@ final class MapInspectionTests: XCTestCase {
         let loaded = try await ReviewImageLoader.shared.load(source, numeric: true)
         XCTAssertEqual(loaded.pixelWidth, width)
         XCTAssertEqual(loaded.pixelHeight, height)
+        XCTAssertEqual(loaded.storageDescription, "16-bit integer PNG")
+        XCTAssertEqual(loaded.image.bitsPerComponent, 8, "Display precision must not be confused with the stored source precision")
         let copy = directory.appendingPathComponent("copy.png")
         try ReviewImageLoader.exportOriginal(source, expectedSHA256: loaded.sourceSHA256, to: copy)
         XCTAssertEqual(try Data(contentsOf: copy), original)
@@ -123,6 +178,7 @@ final class MapInspectionTests: XCTestCase {
             expectedSHA256: loaded.sourceSHA256)
         XCTAssertEqual(loaded.pixelWidth, 2)
         XCTAssertEqual(loaded.pixelHeight, 1)
+        XCTAssertEqual(loaded.storageDescription, "32-bit float EXR")
         XCTAssertEqual(contrast.sourceSHA256, loaded.sourceSHA256)
         let codes = rgbaCodes(contrast.image)
         XCTAssertGreaterThan(Int(codes[4]) - Int(codes[0]), 5, "Sub-8-bit detail must be amplified before display conversion")
@@ -166,6 +222,22 @@ final class MapInspectionTests: XCTestCase {
         XCTAssertEqual(ReviewWorkbenchView.initialCandidates(candidates).map(\.label), ["target", "trained_2k"])
         XCTAssertEqual(ReviewWorkbenchView.initialCandidates([candidates[0], candidates[1]]).map(\.label), ["target"])
         XCTAssertEqual(ReviewWorkbenchView.initialCandidates([candidates[2], candidates[3]]).map(\.label), ["starting_head", "trained_2k"])
+    }
+
+    @MainActor func testSavedVisibilityCannotHideTheRealSourceReferenceOrReplaceItWithABasePrediction() {
+        let candidates = [
+            MapReviewCandidate(id: "photo", label: "Source photo", mapURL: URL(fileURLWithPath: "/source.png"), numeric: false, role: "source"),
+            MapReviewCandidate(id: "reference", label: "Source displacement · reference", mapURL: URL(fileURLWithPath: "/reference.exr"), numeric: true, role: "target"),
+            MapReviewCandidate(id: "base", label: "PBRnxt base", mapURL: URL(fileURLWithPath: "/base.exr"), numeric: true, role: "base"),
+            MapReviewCandidate(id: "refined", label: "PBRnxt refined", mapURL: URL(fileURLWithPath: "/refined.exr"), numeric: true, role: "checkpoint")]
+        XCTAssertEqual(ReviewWorkbenchView.resolvedCandidates(candidates, visibleIDs: ["base", "refined"]).map(\.id),
+                       ["reference", "base", "refined"])
+        XCTAssertEqual(ReviewWorkbenchView.resolvedCandidates(candidates, visibleIDs: ["refined"]).map(\.id), ["reference", "refined"])
+        XCTAssertEqual(ReviewWorkbenchView.resolvedCandidates(candidates, visibleIDs: []).map(\.id), ["reference", "base", "refined"])
+        XCTAssertEqual(ReviewWorkbenchView.resolvedCandidates([candidates[2], candidates[3]], visibleIDs: []).map(\.id), ["base", "refined"],
+                       "A review without a recorded reference must not relabel a prediction as one")
+        XCTAssertFalse(MapReviewCandidate(label: "target", mapURL: URL(fileURLWithPath: "/prediction.exr"), numeric: true,
+            role: "model").isReference, "An explicit prediction role overrides a misleading name")
     }
 
     func testPhotoDisplayHonorsWideGamutProfileWhileNumericCodesStayUnmanaged() async throws {

@@ -2,7 +2,6 @@ import Foundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import ImageIO
-import AVFoundation
 import Metal
 import Darwin
 
@@ -28,6 +27,18 @@ actor TextureEngine {
             .cacheIntermediates: false, .name: "Texture Studio float data"]
         self.context = metal.map { CIContext(mtlDevice: $0, options: options) } ?? CIContext(options: options)
         self.dataContext = metal.map { CIContext(mtlDevice: $0, options: dataOptions) } ?? CIContext(options: dataOptions)
+    }
+
+    /// Photo auxiliaries can help decode colour and identify masks. Apple's
+    /// portrait depth/disparity describes object placement, not material relief,
+    /// so Studio neither decodes it nor advertises it as an available map.
+    static var materialPhotoAuxiliaryTypes: [(CFString, String)] {
+        [(kCGImageAuxiliaryDataTypeHDRGainMap, "HDR gain map"),
+         (kCGImageAuxiliaryDataTypeISOGainMap, "ISO HDR gain map"),
+         (kCGImageAuxiliaryDataTypePortraitEffectsMatte, "Portrait matte"),
+         (kCGImageAuxiliaryDataTypeSemanticSegmentationHairMatte, "Hair matte"),
+         (kCGImageAuxiliaryDataTypeSemanticSegmentationSkinMatte, "Skin matte"),
+         (kCGImageAuxiliaryDataTypeSemanticSegmentationSkyMatte, "Sky matte")]
     }
 
     func importPhoto(_ url: URL) throws -> TextureSource {
@@ -58,24 +69,9 @@ actor TextureEngine {
         metadata.orientation = (properties[kCGImagePropertyOrientation as String] as? NSNumber)?.uint32Value ?? 1
         metadata.sourceBitDepth = (properties[kCGImagePropertyDepth as String] as? NSNumber)?.intValue
         metadata.colorProfile = properties[kCGImagePropertyProfileName as String] as? String
-        let types: [(CFString, String)] = [(kCGImageAuxiliaryDataTypeDepth,"Depth"),
-            (kCGImageAuxiliaryDataTypeDisparity,"Disparity"), (kCGImageAuxiliaryDataTypeHDRGainMap,"HDR gain map"),
-            (kCGImageAuxiliaryDataTypeISOGainMap,"ISO HDR gain map"),
-            (kCGImageAuxiliaryDataTypePortraitEffectsMatte,"Portrait matte"),
-            (kCGImageAuxiliaryDataTypeSemanticSegmentationHairMatte,"Hair matte"),
-            (kCGImageAuxiliaryDataTypeSemanticSegmentationSkinMatte,"Skin matte"),
-            (kCGImageAuxiliaryDataTypeSemanticSegmentationSkyMatte,"Sky matte")]
-        var embedded: CIImage?
-        for (type, label) in types {
-            guard let dictionary = CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, primaryIndex, type) as? [AnyHashable: Any] else { continue }
+        for (type, label) in Self.materialPhotoAuxiliaryTypes {
+            guard CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, primaryIndex, type) != nil else { continue }
             metadata.auxiliaryTypes.append(label)
-            if embedded == nil && (type == kCGImageAuxiliaryDataTypeDepth || type == kCGImageAuxiliaryDataTypeDisparity),
-               let depth = try? AVDepthData(fromDictionaryRepresentation: dictionary) {
-                let oriented = depth.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
-                    .applyingExifOrientation(CGImagePropertyOrientation(rawValue: metadata.orientation) ?? .up)
-                metadata.hasCalibration = oriented.cameraCalibrationData != nil
-                embedded = CIImage(cvPixelBuffer: oriented.depthDataMap, options: [.colorSpace:NSNull()])
-            }
         }
         let zero = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
         var hdrImage: CIImage?
@@ -93,7 +89,7 @@ actor TextureEngine {
             acceptedIndices.append(index)
             return view.transformed(by:CGAffineTransform(translationX:-view.extent.minX,y:-view.extent.minY))
         }
-        return TextureSource(url: url, orientedImage: zero, embeddedDepth: embedded,
+        return TextureSource(url: url, orientedImage: zero,
                              camera: metadata, pixelWidth: Int(width), pixelHeight: Int(height),
                              supportingViews:supporting,primaryImageIndex:primaryIndex,supportingImageIndices:acceptedIndices,
                              hdrImage:hdrImage)
@@ -148,7 +144,7 @@ actor TextureEngine {
         if settings.useSupportingViews, !source.supportingViews.isEmpty {
             var evidenceSource = source
             if usesHDR {
-                evidenceSource = TextureSource(url:source.url,orientedImage:processingPhoto,embeddedDepth:source.embeddedDepth,
+                evidenceSource = TextureSource(url:source.url,orientedImage:processingPhoto,
                     camera:source.camera,pixelWidth:source.pixelWidth,pixelHeight:source.pixelHeight,
                     supportingViews:source.supportingViews,primaryImageIndex:source.primaryImageIndex,
                     supportingImageIndices:source.supportingImageIndices,hdrImage:source.hdrImage)
@@ -187,8 +183,6 @@ actor TextureEngine {
                         "Maps are not automatically seamless. Inspect edges before using a repeating material."]
         warnings.append(contentsOf:evidence.warnings)
         if usesHDR { warnings.append("HDR detail is decoded at full precision before cropping, with midtone exposure matched to the base photo and a smooth highlight rolloff for 8-bit sRGB PNG. Source data stays untouched.") }
-        // Portrait depth is useful metadata, but its coarse object edges are unsuitable
-        // for texture relief. The material pipeline never selects it, including old recipes.
         var baseHeight = CIImage(color:CIColor(red:0.5,green:0.5,blue:0.5)).cropped(to:output)
         if let selected = attachedDepth {
             let aligned = try lensCorrect(resize(selected.image,to:extent.size),amount:settings.lensDistortion,kernels:kernels)

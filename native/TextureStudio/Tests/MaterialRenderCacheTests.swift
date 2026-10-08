@@ -5,12 +5,11 @@ import XCTest
 
 @MainActor
 final class MaterialRenderCacheTests: XCTestCase {
-    func testRenderKeyIgnoresStoragePrecisionAndUnusedPortraitDepthOnly() {
+    func testRenderKeyIgnoresStoragePrecisionOnly() {
         let settings = TextureSettings()
         let original = MaterialRenderKey(sourceIdentity: "photo-a", depthIdentity: "checkpoint-a", settings: settings)
         var storage = settings
         storage.exrPrecision = .float16
-        storage.useEmbeddedDepth = true
         XCTAssertEqual(original, MaterialRenderKey(sourceIdentity: "photo-a", depthIdentity: "checkpoint-a", settings: storage))
         for updated in [changed(settings, { $0.outputSize = 2048 }), changed(settings, { $0.lightingStrength = 0.3 }),
                         changed(settings, { $0.rotationX = 3 }), changed(settings, { $0.heightInvert = true }),

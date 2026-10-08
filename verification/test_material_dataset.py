@@ -9,6 +9,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 import zlib
@@ -369,6 +370,64 @@ class MaterialPreparationTests(unittest.TestCase):
         with mock.patch.object(MODULE, "prepare_material", side_effect=ValueError("Injected crop failure")):
             self.assertEqual(MODULE.main(command), 1)
         self.assertEqual(index.read_bytes(), original)
+
+    def test_zero_validation_fraction_preserves_whole_maps_for_fitting_pilot(self):
+        folder, maps = self.material(shape=(2, 2))
+        originals = {path: path.read_bytes() for path in folder.iterdir() if path.is_file()}
+        command = ["prepare", "--sources", str(self.sources), "--output", str(self.output),
+                   "--crop-size", "2", "--validation-fraction", "0", "--approve"]
+        self.assertEqual(MODULE.main(command), 0)
+        index = json.loads((self.output / "dataset.json").read_text())
+        self.assertEqual(index["validation_fraction"], 0)
+        self.assertEqual(len(index["samples"]), 1)
+        sample = index["samples"][0]
+        self.assertEqual(sample["split"], "train")
+        metadata = json.loads((self.output / sample["path"] / "sample.json").read_text())
+        self.assertEqual(metadata["crop_rectangle_top_left_xywh"], [0, 0, 2, 2])
+        actual, header = MODULE.read_png(self.output / sample["path"] / "displacement.png")
+        np.testing.assert_array_equal(actual, maps["disp"])
+        self.assertEqual(header["sample_bits"], 16)
+        self.assertEqual(originals, {path: path.read_bytes() for path in originals})
+        self.assertEqual(MODULE.main(["verify", "--dataset", str(self.output), "--check-sources"]), 0)
+
+    def test_whole_map_preparation_preserves_rectangular_boundaries_and_all_16bit_codes(self):
+        folder, maps = self.material(shape=(2, 4))
+        originals = {path: path.read_bytes() for path in folder.iterdir() if path.is_file()}
+        command = ["prepare", "--sources", str(self.sources), "--output", str(self.output),
+                   "--crop-size", "4", "--whole-maps", "--validation-fraction", "0", "--approve"]
+        self.assertEqual(MODULE.main(command), 0)
+        index = json.loads((self.output / "dataset.json").read_text())
+        self.assertTrue(index["whole_source_maps"])
+        self.assertEqual(len(index["samples"]), 1)
+        sample = self.output / index["samples"][0]["path"]
+        metadata = json.loads((sample / "sample.json").read_text())
+        self.assertEqual(metadata["sample_pixel_dimensions"], [4, 2])
+        self.assertEqual(metadata["crop_rectangle_top_left_xywh"], [0, 0, 4, 2])
+        for role, source_key in (("input", "diff"), ("height", "disp"), ("normal", "nor_gl"), ("roughness", "rough")):
+            actual, header = MODULE.read_png(sample / metadata["maps"][role])
+            np.testing.assert_array_equal(actual, maps[source_key])
+            self.assertEqual(header["sample_bits"], 16)
+        self.assertEqual(MODULE.verify_sample(sample, check_sources=True), [])
+        self.assertEqual(originals, {path: path.read_bytes() for path in originals})
+        before = (self.output / "dataset.json").read_bytes()
+        self.assertEqual(MODULE.main([arg for arg in command if arg != "--whole-maps"]), 1)
+        self.assertEqual((self.output / "dataset.json").read_bytes(), before)
+
+    def test_parallel_material_preparation_keeps_exact_pairs_and_deterministic_index(self):
+        self.material("First", "first", shape=(2, 2))
+        self.material("Second", "second", shape=(2, 2))
+        barrier = threading.Barrier(2)
+        original = MODULE.prepare_material
+        def synchronized(*args):
+            barrier.wait(timeout=5)
+            return original(*args)
+        with mock.patch.object(MODULE, "source_cache_budget", return_value=1024**3), mock.patch.object(MODULE.os, "cpu_count", return_value=4), mock.patch.object(MODULE, "prepare_material", side_effect=synchronized):
+            self.assertEqual(MODULE.main(["prepare", "--sources", str(self.sources), "--output", str(self.output),
+                                         "--crop-size", "2", "--workers", "2", "--validation-fraction", "0"]), 0)
+        index = json.loads((self.output / "dataset.json").read_text())
+        self.assertEqual([row["material_id"] for row in index["samples"]], ["first", "second"])
+        for row in index["samples"]:
+            self.assertEqual(MODULE.verify_sample(self.output / row["path"], check_sources=True), [])
 
     def test_dataset_index_path_escape_is_rejected_before_reading_sample(self):
         self.output.mkdir()

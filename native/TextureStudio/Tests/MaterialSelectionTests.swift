@@ -123,7 +123,7 @@ final class MaterialSelectionTests: XCTestCase {
     func testProductionCheckpointServiceRejectsRetiredModelBeforeLaunchingProcess() async throws {
         let source = TextureSource(url: URL(fileURLWithPath: "/fixture.png"),
             orientedImage: CIImage(color: .gray).cropped(to: CGRect(x: 0, y: 0, width: 32, height: 32)),
-            embeddedDepth: nil, camera: CameraMetadata(), pixelWidth: 32, pixelHeight: 32)
+            camera: CameraMetadata(), pixelWidth: 32, pixelHeight: 32)
         do {
             _ = try await MaterialCheckpointService().predict(source: source,
                 checkpoint: selection(path: "/nonexistent/model.pt", hash: "legacy"), size: 1024)
@@ -143,7 +143,7 @@ final class MaterialSelectionTests: XCTestCase {
             let workspace = TextureWorkspace(checkpointRegistryURL: root.appendingPathComponent("missing.json"))
             workspace.source = TextureSource(url: root.appendingPathComponent("photo.png"),
                 orientedImage: CIImage(color: .gray).cropped(to: CGRect(x: 0, y: 0, width: 32, height: 32)),
-                embeddedDepth: nil, camera: CameraMetadata(), pixelWidth: 32, pixelHeight: 32)
+                camera: CameraMetadata(), pixelWidth: 32, pixelHeight: 32)
             workspace.attachedDepth = try TextureDepth(width: 32, height: 32,
                 values: [Float](repeating: amplitude, count: 32 * 32),
                 sourceLabel: "User numeric height", interpretation: .surfaceHeight)

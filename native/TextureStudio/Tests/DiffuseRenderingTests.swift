@@ -15,7 +15,7 @@ final class DiffuseRenderingTests: XCTestCase {
         let base: [Float] = [0.28, 0.18, 0.10, 1]
         let boosted: [Float] = [base[0] * 8, base[1] * 8, base[2] * 8, 1]
         let source = TextureSource(url: URL(fileURLWithPath: "/tmp/uniform-hdr-surface.png"),
-            orientedImage: constant(base, side: side), embeddedDepth: nil,
+            orientedImage: constant(base, side: side),
             camera: CameraMetadata(), pixelWidth: side, pixelHeight: side,
             hdrImage: constant(boosted, side: side))
         let engine = TextureEngine()

@@ -326,6 +326,7 @@ final class WorkbenchStore {
         let target = selected[0].target
         let sampleLabel = sourceImageURL == nil ? selectedSampleId ?? image.lastPathComponent : image.lastPathComponent
         let referenceMap = sourceImageURL == nil ? selectedSample?.maps[target] : nil
+        let referenceSampleID = sourceImageURL == nil ? selectedSampleId : nil
         let targetLabel = target == "height" ? "Displacement" : target.capitalized
         operation("Comparing \(selected.count + (includeBase ? 1 : 0)) models at the source resolution…") {
             let parent = try self.newOutputURL(prefix: "comparison")
@@ -336,10 +337,13 @@ final class WorkbenchStore {
                 sampleLabel: sampleLabel, detail: image.path, role: "source",
                 modelIdentity: MapReviewModelIdentity(mapType: "input"))]
             if let referenceMap {
-                candidates.append(MapReviewCandidate(id: "target|" + referenceMap.path, label: "Reference \(targetLabel.lowercased())",
+                let sourceIdentity = await Task.detached {
+                    MapReviewSourceIdentity.fromDatasetMap(referenceMap, target: target, sampleID: referenceSampleID)
+                }.value
+                candidates.append(MapReviewCandidate(id: "target|" + referenceMap.path, label: "Source \(targetLabel.lowercased()) · reference",
                     mapURL: referenceMap.url, numeric: true, sampleLabel: sampleLabel,
-                    detail: "Dataset target · \(referenceMap.sourceBits.map { "\($0)-bit source" } ?? "original source precision") · linear data", role: "target",
-                    modelIdentity: MapReviewModelIdentity(mapType: target, modelName: "Dataset reference")))
+                    detail: (["Real source map · not a model output"] + sourceIdentity.recordedDetails).joined(separator: " · "), role: "target",
+                    modelIdentity: MapReviewModelIdentity(mapType: target, modelName: "Dataset reference"), sourceIdentity: sourceIdentity))
             }
             if includeBase, let reference = selected.first {
                 self.activity = "Creating the untrained DINOv2 material-head baseline"
@@ -351,7 +355,7 @@ final class WorkbenchStore {
                 }
                 candidates.append(MapReviewCandidate(id: "base|" + reference.id, label: "DINOv2 Base · untrained \(targetLabel.lowercased()) head",
                     mapURL: URL(fileURLWithPath: map.path), numeric: true, sampleLabel: sampleLabel,
-                    detail: "Before material training · \(target == "normal" ? "flat OpenGL normal" : "flat 0.5 output") · DINOv2 supplies features; it is not a pretrained depth estimator", role: "base",
+                    detail: "Base model prediction · not the real source map · DINOv2 Base + untrained material head · Before material training · \(target == "normal" ? "flat OpenGL normal" : "flat 0.5 output") · DINOv2 supplies features; it is not a pretrained depth estimator", role: "base",
                     modelIdentity: MapReviewModelIdentity(architecture: "DINOv2 Base + untrained material head",
                         mapType: target, modelName: "Untrained material-head baseline")))
             }
@@ -366,7 +370,7 @@ final class WorkbenchStore {
                 }
                 candidates.append(MapReviewCandidate(id: checkpoint.id, label: "\(checkpoint.url.deletingLastPathComponent().lastPathComponent) · \(targetLabel)",
                     mapURL: URL(fileURLWithPath: map.path), numeric: true, sampleLabel: sampleLabel,
-                    detail: "\(checkpoint.trainingBaseLabel) · \(checkpoint.url.lastPathComponent) · step \(checkpoint.step.formatted()) · SHA256 \(checkpoint.sha256.prefix(12))", role: "checkpoint",
+                    detail: "Trained model prediction · not the real source map · \(checkpoint.trainingBaseLabel) · \(checkpoint.url.lastPathComponent) · step \(checkpoint.step.formatted()) · SHA256 \(checkpoint.sha256.prefix(12))", role: "checkpoint",
                     modelIdentity: MapReviewModelIdentity(checkpointPath: checkpoint.checkpointPath,
                         checkpointSHA256: checkpoint.sha256, checkpointStep: checkpoint.step,
                         architecture: checkpoint.trainingBaseLabel, mapType: checkpoint.target)))
@@ -379,6 +383,9 @@ final class WorkbenchStore {
                         var item: [String: Any] = ["name": candidate.label, "candidate_id": candidate.id, target: candidate.mapURL.path,
                             "sample_label": sampleLabel, "detail": candidate.detail ?? "", "role": candidate.role, "numeric": candidate.numeric]
                         if let identity = candidate.modelIdentity {
+                            item.merge(identity.manifestFields) { _, recorded in recorded }
+                        }
+                        if let identity = candidate.sourceIdentity {
                             item.merge(identity.manifestFields) { _, recorded in recorded }
                         }
                         if candidate.role == "base" { item["baseline_untrained"] = true; item["base_encoder"] = "facebook/dinov2-base" }

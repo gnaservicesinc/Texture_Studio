@@ -101,7 +101,7 @@ struct MaterialInspector: View {
                         Text("DA3-GIANT-1.1 runs locally through PyTorch/MPS. Larger inference uses more memory and time; final map size is independent. Weights are non-commercial.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    Text("Model depth is converted to relative surface height. Embedded portrait depth never supplies displacement detail.")
+                    Text("Camera-depth models estimate scene structure. Inspect their fine surface detail before using the result for material displacement.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if workspace.depthChoice == .photoDetail {

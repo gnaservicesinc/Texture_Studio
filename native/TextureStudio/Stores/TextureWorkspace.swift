@@ -93,6 +93,9 @@ final class TextureWorkspace {
             savePreferences()
         }
         selectionObserver = MaterialSelectionObserver { [weak self] in self?.reloadSelectedCheckpoint(activate: true) }
+        // Persist decoded migrations as well as user edits. Retired portrait
+        // settings must not reappear in preferences on the next launch.
+        if preferences != nil { savePreferences() }
     }
 
     private func savePreferences() {
@@ -274,8 +277,7 @@ final class TextureWorkspace {
         guard let source else { throw StudioError("Import a surface photo to generate its material.") }
         let depth = try await selectedDepth(models: models)
         guard let key = currentRenderKey() else { throw StudioError("Choose a height source before generating the material.") }
-        var renderSettings = settings
-        renderSettings.useEmbeddedDepth = false
+        let renderSettings = settings
         activity = "Generating \(renderSettings.outputSize) × \(renderSettings.outputSize) maps…"
         let material: MaterialResult
         if let materialProcessor { material = try await materialProcessor(source, renderSettings, depth) }
@@ -429,8 +431,7 @@ final class TextureWorkspace {
             defer { try? FileManager.default.removeItem(at: staging) }
             let cache = try await self.ensureMaterial(models: models)
             try await self.renderSelectedPreview()
-            var exportSettings = self.settings
-            exportSettings.useEmbeddedDepth = false
+            let exportSettings = self.settings
             self.activity = "Writing PNG, linear EXR maps and material metadata…"
             try await cache.export(to: staging, precision: self.settings.exrPrecision, settings: exportSettings, engine: self.engine)
             try BlenderMaterialScript.write(to: staging, settings: exportSettings)
@@ -521,7 +522,7 @@ final class TextureWorkspace {
             let source = try await self.engine.importPhoto(photoURL)
             var depth: TextureDepth?
             var depthURL: URL?
-            if let path = recipe.depthPath {
+            if (recipe.depthChoice == .attached || recipe.depthChoice == .materialCheckpoint), let path = recipe.depthPath {
                 let candidate = URL(fileURLWithPath: path)
                 if FileManager.default.fileExists(atPath: path) {
                     depth = try await self.engine.importDepth(candidate, matching: source)
@@ -537,7 +538,6 @@ final class TextureWorkspace {
             self.lastRegistrySelectionIdentity = runtime?.selectionIdentity
             self.selectedMaterialCheckpoint = pinnedCheckpoint.flatMap { pin in runtime.map { pin.resolve(using: $0) } } ?? runtime
             self.settings = recipe.settings
-            self.settings.useEmbeddedDepth = false
             if recipe.version == 1 {
                 self.settings.heightDetail = 0
                 self.settings.attachedMapIsHeight = false
@@ -562,7 +562,7 @@ final class TextureWorkspace {
             self.recipeURL = url
             self.decision = nil
             self.exportURL = nil
-            self.warnings = recipe.version == 1 ? ["Recipe upgraded: portrait depth and automatic brightness bumps are disabled. Review the new DA3 surface-height settings."] : []
+            self.warnings = recipe.version == 1 ? ["Recipe upgraded: portrait depth and automatic brightness bumps have been removed. Choose an explicit surface-height map or model when needed."] : []
             self.hasEdits = false
             self.result = nil
             self.preview = preview

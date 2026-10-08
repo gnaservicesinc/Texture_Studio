@@ -15,6 +15,7 @@ struct ReviewWorkbenchView: View {
     @State private var viewport: InspectionViewport
     @State private var notice: String?
     @State private var inspectedHashes: [String: String] = [:]
+    @State private var inspectedDescriptions: [String: String] = [:]
     @State private var visibleIDs: Set<String> = []
     @State private var exportedURL: URL?
     @State private var isExporting = false
@@ -25,7 +26,7 @@ struct ReviewWorkbenchView: View {
         self.candidates = candidates
         self.blendURL = blendURL
         self.preferences = preferences
-        _viewport = State(initialValue: InspectionViewport(preferences: preferences))
+        _viewport = State(initialValue: InspectionViewport(preferences: preferences, preferenceKey: Self.displayPreferenceKey(candidates)))
     }
     static func selectionPreferenceKey(_ candidates: [MapReviewCandidate]) -> String {
         // Persist pane choices only for this exact set of files and candidate
@@ -33,21 +34,28 @@ struct ReviewWorkbenchView: View {
         let identities = candidates.map { [$0.id, $0.mapURL.standardizedFileURL.path].joined(separator: "\u{0}") }.sorted()
         return "reviewVisibleMaps." + ReviewImageLoader.hash(Data(identities.joined(separator: "\u{1}").utf8))
     }
+    static func displayPreferenceKey(_ candidates: [MapReviewCandidate]) -> String {
+        selectionPreferenceKey(candidates) + ".display"
+    }
     private var visibleCandidates: [MapReviewCandidate] {
+        Self.resolvedCandidates(candidates, visibleIDs: visibleIDs)
+    }
+    static func resolvedCandidates(_ candidates: [MapReviewCandidate], visibleIDs: Set<String>) -> [MapReviewCandidate] {
         let selected = candidates.filter { visibleIDs.contains($0.id) }
-        return selected.isEmpty ? Self.initialCandidates(candidates) : selected
+        let requested = selected.isEmpty ? initialCandidates(candidates) : selected
+        // The real reference anchors every model comparison, even if an older
+        // saved pane selection hid it. Never substitute a prediction for it.
+        return candidates.filter(\.isReference) + requested.filter { !$0.isReference }
     }
     static func initialCandidates(_ candidates: [MapReviewCandidate]) -> [MapReviewCandidate] {
         let predictions = candidates.filter { ["base", "checkpoint", "model"].contains($0.role) }
         if !predictions.isEmpty {
-            // Keep every requested model visible. Source/reference maps remain
-            // available in Maps without silently hiding a selected checkpoint.
-            return candidates.filter { $0.role == "target" } + predictions
+            return candidates.filter(\.isReference) + predictions
         }
-        guard let target = candidates.first(where: { $0.label.lowercased() == "target" }) else {
+        guard let target = candidates.first(where: \.isReference) else {
             return Array(candidates.prefix(2))
         }
-        let model = candidates.last { $0.id != target.id && $0.label.lowercased() != "flat" }
+        let model = candidates.last { !$0.isReference && $0.role != "source" && $0.label.lowercased() != "flat" }
         return model.map { [target, $0] } ?? [target]
     }
     var body: some View {
@@ -58,6 +66,11 @@ struct ReviewWorkbenchView: View {
                     Spacer()
                     Text("\(candidates.count) maps · same source").font(.caption).foregroundStyle(.secondary)
                 }.padding(.horizontal, 12).padding(.vertical, 8).background(.bar)
+            }
+            if !candidates.contains(where: \.isReference), candidates.contains(where: { ["base", "checkpoint", "model"].contains($0.role) }) {
+                Label("Model predictions only · this review has no recorded source-map reference", systemImage: "info.circle")
+                    .font(.caption).padding(.horizontal, 12).padding(.vertical, 6)
+                    .help("A real source displacement map must be identified explicitly in the review manifest. A model output is never substituted for it.")
             }
             inspectionControls.padding(8).background(.bar)
             HStack {
@@ -94,6 +107,9 @@ struct ReviewWorkbenchView: View {
                                         if let detail = candidate.detail {
                                             Text(detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                                         }
+                                        if let description = inspectedDescriptions[candidate.id] {
+                                            Text(description).font(.caption.bold()).textSelection(.enabled)
+                                        }
                                         Text(candidate.mapURL.lastPathComponent).font(.caption2).foregroundStyle(.secondary)
                                             .lineLimit(1).truncationMode(.middle).help(candidate.mapURL.path)
                                     }.accessibilityElement(children: .ignore).accessibilityLabel(candidate.accessibleLabel)
@@ -101,6 +117,11 @@ struct ReviewWorkbenchView: View {
                                     Menu {
                                         Button("Open Full Map in New Window") { ReviewWindowController.shared.open(candidates: [candidate]) }
                                         Button("Show Original in Finder") { NSWorkspace.shared.activateFileViewerSelecting([candidate.mapURL]) }
+                                        if let source = candidate.fullSourceReference {
+                                            Button("Show Full Source Map in Finder") { NSWorkspace.shared.activateFileViewerSelecting([source.mapURL]) }
+                                            Button("Export Full Source Map…") { export(source) }
+                                            Button("Open Full Source Map in GIMP") { openInGIMP(source) }
+                                        }
                                     } label: { Image(systemName: "ellipsis.circle") }
                                 }.padding(10)
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -114,6 +135,12 @@ struct ReviewWorkbenchView: View {
                                     .fixedSize(horizontal: false, vertical: true)
                                     .layoutPriority(1)
                                     .background(.bar)
+                                if let source = candidate.fullSourceReference {
+                                    Button("Open Full Source \(candidate.referenceMapName.capitalized) Map", systemImage: "arrow.up.left.and.arrow.down.right") {
+                                        ReviewWindowController.shared.open(candidates: [source])
+                                    }.font(.caption).padding(.horizontal, 10).padding(.bottom, 8)
+                                        .help("Inspect the complete original source displacement map at its own resolution. The comparison above uses the recorded crop; this does not run a model or produce a full-source prediction.")
+                                }
                             }
                             .fixedSize(horizontal: false, vertical: true)
                             .background {
@@ -128,6 +155,7 @@ struct ReviewWorkbenchView: View {
                             Divider()
                             MapInspectionView(url: candidate.mapURL, numeric: candidate.numeric, viewport: viewport, onLoad: { value in
                                 inspectedHashes[candidate.id] = value?.sourceSHA256
+                                inspectedDescriptions[candidate.id] = value.map { "Displayed file: \($0.pixelWidth) × \($0.pixelHeight) · \($0.storageDescription)" }
                             }).frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
                         }.frame(minWidth: 240)
                     }
@@ -137,7 +165,10 @@ struct ReviewWorkbenchView: View {
         .alert("Map inspection", isPresented: Binding(get: { notice != nil }, set: { if !$0 { notice = nil } })) {
             Button("OK") { notice = nil }
         } message: { Text(notice ?? "") }
-        .onAppear { restoreVisibleMaps() }
+        .onAppear {
+            viewport.useDisplayContext(Self.displayPreferenceKey(candidates))
+            restoreVisibleMaps()
+        }
         .onPreferenceChange(ReviewPaneHeaderHeights.self) { heights in
             // Keep linked image coordinates aligned even when one checkpoint
             // has a longer identity than its neighbors. Measure before padding
@@ -145,7 +176,10 @@ struct ReviewWorkbenchView: View {
             let height = heights.values.max() ?? 0
             if abs(height - paneHeaderHeight) > 0.5 { paneHeaderHeight = height }
         }
-        .onChange(of: Self.selectionPreferenceKey(candidates)) { _, _ in restoreVisibleMaps() }
+        .onChange(of: Self.selectionPreferenceKey(candidates)) { _, _ in
+            viewport.useDisplayContext(Self.displayPreferenceKey(candidates))
+            restoreVisibleMaps()
+        }
         .onChange(of: visibleIDs) { _, selected in
             preferences.set(Array(selected), forKey: Self.selectionPreferenceKey(candidates))
         }
@@ -170,11 +204,12 @@ struct ReviewWorkbenchView: View {
                     ForEach(candidates) { candidate in
                         Toggle(candidate.label, isOn: Binding(get: { visibleCandidates.contains(where: { $0.id == candidate.id }) }, set: { shown in
                             if visibleIDs.isEmpty { visibleIDs = Set(visibleCandidates.map(\.id)) }
-                            if shown { visibleIDs.insert(candidate.id) } else if visibleIDs.count > 1 { visibleIDs.remove(candidate.id) }
+                            if shown { visibleIDs.insert(candidate.id) } else if !candidate.isReference && visibleIDs.count > 1 { visibleIDs.remove(candidate.id) }
                         }))
+                        .disabled(candidate.isReference)
                     }
                 }
-                .help("Show the source photo, reference target, base model or checkpoint outputs. Every pane keeps its name and source identity when popped out.")
+                .help("The real source reference stays visible beside model predictions. Choose additional photos and predictions here. Every pane retains its identity when popped out.")
                 Button("Pop Out Comparison") { ReviewWindowController.shared.open(candidates: visibleCandidates, blendURL: blendURL) }
                 if let blendURL { Button("Open Displaced Surface in Blender") { NSWorkspace.shared.open(blendURL) } }
         }.help("Drag or scroll to pan. Pinch, or hold Option/Command while scrolling, to zoom. Pan and zoom are linked across maps.")

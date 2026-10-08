@@ -176,14 +176,23 @@ class PairCache:
 
 
 def crop_pair(rgb: torch.Tensor, height: torch.Tensor, size: int, rng: random.Random,
-              augment: bool = False) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
+              augment: bool = False, whole_maps: bool = False) -> tuple[torch.Tensor, torch.Tensor, list[int]]:
     if rgb.shape[-2:] != height.shape[-2:] or size < 64 or size % 64:
         raise ValueError("Paired native crop must be a multiple of64 with matching dimensions")
     rows, columns = height.shape[-2:]
-    if min(rows, columns) < size:
-        raise ValueError("Crop exceeds real source pixels; choose a lower native size")
-    x, y = rng.randrange(columns - size + 1), rng.randrange(rows - size + 1)
-    rgb, height = rgb[..., y:y + size, x:x + size], height[..., y:y + size, x:x + size]
+    if whole_maps:
+        if min(rows, columns) < 256 or rows % 64 or columns % 64:
+            raise ValueError("Whole native maps need each real dimension at least256 and divisible by64; no padding/resizing")
+        if max(rows, columns) > size:
+            raise ValueError("Whole native map exceeds the maximum edge; choose a smaller published source or a larger explicit budget")
+        x = y = 0
+        width, height_pixels = columns, rows
+    else:
+        if min(rows, columns) < size:
+            raise ValueError("Crop exceeds real source pixels; choose a lower native size")
+        x, y = rng.randrange(columns - size + 1), rng.randrange(rows - size + 1)
+        width = height_pixels = size
+        rgb, height = rgb[..., y:y + size, x:x + size], height[..., y:y + size, x:x + size]
     if augment:
         for axis in (-1, -2):
             if rng.random() < .5:
@@ -192,7 +201,7 @@ def crop_pair(rgb: torch.Tensor, height: torch.Tensor, size: int, rng: random.Ra
         rgb, height = rgb.rot90(turns, (-2, -1)), height.rot90(turns, (-2, -1))
         # Only a derived photograph changes. Numeric target codes stay intact.
         rgb = (rgb * (2 ** rng.uniform(-.2, .2))).clamp(0, 1)
-    return rgb.contiguous(), height.contiguous(), [x, y, size, size]
+    return rgb.contiguous(), height.contiguous(), [x, y, width, height_pixels]
 
 
 def height_loss(prediction: torch.Tensor, target: torch.Tensor, margin: int = 16) -> tuple[torch.Tensor, dict[str, float]]:

@@ -102,7 +102,7 @@ final class WorkbenchTests: XCTestCase {
         let engine = TextureEngine()
         let photo = CIImage(color: CIColor(red: 0.3, green: 0.4, blue: 0.5)).cropped(to: CGRect(x: 0, y: 0, width: 1024, height: 1024))
         let source = TextureSource(url: URL(fileURLWithPath: "/test/photo.png"), orientedImage: photo,
-            embeddedDepth: nil, camera: CameraMetadata(), pixelWidth: 1024, pixelHeight: 1024)
+            camera: CameraMetadata(), pixelWidth: 1024, pixelHeight: 1024)
         let context = CIContext(options: [.workingColorSpace: NSNull(), .outputColorSpace: NSNull()])
         for value: Float in [0.25, 1.125] {
             let depth = try TextureDepth(width: 16, height: 16, values: [Float](repeating: value, count: 256), sourceLabel: "Selected material head", interpretation: .surfaceHeight)

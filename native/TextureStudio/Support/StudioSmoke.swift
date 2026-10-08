@@ -22,14 +22,13 @@ enum StudioSmoke {
         } else {
             let image = CIImage(color: CIColor(red: 0.28, green: 0.4, blue: 0.55)).cropped(to: CGRect(x: 0,y: 0,width: 1300,height: 1100))
             source = TextureSource(url: temporary.appendingPathComponent("test-photo.png"), orientedImage: image,
-                embeddedDepth: nil, camera: CameraMetadata(), pixelWidth: 1300, pixelHeight: 1100)
+                camera: CameraMetadata(), pixelWidth: 1300, pixelHeight: 1100)
         }
         var settings = TextureSettings()
         settings.rotationX = 7.93
         settings.rotationZ = 0.22
         settings.lightingStrength = 0
         settings.heightDetail = 0
-        settings.useEmbeddedDepth = false
         let material = try await engine.process(source: source, settings: settings)
         let preview = try await engine.preview(material.diffuse)
         guard preview.width == 1024, preview.height == 1024 else { throw StudioError("Unexpected preview dimensions") }

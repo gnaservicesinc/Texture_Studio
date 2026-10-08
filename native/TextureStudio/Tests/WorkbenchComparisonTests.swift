@@ -106,6 +106,64 @@ final class WorkbenchComparisonTests: XCTestCase {
         XCTAssertFalse(store.isBusy)
     }
 
+    func testComparisonUsesSelectedSamplesVerifiedFullSourceAndKeepsCropCoordinates() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "selected-reference-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(root.path, forKey: "workspace")
+        var samples: [[String: Any]] = []
+        var fullSources: [URL] = []
+        var crops: [URL] = []
+        for index in 0..<2 {
+            let folder = root.appendingPathComponent("sample-\(index)")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+            let map = folder.appendingPathComponent("displacement.png")
+            let bytes = Data("Exact cropped height bytes \(index)".utf8)
+            try bytes.write(to: map)
+            let original = root.appendingPathComponent("original-4k-height-\(index).png")
+            try Data("Full original height bytes \(index)".utf8).write(to: original)
+            let hash = ReviewImageLoader.hash(bytes)
+            let metadata: [String: Any] = ["sample_id": "sample-\(index)", "maps": ["height": "displacement.png"],
+                "crop_rectangle_top_left_xywh": [index * 2048, 0, 2048, 2048],
+                "map_metadata": ["height": ["sample_sha256": hash, "source": ["path": original.path,
+                    "file_sha256": "original-source-sha-\(index)", "sample_bits": 16, "width": 4096, "height": 4096,
+                    "published_url": "https://example.com/material-\(index)-disp.png"]]]]
+            try JSONSerialization.data(withJSONObject: metadata).write(to: folder.appendingPathComponent("sample.json"))
+            samples.append(["sample_id": "sample-\(index)", "status": "approved", "split": "train", "width": 2048, "height": 2048,
+                "maps": ["input": ["path": folder.appendingPathComponent("photo.png").path],
+                    "height": ["path": map.path, "sha256": hash, "source_bits": 16, "width": 2048, "height": 2048]]])
+            fullSources.append(original); crops.append(map)
+        }
+        let document: [String: Any] = ["dataset_path": root.path, "index_sha256": "fixture-index-sha",
+            "materials": [["material_id": "brick", "samples": samples]]]
+        let store = WorkbenchStore(preferences: defaults, managedWorkspaceURL: root, workerOverride: { arguments, _ in
+            let output = arguments[try XCTUnwrap(arguments.firstIndex(of: "--output")) + 1]
+            return "{\"outputs\":{\"height\":{\"path\":\"\(output)/height.exr\"}},\"checkpoint_sha256\":\"exact-sha\"}"
+        })
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        store.dataset = try decoder.decode(WorkbenchDataset.self, from: JSONSerialization.data(withJSONObject: document))
+        store.selectedSampleId = "sample-1"
+        store.checkpoints = [try checkpoint(sha: "exact-sha", target: "height")]
+        store.comparisonCheckpointIds = ["exact-sha"]
+        store.compare()
+        // Selection may change while a comparison is running. The captured
+        // sample, its source and the model input must remain the same pair.
+        store.selectedSampleId = "sample-0"
+        try await waitForOperation(store)
+        XCTAssertNil(store.error)
+        let reference = try XCTUnwrap(store.comparisonCandidates.first { $0.isReference })
+        XCTAssertEqual(reference.sampleLabel, "sample-1")
+        XCTAssertEqual(reference.mapURL, crops[1])
+        XCTAssertEqual(reference.sourceIdentity?.path, fullSources[1].path)
+        XCTAssertEqual(reference.sourceIdentity?.cropRectangle, [2048, 0, 2048, 2048])
+        XCTAssertEqual(reference.sourceIdentity?.pixelDimensions, [4096, 4096])
+        XCTAssertEqual(reference.fullSourceReference?.mapURL, fullSources[1])
+        XCTAssertNotEqual(reference.fullSourceReference?.mapURL, fullSources[0])
+        XCTAssertEqual(try Data(contentsOf: crops[1]), Data("Exact cropped height bytes 1".utf8))
+    }
+
     private func checkpoint(sha: String, target: String) throws -> WorkbenchCheckpoint {
         try WorkbenchProcess.decode(WorkbenchCheckpoint.self, output: """
         {"checkpoint_path":"/runs/material-2k/checkpoint.selected.pt","sha256":"\(sha)","schema":"texture-studio-material-training-cycle-v1","target":"\(target)","step":42,"compatible":true}

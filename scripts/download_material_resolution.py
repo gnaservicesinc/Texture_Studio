@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Plan/download original published Poly Haven 2K PNG map sets, without resize.
+"""Plan/download original published Poly Haven 1K/2K PNG map sets, without resize.
 
 The default only plans. --download is explicit; existing changed files are never
 overwritten. This does not prepare crops or change the active dataset index.
+2K remains the default source resolution; later real-pixel crops are a separate
+operation. The default destination is separate for each published resolution.
 """
 from __future__ import annotations
 
@@ -77,12 +79,12 @@ def png_header(path: Path) -> dict[str, Any]:
     if len(data) != 33 or data[:8] != PNG_SIGNATURE or data[8:16] != b"\0\0\0\rIHDR" or zlib.crc32(data[12:29]) & 0xffffffff != struct.unpack(">I", data[29:33])[0]:
         raise ValueError(f"Missing/invalid PNG IHDR: {path}")
     width, height, bits, color, compression, filtering, interlace = struct.unpack(">IIBBBBB", data[16:29])
-    if min(width, height) < 1 or color not in (0, 2, 6) or bits not in (8, 16) or compression != 0 or filtering != 0 or interlace not in (0, 1):
+    if min(width, height) < 1 or color not in (0, 2, 4, 6) or bits not in (8, 16) or compression != 0 or filtering != 0 or interlace not in (0, 1):
         raise ValueError(f"Unsupported photographic/data PNG header: {path}")
-    return {"width": width, "height": height, "sample_bits": bits, "sample_dtype": f"uint{bits}", "png_color_type": color, "channels": {0: 1, 2: 3, 6: 4}[color], "interlace": interlace, "header_crc_verified": True}
+    return {"width": width, "height": height, "sample_bits": bits, "sample_dtype": f"uint{bits}", "png_color_type": color, "channels": {0: 1, 2: 3, 4: 2, 6: 4}[color], "interlace": interlace, "header_crc_verified": True}
 
 
-def dataset_assets(dataset: Path) -> tuple[dict[str, dict], list[dict[str, str]], str]:
+def dataset_assets(dataset: Path, source_links: bool = False) -> tuple[dict[str, dict], list[dict[str, str]], str]:
     index_path = dataset / "dataset.json"
     index_bytes = index_path.read_bytes()
     index = json.loads(index_bytes)
@@ -102,16 +104,19 @@ def dataset_assets(dataset: Path) -> tuple[dict[str, dict], list[dict[str, str]]
             sources = [metadata.get("map_metadata", {}).get(role, {}).get("source", {}) for role in ROLES]
             if metadata.get("source_provider") == "Poly Haven" and metadata.get("source_license") == "CC0-1.0" and all(source.get("provider") == "Poly Haven" and source.get("license") == "CC0-1.0" and source.get("published_api_url") == f"https://api.polyhaven.com/files/{material}" and source.get("file_bytes") == source.get("published_bytes") and isinstance(source.get("file_md5"), str) and source["file_md5"].lower() == str(source.get("published_md5", "")).lower() and re.fullmatch(r"[0-9a-fA-F]{32}", source["file_md5"]) for source in sources):
                 candidates.append(metadata)
-        if not candidates:
+        linked = source_links and any(sample.get("source_url") == f"https://polyhaven.com/a/{material}" for sample in samples)
+        if not candidates and not linked:
             skipped.append({"material_id": material, "reason": "No complete checksum-verified Poly Haven provenance in prepared dataset; other providers handled separately"})
             continue
-        representative = candidates[0]
         parents = {}
-        for role in ROLES:
-            source = representative["map_metadata"][role]["source"]
-            parents[role] = {key: source.get(key) for key in ("filename", "resolution_label", "width", "height", "sample_bits", "file_sha256", "published_md5", "published_url")}
+        if candidates:
+            representative = candidates[0]
+            for role in ROLES:
+                source = representative["map_metadata"][role]["source"]
+                parents[role] = {key: source.get(key) for key in ("filename", "resolution_label", "width", "height", "sample_bits", "file_sha256", "published_md5", "published_url")}
         regions = [{"sample_id": sample["sample_id"], "split": sample["split"], "crop_rectangle_top_left_xywh": sample.get("crop_rectangle_top_left_xywh"), "source_pixel_dimensions": sample.get("source_pixel_dimensions"), "source_input_sha256": sample.get("map_metadata", {}).get("input", {}).get("source", {}).get("file_sha256")} for sample in samples]
-        verified[material] = {"verified_existing_parent_maps": parents, "active_dataset_source_regions": regions}
+        verified[material] = {"verified_existing_parent_maps": parents, "active_dataset_source_regions": regions,
+                              "selection_basis": "checksum-verified existing parents" if candidates else "explicit dataset source URL; old parent provenance not asserted"}
     return verified, skipped, hashlib.sha256(index_bytes).hexdigest()
 
 
@@ -171,7 +176,10 @@ def verify_map(path: Path, entry: dict, resolution: str) -> dict:
     if checksums["bytes"] != entry["published_bytes"] or checksums["md5"] != entry["published_md5"]:
         raise ValueError(f"Existing/downloaded map differs from published bytes; left untouched: {path}")
     header = png_header(path)
-    if max(header["width"], header["height"]) != int(resolution[:-1]) * 1024:
+    # Published resolution labels can refer to either axis, including a
+    # non-square photographic footprint. Actual paired geometry is retained;
+    # model-grid eligibility is a separate decision, never a resize here.
+    if int(resolution[:-1]) * 1024 not in (header["width"], header["height"]):
         raise ValueError(f"Published map has unexpected native {resolution} dimensions: {path}, {header}")
     if entry["role"] == "height" and header["sample_bits"] != 16:
         raise ValueError(f"Published height map is {header['sample_bits']}-bit; UInt16 required, no upconversion: {path}")
@@ -237,20 +245,28 @@ def download_asset(plan: dict, destination: Path) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path)
+    parser.add_argument("--source-links", action="store_true",
+                        help="Select all exact Poly Haven source URLs in the dataset, including edited old parents; newly downloaded bytes are still fully verified")
     parser.add_argument("--materials", action="append", help="Repeat this flag or provide comma-separated official asset IDs")
-    parser.add_argument("--resolution", choices=("2k",), default="2k")
-    parser.add_argument("--destination", type=Path, default=Path("/opt/ipde/material-dataset/sources-2k"))
+    parser.add_argument("--resolution", choices=("1k", "2k"), default="2k", help="Published source resolution, not the later training crop size; defaults to 2k")
+    parser.add_argument("--destination", type=Path, help="Separate published-originals folder; defaults to /opt/ipde/material-dataset/sources-<resolution>")
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--api-cache", type=Path)
     parser.add_argument("--max-bytes", type=int, default=4 * 1024**3)
+    parser.add_argument("--download-workers", type=int, default=8,
+                        help="Download independent material sets concurrently (1–16; default 8)")
     parser.add_argument("--api-workers", type=int, default=4)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--plan", action="store_true", help="Default: inspect official metadata; download no PNGs")
     mode.add_argument("--download", action="store_true", help="Explicitly download/reuse the planned published originals")
     args = parser.parse_args(argv)
-    if args.report.exists() or not 1 <= args.api_workers <= 4 or args.max_bytes < 1 or (not args.dataset and not args.materials):
-        parser.error("Choose a new report path, positive byte budget, 1–4 API workers and dataset or explicit materials")
-    references, skipped, index_sha = dataset_assets(args.dataset) if args.dataset else ({}, [], None)
+    if args.destination is None:
+        args.destination = Path("/opt/ipde/material-dataset") / f"sources-{args.resolution}"
+    if args.report.exists() or not 1 <= args.api_workers <= 4 or not 1 <= args.download_workers <= 16 or args.max_bytes < 1 or (not args.dataset and not args.materials):
+        parser.error("Choose a new report path, positive byte budget, 1–4 API workers, 1–16 download workers and dataset or explicit materials")
+    if args.source_links and args.dataset is None:
+        parser.error("--source-links requires a dataset")
+    references, skipped, index_sha = dataset_assets(args.dataset, args.source_links) if args.dataset else ({}, [], None)
     requested = [asset_id(value) for group in args.materials or [] for value in group.split(",")]
     if len(requested) != len(set(requested)):
         parser.error("Duplicate asset IDs")
@@ -294,10 +310,17 @@ def main(argv: list[str] | None = None) -> int:
             if report["disk_free_before_bytes"] < missing_bytes:
                 raise ValueError("Insufficient free disk for planned original map bytes; no PNG downloaded")
             report["downloaded_materials"] = []
-            for item in report["materials"]:
+            report["download_workers"] = args.download_workers
+            def hydrate(item: dict) -> dict:
                 print(f"Downloading/verifying published {args.resolution}: {item['material_id']}", flush=True)
-                report["downloaded_materials"].append(download_asset(item, args.destination))
-            report["status"] = "download_complete_verified"
+                try:
+                    return download_asset(item, args.destination)
+                except Exception as error:
+                    return {"material_id": item["material_id"], "error": str(error)}
+            with ThreadPoolExecutor(max_workers=args.download_workers) as pool:
+                for result in pool.map(hydrate, report["materials"]):
+                    (report["errors"] if "error" in result else report["downloaded_materials"]).append(result)
+            report["status"] = "incomplete" if report["errors"] else "download_complete_verified"
         except Exception as error:
             report["errors"].append({"error": str(error)})
             report["status"] = "incomplete"

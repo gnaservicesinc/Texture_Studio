@@ -39,7 +39,8 @@ enum DepthChoice: String, Codable, CaseIterable, Identifiable {
         let value = try decoder.singleValueContainer().decode(String.self)
         switch value {
         case "Photo detail", "Flat surface": self = .photoDetail
-        case "Embedded depth": self = .model
+        // Retired portrait maps do not imply consent to run a different model.
+        case "Embedded depth": self = .photoDetail
         case "Attached depth": self = .attached
         case "Local ML depth": self = .model
         case "Material checkpoint": self = .materialCheckpoint

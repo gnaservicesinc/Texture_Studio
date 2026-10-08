@@ -8,6 +8,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 import zlib
@@ -23,15 +24,55 @@ def png_bytes(width=2048, height=1024, bits=16, color=0):
     return download.PNG_SIGNATURE + struct.pack(">I", len(payload)) + chunk + struct.pack(">I", zlib.crc32(chunk) & 0xffffffff)
 
 
-def api_payload(material="example"):
+def api_payload(material="example", resolution="2k"):
     result = {}
     for role, provider, suffix, color in (("input", "Diffuse", "diff", 2), ("height", "Displacement", "disp", 0), ("normal", "nor_gl", "nor_gl", 2), ("roughness", "Rough", "rough", 0)):
-        data = png_bytes(color=color)
-        result[provider] = {"2k": {"png": {"url": f"https://dl.polyhaven.org/file/ph-assets/Textures/png/2k/{material}/{material}_{suffix}_2k.png", "size": len(data), "md5": hashlib.md5(data).hexdigest().upper()}}}
+        data = png_bytes(width=int(resolution[:-1]) * 1024, color=color)
+        result[provider] = {resolution: {"png": {"url": f"https://dl.polyhaven.org/file/ph-assets/Textures/png/{resolution}/{material}/{material}_{suffix}_{resolution}.png", "size": len(data), "md5": hashlib.md5(data).hexdigest().upper()}}}
     return result
 
 
 class MaterialResolutionDownloadTests(unittest.TestCase):
+    def test_source_link_selection_does_not_claim_old_parent_checksums_or_accept_wrong_asset_url(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = []
+            for material, url in (("example", "https://polyhaven.com/a/example"),
+                                  ("wrong", "https://polyhaven.com/a/other"), ("ambient", "https://ambientcg.com/view?id=Snow014")):
+                folder = root / material
+                folder.mkdir()
+                row = {"material_id": material, "sample_id": material, "split": "train", "status": "approved", "path": material}
+                rows.append(row)
+                (folder / "sample.json").write_text(json.dumps({**row, "source_url": url}))
+            (root / "dataset.json").write_text(json.dumps({"samples": rows}))
+            strict, skipped, _ = download.dataset_assets(root)
+            self.assertEqual(strict, {})
+            linked, skipped, _ = download.dataset_assets(root, source_links=True)
+            self.assertEqual(set(linked), {"example"})
+            self.assertEqual(linked["example"]["verified_existing_parent_maps"], {})
+            self.assertIn("not asserted", linked["example"]["selection_basis"])
+            self.assertEqual({item["material_id"] for item in skipped}, {"wrong", "ambient"})
+
+    def test_concurrent_material_downloads_and_one_failure_preserve_other_results(self):
+        barrier = threading.Barrier(2)
+        def fetch(material, _cache):
+            return api_payload(material), {}
+        def hydrate(plan, _destination):
+            barrier.wait(timeout=5)
+            if plan["material_id"] == "bad":
+                raise ValueError("simulated provider failure")
+            return {"material_id": plan["material_id"], "status": "downloaded_or_reused_verified"}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(download, "fetch_metadata", side_effect=fetch), patch.object(download, "download_asset", side_effect=hydrate):
+                self.assertEqual(download.main(["--materials", "bad,good", "--download", "--download-workers", "2",
+                    "--destination", str(root / "sources"), "--report", str(root / "report.json")]), 1)
+            report = json.loads((root / "report.json").read_text())
+            self.assertEqual(report["download_workers"], 2)
+            self.assertEqual([item["material_id"] for item in report["downloaded_materials"]], ["good"])
+            self.assertEqual(report["errors"], [{"material_id": "bad", "error": "simulated provider failure"}])
+            self.assertEqual(report["status"], "incomplete")
+
     def test_metadata_published_atomically_without_overwriting(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -56,6 +97,65 @@ class MaterialResolutionDownloadTests(unittest.TestCase):
         self.assertFalse(plan["training_split_assigned"])
         self.assertEqual(plan["license"], "CC0-1.0")
         self.assertEqual(plan["maps"]["height"]["published_md5"], payload["Displacement"]["2k"]["png"]["md5"].lower())
+
+    def test_native_1k_set_preserves_original_codes_and_4k_sources(self):
+        plan = download.make_plan("example", api_payload(resolution="1k"), {}, {}, "1k")
+        def curl(command, **kwargs):
+            color = 2 if "_diff_" in command[-1] or "_nor_gl_" in command[-1] else 0
+            Path(command[command.index("--output") + 1]).write_bytes(png_bytes(width=1024, color=color))
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        with tempfile.TemporaryDirectory() as directory, patch.object(download.subprocess, "run", side_effect=curl):
+            root = Path(directory)
+            original = root / "sources/example/example_disp_4k.png"
+            original.parent.mkdir(parents=True)
+            original.write_bytes(b"existing original 4k map")
+            result = download.download_asset(plan, root / "sources-1k")
+            self.assertEqual(result["resolution"], "1k")
+            self.assertEqual(result["actual_native_pixel_dimensions"], [1024, 1024])
+            self.assertFalse(result["resized_from_existing_4k"])
+            self.assertEqual(original.read_bytes(), b"existing original 4k map")
+            for role, entry in result["downloaded_maps"].items():
+                data = Path(entry["path"]).read_bytes()
+                self.assertEqual(entry["sha256"], hashlib.sha256(data).hexdigest())
+                self.assertEqual(entry["md5"], plan["maps"][role]["published_md5"])
+                self.assertEqual(entry["png_header"]["sample_bits"], 16)
+                self.assertFalse(entry["numeric_values_transformed"])
+
+    def test_resolution_option_separates_source_folders_and_keeps_2k_default(self):
+        for resolution, option in (("2k", []), ("1k", ["--resolution", "1k"])):
+            with self.subTest(resolution=resolution), tempfile.TemporaryDirectory() as directory:
+                report = Path(directory) / "plan.json"
+                with patch.object(download, "fetch_metadata", return_value=(api_payload(resolution=resolution), {})), patch.object(download, "download_asset") as hydrate:
+                    self.assertEqual(download.main(["--materials", "example", "--report", str(report), *option]), 0)
+                    hydrate.assert_not_called()
+                result = json.loads(report.read_text())
+                self.assertEqual(result["resolution"], resolution)
+                self.assertEqual(result["destination"], f"/opt/ipde/material-dataset/sources-{resolution}")
+                self.assertFalse(result["resize_or_gamma_conversion"])
+                self.assertEqual(result["materials"][0]["maps"]["height"]["required_data_bits"], 16)
+
+    def test_native_1k_uint8_height_rejected_without_upconversion(self):
+        data = png_bytes(width=1024, bits=8)
+        entry = {"role": "height", "published_bytes": len(data), "published_md5": hashlib.md5(data).hexdigest()}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "height.png"
+            path.write_bytes(data)
+            with self.assertRaisesRegex(ValueError, "8-bit"):
+                download.verify_map(path, entry, "1k")
+            self.assertEqual(path.read_bytes(), data)
+
+    def test_original_gray_alpha_and_rectangular_1k_geometry_are_retained(self):
+        for width, height, color in ((1024, 1025, 4), (1024, 1269, 0)):
+            with self.subTest(dimensions=(width, height)), tempfile.TemporaryDirectory() as directory:
+                data = png_bytes(width=width, height=height, color=color)
+                path = Path(directory) / "height.png"
+                path.write_bytes(data)
+                entry = {"role": "height", "published_bytes": len(data), "published_md5": hashlib.md5(data).hexdigest()}
+                result = download.verify_map(path, entry, "1k")
+                self.assertEqual([result["png_header"]["width"], result["png_header"]["height"]], [width, height])
+                self.assertEqual(result["png_header"]["channels"], 2 if color == 4 else 1)
+                self.assertFalse(result["numeric_values_transformed"])
+                self.assertEqual(path.read_bytes(), data)
 
     def test_jpeg_is_never_substituted_for_missing_png(self):
         payload = api_payload()

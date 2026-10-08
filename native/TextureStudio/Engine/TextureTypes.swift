@@ -16,8 +16,6 @@ struct TextureSettings: Codable, Sendable, Equatable {
     var cropOffsetX: Double = 0
     var cropOffsetY: Double = 0
     var outputSize: Int = 1024
-    // Retained for reading old recipes. Material relief never consumes portrait depth.
-    var useEmbeddedDepth: Bool = false
     var useSupportingViews: Bool = true
     var useHDRGainMap: Bool = true
     var lensDistortion: Double = 0
@@ -43,7 +41,7 @@ struct TextureSettings: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case rotationX, rotationY, rotationZ, focalLengthPixels, cropScale, cropOffsetX, cropOffsetY,
-             outputSize, useEmbeddedDepth, useSupportingViews, useHDRGainMap, lensDistortion,
+             outputSize, useSupportingViews, useHDRGainMap, lensDistortion,
              exrPrecision, lightingStrength, lightingRadius, noiseReduction, heightStrength,
              heightDetail, surfacePlaneRemoval, depthCleanup, heightInvert, adaptiveRelief, attachedMapIsHeight, modelProcessResolution,
              roughnessBase, roughnessDetail, materialWidthMeters, displacementScaleMeters
@@ -59,8 +57,8 @@ struct TextureSettings: Codable, Sendable, Equatable {
         cropOffsetX = try c.decodeIfPresent(Double.self,forKey:.cropOffsetX) ?? cropOffsetX
         cropOffsetY = try c.decodeIfPresent(Double.self,forKey:.cropOffsetY) ?? cropOffsetY
         outputSize = try c.decodeIfPresent(Int.self,forKey:.outputSize) ?? outputSize
-        // Old settings may request embedded portrait depth; the new pipeline ignores it.
-        useEmbeddedDepth = false
+        // Unknown legacy keys, including useEmbeddedDepth, are deliberately
+        // ignored. There is no portrait-depth source in the material workflow.
         useSupportingViews = try c.decodeIfPresent(Bool.self,forKey:.useSupportingViews) ?? useSupportingViews
         useHDRGainMap = try c.decodeIfPresent(Bool.self,forKey:.useHDRGainMap) ?? useHDRGainMap
         lensDistortion = try c.decodeIfPresent(Double.self,forKey:.lensDistortion) ?? lensDistortion
@@ -96,7 +94,6 @@ struct CameraMetadata: Codable, Sendable {
     var sourceBitDepth: Int?
     var colorProfile: String?
     var auxiliaryTypes: [String] = []
-    var hasCalibration: Bool = false
     var summary: String {
         let camera = [make, model, lensModel].compactMap { $0 }.joined(separator: " · ")
         let focal = focalLengthMillimeters.map { String(format: "%.1f mm", $0) }
@@ -107,7 +104,6 @@ struct CameraMetadata: Codable, Sendable {
 struct TextureSource: @unchecked Sendable {
     let url: URL
     let orientedImage: CIImage
-    let embeddedDepth: CIImage?
     let camera: CameraMetadata
     let pixelWidth: Int
     let pixelHeight: Int

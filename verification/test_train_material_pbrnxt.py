@@ -203,6 +203,8 @@ def test_legacy_final_height_checkpoint_can_widen_without_losing_parent_weights(
     saved.pop("refinement_scope")
     saved.pop("trainable_prefixes")
     saved["configuration"].pop("scope")
+    saved.pop("whole_maps")
+    saved["configuration"].pop("whole_maps")
     torch.save(saved, path)
     assert trainer.checkpoint_scope(saved) == "final-height"
     assert trainer.resolve_scope("train", None, None) == "final-height"
@@ -278,13 +280,142 @@ def test_height_decoder_checkpoint_rejects_changed_pretrained_layout_buffer(tmp_
 def test_review_manifest_declares_actual_model_input_diffuse_transfer(tmp_path):
     record = {"sample": "surface_001", "source_png": "/review/source.png", "reference_exr": "/review/reference.exr",
               "model_label": "pretrained-base", "height_exr": "/review/base.exr", "native_size": 1024,
-              "source_rectangle": [0, 0, 1024, 1024]}
+              "source_rectangle": [0, 0, 1024, 1024], "reference_provenance": {"source_bits": 16}}
     path = tmp_path / "review.json"
     trainer.write_review_manifest({"comparison": [record]}, path)
     group = json.loads(path.read_text())["materials"][0]
     assert group["diffuse_encoding"] == "sRGB"
     assert group["target_original_bits"] == 16
     assert group["variants"][1]["checkpoint_sha256"] == trainer.WEIGHTS_SHA256
+
+
+def original_source_fixture(tmp_path):
+    return {"path": str(tmp_path / "original/surface_disp_4k.png"), "filename": "surface_disp_4k.png",
+            "width": 4096, "height": 4096, "sample_bits": 16, "file_sha256": "a" * 64,
+            "provider": "Poly Haven", "license": "CC0-1.0", "file_bytes": 12345,
+            "published_bytes": 12345, "file_md5": "b" * 32, "published_md5": "B" * 32,
+            "published_api_url": "https://api.polyhaven.com/files/surface",
+            "published_url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/4k/surface/surface_disp_4k.png"}
+
+
+def comparison_source_provenance(model, pair, cache, tmp_path):
+    pair = copy.deepcopy(pair)
+    pair["metadata"].update(material_id="surface", source_pixel_dimensions=[4096, 4096],
+                            crop_rectangle_top_left_xywh=[1200, 2200, 320, 320],
+                            map_metadata={"height": {"sample_bits": 16, "source": original_source_fixture(tmp_path)}})
+    pair["paths"] = {"height": tmp_path / "dataset/surface/displacement.png"}
+    pair["sha256"]["height"] = "c" * 64
+    return pair
+
+
+def test_reference_export_and_manifest_preserve_raw_values_and_full_original_provenance(tmp_path):
+    OpenEXR = pytest.importorskip("OpenEXR")
+    model, pair, cache = comparison_fixture()
+    pair = comparison_source_provenance(model, pair, cache, tmp_path)
+    with torch.no_grad():
+        model.ups[3].bias.fill_(2)
+    records = export(model, pair, cache, tmp_path / "review", "pretrained-base")
+    record = records[0]
+    rectangle = record["source_rectangle"]
+    x, y, width, height = rectangle
+    expected = cache.height.numpy()[0, 0, y:y + height, x:x + width]
+    raw = OpenEXR.File(record["reference_exr"], separate_channels=True).channels()["Y"].pixels
+    assert raw.dtype == np.float32 and np.array_equal(raw, expected)
+    prediction = OpenEXR.File(record["height_exr"], separate_channels=True).channels()["Y"].pixels
+    assert prediction.min() > 1  # Display PNG may clip; raw EXR never does.
+    provenance = record["reference_provenance"]
+    source = pair["metadata"]["map_metadata"]["height"]["source"]
+    assert provenance["source_path"] == source["path"]
+    assert provenance["source_sha256"] == source["file_sha256"]
+    assert provenance["source_url"] == source["published_url"]
+    assert provenance["source_bits"] == 16
+    assert provenance["source_pixel_dimensions"] == [4096, 4096]
+    assert provenance["source_crop_rectangle"] == [1200 + x, 2200 + y, width, height]
+    assert provenance["dataset_parent_source_crop_rectangle"] == [1200, 2200, 320, 320]
+    assert provenance["dataset_sample_crop_rectangle"] == rectangle
+    assert provenance["dataset_sample_path"] == str(pair["paths"]["height"])
+    assert provenance["dataset_sample_sha256"] == pair["sha256"]["height"]
+    manifest = tmp_path / "review-manifest.json"
+    trainer.write_review_manifest({"comparison": records}, manifest)
+    material = json.loads(manifest.read_text())["materials"][0]
+    target = material["variants"][0]
+    assert target["role"] == "target" and "checkpoint" not in target and "model_name" not in target
+    assert target["height"] == material["height"] == material["reference_height"] == record["reference_exr"]
+    assert material["target_original_bits"] == 16
+    assert all(material[key] == target[key] == value for key, value in provenance.items())
+    assert "real source map, not a model output" in target["detail"]
+
+
+@pytest.mark.parametrize("missing", ["published_api_url", "published_md5", "file_sha256", "provider"])
+def test_reference_url_not_guessed_without_verified_provider_evidence(tmp_path, missing):
+    pair = {"metadata": {"material_id": "surface", "source_url": "https://polyhaven.com/a/surface",
+                         "map_metadata": {"height": {"source": original_source_fixture(tmp_path)}}}}
+    pair["metadata"]["map_metadata"]["height"]["source"].pop(missing)
+    provenance = trainer.reference_provenance(pair, [0, 0, 256, 256])
+    assert "source_url" not in provenance
+    unknown = trainer.reference_provenance({"metadata": {"sample_id": "unknown"}}, [0, 0, 256, 256])
+    assert "source_bits" not in unknown and "source_path" not in unknown and "source_url" not in unknown
+
+
+def test_reference_provenance_prefers_full_original_and_rejects_invalid_crop_geometry(tmp_path):
+    original = original_source_fixture(tmp_path)
+    pair = {"metadata": {"material_id": "surface", "crop_rectangle_top_left_xywh": [10, 20, 320, 320],
+                         "source_pixel_dimensions": [4096, 4096], "map_metadata": {"height": {
+                             "sample_bits": 16, "original_source": original,
+                             "source": {"path": str(tmp_path / "dataset/displacement.png"), "width": 320, "height": 320}}}}}
+    provenance = trainer.reference_provenance(pair, [30, 40, 256, 256])
+    assert provenance["source_path"] == original["path"]
+    assert provenance["source_crop_rectangle"] == [40, 60, 256, 256]
+    with pytest.raises(ValueError, match="dataset parent crop"):
+        trainer.reference_provenance(pair, [100, 100, 256, 256])
+    pair["metadata"]["crop_rectangle_top_left_xywh"] = [4000, 4000, 320, 320]
+    with pytest.raises(ValueError, match="full original source"):
+        trainer.reference_provenance(pair, [0, 0, 256, 256])
+
+
+def test_verified_ambientcg_source_records_exact_provider_package_url(tmp_path):
+    source = {"path": str(tmp_path / "original/Snow014_1K_Displacement.png"), "sample_bits": 16,
+              "provider": "ambientCG", "license": "CC0-1.0", "file_sha256": "a" * 64,
+              "file_bytes": 1234, "published_member_sha256": "a" * 64, "published_member_bytes": 1234,
+              "published_package_url": "https://ambientcg.com/get?file=Snow014_1K-PNG.zip",
+              "published_package_sha256": "b" * 64, "published_package_bytes": 12345,
+              "published_archive_member": "Snow014_1K-PNG/Snow014_1K_Displacement.png"}
+    pair = {"metadata": {"map_metadata": {"height": {"source": source}}}}
+    provenance = trainer.reference_provenance(pair, [0, 0, 256, 256])
+    assert provenance["source_url"] == source["published_package_url"]
+    source["published_member_sha256"] = "c" * 64
+    assert "source_url" not in trainer.reference_provenance(pair, [0, 0, 256, 256])
+
+
+def test_manifest_rejects_mixed_reference_identity_for_same_sample(tmp_path):
+    record = {"sample": "surface_001", "source_png": "/review/source.png", "reference_exr": "/review/reference.exr",
+              "model_label": "pretrained-base", "height_exr": "/review/base.exr", "native_size": 1024,
+              "source_rectangle": [0, 0, 1024, 1024], "reference_provenance": {"source_bits": 16}}
+    changed = copy.deepcopy(record)
+    changed["reference_provenance"] = {}
+    with pytest.raises(ValueError, match="reference provenance"):
+        trainer.write_review_manifest({"comparison": [record, changed]}, tmp_path / "review.json")
+    assert not (tmp_path / "review.json").exists()
+
+
+@pytest.mark.parametrize("problem", ["wrong-type", "wrong-configuration-type", "missing-configuration", "configuration-disagrees"])
+def test_checkpoint_whole_map_policy_rejected_before_state_mutation(tmp_path, problem):
+    _, _, path, _, _ = checkpoint_fixture(tmp_path)
+    saved = torch.load(path, weights_only=True)
+    if problem == "wrong-type":
+        saved["whole_maps"] = saved["configuration"]["whole_maps"] = "yes"
+    elif problem == "wrong-configuration-type":
+        saved["configuration"]["whole_maps"] = 0
+    elif problem == "missing-configuration":
+        saved["configuration"].pop("whole_maps")
+    else:
+        saved["configuration"]["whole_maps"] = True
+    torch.save(saved, path)
+    model = TinyPretrained()
+    before = {name: value.clone() for name, value in model.state_dict().items()}
+    with pytest.raises(ValueError, match="whole-map geometry"):
+        trainer.restore_refinement(model, path)
+    assert_same_weights(before, model.state_dict())
 
 
 @pytest.mark.parametrize("field,value", [
@@ -362,6 +493,24 @@ def test_resource_guard_rejects_too_large_native_grid_before_dataset_or_model_lo
                       "--size", "2048", "--memory-gib", "56", "--cache-gib", "4", "--device", "cpu", "--scope", "height-decoder"])
 
 
+def test_no_gradient_resource_plan_uses_a_positive_budget_without_claiming_a_measured_peak(monkeypatch):
+    monkeypatch.setattr(trainer.os, "sysconf", lambda name: 16 * 1024 * 1024 if name == "SC_PHYS_PAGES" else 4096)
+    plan = trainer.resource_plan(2048, 56, 4, "height-decoder", inference=True)
+    assert plan["operation"] == "inference" and plan["driver_budget_gib"] == 50
+    assert plan["runtime_reserve_gib"] == 2 and not plan["peak_measured"]
+    assert plan["driver_estimate_gib"] is None and plan["combined_estimate_gib"] is None
+    assert plan["refinement_scope"] is None
+    assert "unmeasured" in plan["estimate_basis"] and "exhaust" in plan["estimate_basis"]
+    with pytest.raises(ValueError, match="smaller real training crop"):
+        trainer.resource_plan(2048, 56, 4, "height-decoder")
+    with pytest.raises(ValueError, match="at least 1 GiB"):
+        trainer.resource_plan(2048, 56, 54, inference=True)
+    with pytest.raises(ValueError, match="4GiB for macOS"):
+        trainer.resource_plan(2048, 61, 4, inference=True)
+    with pytest.raises(ValueError, match="padding or resizing"):
+        trainer.resource_plan(2047, 56, 4, inference=True)
+
+
 @pytest.mark.parametrize("problem", ["small-grid", "extra-channel", "nan"])
 def test_predict_rejects_changed_output_grid_channels_or_invalid_values(problem):
     class BrokenModel:
@@ -384,14 +533,103 @@ class ArrayCache:
         return self.rgb, self.height
 
 
-def comparison_fixture():
-    yy, xx = np.indices((320, 320))
+def comparison_fixture(dimensions=(320, 320)):
+    width, height_pixels = dimensions
+    yy, xx = np.indices((height_pixels, width))
     codes = (10000 + ((xx * 7 + yy * 13) % 20000)).astype(np.uint16)
     height = torch.from_numpy(numeric_height(codes)[None, None])
     rgb = torch.cat((height, height / 2, height / 3), dim=1)
     pair = {"metadata": {"sample_id": "surface_001"}, "sha256": {"input": "photo-identity", "height": "height-identity"}}
     model = TinyPretrained().eval()
     return model, pair, ArrayCache(rgb, height)
+
+
+@pytest.mark.parametrize("dimensions", [(256, 256), (512, 256)])
+def test_evaluate_base_exports_actual_full_native_maps_without_training_or_checkpoint(tmp_path, monkeypatch, dimensions):
+    OpenEXR = pytest.importorskip("OpenEXR")
+    model, pair, cache = comparison_fixture(dimensions)
+    pair = comparison_source_provenance(model, pair, cache, tmp_path)
+    pair["dimensions"] = list(dimensions)
+    pair["metadata"]["crop_rectangle_top_left_xywh"] = [1200, 2200, *dimensions]
+    before = {name: value.clone() for name, value in model.state_dict().items()}
+    monkeypatch.setattr(trainer, "select_pairs", lambda *_args: ([pair], [], {"fixture": "source UInt16 pairs"}))
+    monkeypatch.setattr(trainer, "load_complete_pretrained", lambda *_args, **_kwargs: model)
+    monkeypatch.setattr(trainer, "PairCache", lambda _capacity: cache)
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Pretrained-base inspection must not create an optimizer or read/save a checkpoint")
+    for name in ("configure_refinement", "read_refinement_checkpoint", "save_checkpoint"):
+        monkeypatch.setattr(trainer, name, forbidden)
+    monkeypatch.setattr(trainer.torch.optim, "AdamW", forbidden)
+    output = tmp_path / "base-review"
+    assert trainer.main(["evaluate-base", "--dataset", str(tmp_path / "dataset"), "--output", str(output),
+                         "--source-dir", str(tmp_path / "source"), "--weights", str(tmp_path / "weights"),
+                         "--size", str(max(dimensions)), "--whole-maps", "--memory-gib", "48", "--cache-gib", "0",
+                         "--updates", "0", "--max-minutes", "0", "--learning-rate", "0", "--device", "cpu"]) == 0
+    assert_same_weights(before, model.state_dict())
+    assert all(not parameter.requires_grad and parameter.grad is None for parameter in model.parameters())
+    report = json.loads((output / "run.json").read_text())
+    assert report["operation"] == "evaluate-base" and report["status"] == "completed"
+    assert report["training_crop_size"] is None and report["inspection_size"] == max(dimensions)
+    assert report["whole_maps"] and not report["training_performed"]
+    assert report["trainable_parameters"] == 0 and report["steps"] == []
+    assert report["refinement_scope"] is None and report["trainable_prefixes"] == []
+    assert report["resources"]["operation"] == "inference" and not report["resources"]["peak_measured"]
+    assert not report["production_eligible"]
+    assert not any(name in report for name in ("parent", "checkpoint", "checkpoint_sha256", "saved_step"))
+    assert not list(output.rglob("*.pt"))
+    record = report["comparison"][0]
+    assert record["native_dimensions"] == list(dimensions)
+    assert record["source_rectangle"] == [0, 0, *dimensions]
+    raw = OpenEXR.File(record["reference_exr"], separate_channels=True).channels()["Y"].pixels
+    assert np.array_equal(raw, cache.height.numpy()[0, 0])
+    review = json.loads((output / "review-manifest.json").read_text())
+    material = review["materials"][0]
+    assert material["height"] == material["reference_height"] == record["reference_exr"]
+    assert [variant["role"] for variant in material["variants"]] == ["target", "base"]
+    assert all("checkpoint" not in variant and "checkpoint_step" not in variant for variant in material["variants"])
+    assert f"{dimensions[0]} × {dimensions[1]} pixels" in material["variants"][1]["detail"]
+
+
+def test_checkpoint_evaluation_preserves_saved_identity_without_optimizer_or_trainable_parameters(tmp_path, monkeypatch):
+    pytest.importorskip("OpenEXR")
+    refined, _optimizer, checkpoint, _rgb, _initial = checkpoint_fixture(tmp_path, scope="height-decoder")
+    model, pair, cache = comparison_fixture((256, 256))
+    pair = comparison_source_provenance(model, pair, cache, tmp_path)
+    pair["dimensions"] = [256, 256]
+    expected_weights = {name: value.clone() for name, value in refined.state_dict().items()}
+    checkpoint_hash = digest(checkpoint)
+    monkeypatch.setattr(trainer, "select_pairs", lambda *_args: ([pair], [], {"fixture": "source UInt16 pairs"}))
+    monkeypatch.setattr(trainer, "load_complete_pretrained", lambda *_args, **_kwargs: model)
+    monkeypatch.setattr(trainer, "PairCache", lambda _capacity: cache)
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Checkpoint inspection must not configure trainable parameters, create an optimizer, or save a checkpoint")
+    for name in ("configure_refinement", "save_checkpoint"):
+        monkeypatch.setattr(trainer, name, forbidden)
+    monkeypatch.setattr(trainer.torch.optim, "AdamW", forbidden)
+    monkeypatch.setattr(trainer.torch.optim.lr_scheduler, "CosineAnnealingLR", forbidden)
+    output = tmp_path / "checkpoint-review"
+    assert trainer.main(["evaluate", "--dataset", str(tmp_path / "dataset"), "--output", str(output),
+                         "--checkpoint", str(checkpoint), "--source-dir", str(tmp_path / "source"),
+                         "--weights", str(tmp_path / "weights"), "--size", "256", "--memory-gib", "48",
+                         "--cache-gib", "0", "--updates", "0", "--max-minutes", "0",
+                         "--learning-rate", "0", "--device", "cpu"]) == 0
+    assert_same_weights(expected_weights, model.state_dict())
+    assert all(not parameter.requires_grad and parameter.grad is None for parameter in model.parameters())
+    report = json.loads((output / "run.json").read_text())
+    assert report["operation"] == "evaluate" and not report["training_performed"]
+    assert report["trainable_parameters"] == 0 and report["trainable_prefixes"] == []
+    assert report["refinement_scope"] == "height-decoder" and report["saved_step"] == 1
+    assert report["checkpoint_sha256"] == checkpoint_hash and report["parent"]["sha256"] == checkpoint_hash
+    assert report["resources"]["operation"] == "inference" and not report["resources"]["peak_measured"]
+    assert report["steps"] == [] and not list(output.rglob("*.pt"))
+    assert digest(checkpoint) == checkpoint_hash
+
+
+@pytest.mark.parametrize("option", [("--checkpoint", "unused.pt"), ("--scope", "height-decoder")])
+def test_evaluate_base_rejects_refinement_arguments_before_loading_assets(tmp_path, monkeypatch, option):
+    monkeypatch.setattr(trainer, "load_complete_pretrained", lambda *_args, **_kwargs: pytest.fail("Invalid request loaded the base"))
+    with pytest.raises(ValueError, match="only the pretrained base"):
+        trainer.main(["evaluate-base", "--dataset", str(tmp_path / "dataset"), "--output", str(tmp_path / "output"), *option])
 
 
 def export(model, pair, cache, folder, label, seed=17):

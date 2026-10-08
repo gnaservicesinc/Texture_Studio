@@ -12,7 +12,6 @@ struct MaterialRenderKey: Equatable, Sendable {
         self.settings = settings
         // Storage precision changes export encoding, not the rendered maps.
         self.settings.exrPrecision = .float32
-        self.settings.useEmbeddedDepth = false
     }
 }
 

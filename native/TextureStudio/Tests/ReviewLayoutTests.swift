@@ -13,7 +13,6 @@ final class ReviewLayoutTests: XCTestCase {
         let suite = "review-layout-\(UUID().uuidString)"
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { preferences.removePersistentDomain(forName: suite) }
-        preferences.set(["zoom": 2.0, "fit": false, "contrast": 1.0, "midpoint": 0.5], forKey: "reviewDisplay")
         let titles = ["Reference displacement", "Flat baseline · no model",
                       "Starting trained displacement · four-material-adaptation-01/frozen",
                       "Trained 2K displacement · native-2k-material-cycle-01"]
@@ -32,6 +31,8 @@ final class ReviewLayoutTests: XCTestCase {
                 numeric: true, sampleLabel: "broken_brick_wall_auto_003", detail: details[index],
                 role: index == 0 ? "target" : index == 1 ? "base" : "checkpoint"))
         }
+        preferences.set(["zoom": 2.0, "fit": false, "contrast": 1.0, "midpoint": 0.5],
+            forKey: ReviewWorkbenchView.displayPreferenceKey(candidates))
         let view = ReviewWorkbenchView(candidates: candidates, preferences: preferences)
         let hosting = NSHostingView(rootView: view.environment(\.colorScheme, .dark))
         let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1500, height: 850),

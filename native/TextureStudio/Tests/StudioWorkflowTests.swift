@@ -129,7 +129,7 @@ final class StudioWorkflowTests: XCTestCase {
     }
     private func source(_ url: URL) -> TextureSource {
         TextureSource(url: url, orientedImage: CIImage(color: .gray).cropped(to: CGRect(x: 0, y: 0, width: 32, height: 32)),
-            embeddedDepth: nil, camera: CameraMetadata(), pixelWidth: 32, pixelHeight: 32)
+            camera: CameraMetadata(), pixelWidth: 32, pixelHeight: 32)
     }
     private func checkpoint(_ url: URL, sha: String) -> SelectedMaterialCheckpoint {
         SelectedMaterialCheckpoint(checkpointPath: url.path, sha256: sha, target: "height", pythonPath: "/python",

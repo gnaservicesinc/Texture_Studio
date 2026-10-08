@@ -88,6 +88,9 @@ final class ReviewSessionStore {
                 if let identity = candidate.modelIdentity {
                     fields.merge(identity.manifestFields) { _, recorded in recorded }
                 }
+                if let identity = candidate.sourceIdentity {
+                    fields.merge(identity.manifestFields) { _, recorded in recorded }
+                }
                 return fields
             }]
         }
@@ -107,30 +110,45 @@ final class ReviewSessionStore {
             var parsedNotes: [String: String] = [:]
             let target = manifest["comparison_target"] as? String ?? "height"
             for material in materials {
-                guard let id = material["material_id"] as? String, let variants = material["variants"] as? [[String: Any]] else { continue }
+                guard let id = material["material_id"] as? String, var variants = material["variants"] as? [[String: Any]] else { continue }
+                let hasReference = variants.contains { Self.isReferenceVariant($0) && Self.mapPath($0, target: target) != nil }
+                if !hasReference, let path = Self.nonemptyString(material["reference_\(target)"])
+                    ?? Self.nonemptyString(material[target]) ?? (target == "height" ? Self.nonemptyString(material["reference_exr"]) : nil) {
+                    variants.insert(["name": "target", "role": "target", target: path], at: 0)
+                }
                 var candidates = variants.compactMap { variant -> MapReviewCandidate? in
                     guard let name = variant["name"] as? String,
-                          let path = variant[target] as? String ?? variant["path"] as? String else { return nil }
+                          let path = Self.mapPath(variant, target: target) else { return nil }
                     let map = path.hasPrefix("/") ? URL(fileURLWithPath: path) : url.deletingLastPathComponent().appendingPathComponent(path)
                     let candidateId = variant["candidate_id"] as? String ?? "\(id)/\(name)"
                     if let decision = variant["decision"] as? String { parsedDecisions[candidateId] = decision }
                     if let note = variant["note"] as? String { parsedNotes[candidateId] = note }
                     let identity = Self.modelIdentity(variant, target: target, relativeTo: url)
                     let deepBump = (identity.modelName ?? name).localizedCaseInsensitiveContains("deepbump")
-                    let role = variant["role"] as? String ?? (name == "target" ? "target" : name == "flat" ? "base" : identity.checkpointPath != nil ? "checkpoint" : deepBump ? "model" : "map")
+                    let recordedRole = variant["role"] as? String
+                    let role = recordedRole == "reference" ? "target" : recordedRole ?? (name == "target" ? "target" : name == "flat" ? "base" : identity.checkpointPath != nil ? "checkpoint" : deepBump ? "model" : "map")
                     let title = Self.candidateTitle(name: name, role: role, identity: identity, deepBump: deepBump)
+                    let sourceIdentity = role == "target" ? Self.sourceIdentity(variant, material: material, relativeTo: url) : nil
                     var details = identity.recordedDetails
                     if role == "checkpoint", identity.architecture == nil { details.append("Architecture not recorded") }
                     if role == "target" {
-                        details.insert("Dataset reference · not a model output", at: 0)
-                        if let bits = material["target_original_bits"] as? Int { details.append("\(bits)-bit source · linear data") }
+                        details.insert("Real source map · not a model output", at: 0)
+                        details.append(contentsOf: sourceIdentity?.recordedDetails ?? [])
                     }
+                    if role == "base", name != "flat" { details.insert("Base model prediction · not the real source map", at: 0) }
+                    if role == "checkpoint" { details.insert("Trained model prediction · not the real source map", at: 0) }
                     if name == "flat" { details.append("Constant height · no model inference") }
                     if deepBump { details.append("DeepBump model output · not the dataset reference") }
                     let savedDetail = Self.nonemptyString(variant["detail"])
-                    let detail = savedDetail ?? (details.isEmpty ? nil : details.joined(separator: " · "))
+                    // A saved freeform description cannot hide the structured
+                    // role, source or checkpoint identity. Keep this merge
+                    // idempotent across repeated save/reopen cycles.
+                    let mandatory = details.filter { savedDetail?.range(of: $0, options: .caseInsensitive) == nil }
+                    let combined = mandatory + [savedDetail].compactMap { $0 }
+                    let detail = combined.isEmpty ? nil : combined.joined(separator: " · ")
                     return MapReviewCandidate(id: candidateId, label: title, mapURL: map, numeric: variant["numeric"] as? Bool ?? true,
-                        sampleLabel: variant["sample_label"] as? String ?? id, detail: detail, role: role, modelIdentity: identity)
+                        sampleLabel: variant["sample_label"] as? String ?? id, detail: detail, role: role, modelIdentity: identity,
+                        sourceIdentity: sourceIdentity)
                 }
                 if !candidates.contains(where: { $0.role == "source" }), let source = material["diffuse"] as? String {
                     let map = source.hasPrefix("/") ? URL(fileURLWithPath: source) : url.deletingLastPathComponent().appendingPathComponent(source)
@@ -164,6 +182,21 @@ final class ReviewSessionStore {
         return string
     }
 
+    private static func isReferenceVariant(_ variant: [String: Any]) -> Bool {
+        if let role = variant["role"] as? String { return role == "target" || role == "reference" }
+        return variant["name"] as? String == "target"
+    }
+
+    private static func mapPath(_ variant: [String: Any], target: String) -> String? {
+        if let raw = nonemptyString(variant["raw_path"]) { return raw }
+        if target == "height", isReferenceVariant(variant),
+           let reference = nonemptyString(variant["reference_height"]) ?? nonemptyString(variant["reference_exr"]) {
+            return reference
+        }
+        return nonemptyString(variant[target]) ?? nonemptyString(variant["path"])
+            ?? (target == "height" ? nonemptyString(variant["height_exr"]) : nil)
+    }
+
     private static func modelIdentity(_ variant: [String: Any], target: String, relativeTo manifest: URL) -> MapReviewModelIdentity {
         let checkpoint = nonemptyString(variant["checkpoint"]).map { path in
             path.hasPrefix("/") ? path : manifest.deletingLastPathComponent().appendingPathComponent(path).path
@@ -178,9 +211,25 @@ final class ReviewSessionStore {
             mapType: nonemptyString(variant["map_type"]) ?? target, modelName: nonemptyString(variant["model_name"]))
     }
 
+    private static func sourceIdentity(_ variant: [String: Any], material: [String: Any], relativeTo manifest: URL) -> MapReviewSourceIdentity {
+        let path = nonemptyString(variant["source_path"] ?? material["source_path"]).map { value in
+            value.hasPrefix("/") ? value : manifest.deletingLastPathComponent().appendingPathComponent(value).path
+        }
+        func integers(_ key: String, count: Int) -> [Int]? {
+            guard let values = variant[key] as? [Int] ?? material[key] as? [Int], values.count == count,
+                  values.allSatisfy({ $0 >= 0 }), values.suffix(2).allSatisfy({ $0 > 0 }) else { return nil }
+            return values
+        }
+        return MapReviewSourceIdentity(path: path,
+            sha256: nonemptyString(variant["source_sha256"] ?? material["source_sha256"]),
+            url: nonemptyString(variant["source_url"] ?? material["source_url"]),
+            bits: variant["source_bits"] as? Int ?? material["source_bits"] as? Int ?? material["target_original_bits"] as? Int,
+            cropRectangle: integers("source_crop_rectangle", count: 4), pixelDimensions: integers("source_pixel_dimensions", count: 2))
+    }
+
     private static func candidateTitle(name: String, role: String, identity: MapReviewModelIdentity, deepBump: Bool) -> String {
         let map = identity.mapType == "height" ? "displacement" : identity.mapType ?? "map"
-        if name == "target" { return "Reference \(map)" }
+        if role == "target" { return "Source \(map) · reference" }
         if name == "flat" { return "Flat baseline · no model" }
         if deepBump { return "DeepBump · \(map)" }
         var title: String

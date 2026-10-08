@@ -68,7 +68,8 @@ final class EngineTests: XCTestCase {
     func testOldSettingsDecodeWithSafeSurfaceHeightDefaults() throws {
         let data=Data("{\"outputSize\":2048,\"useEmbeddedDepth\":true}".utf8)
         let settings=try JSONDecoder().decode(TextureSettings.self,from:data)
-        XCTAssertFalse(settings.useEmbeddedDepth)
+        let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(settings)) as? [String: Any])
+        XCTAssertNil(encoded["useEmbeddedDepth"], "Retired portrait-depth settings must not be written into recipes or exports")
         XCTAssertEqual(settings.heightDetail,0)
         XCTAssertEqual(settings.surfacePlaneRemoval,1)
         XCTAssertEqual(settings.depthCleanup,0.25)
@@ -183,7 +184,7 @@ final class EngineTests: XCTestCase {
         for index in 0..<4 { XCTAssertEqual(actual[index],expected[index],accuracy:1e-6) }
     }
 
-    func testPhotoPatternsAndEmbeddedPortraitDepthNeverBecomeDefaultRelief() async throws {
+    func testPhotoPatternsAndLegacyPortraitSettingsNeverBecomeDefaultRelief() async throws {
         let engine=TextureEngine()
         let side=64
         var colours=[Float](repeating:1,count:side*side*4)
@@ -195,11 +196,10 @@ final class EngineTests: XCTestCase {
         }
         let image=CIImage(bitmapData:colours.withUnsafeBytes { Data($0) },bytesPerRow:side*16,
             size:CGSize(width:side,height:side),format:.RGBAf,colorSpace:CGColorSpace(name:CGColorSpace.extendedLinearSRGB))
-        let embedded=try TextureDepth(width:side,height:side,
-            values:(0..<side*side).map { Float($0%side)/64 },sourceLabel:"coarse portrait").image
         let source=TextureSource(url:URL(fileURLWithPath:"/tmp/colour-pattern.png"),orientedImage:image,
-            embeddedDepth:embedded,camera:CameraMetadata(),pixelWidth:side,pixelHeight:side)
-        var settings=TextureSettings();settings.useEmbeddedDepth=true
+            camera:CameraMetadata(),pixelWidth:side,pixelHeight:side)
+        let settings=try JSONDecoder().decode(TextureSettings.self,
+            from:Data("{\"useEmbeddedDepth\":true}".utf8))
         let result=try await engine.process(source:source,settings:settings)
         let context=CIContext(options:[.workingColorSpace:NSNull(),.outputColorSpace:NSNull(),.workingFormat:CIFormat.RGBAf])
         var values=[Float](repeating:0,count:32*32)
@@ -210,13 +210,26 @@ final class EngineTests: XCTestCase {
         XCTAssertTrue(result.depthOrigin.contains("Flat"))
     }
 
+    func testMaterialPhotoImportRetainsColourAuxiliariesButNeverReadsPortraitDepth() {
+        let types = TextureEngine.materialPhotoAuxiliaryTypes.map { $0.0 as String }
+        XCTAssertFalse(types.contains(kCGImageAuxiliaryDataTypeDepth as String))
+        XCTAssertFalse(types.contains(kCGImageAuxiliaryDataTypeDisparity as String))
+        XCTAssertEqual(Set(types), Set([
+            kCGImageAuxiliaryDataTypeHDRGainMap as String,
+            kCGImageAuxiliaryDataTypeISOGainMap as String,
+            kCGImageAuxiliaryDataTypePortraitEffectsMatte as String,
+            kCGImageAuxiliaryDataTypeSemanticSegmentationHairMatte as String,
+            kCGImageAuxiliaryDataTypeSemanticSegmentationSkinMatte as String,
+            kCGImageAuxiliaryDataTypeSemanticSegmentationSkyMatte as String]))
+    }
+
     func testLowResolutionDepthUpsamplingDoesNotCreateRaisedBorderRim() async throws {
         let engine=TextureEngine()
         let side=512,depthSide=32
         let photo=CIImage(color:CIColor(red:0.4,green:0.4,blue:0.4))
             .cropped(to:CGRect(x:0,y:0,width:side,height:side))
         let source=TextureSource(url:URL(fileURLWithPath:"/tmp/edge-surface.png"),orientedImage:photo,
-            embeddedDepth:nil,camera:CameraMetadata(),pixelWidth:side,pixelHeight:side)
+            camera:CameraMetadata(),pixelWidth:side,pixelHeight:side)
         let values=(0..<depthSide*depthSide).map { index in
             Float(2)+0.04*sin(Float(index%depthSide)*2*Float.pi/Float(depthSide-1))
         }
@@ -244,7 +257,7 @@ final class EngineTests: XCTestCase {
         let side=64
         let photo=CIImage(color:CIColor(red:0.4,green:0.4,blue:0.4)).cropped(to:CGRect(x:0,y:0,width:side,height:side))
         let source=TextureSource(url:URL(fileURLWithPath:"/tmp/surface.png"),orientedImage:photo,
-            embeddedDepth:nil,camera:CameraMetadata(),pixelWidth:side,pixelHeight:side)
+            camera:CameraMetadata(),pixelWidth:side,pixelHeight:side)
         let raw=(0..<side*side).map { Float(2)+Float($0%side)*0.005+Float($0/side)*0.01 }
         let depth=try TextureDepth(width:side,height:side,values:raw,sourceLabel:"distance ramp",interpretation:.distance)
         var settings=TextureSettings();settings.surfacePlaneRemoval=0;settings.depthCleanup=0
@@ -301,7 +314,7 @@ final class EngineTests: XCTestCase {
         let engine = TextureEngine(libraryURL:library)
         let image = CIImage(color:CIColor(red:0.4,green:0.4,blue:0.4)).cropped(to:CGRect(x:0,y:0,width:1200,height:1000))
         let source = TextureSource(url:URL(fileURLWithPath:"/tmp/synthetic-source.png"),orientedImage:image,
-                                  embeddedDepth:nil,camera:CameraMetadata(),pixelWidth:1200,pixelHeight:1000)
+                                  camera:CameraMetadata(),pixelWidth:1200,pixelHeight:1000)
         let settings = TextureSettings()
         let material = try await engine.process(source:source,settings:settings)
         let numeric = CIContext(options:[.workingColorSpace:NSNull(),.outputColorSpace:NSNull(),.workingFormat:CIFormat.RGBAf])

@@ -3,4 +3,4 @@
 from .extractor import ExtractOptions, extract_file, inspect_file
 
 __all__ = ["ExtractOptions", "extract_file", "inspect_file"]
-__version__ = "0.9.11"
+__version__ = "0.9.12"

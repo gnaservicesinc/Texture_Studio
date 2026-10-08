@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -49,6 +50,20 @@ def source_cache_budget() -> int:
     from material_resources import available_memory_bytes, os_reserve_bytes, physical_memory_bytes
     reserve = os_reserve_bytes(physical_memory_bytes())
     return max(0, available_memory_bytes() - reserve)
+
+
+def preparation_worker_count(materials: list[dict], requested: int | None = None) -> int:
+    """Parallel independent materials within measured CPU/memory headroom."""
+    cores = os.cpu_count() or 1
+    if requested is not None and (type(requested) is not int or requested < 1):
+        raise ValueError("Preparation workers must be a positive integer")
+    peak_source = max((item["width"] * item["height"] * item["channels"] * (item["sample_bits"] // 8)
+                       for material in materials if material["ready"] for item in material["maps"].values()), default=1)
+    # Decode, encoder and verification buffers can coexist. Keep a conservative
+    # per-worker allowance without capping every machine at a fixed small count.
+    per_worker = max(64 * 1024**2, peak_source * 8)
+    return max(1, min(cores, requested or cores, max(1, source_cache_budget() // per_worker),
+                      max(1, sum(material["ready"] for material in materials))))
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -366,7 +381,7 @@ def source_summary(path: Path) -> dict:
     return metadata
 
 
-def discover_materials(sources: Path, crop_size: int, dimension_policy: str = "strict") -> list[dict]:
+def discover_materials(sources: Path, crop_size: int, dimension_policy: str = "strict", whole_maps: bool = False) -> list[dict]:
     discovered = []
     identifiers: set[str] = set()
     for folder in sorted((item for item in sources.iterdir() if item.is_dir()), key=lambda item: item.name.casefold()):
@@ -414,12 +429,17 @@ def discover_materials(sources: Path, crop_size: int, dimension_policy: str = "s
         if candidates:
             width = min(item["width"] for item in candidates.values())
             height = min(item["height"] for item in candidates.values())
-            if width < crop_size or height < crop_size:
+            if whole_maps and max(width, height) > crop_size:
+                problems.append(f"Whole map exceeds requested {crop_size} maximum edge; never resized")
+            elif not whole_maps and (width < crop_size or height < crop_size):
                 problems.append(f"Source is smaller than native {crop_size} crop")
-            rectangles = [[0, 0, crop_size, crop_size]]
-            opposite = [width - crop_size, height - crop_size, crop_size, crop_size]
-            if opposite != rectangles[0]:
-                rectangles.append(opposite)
+            if whole_maps:
+                rectangles = [[0, 0, width, height]]
+            else:
+                rectangles = [[0, 0, crop_size, crop_size]]
+                opposite = [width - crop_size, height - crop_size, crop_size, crop_size]
+                if opposite != rectangles[0]:
+                    rectangles.append(opposite)
         else:
             width = height = 0
             rectangles = []
@@ -1103,10 +1123,16 @@ def main(argv: list[str] | None = None) -> int:
         child.add_argument("--report", type=Path)
         child.add_argument("--dimension-policy", choices=("strict", "common-intersection"), default="strict")
         child.add_argument("--acknowledge-registration", action="store_true")
+        if command in ("plan", "prepare"):
+            child.add_argument("--whole-maps", action="store_true",
+                               help="Keep each complete native map, including rectangular maps. Crop size becomes the maximum allowed edge; never resize or pad.")
+            child.add_argument("--max-edge", type=int,
+                               help="Explicit maximum source edge for --whole-maps; does not resize maps or set the training size")
         if command == "prepare":
             child.add_argument("--output", type=Path, required=True)
             child.add_argument("--approve", action="store_true", help="Record explicit user selection of all generated samples for pilot training")
             child.add_argument("--validation-fraction", type=float, default=.2)
+            child.add_argument("--workers", type=int, help="Optional parallel-material upper bound; defaults to available CPU/memory headroom")
             child.add_argument("--transfer-overrides", type=Path, help="JSON {material_id:{height/normal/roughness:'srgb_to_linear' or {mode:'gamma_to_linear',exponent:2.2}}}; never inferred")
             child.add_argument("--published-source-audit", type=Path, help="Optional official Poly Haven API audit; annotate licenses only for current files matching published MD5 and size")
             child.add_argument("--package-source-audit", type=Path, action="append", default=[], help="Verified ambientCG archive/member audit; repeat per asset, preserving original filenames")
@@ -1156,15 +1182,24 @@ def main(argv: list[str] | None = None) -> int:
                 write_json(arguments.report, report)
             print(json.dumps({"verified": report["verified"], "sample_count": len(checks), "failed": [item for item in checks if not item["verified"]]}, indent=2))
             return 0 if report["verified"] else 1
+        if getattr(arguments, "max_edge", None) is not None:
+            if not getattr(arguments, "whole_maps", False):
+                raise ValueError("--max-edge applies only to --whole-maps")
+            arguments.crop_size = arguments.max_edge
         if arguments.crop_size <= 0:
             raise ValueError("Crop size must be positive")
         if arguments.dimension_policy == "common-intersection" and not arguments.acknowledge_registration:
             raise ValueError("Common-intersection cropping needs --acknowledge-registration after checking paired UV alignment")
         if arguments.command == "prepare" and arguments.output.resolve().is_relative_to(arguments.sources.resolve()):
             raise ValueError("Output must be outside the sources directory; source folders cannot contain generated crops")
-        materials = discover_materials(arguments.sources.resolve(), arguments.crop_size, arguments.dimension_policy)
+        whole_maps = getattr(arguments, "whole_maps", False)
+        if whole_maps and arguments.dimension_policy != "strict":
+            raise ValueError("Whole maps require matching paired dimensions; common-intersection would discard source pixels")
+        materials = discover_materials(arguments.sources.resolve(), arguments.crop_size, arguments.dimension_policy, whole_maps)
+        crop_policy = "complete native source map; rectangular aspect preserved; no resize or padding" if whole_maps else "top-left and opposite corner; applies to squares and rectangles"
         report = {"schema_version": 2, "generator": GENERATOR, "source_images_modified": False,
-                  "crop_size": arguments.crop_size, "crop_policy": "top-left and opposite corner; applies to squares and rectangles",
+                  "crop_size": arguments.crop_size, "crop_size_is_maximum_edge": whole_maps,
+                  "whole_source_maps": whole_maps, "crop_policy": crop_policy,
                   "materials": materials}
         if arguments.command == "normalize-names":
             report["renames"] = normalization_plan(materials, arguments.archive_identical_duplicates)
@@ -1174,8 +1209,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 report["applied"] = False
         elif arguments.command == "prepare":
-            if not 0 < arguments.validation_fraction < 1:
-                raise ValueError("Validation fraction must be between zero and one")
+            if not 0 <= arguments.validation_fraction < 1:
+                raise ValueError("Validation fraction must be at least zero and less than one")
             overrides = json.loads(arguments.transfer_overrides.read_text()) if arguments.transfer_overrides else {}
             published_audit = load_source_audits(arguments.published_source_audit, arguments.package_source_audit)
             previous_index = arguments.output / "dataset.json"
@@ -1183,28 +1218,36 @@ def main(argv: list[str] | None = None) -> int:
                 previous_document = json.loads(previous_index.read_text())
                 if previous_document.get("generator") != GENERATOR:
                     raise ValueError(f"Existing dataset index belongs to another workflow: {previous_index}; no metadata overwritten")
+                if previous_document.get("whole_source_maps", False) != whole_maps:
+                    raise ValueError("Existing dataset uses a different whole-map/crop policy; choose a new output folder")
                 requested_status = "approved" if arguments.approve else "prepared"
                 if any(item.get("status") != requested_status for item in previous_document.get("samples", [])) or previous_document.get("validation_fraction") != arguments.validation_fraction:
                     raise ValueError("Existing dataset approval or split options differ; review metadata explicitly before changing them. Existing dataset index preserved")
             records = []
             failures = []
             preparation_errors = []
-            for material in materials:
+            worker_count = preparation_worker_count(materials, arguments.workers)
+            report["preparation_workers"] = worker_count
+            def prepare_one(material: dict) -> tuple[list[dict], dict | None, str | None]:
                 if not material["ready"]:
-                    failures.append({"material_id": material["material_id"], "problems": material["problems"]})
-                    continue
+                    return [], {"material_id": material["material_id"], "problems": material["problems"]}, None
                 print(f"Preparing {material['material_id']}...", flush=True)
                 try:
-                    records.extend(prepare_material(material, arguments.output.resolve(), overrides, arguments.approve, arguments.validation_fraction, published_audit))
+                    return prepare_material(material, arguments.output.resolve(), overrides, arguments.approve, arguments.validation_fraction, published_audit), None, None
                 except (ValueError, OSError, KeyError) as error:
-                    failures.append({"material_id": material["material_id"], "problems": [str(error)]})
-                    preparation_errors.append(str(error))
+                    return [], {"material_id": material["material_id"], "problems": [str(error)]}, str(error)
+            with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                for prepared, failure, error in pool.map(prepare_one, materials):
+                    records.extend(prepared)
+                    if failure is not None: failures.append(failure)
+                    if error is not None: preparation_errors.append(error)
             if preparation_errors and previous_index.exists():
                 if arguments.report:
                     report.update(sample_count=len(records), skipped_materials=failures, dataset_index_preserved=True)
                     write_json(arguments.report, report)
                 raise ValueError(f"Preparation failed for {len(preparation_errors)} materials; existing dataset index preserved: {preparation_errors[0]}")
             index = {"schema_version": 2, "generator": GENERATOR, "crop_size": arguments.crop_size,
+                     "whole_source_maps": whole_maps, "crop_size_is_maximum_edge": whole_maps,
                      "crop_policy": report["crop_policy"], "source_images_modified": False,
                      "height_normalization": "source integer code / maximum code; no per-crop min/max stretch",
                      "normal_convention": "OpenGL +Y", "split_policy": "sha256 material identity; all crops of a material share a split",
