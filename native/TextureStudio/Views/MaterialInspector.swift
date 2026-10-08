@@ -6,6 +6,13 @@ struct MaterialInspector: View {
 
     var body: some View {
         Form {
+            Section("Material workflow") {
+                Text("Adjust the photo and surface settings, then choose Generate Material. Open Full Quality inspects the finished map; Export Material saves all four maps for Blender.")
+                    .font(.caption).foregroundStyle(.secondary)
+                LabeledContent("Height source") {
+                    Text(workspace.activeHeightSourceLabel).multilineTextAlignment(.trailing).textSelection(.enabled)
+                }
+            }
             Section("Photo") {
                 if let source = workspace.source {
                     Text(source.url.lastPathComponent).font(.headline).lineLimit(2)
@@ -27,9 +34,13 @@ struct MaterialInspector: View {
             }
             Section("Straighten & crop") {
                 DoubleControl(title: "Tilt X", value: $workspace.settings.rotationX, range: -45...45, suffix: "°")
+                    .help("Straighten a surface that tilts away vertically. Empty edges are cropped automatically.")
                 DoubleControl(title: "Tilt Y", value: $workspace.settings.rotationY, range: -45...45, suffix: "°")
+                    .help("Straighten a surface that tilts away horizontally. Empty edges are cropped automatically.")
                 DoubleControl(title: "Rotate Z", value: $workspace.settings.rotationZ, range: -45...45, suffix: "°")
+                    .help("Rotate within the photo to level horizontal or vertical surface features.")
                 DoubleControl(title: "Lens correction", value: $workspace.settings.lensDistortion, range: -0.15...0.15)
+                    .help("Correct barrel or pincushion curvature. Leave at zero if straight features already look straight.")
                 LabeledContent("Focal length (px)") {
                     TextField("Auto", value: $workspace.settings.focalLengthPixels, format: .number)
                         .frame(width: 90)
@@ -42,12 +53,15 @@ struct MaterialInspector: View {
                 Button("Reset Transform") {
                     workspace.settings.rotationX = 0; workspace.settings.rotationY = 0; workspace.settings.rotationZ = 0
                     workspace.settings.cropScale = 1; workspace.settings.cropOffsetX = 0; workspace.settings.cropOffsetY = 0
+                    workspace.settings.lensDistortion = 0; workspace.settings.focalLengthPixels = nil
                 }
+                .help("Reset tilt, rotation, lens correction and crop. Focal length returns to the photo's camera information.")
             }
             Section("Balance the photo") {
                 FloatControl(title: "Lighting balance", value: $workspace.settings.lightingStrength, range: 0...1)
                 FloatControl(title: "Lighting scale", value: $workspace.settings.lightingRadius, range: 0.01...0.5)
                 FloatControl(title: "Noise reduction", value: $workspace.settings.noiseReduction, range: 0...0.1)
+                    .help("Use the lowest value that removes visible sensor noise. Inspect at full quality to preserve small surface detail.")
                 Text("Broad illumination is reduced while retaining photo detail. Clipped highlights and hidden shadow detail need review.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -120,14 +134,16 @@ struct MaterialInspector: View {
                     TextField("Meters", value: $workspace.settings.materialWidthMeters, format: .number)
                         .frame(width: 90)
                 }
+                .help("The real or intended width of the material tile in Blender. Used with relief scale to calculate normal strength.")
                 LabeledContent("Relief scale (m)") {
                     TextField("Meters", value: $workspace.settings.displacementScaleMeters, format: .number)
                         .frame(width: 90)
                 }
+                .help("The displacement amount for Blender. Adjust for useful visual relief; inferred height is not a calibrated physical measurement.")
                 Text("Depth cleanup targets isolated artifacts while retaining coherent edges. Roughness remains an editable estimate.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("Final output") {
+            Section("Export material") {
                 Picker("Map size", selection: $workspace.settings.outputSize) {
                     Text("1024 × 1024").tag(1024)
                     Text("2048 × 2048").tag(2048)
@@ -138,9 +154,18 @@ struct MaterialInspector: View {
                     Text("16-bit float").tag(EXRPrecision.float16)
                     Text("32-bit float").tag(EXRPrecision.float32)
                 }
+                .help("16-bit float uses less disk space; 32-bit float preserves the pipeline's numeric precision. Both store linear map data.")
                 Text("Diffuse: 8-bit sRGB PNG. Roughness, normal and displacement: linear EXR.")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("Higher export resolution resamples the material; it does not increase the model’s detail or precision.")
+                Text(workspace.depthChoice == .materialCheckpoint
+                    ? "This material model supports native 1024 or 2048 output. Choose either size for this checkpoint."
+                    : "Camera-depth model resolution is set separately. Larger output maps do not add detail absent from the height prediction.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Export Material…", systemImage: "square.and.arrow.up") { workspace.chooseExport(models: models) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(workspace.source == nil)
+                    .help("Save all four maps and a Blender setup script in one folder. Any pending changes are generated automatically. ⌘E")
+                Text("Choose a new material folder. Export includes every map, regardless of which one you are viewing.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if !workspace.warnings.isEmpty {
@@ -151,10 +176,6 @@ struct MaterialInspector: View {
         }
         .formStyle(.grouped)
         .disabled(workspace.isBusy)
-        .onChange(of: workspace.settings) { workspace.markEdited() }
-        .onChange(of: workspace.depthChoice) { workspace.markEdited() }
-        .onChange(of: workspace.modelID) { workspace.invalidateModelDepth() }
-        .onChange(of: workspace.customInverseDepth) { workspace.invalidateModelDepth() }
     }
 }
 

@@ -6,6 +6,84 @@ import XCTest
 @testable import TextureStudio
 
 final class MapInspectionTests: XCTestCase {
+    @MainActor func testNestedInspectorCacheMatchingHonorsFolderBoundaries() {
+        let folder = URL(fileURLWithPath: "/tmp/texture-cache", isDirectory: true)
+        XCTAssertTrue(ReviewWindowController.mapURL(folder.appendingPathComponent("normal.exr"), isInCacheFolder: folder))
+        XCTAssertTrue(ReviewWindowController.mapURL(folder.appendingPathComponent("maps/height.exr"), isInCacheFolder: folder))
+        XCTAssertFalse(ReviewWindowController.mapURL(URL(fileURLWithPath: "/tmp/texture-cache-other/normal.exr"), isInCacheFolder: folder))
+        XCTAssertFalse(ReviewWindowController.mapURL(folder, isInCacheFolder: folder))
+        XCTAssertFalse(ReviewWindowController.mapURL(folder.appendingPathComponent("../outside.exr"), isInCacheFolder: folder))
+    }
+
+    func testOriginalAndBatchExportsDoNotRequireDisplayDecodingAndKeepExactBytes() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = directory.appendingPathComponent("first.exr")
+        let second = directory.appendingPathComponent("second.exr")
+        // Arbitrary binary data proves this path copies original bytes without
+        // depending on a successful display decode or applying image changes.
+        let firstBytes = Data([0, 1, 255, 32, 128, 0])
+        let secondBytes = Data([255, 0, 129, 7])
+        try firstBytes.write(to: first); try secondBytes.write(to: second)
+        let direct = directory.appendingPathComponent("direct.exr")
+        try ReviewImageLoader.exportOriginal(first, to: direct)
+        XCTAssertEqual(try Data(contentsOf: direct), firstBytes)
+        let batch = directory.appendingPathComponent("exports", isDirectory: true)
+        try ReviewImageLoader.exportOriginals([
+            ReviewOriginalExport(sourceURL: first, filename: "soil.exr", expectedSHA256: nil),
+            ReviewOriginalExport(sourceURL: second, filename: "soil.exr", expectedSHA256: ReviewImageLoader.hash(secondBytes))], to: batch)
+        XCTAssertEqual(try Data(contentsOf: batch.appendingPathComponent("soil.exr")), firstBytes)
+        XCTAssertEqual(try Data(contentsOf: batch.appendingPathComponent("soil-2.exr")), secondBytes)
+        XCTAssertEqual(try Data(contentsOf: first), firstBytes)
+        XCTAssertThrowsError(try ReviewImageLoader.exportOriginals([], to: batch))
+        XCTAssertEqual(try Data(contentsOf: batch.appendingPathComponent("soil.exr")), firstBytes)
+    }
+
+    func testBatchExportRejectsChangedSourcesAndRemovesOnlyItsNewPartialFolder() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("source.png")
+        let bytes = Data([10, 20, 30])
+        try bytes.write(to: source)
+        let batch = directory.appendingPathComponent("exports", isDirectory: true)
+        XCTAssertThrowsError(try ReviewImageLoader.exportOriginals([
+            ReviewOriginalExport(sourceURL: source, filename: "first.png", expectedSHA256: nil),
+            ReviewOriginalExport(sourceURL: source, filename: "second.png", expectedSHA256: "changed")], to: batch))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: batch.path))
+        XCTAssertEqual(try Data(contentsOf: source), bytes)
+    }
+
+    @MainActor func testReviewDisplayChoicesSurviveReopeningAndClampInvalidStoredValues() throws {
+        let name = "MapInspectionPreferences-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { preferences.removePersistentDomain(forName: name) }
+        let viewport = InspectionViewport(preferences: preferences)
+        viewport.setZoom(2)
+        viewport.displayContrast = 12
+        viewport.displayMidpoint = 0.42
+        let reopened = InspectionViewport(preferences: preferences)
+        XCTAssertEqual(reopened.zoom, 2)
+        XCTAssertFalse(reopened.fitToView)
+        XCTAssertEqual(reopened.displayContrast, 12)
+        XCTAssertEqual(reopened.displayMidpoint, 0.42)
+        reopened.fit()
+        XCTAssertTrue(InspectionViewport(preferences: preferences).fitToView)
+        preferences.set(["zoom": -20, "contrast": 99, "midpoint": -1], forKey: "reviewDisplay")
+        let clamped = InspectionViewport(preferences: preferences)
+        XCTAssertEqual(clamped.zoom, 0.02)
+        XCTAssertEqual(clamped.displayContrast, 32)
+        XCTAssertEqual(clamped.displayMidpoint, 0)
+    }
+
+    @MainActor func testVisibleMapPreferencesAreScopedToExactCandidateIdentitiesAndFiles() {
+        let original = MapReviewCandidate(id: "checkpoint", label: "Model", mapURL: URL(fileURLWithPath: "/first/model.exr"), numeric: true)
+        let second = MapReviewCandidate(id: "target", label: "Reference", mapURL: URL(fileURLWithPath: "/first/target.png"), numeric: true)
+        let unrelated = MapReviewCandidate(id: "checkpoint", label: "Model", mapURL: URL(fileURLWithPath: "/second/model.exr"), numeric: true)
+        XCTAssertEqual(ReviewWorkbenchView.selectionPreferenceKey([original, second]), ReviewWorkbenchView.selectionPreferenceKey([second, original]))
+        XCTAssertNotEqual(ReviewWorkbenchView.selectionPreferenceKey([original]), ReviewWorkbenchView.selectionPreferenceKey([unrelated]))
+        XCTAssertNotEqual(ReviewWorkbenchView.selectionPreferenceKey([original]), ReviewWorkbenchView.selectionPreferenceKey([original, second]))
+    }
+
     func testPNGFullDimensionsAndOriginalBytesRemainIntact() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

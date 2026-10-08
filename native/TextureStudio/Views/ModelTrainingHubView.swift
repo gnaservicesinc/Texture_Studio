@@ -46,8 +46,14 @@ private enum TrainingDestination: String, CaseIterable, Identifiable {
 
 struct ModelTrainingHubView: View {
     @Bindable var store: WorkbenchStore
-    @State private var destination: TrainingDestination? = .overview
+    @AppStorage("trainingDestination", store: UserDefaults(suiteName: "org.ipde.material-tools"))
+    private var destinationName = TrainingDestination.overview.rawValue
     @State private var review = ReviewSessionStore()
+
+    private var destination: TrainingDestination? {
+        get { TrainingDestination(rawValue: destinationName) ?? .overview }
+        nonmutating set { destinationName = (newValue ?? .overview).rawValue }
+    }
 
     var body: some View {
         NavigationSplitView {

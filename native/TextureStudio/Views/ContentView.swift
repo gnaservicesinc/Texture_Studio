@@ -9,12 +9,12 @@ struct ContentView: View {
     init(models: ModelManager, adviser: OllamaDecisionService, runtime: PythonDepthService) {
         self.models = models
         self.adviser = adviser
-        self._workspace = State(initialValue: TextureWorkspace(pythonDepthService: runtime))
+        self._workspace = State(initialValue: TextureWorkspace(pythonDepthService: runtime, preferences: StudioPreferences.defaults))
     }
 
     var body: some View {
         NavigationSplitView {
-            StudioSidebar(workspace: workspace)
+            StudioSidebar(workspace: workspace, models: models)
                 .navigationSplitViewColumnWidth(min: 170, ideal: 205, max: 245)
         } detail: {
             MaterialCanvas(workspace: workspace, models: models)
@@ -24,6 +24,7 @@ struct ContentView: View {
                 .inspectorColumnWidth(min: 300, ideal: 330, max: 400)
         }
         .focusedSceneValue(\.textureWorkspace, workspace)
+        .focusedSceneValue(\.textureModels, models)
         .navigationTitle(workspace.source?.url.lastPathComponent ?? "Texture Studio")
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
@@ -31,13 +32,20 @@ struct ContentView: View {
                     .help("Import a surface photo")
                     .disabled(workspace.isBusy)
                 Button { workspace.chooseRecipe() } label: { Label("Open Recipe", systemImage: "folder") }
+                    .help("Restore a saved photo, material settings and model selection.")
                     .disabled(workspace.isBusy)
             }
             ToolbarSpacer(.flexible)
             ToolbarItemGroup(placement: .primaryAction) {
-                Button { workspace.updatePreview(models: models) } label: { Label("Update Preview", systemImage: "arrow.trianglehead.2.clockwise") }
-                    .disabled(workspace.source == nil || workspace.isBusy)
-                Button { workspace.chooseExport(models: models) } label: { Label("Export Material", systemImage: "square.and.arrow.up") }
+                Button { workspace.updatePreview(models: models) } label: {
+                    Label(workspace.materialNeedsUpdate ? (workspace.hasEdits ? "Update Material" : "Generate Material") : "Material Is Current",
+                          systemImage: workspace.materialNeedsUpdate ? "arrow.trianglehead.2.clockwise" : "checkmark.circle")
+                }
+                    .help("Generate all four maps at the selected output size. Full Quality and export reuse the finished maps until you change a setting.")
+                    .disabled(workspace.source == nil || workspace.isBusy || !workspace.materialNeedsUpdate)
+                Button { workspace.chooseExport(models: models) } label: { Label("Export Material…", systemImage: "square.and.arrow.up") }
+                    .labelStyle(.titleAndIcon)
+                    .help("Save diffuse PNG, roughness, OpenGL normal and displacement EXRs, plus a Blender setup script, in a material folder. ⌘E")
                     .disabled(workspace.source == nil || workspace.isBusy)
             }
             ToolbarSpacer(.fixed)
@@ -46,8 +54,10 @@ struct ContentView: View {
                     .help("Prepare crops, refine a model, compare checkpoints and inspect full-resolution material maps.")
                 Button { workspace.showAdvice = true } label: { Label("Review Photo", systemImage: "eye") }
                     .help("Review bounded suggestions from local Clef")
-                Button { workspace.showModels = true } label: { Label("Models", systemImage: "shippingbox") }
+                Button { workspace.showModels = true } label: { Label("Local Models", systemImage: "shippingbox") }
+                    .help("See the active material model, locate model files and manage local runtimes.")
                 Button { workspace.showInspector.toggle() } label: { Label("Inspector", systemImage: "sidebar.right") }
+                    .help("Show or hide photo, material and export settings. ⌥⌘I")
             }
         }
         .sheet(isPresented: $workspace.showModels) {
@@ -99,6 +109,7 @@ struct ContentView: View {
 struct StudioSidebar: View {
     @Environment(\.openWindow) private var openWindow
     @Bindable var workspace: TextureWorkspace
+    let models: ModelManager
 
     var body: some View {
         ScrollView {
@@ -112,6 +123,9 @@ struct StudioSidebar: View {
                 }
             }
             Section("Project") {
+                Button { workspace.chooseExport(models: models) } label: { Label("Export Material…", systemImage: "square.and.arrow.up") }
+                    .help("Save all four final maps and a Blender setup script. ⌘E")
+                    .disabled(workspace.source == nil || workspace.isBusy)
                 Button { openWindow(id: "model-training") } label: { Label("Model Training", systemImage: "graduationcap") }
                     .help("Open the guided workspace for data preparation, training, comparison and model export.")
                 Button { workspace.saveRecipe() } label: { Label("Save Recipe…", systemImage: "doc.badge.arrow.up") }

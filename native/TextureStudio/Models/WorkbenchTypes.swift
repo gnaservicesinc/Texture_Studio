@@ -114,7 +114,7 @@ struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
     }
 }
 
-struct MaterialTrainingOptions: Equatable, Sendable {
+struct MaterialTrainingOptions: Codable, Equatable, Sendable {
     var target = "height"
     var size = 1024
     var updatesPerCrop = 100
@@ -125,6 +125,69 @@ struct MaterialTrainingOptions: Equatable, Sendable {
     var maskTransparency = true
     var useSelectedMaterialOnly = false
     var useWarmStart = false
+
+    init() {}
+
+    enum CodingKeys: String, CodingKey {
+        case target, size, updatesPerCrop, maxMinutes, memoryGB, allowUnreviewed,
+             maskTransparency, useSelectedMaterialOnly, useWarmStart
+    }
+
+    init(from decoder: Decoder) throws {
+        self.init()
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        target = try values.decodeIfPresent(String.self, forKey: .target) ?? target
+        size = try values.decodeIfPresent(Int.self, forKey: .size) ?? size
+        updatesPerCrop = try values.decodeIfPresent(Int.self, forKey: .updatesPerCrop) ?? updatesPerCrop
+        maxMinutes = try values.decodeIfPresent(Double.self, forKey: .maxMinutes) ?? maxMinutes
+        memoryGB = try values.decodeIfPresent(Double.self, forKey: .memoryGB) ?? memoryGB
+        allowUnreviewed = try values.decodeIfPresent(Bool.self, forKey: .allowUnreviewed) ?? allowUnreviewed
+        maskTransparency = try values.decodeIfPresent(Bool.self, forKey: .maskTransparency) ?? maskTransparency
+        useSelectedMaterialOnly = try values.decodeIfPresent(Bool.self, forKey: .useSelectedMaterialOnly) ?? useSelectedMaterialOnly
+        useWarmStart = try values.decodeIfPresent(Bool.self, forKey: .useWarmStart) ?? useWarmStart
+    }
+
+    /// A stored memory setting can come from a different Mac. Preserve every
+    /// supported choice; adapt only values outside this machine's actual limits.
+    func restored(for resources: MachineResources) -> Self {
+        var result = self
+        if !["height", "roughness", "normal"].contains(result.target) { result.target = "height" }
+        if ![1024, 2048].contains(result.size) { result.size = 1024 }
+        result.updatesPerCrop = min(10_000, max(1, result.updatesPerCrop))
+        result.maxMinutes = result.maxMinutes.isFinite ? min(240, max(1, result.maxMinutes)) : 30
+        if resources.trainingMemoryIssue(result.memoryGB) != nil {
+            result.memoryGB = result.memoryGB.isFinite
+                ? min(resources.maximumTrainingGiB, max(resources.trainingMemoryRange.lowerBound, result.memoryGB))
+                : resources.defaultTrainingGiB
+        }
+        return result
+    }
+}
+
+/// Optional fields let older preferences gain new controls without losing the
+/// settings they already contain. Runtime paths keep their existing keys.
+struct WorkbenchPreferences: Codable {
+    var training: MaterialTrainingOptions?
+    var selectedSampleId: String?
+    var selectedRole: String?
+    var selectedCheckpointId: String?
+    var comparisonCheckpointIds: Set<String>?
+    var comparisonIncludesBase: Bool?
+    var sourceImagePath: String?
+    var lastOutputPath: String?
+    var lastLogPath: String?
+    var lastPackagePath: String?
+    var lastPackageCheckpointId: String?
+    static let key = "workbenchSettings.v1"
+
+    static func load(from defaults: UserDefaults) -> Self {
+        guard let data = defaults.data(forKey: key), let value = try? JSONDecoder().decode(Self.self, from: data) else { return Self() }
+        return value
+    }
+    func save(to defaults: UserDefaults) {
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        defaults.set(data, forKey: Self.key)
+    }
 }
 
 enum MaterialWorkbenchRuntime {

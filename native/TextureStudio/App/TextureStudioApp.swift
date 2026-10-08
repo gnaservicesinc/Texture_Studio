@@ -79,15 +79,21 @@ final class StudioAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 private struct WorkspaceFocusKey: FocusedValueKey { typealias Value = TextureWorkspace }
+private struct StudioModelsFocusKey: FocusedValueKey { typealias Value = ModelManager }
 extension FocusedValues {
     var textureWorkspace: TextureWorkspace? {
         get { self[WorkspaceFocusKey.self] }
         set { self[WorkspaceFocusKey.self] = newValue }
     }
+    var textureModels: ModelManager? {
+        get { self[StudioModelsFocusKey.self] }
+        set { self[StudioModelsFocusKey.self] = newValue }
+    }
 }
 
 struct StudioCommands: Commands {
     @FocusedValue(\.textureWorkspace) private var workspace
+    @FocusedValue(\.textureModels) private var models
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             Button("Import Photo…") { workspace?.choosePhoto() }
@@ -101,9 +107,25 @@ struct StudioCommands: Commands {
             Button("Save Texture Recipe…") { workspace?.saveRecipe() }
                 .keyboardShortcut("s")
                 .disabled(workspace?.source == nil || workspace?.isBusy == true)
+            Button("Export Material…") {
+                if let workspace, let models { workspace.chooseExport(models: models) }
+            }
+                .keyboardShortcut("e")
+                .disabled(workspace?.source == nil || workspace?.isBusy == true || models == nil)
         }
         CommandMenu("Material") {
-            Button("Attach Depth Map…") { workspace?.chooseDepth() }
+            Button("Generate / Update Material") {
+                if let workspace, let models { workspace.updatePreview(models: models) }
+            }
+                .keyboardShortcut("r")
+                .disabled(workspace?.source == nil || workspace?.isBusy == true || workspace?.materialNeedsUpdate != true || models == nil)
+            Button("Open Full Quality") {
+                if let workspace, let models { workspace.inspectFullQuality(models: models) }
+            }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .disabled(workspace?.fullQualityAvailable != true || workspace?.isBusy == true || models == nil)
+            Divider()
+            Button("Attach Height / Depth Map…") { workspace?.chooseDepth() }
                 .disabled(workspace?.source == nil || workspace?.isBusy == true)
             Button("Manage Local Models…") { workspace?.showModels = true }
             Button("Show Inspector") { workspace?.showInspector.toggle() }

@@ -96,7 +96,7 @@ struct MaterialToolRootView: View {
                         }.frame(width: 240)
                             .help("Record whether this candidate produces useful surface detail. A score alone cannot judge material quality.")
                         TextField("Detail, noise or relief observations", text: Binding(get: { review.notes[candidateId] ?? "" }, set: { review.notes[candidateId] = $0 }))
-                        Button("Save Review…") { review.saveReview() }
+                        Button("Save Decisions & Notes…") { review.saveReview() }
                             .help("Save decisions and notes to a separate file you can reopen. Original maps and selected models stay intact.")
                     }.padding(12)
                     Divider()
@@ -111,7 +111,7 @@ struct MaterialToolRootView: View {
                 Button("Open Review…", systemImage: "folder") { review.chooseManifest() }
                     .help("Reopen saved review decisions or the review manifest produced by a checkpoint comparison.")
                 Button("Open Maps…", systemImage: "photo") { review.chooseMaps() }
-                    .help("Inspect original PNG or EXR maps at full source resolution.")
+                    .help("Inspect original PNG or EXR maps at full source resolution. Export Original saves a map; Export Visible Maps saves all visible panes together.")
             }
         }
     }
@@ -120,7 +120,19 @@ struct MaterialToolRootView: View {
             HStack {
                 Button("Source Photo…", systemImage: "photo") { store.chooseSourceImage() }
                     .help("Use one native crop, up to 2048 pixels per side, for every checkpoint. A selected dataset crop is used when no separate photo is chosen.")
-                Text(store.sourceImageURL?.lastPathComponent ?? store.selectedSampleId ?? "Choose a photo or dataset crop").foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(store.sourceImageURL.map { "Source photo: \($0.lastPathComponent)" }
+                         ?? store.selectedSampleId.map { "Dataset crop: \($0)" } ?? "Choose a photo or dataset crop")
+                        .lineLimit(1).truncationMode(.middle)
+                    if store.sourceImageURL != nil {
+                        Text("This saved photo is used instead of the dataset selection.").font(.caption)
+                    }
+                }.foregroundStyle(.secondary)
+                if store.sourceImageURL != nil {
+                    Button("Use Dataset Crop") { store.sourceImageURL = nil }
+                        .disabled(store.isBusy || store.selectedSample?.maps["input"] == nil)
+                        .help("Switch back to the crop currently selected in Dataset. Its source photo and reference map will be used for this comparison.")
+                }
                 Spacer()
                 Button("Choose Checkpoints…") { store.chooseCheckpoint() }
                     .help("Select one checkpoint to compare with its untrained base, or multiple saved checkpoints predicting the same map type. Their exact hashes are recorded with the results.")

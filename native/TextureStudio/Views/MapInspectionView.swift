@@ -3,11 +3,25 @@ import Observation
 import SwiftUI
 
 @MainActor @Observable final class InspectionViewport {
-    var zoom: CGFloat = 1
+    var zoom: CGFloat = 1 { didSet { persistDisplay() } }
     var normalizedCenter = CGPoint(x: 0.5, y: 0.5)
-    var fitToView = false
-    var displayContrast: Double = 1
-    var displayMidpoint: Double = 0.5
+    var fitToView = false { didSet { persistDisplay() } }
+    var displayContrast: Double = 1 { didSet { persistDisplay() } }
+    var displayMidpoint: Double = 0.5 { didSet { persistDisplay() } }
+    private let preferences: UserDefaults?
+    init(preferences: UserDefaults? = nil) {
+        self.preferences = preferences
+        if let stored = preferences?.dictionary(forKey: "reviewDisplay") {
+            if let value = stored["zoom"] as? Double, value.isFinite { zoom = min(32, max(0.02, value)) }
+            fitToView = stored["fit"] as? Bool ?? false
+            if let value = stored["contrast"] as? Double, value.isFinite { displayContrast = min(32, max(1, value)) }
+            if let value = stored["midpoint"] as? Double, value.isFinite { displayMidpoint = min(1, max(0, value)) }
+        }
+    }
+    private func persistDisplay() {
+        preferences?.set(["zoom": Double(zoom), "fit": fitToView,
+                          "contrast": displayContrast, "midpoint": displayMidpoint], forKey: "reviewDisplay")
+    }
     func setActualSize() { zoom = 1; fitToView = false }
     func fit() { normalizedCenter = CGPoint(x: 0.5, y: 0.5); fitToView = true }
     func setZoom(_ value: CGFloat) {

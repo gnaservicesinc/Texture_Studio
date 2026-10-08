@@ -4,7 +4,8 @@ import AppKit
 struct TrainingWorkbenchView: View {
     @Bindable var store: WorkbenchStore
     @State private var showCheckpoints = false
-    @State private var followLog = true
+    @AppStorage("trainingFollowLog", store: UserDefaults(suiteName: "org.ipde.material-tools"))
+    private var followLog = true
 
     private var selectedMaterial: WorkbenchMaterial? {
         store.dataset?.materials.first { $0.id == store.selectedMaterialId }
@@ -95,6 +96,11 @@ struct TrainingWorkbenchView: View {
             if !store.isBusy, let issue = trainingIssue {
                 Label(issue, systemImage: "info.circle")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            if let notice = store.trainingPreferenceNotice {
+                Label(notice, systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .help("Training choices are remembered. A saved value is adjusted only when it falls outside the supported range or this Mac's available resources.")
             }
             Text("Start Training uses the setup on the left. Resume restores a saved run’s optimizer and source selections; updates per crop becomes its desired total.")
                 .font(.caption).foregroundStyle(.secondary)

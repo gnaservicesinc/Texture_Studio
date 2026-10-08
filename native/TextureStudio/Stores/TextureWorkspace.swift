@@ -10,12 +10,12 @@ final class TextureWorkspace {
     var generatedDepth: TextureDepth?
     var generatedProvenance: ModelDepthProvenance?
     var depthURL: URL?
-    var settings = TextureSettings()
-    var depthChoice = DepthChoice.model
+    var settings = TextureSettings() { didSet { if settings != oldValue { savePreferences(); markEdited() } } }
+    var depthChoice = DepthChoice.model { didSet { if depthChoice != oldValue { savePreferences(); markEdited() } } }
     private(set) var selectedMaterialCheckpoint: SelectedMaterialCheckpoint?
-    var modelID = LocalModelDescriptor.da3GiantID
-    var customInverseDepth = true
-    var selectedPreview = MaterialPreview.diffuse
+    var modelID = LocalModelDescriptor.da3GiantID { didSet { if modelID != oldValue { savePreferences(); invalidateModelDepth() } } }
+    var customInverseDepth = true { didSet { if customInverseDepth != oldValue { savePreferences(); invalidateModelDepth() } } }
+    var selectedPreview = MaterialPreview.diffuse { didSet { savePreferences() } }
     var renderedPreview = MaterialPreview.source
     var preview: CGImage?
     var result: MaterialResult?
@@ -27,7 +27,7 @@ final class TextureWorkspace {
     var decision: MaterialDecision?
     var showModelRecovery = false
     var showMemoryWarning = false
-    var showInspector = true
+    var showInspector = true { didSet { savePreferences() } }
     var warnings: [String] = []
     var exportURL: URL?
     var recipeURL: URL?
@@ -44,18 +44,87 @@ final class TextureWorkspace {
     private var sourcePreview: CGImage?
     private var recipeCheckpoint: MaterialCheckpointIdentity?
     private var lastRegistrySelectionIdentity: String?
+    private var generatedCheckpointKey: String?
+    private var materialCache: MaterialRenderCache?
+    @ObservationIgnored private weak var renderModels: ModelManager?
+    @ObservationIgnored private let preferences: UserDefaults?
+    @ObservationIgnored private let checkpointPredictor: (@MainActor (TextureSource, SelectedMaterialCheckpoint, Int) async throws -> TextureDepth)?
+    @ObservationIgnored private let materialProcessor: (@MainActor (TextureSource, TextureSettings, TextureDepth?) async throws -> MaterialResult)?
+    private var exportDirectory: String?
     private let checkpointRegistryURL: URL
     @ObservationIgnored private var selectionObserver: MaterialSelectionObserver?
     @ObservationIgnored private var pendingCheckpointActivation = false
 
     init(pythonDepthService: PythonDepthService = PythonDepthService(),
-         checkpointRegistryURL: URL = SelectedMaterialCheckpoint.registryURL) {
+         checkpointRegistryURL: URL = SelectedMaterialCheckpoint.registryURL,
+         preferences: UserDefaults? = nil,
+         checkpointPredictor: (@MainActor (TextureSource, SelectedMaterialCheckpoint, Int) async throws -> TextureDepth)? = nil,
+         materialProcessor: (@MainActor (TextureSource, TextureSettings, TextureDepth?) async throws -> MaterialResult)? = nil) {
         self.pythonDepthService = pythonDepthService
         self.checkpointRegistryURL = checkpointRegistryURL
+        self.preferences = preferences
+        self.checkpointPredictor = checkpointPredictor
+        self.materialProcessor = materialProcessor
         selectedMaterialCheckpoint = try? SelectedMaterialCheckpoint.read(from: checkpointRegistryURL)
         lastRegistrySelectionIdentity = selectedMaterialCheckpoint?.selectionIdentity
         if selectedMaterialCheckpoint?.target == "height" { depthChoice = .materialCheckpoint }
+        if let preferences {
+            let saved = StudioPreferences.load(from: preferences)
+            settings = saved.settings ?? settings
+            depthChoice = saved.depthChoice ?? depthChoice
+            modelID = saved.modelID ?? modelID
+            customInverseDepth = saved.customInverseDepth ?? customInverseDepth
+            selectedPreview = saved.selectedPreview.flatMap(MaterialPreview.init(rawValue:)) ?? selectedPreview
+            showInspector = saved.showInspector ?? showInspector
+            exportDirectory = saved.exportDirectory
+        }
         selectionObserver = MaterialSelectionObserver { [weak self] in self?.reloadSelectedCheckpoint(activate: true) }
+    }
+
+    private func savePreferences() {
+        guard let preferences else { return }
+        StudioPreferences(settings: settings, depthChoice: depthChoice, modelID: modelID,
+            customInverseDepth: customInverseDepth, selectedPreview: selectedPreview.rawValue,
+            showInspector: showInspector, exportDirectory: exportDirectory).save(to: preferences)
+    }
+
+    private func currentRenderKey() -> MaterialRenderKey? {
+        guard let source else { return nil }
+        let depthIdentity: String
+        switch depthChoice {
+        case .materialCheckpoint:
+            guard let checkpoint = try? currentMaterialCheckpoint() else { return nil }
+            depthIdentity = checkpointCacheKey(checkpoint)
+        case .model:
+            let record = renderModels?.records[modelID]
+            let path = record?.path ?? generatedModelPath ?? ""
+            let signature = path.isEmpty ? "" : modelFileSignature(URL(fileURLWithPath: path), record: record)
+            depthIdentity = "\(modelID)|\(settings.modelProcessResolution)|\(customInverseDepth)|\(path)|\(signature)"
+        case .attached:
+            guard let attachedDepth else { return nil }
+            depthIdentity = "attached|\(ObjectIdentifier(attachedDepth.image))|\(settings.attachedMapIsHeight)"
+        case .photoDetail: depthIdentity = "flat"
+        }
+        return MaterialRenderKey(sourceIdentity: "\(source.url.path)|\(ObjectIdentifier(source.orientedImage))", depthIdentity: depthIdentity, settings: settings)
+    }
+
+    private var currentCache: MaterialRenderCache? {
+        guard let materialCache, materialCache.key == currentRenderKey() else { return nil }
+        return materialCache
+    }
+
+    var materialNeedsUpdate: Bool { currentCache == nil }
+    var fullQualityAvailable: Bool { source != nil && (selectedPreview == .source || currentCache != nil) }
+    var materialStatusText: String {
+        if let cache = currentCache { return "\(cache.material.outputSize) × \(cache.material.outputSize) maps ready · Full Quality and export reuse these maps" }
+        return source == nil ? "Import a surface photo to begin" : "Generate material at \(settings.outputSize) × \(settings.outputSize) to inspect or export its maps"
+    }
+    func cachedMaterialMapURL(_ selection: MaterialPreview) -> URL? { currentCache?.mapURL(selection) }
+
+    private func checkpointCacheKey(_ checkpoint: SelectedMaterialCheckpoint) -> String {
+        let file = URL(fileURLWithPath: checkpoint.checkpointPath)
+        let values = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        return "\(checkpoint.selectionIdentity)|\(checkpoint.pythonPath)|\(checkpoint.modelDirectory)|\(checkpoint.codeDirectory)|\(settings.outputSize)|\(source.map { ObjectIdentifier($0.orientedImage).debugDescription } ?? "")|\(values?.fileSize ?? -1)|\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
     }
 
     func reloadSelectedCheckpoint(activate: Bool = false) {
@@ -98,11 +167,15 @@ final class TextureWorkspace {
             try Task.checkCancellation()
             self.source = imported
             self.sourcePreview = preview
+            self.materialCache = nil
             self.recipeCheckpoint = nil
             self.attachedDepth = nil
             self.generatedDepth = nil
             self.generatedProvenance = nil
             self.generatedModelID = nil
+            self.generatedCheckpointKey = nil
+            self.generatedResolution = nil
+            self.generatedModelPath = nil
             self.generatedFileSignature = nil
             self.decision = nil
             self.depthURL = nil
@@ -111,11 +184,10 @@ final class TextureWorkspace {
             self.exportURL = nil
             self.selectedMaterialCheckpoint = try? SelectedMaterialCheckpoint.read(from: self.checkpointRegistryURL)
             self.lastRegistrySelectionIdentity = self.selectedMaterialCheckpoint?.selectionIdentity
-            self.depthChoice = self.selectedMaterialCheckpoint?.target == "height" ? .materialCheckpoint : .model
-            self.modelID = LocalModelDescriptor.da3GiantID
-            self.settings = TextureSettings()
+            if self.depthChoice == .attached {
+                self.depthChoice = self.selectedMaterialCheckpoint?.target == "height" ? .materialCheckpoint : .model
+            }
             self.hasEdits = false
-            self.selectedPreview = .source
             self.preview = preview
             self.renderedPreview = .source
             self.warnings = []
@@ -147,8 +219,8 @@ final class TextureWorkspace {
 
     func markEdited() {
         hasEdits = true
-        result = nil
-        if renderedPreview != .source {
+        result = currentCache?.material
+        if result == nil, renderedPreview != .source {
             preview = sourcePreview
             renderedPreview = .source
         }
@@ -161,12 +233,8 @@ final class TextureWorkspace {
             showModelRecovery = true
             return
         }
-        run("Preparing the material preview…") {
-            let depth = try await self.selectedDepth(models: models)
-            var previewSettings = self.settings
-            previewSettings.outputSize = 1024
-            previewSettings.useEmbeddedDepth = false
-            let material = try await self.engine.process(source: self.source!, settings: previewSettings, attachedDepth: depth)
+        run("Generating \(settings.outputSize) × \(settings.outputSize) material maps…") {
+            let material = try await self.ensureMaterial(models: models).material
             let selection: MaterialPreview = self.selectedPreview == .source ? .diffuse : self.selectedPreview
             let (preview, rendered) = try await self.preparePreview(source: self.source!, result: material, selection: selection)
             try Task.checkCancellation()
@@ -176,6 +244,28 @@ final class TextureWorkspace {
             self.preview = preview
             self.renderedPreview = rendered
         }
+    }
+
+    private func ensureMaterial(models: ModelManager) async throws -> MaterialRenderCache {
+        renderModels = models
+        if let currentCache { return currentCache }
+        guard let source else { throw StudioError("Import a surface photo to generate its material.") }
+        let depth = try await selectedDepth(models: models)
+        guard let key = currentRenderKey() else { throw StudioError("Choose a height source before generating the material.") }
+        var renderSettings = settings
+        renderSettings.useEmbeddedDepth = false
+        activity = "Generating \(renderSettings.outputSize) × \(renderSettings.outputSize) maps…"
+        let material: MaterialResult
+        if let materialProcessor { material = try await materialProcessor(source, renderSettings, depth) }
+        else { material = try await engine.process(source: source, settings: renderSettings, attachedDepth: depth) }
+        activity = "Retaining native maps for immediate inspection and export…"
+        let cache = try await MaterialRenderCache.make(material: material, key: key, engine: engine)
+        try Task.checkCancellation()
+        guard currentRenderKey() == key else { throw CancellationError() }
+        materialCache = cache
+        result = cache.material
+        warnings = cache.material.warnings
+        return cache
     }
 
     func selectPreview(_ selection: MaterialPreview) {
@@ -220,7 +310,20 @@ final class TextureWorkspace {
             catch { throw StudioError("No material checkpoint is selected. Open Material Trainer → Checkpoints, locate a height checkpoint, then choose Use in Texture Studio.") }
             activity = "Predicting native surface height with the selected material checkpoint…"
             selectedMaterialCheckpoint = record
-            return try await materialCheckpointService.predict(source: source!, checkpoint: record, size: settings.outputSize)
+            let key = checkpointCacheKey(record)
+            if let generatedDepth, generatedCheckpointKey == key { return generatedDepth }
+            let depth: TextureDepth
+            if let checkpointPredictor { depth = try await checkpointPredictor(source!, record, settings.outputSize) }
+            else { depth = try await materialCheckpointService.predict(source: source!, checkpoint: record, size: settings.outputSize) }
+            try Task.checkCancellation()
+            generatedDepth = depth
+            generatedCheckpointKey = key
+            generatedProvenance = nil
+            generatedModelID = nil
+            generatedModelPath = nil
+            generatedFileSignature = nil
+            generatedResolution = nil
+            return depth
         case .photoDetail: return nil
         case .attached:
             guard let attachedDepth else { throw StudioError("Attach a height/depth map, or choose Flat surface.") }
@@ -239,7 +342,7 @@ final class TextureWorkspace {
                 showModels = true
                 throw StudioError("The local PyTorch runtime is missing or unavailable. Install it or locate its Python executable in Local Models.")
             }
-            if descriptor.backend == .pytorchDA3, let generatedDepth, generatedModelID == modelID,
+            if let generatedDepth, generatedModelID == modelID,
                generatedModelPath == modelURL.path, generatedResolution == settings.modelProcessResolution,
                generatedFileSignature == signature {
                 return generatedDepth
@@ -267,6 +370,7 @@ final class TextureWorkspace {
                                          interpretation: inverse ? .inverseDepth : .distance)
             try Task.checkCancellation()
             generatedDepth = depth
+            generatedCheckpointKey = nil
             generatedProvenance = prediction.provenance
             generatedModelID = modelID
             generatedResolution = settings.modelProcessResolution
@@ -278,6 +382,7 @@ final class TextureWorkspace {
 
     func invalidateModelDepth() {
         generatedDepth = nil
+        generatedCheckpointKey = nil
         generatedProvenance = nil
         generatedModelID = nil
         generatedResolution = nil
@@ -292,7 +397,7 @@ final class TextureWorkspace {
             showModelRecovery = true
             return
         }
-        if settings.outputSize >= 4098, !memoryApproved {
+        if currentCache == nil, settings.outputSize >= 4098, !memoryApproved {
             showMemoryWarning = true
             return
         }
@@ -302,6 +407,7 @@ final class TextureWorkspace {
         panel.nameFieldStringValue = "\(source!.url.deletingPathExtension().lastPathComponent)-material"
         panel.canCreateDirectories = true
         panel.prompt = "Export Material"
+        panel.directoryURL = exportDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }
         panel.begin { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
             self?.export(to: url, models: models)
@@ -309,19 +415,19 @@ final class TextureWorkspace {
     }
 
     func export(to url: URL, models: ModelManager, reveal: Bool = true) {
-        guard let source, !isBusy else { return }
-        run("Rendering \(self.settings.outputSize) × \(self.settings.outputSize) material maps…") {
+        guard source != nil, !isBusy else { return }
+        run("Exporting material maps…") {
             guard !FileManager.default.fileExists(atPath: url.path) else {
                 throw StudioError("Choose a new material folder to preserve the previous export.")
             }
             let staging = url.deletingLastPathComponent().appendingPathComponent(".texture-export-\(UUID().uuidString)")
             defer { try? FileManager.default.removeItem(at: staging) }
-            let depth = try await self.selectedDepth(models: models)
+            let cache = try await self.ensureMaterial(models: models)
+            try await self.renderSelectedPreview()
             var exportSettings = self.settings
             exportSettings.useEmbeddedDepth = false
-            let material = try await self.engine.process(source: source, settings: exportSettings, attachedDepth: depth)
             self.activity = "Writing PNG, linear EXR maps and material metadata…"
-            _ = try await self.engine.export(material, to: staging, precision: self.settings.exrPrecision)
+            try await cache.export(to: staging, precision: self.settings.exrPrecision, settings: exportSettings, engine: self.engine)
             try BlenderMaterialScript.write(to: staging, settings: exportSettings)
             if self.depthChoice == .model, let provenance = self.generatedProvenance {
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -337,7 +443,9 @@ final class TextureWorkspace {
             try Task.checkCancellation()
             try FileManager.default.moveItem(at: staging, to: url)
             self.exportURL = url
-            self.warnings = material.warnings
+            self.exportDirectory = url.deletingLastPathComponent().path
+            self.savePreferences()
+            self.warnings = cache.material.warnings
             if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]) }
         }
     }
@@ -423,6 +531,7 @@ final class TextureWorkspace {
             try Task.checkCancellation()
             self.source = source
             self.sourcePreview = preview
+            self.materialCache = nil
             self.recipeCheckpoint = pinnedCheckpoint
             self.lastRegistrySelectionIdentity = runtime?.selectionIdentity
             self.selectedMaterialCheckpoint = pinnedCheckpoint.flatMap { pin in runtime.map { pin.resolve(using: $0) } } ?? runtime
@@ -435,8 +544,11 @@ final class TextureWorkspace {
             self.attachedDepth = depth
             self.depthURL = depthURL
             self.generatedDepth = nil
+            self.generatedCheckpointKey = nil
             self.generatedProvenance = nil
             self.generatedModelID = nil
+            self.generatedResolution = nil
+            self.generatedModelPath = nil
             self.generatedFileSignature = nil
             self.depthChoice = recipe.depthChoice == .attached && depth == nil ? .photoDetail : recipe.depthChoice
             self.modelID = recipe.modelID == "depth-anything-v2-small" ? LocalModelDescriptor.da3GiantID : recipe.modelID
@@ -447,7 +559,6 @@ final class TextureWorkspace {
             self.warnings = recipe.version == 1 ? ["Recipe upgraded: portrait depth and automatic brightness bumps are disabled. Review the new DA3 surface-height settings."] : []
             self.hasEdits = false
             self.result = nil
-            self.selectedPreview = .source
             self.preview = preview
             self.renderedPreview = .source
         }
@@ -461,17 +572,11 @@ final class TextureWorkspace {
             ReviewWindowController.shared.open(candidates: [MapReviewCandidate(id: source.url.path, label: source.url.lastPathComponent, mapURL: source.url, numeric: false)])
             return
         }
-        run("Rendering \(settings.outputSize) × \(settings.outputSize) maps for full-quality inspection…") {
-            let depth = try await self.selectedDepth(models: models)
-            let material = try await self.engine.process(source: source, settings: self.settings, attachedDepth: depth)
-            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("material-review-\(UUID().uuidString)")
-            _ = try await self.engine.export(material, to: folder, precision: .float32)
-            let names: [MaterialPreview: String] = [.diffuse: "diffuse.png", .roughness: "roughness.exr", .normal: "normal.exr", .height: "displacement.exr"]
-            let choice = self.selectedPreview
-            guard let name = names[choice] else { return }
-            let url = folder.appendingPathComponent(name)
-            ReviewWindowController.shared.open(candidates: [MapReviewCandidate(id: url.path, label: "\(choice.rawValue) · \(material.outputSize) × \(material.outputSize)", mapURL: url, numeric: choice != .diffuse)])
-        }
+        guard let cache = currentCache, let url = cache.mapURL(selectedPreview) else { return }
+        let choice = selectedPreview
+        ReviewWindowController.shared.open(candidates: [MapReviewCandidate(id: url.path,
+            label: "\(source.url.deletingPathExtension().lastPathComponent) · \(choice.rawValue) · \(cache.material.outputSize) × \(cache.material.outputSize)",
+            mapURL: url, numeric: choice != .diffuse)], retaining: cache)
     }
 
     func requestAdvice(adviser: OllamaDecisionService) {
@@ -503,6 +608,7 @@ final class TextureWorkspace {
         let previousResolution = generatedResolution
         let previousPath = generatedModelPath
         let previousSignature = generatedFileSignature
+        let previousCheckpointKey = generatedCheckpointKey
         operation = Task {
             defer {
                 self.isBusy = false; self.activity = ""; self.operation = nil
@@ -522,6 +628,7 @@ final class TextureWorkspace {
                 self.generatedResolution = previousResolution
                 self.generatedModelPath = previousPath
                 self.generatedFileSignature = previousSignature
+                self.generatedCheckpointKey = previousCheckpointKey
             }
             catch { self.report(error) }
         }
@@ -534,11 +641,11 @@ final class TextureWorkspace {
     private func modelFileSignature(_ url: URL, record: InstalledLocalModel?) -> String {
         let weight = url.appendingPathComponent("model.safetensors")
         let config = url.appendingPathComponent("config.json")
-        let files = [weight, config].map { file in
+        let files = [url, weight, config].map { file in
             let values = try? file.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
             return "\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0):\(values?.fileSize ?? -1)"
         }
-        return files.joined(separator: "|") + "|\(record?.installedAt.timeIntervalSince1970 ?? 0)"
+        return files.joined(separator: "|") + "|\(record?.installedAt.timeIntervalSince1970 ?? 0)|\(record?.selectedOutput ?? "")"
     }
 }
 

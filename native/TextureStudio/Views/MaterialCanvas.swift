@@ -16,14 +16,6 @@ struct MaterialCanvas: View {
                         .glassEffect()
                         .padding(16)
                 }
-                .overlay(alignment: .bottom) {
-                    if workspace.hasEdits && workspace.result == nil {
-                        Button("Update material preview") { workspace.updatePreview(models: models) }
-                            .buttonStyle(.glassProminent)
-                            .padding(18)
-                            .disabled(workspace.isBusy)
-                    }
-                }
             } else {
                 ContentUnavailableView {
                     Label("Start with a surface photo", systemImage: "square.3.layers.3d")
@@ -37,20 +29,36 @@ struct MaterialCanvas: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             Divider()
-            HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
                 if workspace.isBusy {
-                    ProgressView().controlSize(.small)
-                    Text(workspace.activity).lineLimit(2)
-                    Spacer()
-                    Button("Cancel") { workspace.cancel() }
+                    HStack(spacing: 12) {
+                        ProgressView().controlSize(.small)
+                        Text(workspace.activity).lineLimit(2)
+                        Spacer()
+                        Button("Cancel") { workspace.cancel() }
+                    }
                 } else {
-                    Text(workspace.result == nil ? "Original photo • update preview to see your material" : "1024 px preview • exports use the selected resolution")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Full Quality…", systemImage: "arrow.up.left.and.arrow.down.right") { workspace.inspectFullQuality(models: models) }
-                        .help("Inspect the original photo or final-size map with pan, zoom, pop-out and original-file export")
-                    if let output = workspace.exportURL {
-                        Button("Show Export") { NSWorkspace.shared.activateFileViewerSelecting([output]) }
+                    HStack(alignment: .top) {
+                        Text(workspace.materialStatusText).foregroundStyle(.secondary)
+                        Spacer(minLength: 8)
+                        if let output = workspace.exportURL {
+                            Button("Show Export in Finder", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([output]) }
+                                .help("Open the folder containing your diffuse, roughness, normal and displacement maps.")
+                        }
+                    }
+                    if workspace.source != nil {
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 10) {
+                                generateButton
+                                inspectButton
+                                Spacer(minLength: 0)
+                                exportButton
+                            }
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack(spacing: 10) { generateButton; inspectButton }
+                                exportButton
+                            }
+                        }
                     }
                 }
             }
@@ -63,6 +71,33 @@ struct MaterialCanvas: View {
             return true
         }
     }
+
+    private var generateButton: some View {
+        Button(workspace.materialNeedsUpdate ? (workspace.hasEdits ? "Update Material" : "Generate Material") : "Material Is Current",
+               systemImage: workspace.materialNeedsUpdate ? "arrow.trianglehead.2.clockwise" : "checkmark.circle") {
+            workspace.updatePreview(models: models)
+        }
+        .disabled(!workspace.materialNeedsUpdate)
+        .help(workspace.materialNeedsUpdate
+            ? "Generate all four maps at \(workspace.settings.outputSize) × \(workspace.settings.outputSize). Open Full Quality and export then reuse those maps. ⌘R"
+            : "Your maps are current. Open Full Quality or export them now. Change a setting to generate a different result. ⌘R")
+    }
+
+    private var inspectButton: some View {
+        Button("Open Full Quality", systemImage: "arrow.up.left.and.arrow.down.right") {
+            workspace.inspectFullQuality(models: models)
+        }
+        .disabled(!workspace.fullQualityAvailable)
+        .help(workspace.fullQualityAvailable
+            ? "Open the selected photo or finished map at its original resolution. Pan, zoom or save a copy for GIMP. No model rerun. ⇧⌘F"
+            : "Generate or update the material first. Full Quality opens an existing map without rerunning the model. ⇧⌘F")
+    }
+
+    private var exportButton: some View {
+        Button("Export Material…", systemImage: "square.and.arrow.up") { workspace.chooseExport(models: models) }
+            .buttonStyle(.glassProminent)
+            .help("Choose a folder for all four maps and a Blender setup script. Generates any pending changes automatically. ⌘E")
+    }
 }
 
 private struct StudioPreviewInspection: View {
@@ -71,9 +106,9 @@ private struct StudioPreviewInspection: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Button("Fit") { viewport.fit() }
-                Button("100%") { viewport.setActualSize() }
-                Button("200%") { viewport.setZoom(2) }
+                Button("Fit") { viewport.fit() }.help("Fit the whole image in the canvas.")
+                Button("100%") { viewport.setActualSize() }.help("Show one image pixel per screen point. Open Full Quality for the final-resolution map.")
+                Button("200%") { viewport.setZoom(2) }.help("Magnify the displayed image to inspect individual pixels.")
                 Text("Drag to pan · scroll to move · pinch or ⌘-scroll to zoom").font(.caption).foregroundStyle(.secondary)
                 Spacer()
             }.padding(8)

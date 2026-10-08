@@ -29,10 +29,24 @@ struct MapReviewCandidate: Identifiable, Hashable {
 struct ReviewWorkbenchView: View {
     let candidates: [MapReviewCandidate]
     var blendURL: URL? = nil
-    @State private var viewport = InspectionViewport()
+    @State private var viewport: InspectionViewport
     @State private var notice: String?
     @State private var inspectedHashes: [String: String] = [:]
     @State private var visibleIDs: Set<String> = []
+    @State private var exportedURL: URL?
+    @State private var isExporting = false
+    private let preferences = UserDefaults(suiteName: "org.ipde.material-tools")!
+    init(candidates: [MapReviewCandidate], blendURL: URL? = nil) {
+        self.candidates = candidates
+        self.blendURL = blendURL
+        _viewport = State(initialValue: InspectionViewport(preferences: UserDefaults(suiteName: "org.ipde.material-tools")))
+    }
+    static func selectionPreferenceKey(_ candidates: [MapReviewCandidate]) -> String {
+        // Persist pane choices only for this exact set of files and candidate
+        // identities; a different comparison must never inherit stale IDs.
+        let identities = candidates.map { [$0.id, $0.mapURL.standardizedFileURL.path].joined(separator: "\u{0}") }.sorted()
+        return "reviewVisibleMaps." + ReviewImageLoader.hash(Data(identities.joined(separator: "\u{1}").utf8))
+    }
     private var visibleCandidates: [MapReviewCandidate] {
         let selected = candidates.filter { visibleIDs.contains($0.id) }
         return selected.isEmpty ? Self.initialCandidates(candidates) : selected
@@ -60,9 +74,23 @@ struct ReviewWorkbenchView: View {
                 }.padding(.horizontal, 12).padding(.vertical, 8).background(.bar)
             }
             inspectionControls.padding(8).background(.bar)
-            Text("Drag or scroll to pan · Pinch or Option-scroll to zoom · 100% shows original pixels")
-                .font(.caption).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12).padding(.vertical, 5)
+            HStack {
+                Text("Drag or scroll to pan · Pinch or Option-scroll to zoom · 100% shows original pixels")
+                Spacer()
+                Button("Export Visible Maps (\(visibleCandidates.count))…", systemImage: "square.and.arrow.up") { exportSelected() }
+                    .buttonStyle(.bordered)
+                    .disabled(candidates.isEmpty || isExporting)
+                    .help("Save every currently visible map into a new folder, with its sample and model name. Copies keep their original resolution, bit depth and exact bytes; display adjustments are not exported.")
+            }.font(.caption).foregroundStyle(.secondary)
+                .padding(.horizontal, 12).padding(.vertical, 7)
+            if let exportedURL {
+                HStack {
+                    Label("Export complete · original data preserved", systemImage: "checkmark.circle")
+                    Text(exportedURL.lastPathComponent).lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Button("Show Export in Finder") { NSWorkspace.shared.activateFileViewerSelecting([exportedURL]) }
+                }.font(.caption).padding(.horizontal, 12).padding(.bottom, 5)
+            }
             if candidates.isEmpty {
                 ContentUnavailableView("Choose maps to compare", systemImage: "square.split.2x1")
             } else {
@@ -79,15 +107,15 @@ struct ReviewWorkbenchView: View {
                                         .lineLimit(1).truncationMode(.middle).help(candidate.mapURL.path)
                                 }.accessibilityElement(children: .ignore).accessibilityLabel(candidate.accessibleLabel)
                                 Spacer()
-                                Button("Export Original…") { export(candidate) }.disabled(inspectedHashes[candidate.id] == nil)
-                                    .help("Copy the original PNG or EXR exactly, at its original resolution and precision. Display contrast has no effect on the export.")
                                 Menu {
                                     Button("Open Full Map in New Window") { ReviewWindowController.shared.open(candidates: [candidate]) }
-                                    Button("Export Original…") { export(candidate) }.disabled(inspectedHashes[candidate.id] == nil)
-                                    Button("Open in GIMP") { openInGIMP(candidate) }.disabled(inspectedHashes[candidate.id] == nil)
                                     Button("Show Original in Finder") { NSWorkspace.shared.activateFileViewerSelecting([candidate.mapURL]) }
                                 } label: { Image(systemName: "ellipsis.circle") }
                             }.padding(10)
+                            ViewThatFits(in: .horizontal) {
+                                HStack { exportControls(candidate); Spacer(minLength: 0) }
+                                VStack(alignment: .leading) { exportControls(candidate) }.frame(maxWidth: .infinity, alignment: .leading)
+                            }.font(.caption).padding(.horizontal, 10).padding(.bottom, 8).disabled(isExporting)
                             MapInspectionView(url: candidate.mapURL, numeric: candidate.numeric, viewport: viewport, onLoad: { value in
                                 inspectedHashes[candidate.id] = value?.sourceSHA256
                             })
@@ -99,6 +127,17 @@ struct ReviewWorkbenchView: View {
         .alert("Map inspection", isPresented: Binding(get: { notice != nil }, set: { if !$0 { notice = nil } })) {
             Button("OK") { notice = nil }
         } message: { Text(notice ?? "") }
+        .onAppear { restoreVisibleMaps() }
+        .onChange(of: Self.selectionPreferenceKey(candidates)) { _, _ in restoreVisibleMaps() }
+        .onChange(of: visibleIDs) { _, selected in
+            preferences.set(Array(selected), forKey: Self.selectionPreferenceKey(candidates))
+        }
+    }
+    @ViewBuilder private func exportControls(_ candidate: MapReviewCandidate) -> some View {
+        Button("Export Original…", systemImage: "square.and.arrow.up") { export(candidate) }
+            .help("Copy this original PNG or EXR exactly, at its original resolution and precision. You can export before its display finishes loading.")
+        Button("Open Copy in GIMP", systemImage: "paintbrush") { openInGIMP(candidate) }
+            .help("Open a byte-identical copy for closer inspection or editing. The original map is retained.")
     }
     private var inspectionControls: some View {
         HStack {
@@ -110,7 +149,7 @@ struct ReviewWorkbenchView: View {
                 Text(viewport.fitToView ? "Fit • linked pan" : "\(Int(viewport.zoom * 100))% • linked pan")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Menu("Maps") {
+                Menu("Visible Maps (\(visibleCandidates.count))") {
                     ForEach(candidates) { candidate in
                         Toggle(candidate.label, isOn: Binding(get: { visibleCandidates.contains(where: { $0.id == candidate.id }) }, set: { shown in
                             if visibleIDs.isEmpty { visibleIDs = Set(visibleCandidates.map(\.id)) }
@@ -133,30 +172,70 @@ struct ReviewWorkbenchView: View {
                         Text("\(viewport.displayMidpoint, specifier: "%.3f")")
                         Button("Reset Display") { viewport.displayContrast = 1; viewport.displayMidpoint = 0.5 }
                         Spacer()
-                        Text("Display only; shared across maps").foregroundStyle(.secondary)
+                        Text("Display only · saved for next time · exports keep raw values").foregroundStyle(.secondary)
                     }.font(.caption)
                 }
             }
     }
+    private func restoreVisibleMaps() {
+        let known = Set(candidates.map(\.id))
+        visibleIDs = Set(preferences.stringArray(forKey: Self.selectionPreferenceKey(candidates)) ?? []).intersection(known)
+    }
+    private func restoreExportDirectory(_ panel: NSSavePanel) {
+        if let path = preferences.string(forKey: "reviewExportDirectory"), FileManager.default.fileExists(atPath: path) {
+            panel.directoryURL = URL(fileURLWithPath: path, isDirectory: true)
+        }
+    }
     private func export(_ candidate: MapReviewCandidate) {
-        guard let expectedHash = inspectedHashes[candidate.id] else { return }
+        let expectedHash = inspectedHashes[candidate.id]
         let panel = NSSavePanel()
+        panel.title = "Export original \(candidate.label)"
+        panel.message = "Save the original file at full resolution and precision. Display contrast and zoom do not change its data. Choose a new filename to keep existing files."
         panel.nameFieldStringValue = candidate.exportFilename
+        restoreExportDirectory(panel)
         if let type = UTType(filenameExtension: candidate.mapURL.pathExtension) { panel.allowedContentTypes = [type] }
         guard panel.runModal() == .OK, let destination = panel.url else { return }
+        preferences.set(destination.deletingLastPathComponent().path, forKey: "reviewExportDirectory")
+        isExporting = true
         Task {
+            defer { isExporting = false }
             do {
                 try await Task.detached {
                     try ReviewImageLoader.exportOriginal(candidate.mapURL, expectedSHA256: expectedHash, to: destination)
                 }.value
+                exportedURL = destination
+            } catch { notice = error.localizedDescription }
+        }
+    }
+    private func exportSelected() {
+        let selected = visibleCandidates
+        let panel = NSOpenPanel()
+        panel.title = "Export \(selected.count) original maps"
+        panel.message = "Choose a destination. A new folder will contain all visible maps, with their original data and sample/model labels."
+        panel.prompt = "Export Maps"
+        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.canCreateDirectories = true
+        restoreExportDirectory(panel)
+        guard panel.runModal() == .OK, let parent = panel.url else { return }
+        preferences.set(parent.path, forKey: "reviewExportDirectory")
+        let directory = parent.appendingPathComponent("Texture Studio Maps \(UUID().uuidString.prefix(8))", isDirectory: true)
+        let copies = selected.map { ReviewOriginalExport(sourceURL: $0.mapURL, filename: $0.exportFilename,
+                                                        expectedSHA256: inspectedHashes[$0.id]) }
+        isExporting = true
+        Task {
+            defer { isExporting = false }
+            do {
+                try await Task.detached { try ReviewImageLoader.exportOriginals(copies, to: directory) }.value
+                exportedURL = directory
             } catch { notice = error.localizedDescription }
         }
     }
     private func openInGIMP(_ candidate: MapReviewCandidate) {
-        guard let expectedHash = inspectedHashes[candidate.id] else { return }
+        let expectedHash = inspectedHashes[candidate.id]
         let identifiers = ["org.gimp.gimp", "org.gimp.GIMP"]
         let app = identifiers.compactMap({ NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) }).first
+        isExporting = true
         Task {
+            defer { isExporting = false }
             do {
                 let directory = FileManager.default.temporaryDirectory.appendingPathComponent("TextureStudio-Editor-\(UUID().uuidString)", isDirectory: true)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

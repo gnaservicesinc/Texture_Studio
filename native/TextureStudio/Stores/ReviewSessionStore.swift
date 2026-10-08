@@ -10,21 +10,41 @@ struct MaterialReviewGroup: Identifiable {
 @MainActor @Observable
 final class ReviewSessionStore {
     var groups: [MaterialReviewGroup] = []
-    var selectedGroupId: String?
+    var selectedGroupId: String? {
+        didSet {
+            if selectedGroupId != oldValue, let selectedCandidateId,
+               selected?.candidates.contains(where: { $0.id == selectedCandidateId }) != true { self.selectedCandidateId = nil }
+            persistSelection()
+        }
+    }
     var blendURL: URL?
     var error: String?
     var decisions: [String: String] = [:]
     var notes: [String: String] = [:]
     var manifestURL: URL?
-    var selectedCandidateId: String?
+    var selectedCandidateId: String? { didSet { persistSelection() } }
+    private let preferences: UserDefaults
+    init(preferences: UserDefaults = UserDefaults(suiteName: "org.ipde.material-tools")!) { self.preferences = preferences }
     var selected: MaterialReviewGroup? { groups.first { $0.id == selectedGroupId } }
+
+    private var selectionKey: String? {
+        manifestURL.map { "reviewSelection." + ReviewImageLoader.hash(Data($0.standardizedFileURL.path.utf8)) }
+    }
+    private func persistSelection() {
+        guard let selectionKey else { return }
+        var values: [String: String] = [:]
+        if let selectedGroupId { values["group"] = selectedGroupId }
+        if let selectedCandidateId, selected?.candidates.contains(where: { $0.id == selectedCandidateId }) == true {
+            values["candidate"] = selectedCandidateId
+        }
+        preferences.set(values, forKey: selectionKey)
+    }
 
     func restore(workspace: String) {
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--review"), args.indices.contains(i + 1) {
             load(URL(fileURLWithPath: args[i + 1])); return
         }
-        let preferences = UserDefaults(suiteName: "org.ipde.material-tools")!
         if let path = preferences.string(forKey: "reviewManifest"), FileManager.default.fileExists(atPath: path) {
             load(URL(fileURLWithPath: path)); return
         }
@@ -42,10 +62,10 @@ final class ReviewSessionStore {
         panel.begin { response in
             guard response == .OK else { return }
             let candidates = panel.urls.map { MapReviewCandidate(id: $0.path, label: $0.lastPathComponent, mapURL: $0, numeric: true) }
+            self.manifestURL = nil
             self.groups = [MaterialReviewGroup(id: "Opened maps", candidates: candidates)]
             self.selectedGroupId = self.groups.first?.id
             self.blendURL = nil
-            self.manifestURL = nil
             self.decisions = [:]; self.notes = [:]; self.selectedCandidateId = nil
         }
     }
@@ -70,6 +90,7 @@ final class ReviewSessionStore {
         let review: [String: Any] = ["schema": "texture-studio-native-material-review-v1",
             "source_manifest": manifestURL?.path ?? "", "materials": materials,
             "blend_scene": blendURL?.path ?? "",
+            "selected_material_id": selectedGroupId ?? "", "selected_candidate_id": selectedCandidateId ?? "",
             "automatic_model_promotion": false]
         try JSONSerialization.data(withJSONObject: review, options: [.prettyPrinted, .sortedKeys]).write(to: url, options: .atomic)
     }
@@ -113,8 +134,14 @@ final class ReviewSessionStore {
                 if !candidates.isEmpty { parsed.append(MaterialReviewGroup(id: id, candidates: candidates)) }
             }
             guard !parsed.isEmpty else { throw StudioError("This manifest contains no map variants.") }
-            groups = parsed; selectedGroupId = parsed.first?.id; error = nil; manifestURL = url
-            decisions = parsedDecisions; notes = parsedNotes; selectedCandidateId = nil
+            let key = "reviewSelection." + ReviewImageLoader.hash(Data(url.standardizedFileURL.path.utf8))
+            let saved = preferences.dictionary(forKey: key) as? [String: String] ?? [:]
+            let requestedGroup = saved["group"] ?? manifest["selected_material_id"] as? String
+            let requestedCandidate = saved["candidate"] ?? manifest["selected_candidate_id"] as? String
+            manifestURL = url; groups = parsed
+            selectedGroupId = parsed.contains(where: { $0.id == requestedGroup }) ? requestedGroup : parsed.first?.id
+            selectedCandidateId = selected?.candidates.contains(where: { $0.id == requestedCandidate }) == true ? requestedCandidate : nil
+            error = nil; decisions = parsedDecisions; notes = parsedNotes
             let nearby = url.deletingLastPathComponent().appendingPathComponent("material-quality-review.blend")
             let legacy = url.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("quality-review-2k-20261008/material-quality-review.blend")
             let explicit = (manifest["blend_scene"] as? String).flatMap { path -> URL? in
@@ -122,7 +149,7 @@ final class ReviewSessionStore {
                 return path.hasPrefix("/") ? URL(fileURLWithPath: path) : url.deletingLastPathComponent().appendingPathComponent(path)
             }
             blendURL = ([explicit].compactMap { $0 } + [nearby, legacy]).first { FileManager.default.fileExists(atPath: $0.path) }
-            UserDefaults(suiteName: "org.ipde.material-tools")!.set(url.path, forKey: "reviewManifest")
+            preferences.set(url.path, forKey: "reviewManifest")
         } catch { self.error = error.localizedDescription }
     }
 }

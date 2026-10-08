@@ -11,6 +11,12 @@ struct ReviewLoadedImage: @unchecked Sendable {
     let pixelHeight: Int
 }
 
+struct ReviewOriginalExport: Sendable {
+    let sourceURL: URL
+    let filename: String
+    let expectedSHA256: String?
+}
+
 enum ReviewImageError: LocalizedError {
     case invalidImage, sourceChanged, destinationExists
     var errorDescription: String? {
@@ -24,9 +30,11 @@ enum ReviewImageError: LocalizedError {
 
 actor ReviewImageLoader {
     static let shared = ReviewImageLoader()
-    private let numericContext = CIContext(options: [.cacheIntermediates: false, .useSoftwareRenderer: true,
+    // Display conversion can use Metal. The original bytes remain untouched;
+    // numeric maps retain their linear values until conversion to the display.
+    private let numericContext = CIContext(options: [.cacheIntermediates: false, .workingFormat: CIFormat.RGBAf,
                                                      .workingColorSpace: NSNull(), .outputColorSpace: NSNull()])
-    private let photoContext = CIContext(options: [.cacheIntermediates: false, .useSoftwareRenderer: true])
+    private let photoContext = CIContext(options: [.cacheIntermediates: false])
     func load(_ url: URL, numeric: Bool, contrast: Double = 1, midpoint: Double = 0.5,
               expectedSHA256: String? = nil) throws -> ReviewLoadedImage {
         let bytes = try Data(contentsOf: url, options: .mappedIfSafe)
@@ -59,13 +67,40 @@ actor ReviewImageLoader {
                                  pixelWidth: image.width, pixelHeight: image.height)
     }
     static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
-    static func exportOriginal(_ source: URL, expectedSHA256: String, to destination: URL) throws {
+    static func exportOriginal(_ source: URL, expectedSHA256: String? = nil, to destination: URL) throws {
         guard !FileManager.default.fileExists(atPath: destination.path) else { throw ReviewImageError.destinationExists }
         let bytes = try Data(contentsOf: source, options: .mappedIfSafe)
-        guard hash(bytes) == expectedSHA256 else { throw ReviewImageError.sourceChanged }
+        let originalHash = hash(bytes)
+        if let expectedSHA256, originalHash != expectedSHA256 { throw ReviewImageError.sourceChanged }
         try bytes.write(to: destination, options: .withoutOverwriting)
-        guard hash(try Data(contentsOf: destination, options: .mappedIfSafe)) == expectedSHA256 else {
+        guard hash(try Data(contentsOf: destination, options: .mappedIfSafe)) == originalHash else {
             throw ReviewImageError.sourceChanged
+        }
+    }
+    static func exportOriginals(_ exports: [ReviewOriginalExport], to directory: URL) throws {
+        guard !FileManager.default.fileExists(atPath: directory.path) else { throw ReviewImageError.destinationExists }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        do {
+            var filenames = Set<String>()
+            for item in exports {
+                let requested = URL(fileURLWithPath: item.filename).lastPathComponent
+                let stem = (requested as NSString).deletingPathExtension
+                let suffix = (requested as NSString).pathExtension
+                var filename = requested
+                var number = 2
+                while filenames.contains(filename.lowercased()) {
+                    filename = "\(stem)-\(number)" + (suffix.isEmpty ? "" : ".\(suffix)")
+                    number += 1
+                }
+                filenames.insert(filename.lowercased())
+                try exportOriginal(item.sourceURL, expectedSHA256: item.expectedSHA256,
+                                   to: directory.appendingPathComponent(filename))
+            }
+        } catch {
+            // This directory was created exclusively for this export. Never
+            // remove or overwrite an existing user folder on a failed copy.
+            try? FileManager.default.removeItem(at: directory)
+            throw error
         }
     }
 }

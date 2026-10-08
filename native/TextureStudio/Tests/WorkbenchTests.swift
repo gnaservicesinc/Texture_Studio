@@ -4,6 +4,38 @@ import ImageIO
 @testable import TextureStudio
 
 final class WorkbenchTests: XCTestCase {
+    @MainActor func testReviewRemembersSampleAndCandidateOnlyInsideTheirOwnManifest() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let suite = "ReviewSelection-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let store = ReviewSessionStore(preferences: preferences)
+        store.groups = ["soil", "stucco"].map { id in
+            MaterialReviewGroup(id: id, candidates: ["base", "trained"].map {
+                MapReviewCandidate(id: "\(id)/\($0)", label: $0, mapURL: directory.appendingPathComponent("\(id)-\($0).exr"), numeric: true)
+            })
+        }
+        let manifest = directory.appendingPathComponent("first.json")
+        try store.writeReview(to: manifest)
+        store.load(manifest)
+        store.selectedGroupId = "stucco"
+        store.selectedCandidateId = "stucco/trained"
+        let reopened = ReviewSessionStore(preferences: preferences)
+        reopened.load(manifest)
+        XCTAssertEqual(reopened.selectedGroupId, "stucco")
+        XCTAssertEqual(reopened.selectedCandidateId, "stucco/trained")
+        let unrelated = directory.appendingPathComponent("second.json")
+        try FileManager.default.copyItem(at: manifest, to: unrelated)
+        reopened.load(unrelated)
+        XCTAssertEqual(reopened.selectedGroupId, "soil")
+        XCTAssertNil(reopened.selectedCandidateId)
+        reopened.load(manifest)
+        reopened.selectedGroupId = "soil"
+        XCTAssertNil(reopened.selectedCandidateId, "Changing sample clears a candidate that belongs to the previous sample")
+    }
+
     @MainActor func testStudioInferencePhotoRetainsSixteenBitColorAndExplicitSize() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("InferencePhoto-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: url) }

@@ -5,13 +5,13 @@ import UniformTypeIdentifiers
 @MainActor @Observable
 final class WorkbenchStore {
     var dataset: WorkbenchDataset?
-    var selectedSampleId: String?
-    var selectedRole = "height"
+    var selectedSampleId: String? { didSet { saveUserSettings() } }
+    var selectedRole = "height" { didSet { saveUserSettings() } }
     var checkpoints: [WorkbenchCheckpoint] = []
-    var selectedCheckpointId: String?
-    var comparisonCheckpointIds: Set<String> = []
-    var comparisonIncludesBase = true
-    var training = MaterialTrainingOptions()
+    var selectedCheckpointId: String? { didSet { saveUserSettings() } }
+    var comparisonCheckpointIds: Set<String> = [] { didSet { saveUserSettings() } }
+    var comparisonIncludesBase = true { didSet { saveUserSettings() } }
+    var training = MaterialTrainingOptions() { didSet { saveUserSettings() } }
     var activity = ""
     var logText = ""
     var error: String?
@@ -21,22 +21,23 @@ final class WorkbenchStore {
     private(set) var isStopping = false
     private(set) var isPreparingDataset = false
     private(set) var datasetPreparationSummary = ""
-    var lastOutputURL: URL?
-    var lastLogURL: URL?
-    var lastPackageURL: URL?
-    var lastPackageCheckpointId: String?
-    var sourceImageURL: URL?
+    private(set) var trainingPreferenceNotice: String?
+    var lastOutputURL: URL? { didSet { saveUserSettings() } }
+    var lastLogURL: URL? { didSet { saveUserSettings() } }
+    var lastPackageURL: URL? { didSet { saveUserSettings() } }
+    var lastPackageCheckpointId: String? { didSet { saveUserSettings() } }
+    var sourceImageURL: URL? { didSet { saveUserSettings() } }
     var comparisonCandidates: [MapReviewCandidate] = []
-    var uploadRepo = ""
-    var uploadPublic = false
+    var uploadRepo = "" { didSet { saveUploadConfiguration() } }
+    var uploadPublic = false { didSet { saveUploadConfiguration() } }
     private(set) var uploadAccount: String?
     private(set) var uploadAccountMessage = "Checking your saved Hugging Face login…"
     private(set) var uploadAccountChecked = false
     private(set) var lastUploadURL: URL?
-    var workspacePath: String
-    var pythonPath: String
-    var modelDirectory: String
-    var codeDirectory: String
+    var workspacePath: String { didSet { preferences.set(workspacePath, forKey: "workspace") } }
+    var pythonPath: String { didSet { preferences.set(pythonPath, forKey: "python") } }
+    var modelDirectory: String { didSet { preferences.set(modelDirectory, forKey: "encoder") } }
+    var codeDirectory: String { didSet { preferences.set(codeDirectory, forKey: "encoderCode") } }
     let resources: MachineResources
     @ObservationIgnored private var runner: WorkbenchProcess?
     @ObservationIgnored private var task: Task<Void, Never>?
@@ -46,6 +47,7 @@ final class WorkbenchStore {
     @ObservationIgnored private let managedWorkspaceURL: URL
     @ObservationIgnored private let selectedCheckpointRegistryURL: URL
     @ObservationIgnored private var hasRestored = false
+    @ObservationIgnored private var isRestoringPreferences = false
 
     var samples: [WorkbenchSample] { dataset?.samples ?? [] }
     var selectedSample: WorkbenchSample? { samples.first { $0.id == selectedSampleId } }
@@ -78,7 +80,35 @@ final class WorkbenchStore {
         let cache = URL(fileURLWithPath: workspace).appendingPathComponent("out/material-training/transfer-models")
         modelDirectory = defaults.string(forKey: "encoder") ?? cache.appendingPathComponent("dinov2-base-f9e44c814b77").path
         codeDirectory = defaults.string(forKey: "encoderCode") ?? cache.appendingPathComponent("dinov2-code-7764ea0f912e").path
-        training.memoryGB = resources.defaultTrainingGiB
+        let saved = WorkbenchPreferences.load(from: defaults)
+        if let options = saved.training {
+            training = options.restored(for: resources)
+            if training != options {
+                trainingPreferenceNotice = "Saved training settings were adapted to the supported limits of this Mac. Review the resource limit before training."
+                activity = trainingPreferenceNotice!
+            }
+        } else { training.memoryGB = resources.defaultTrainingGiB }
+        selectedSampleId = saved.selectedSampleId
+        if let role = saved.selectedRole, ["input", "height", "roughness", "normal"].contains(role) { selectedRole = role }
+        selectedCheckpointId = saved.selectedCheckpointId
+        comparisonCheckpointIds = saved.comparisonCheckpointIds ?? []
+        comparisonIncludesBase = saved.comparisonIncludesBase ?? true
+        sourceImageURL = saved.sourceImagePath.map { URL(fileURLWithPath: $0) }
+        lastOutputURL = saved.lastOutputPath.map { URL(fileURLWithPath: $0) }
+        lastLogURL = saved.lastLogPath.map { URL(fileURLWithPath: $0) }
+        lastPackageURL = saved.lastPackagePath.map { URL(fileURLWithPath: $0) }
+        lastPackageCheckpointId = saved.lastPackageCheckpointId
+    }
+
+    /// Save changes as they happen; closing a window or the app is not a save
+    /// boundary, and starting a worker must not be required to retain a choice.
+    private func saveUserSettings() {
+        guard !isRestoringPreferences else { return }
+        WorkbenchPreferences(training: training, selectedSampleId: selectedSampleId, selectedRole: selectedRole,
+            selectedCheckpointId: selectedCheckpointId, comparisonCheckpointIds: comparisonCheckpointIds,
+            comparisonIncludesBase: comparisonIncludesBase, sourceImagePath: sourceImageURL?.path,
+            lastOutputPath: lastOutputURL?.path, lastLogPath: lastLogURL?.path,
+            lastPackagePath: lastPackageURL?.path, lastPackageCheckpointId: lastPackageCheckpointId).save(to: preferences)
     }
 
     func restore() {
@@ -92,14 +122,22 @@ final class WorkbenchStore {
         }
         if let i = args.firstIndex(of: "--dataset"), args.indices.contains(i + 1) { datasetPath = args[i + 1] }
         let paths = preferences.stringArray(forKey: "checkpoints") ?? []
+        let saved = WorkbenchPreferences.load(from: preferences)
         operation("Opening workspace…") {
+            self.isRestoringPreferences = true
+            defer { self.isRestoringPreferences = false; self.saveUserSettings() }
             if let datasetPath, FileManager.default.fileExists(atPath: datasetPath) {
                 try await self.loadDataset(URL(fileURLWithPath: datasetPath))
             }
             for path in paths where FileManager.default.fileExists(atPath: path) {
-                do { try await self.loadCheckpoint(URL(fileURLWithPath: path)) }
+                do { try await self.loadCheckpoint(URL(fileURLWithPath: path), select: false) }
                 catch { self.logText += "Could not reconnect \(path): \(error.localizedDescription)\n" }
             }
+            if !self.checkpoints.contains(where: { $0.id == self.selectedCheckpointId }) {
+                self.selectedCheckpointId = self.checkpoints.first?.id
+            }
+            let available = Set(self.checkpoints.map(\.id))
+            self.comparisonCheckpointIds = saved.comparisonCheckpointIds.map { $0.intersection(available) } ?? available
         }
     }
 
@@ -218,14 +256,16 @@ final class WorkbenchStore {
         datasetPreparationSummary = "\(preparation.reused ? "Opened existing" : "Prepared") \(size) × \(size) native crops and automatic check samples. Original maps remain unchanged."
         return result
     }
-    func loadCheckpoint(_ url: URL) async throws {
+    func loadCheckpoint(_ url: URL, select: Bool = true) async throws {
         let checkpoint: WorkbenchCheckpoint = try WorkbenchProcess.decode(WorkbenchCheckpoint.self, output: await worker(["checkpoint", "--checkpoint", url.path]))
         guard checkpoint.compatible else { throw StudioError("This checkpoint is not supported by the material backend.") }
         if let i = checkpoints.firstIndex(where: { $0.id == checkpoint.id }) { checkpoints[i] = checkpoint }
         else { checkpoints.append(checkpoint) }
-        selectedCheckpointId = checkpoint.id
-        comparisonCheckpointIds.insert(checkpoint.id)
-        preferences.set(checkpoints.map(\.checkpointPath), forKey: "checkpoints")
+        if select {
+            selectedCheckpointId = checkpoint.id
+            comparisonCheckpointIds.insert(checkpoint.id)
+        }
+        if !isRestoringPreferences { preferences.set(checkpoints.map(\.checkpointPath), forKey: "checkpoints") }
     }
 
     func curateSelected(status: String, split: String? = nil, note: String? = nil) {
