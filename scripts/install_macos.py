@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the completed suite after refusing to replace a running installed app."""
+"""Install Texture Studio after refusing to replace a running installed app."""
 from __future__ import annotations
 
 import argparse
@@ -11,8 +11,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-
-from bundle_macos import clone_or_copy
 
 
 def same_signed_build(source: Path, destination: Path) -> bool:
@@ -38,7 +36,7 @@ def ensure_closed(destination: Path) -> None:
     for line in processes.splitlines():
         fields = line.strip().split(None, 1)
         if len(fields) == 2 and fields[1].startswith(str(destination) + "/"):
-            raise RuntimeError(f"Close IPDE Studio and all its subapps before installing (PID {fields[0]})")
+            raise RuntimeError(f"Close Texture Studio before installing (PID {fields[0]})")
 
 
 def removable_tree(path: Path) -> bool:
@@ -72,12 +70,12 @@ def install(source: Path, destination: Path) -> None:
         return
     ensure_closed(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".ipde-install-", dir=destination.parent))
+    staging = Path(tempfile.mkdtemp(prefix=".texture-studio-install-", dir=destination.parent))
     backup = staging / "previous.app"
     preserve_backup = False
     try:
         staged = staging / destination.name
-        shutil.copytree(source, staged, symlinks=True, copy_function=clone_or_copy)
+        shutil.copytree(source, staged, symlinks=True, copy_function=shutil.copy2)
         subprocess.run(["codesign", "--verify", "--deep", "--strict", str(staged)], check=True)
         ensure_closed(destination)
         if destination.exists() or destination.is_symlink():
@@ -117,9 +115,16 @@ def main() -> None:
     if sys.platform != "darwin":
         parser.error("The install target currently supports macOS only")
     source = args.source.resolve()
-    if not (source / "Contents/Resources/python/bin/python3").is_file():
-        parser.error("Install requires the completed portable package (run make package)")
-    destination = args.destdir.resolve() / "Applications/IPDE Studio.app"
+    try:
+        info = plistlib.loads((source / "Contents/Info.plist").read_bytes())
+        if info.get("CFBundleIdentifier") != "org.ipde.texture-studio":
+            parser.error("Install requires the built Texture Studio app (run make package)")
+        executable = source / "Contents/MacOS" / info["CFBundleExecutable"]
+        if not executable.is_file():
+            parser.error("The app executable is missing")
+    except (OSError, KeyError, ValueError) as error:
+        parser.error(f"Install requires a complete Texture Studio bundle: {error}")
+    destination = args.destdir.resolve() / "Applications/Texture Studio.app"
     if source == destination or source.is_relative_to(destination) or destination.is_relative_to(source):
         parser.error("Source and installed application must be separate")
     install(source, destination)

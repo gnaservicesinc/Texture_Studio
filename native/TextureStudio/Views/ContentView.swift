@@ -1,0 +1,121 @@
+import SwiftUI
+
+struct ContentView: View {
+    let models: ModelManager
+    let adviser: OllamaDecisionService
+    @State private var workspace: TextureWorkspace
+
+    init(models: ModelManager, adviser: OllamaDecisionService, runtime: PythonDepthService) {
+        self.models = models
+        self.adviser = adviser
+        self._workspace = State(initialValue: TextureWorkspace(pythonDepthService: runtime))
+    }
+
+    var body: some View {
+        NavigationSplitView {
+            StudioSidebar(workspace: workspace)
+                .navigationSplitViewColumnWidth(min: 170, ideal: 205, max: 245)
+        } detail: {
+            MaterialCanvas(workspace: workspace, models: models)
+        }
+        .inspector(isPresented: $workspace.showInspector) {
+            MaterialInspector(workspace: workspace, models: models)
+                .inspectorColumnWidth(min: 300, ideal: 330, max: 400)
+        }
+        .focusedSceneValue(\.textureWorkspace, workspace)
+        .navigationTitle(workspace.source?.url.lastPathComponent ?? "Texture Studio")
+        .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                Button { workspace.choosePhoto() } label: { Label("Import Photo", systemImage: "photo.badge.plus") }
+                    .help("Import a surface photo")
+                    .disabled(workspace.isBusy)
+                Button { workspace.chooseRecipe() } label: { Label("Open Recipe", systemImage: "folder") }
+                    .disabled(workspace.isBusy)
+            }
+            ToolbarSpacer(.flexible)
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button { workspace.updatePreview(models: models) } label: { Label("Update Preview", systemImage: "arrow.trianglehead.2.clockwise") }
+                    .disabled(workspace.source == nil || workspace.isBusy)
+                Button { workspace.chooseExport(models: models) } label: { Label("Export Material", systemImage: "square.and.arrow.up") }
+                    .disabled(workspace.source == nil || workspace.isBusy)
+            }
+            ToolbarSpacer(.fixed)
+            ToolbarItemGroup(placement: .automatic) {
+                Button { workspace.showAdvice = true } label: { Label("Review Photo", systemImage: "eye") }
+                    .help("Review bounded suggestions from local Clef")
+                Button { workspace.showModels = true } label: { Label("Models", systemImage: "shippingbox") }
+                Button { workspace.showInspector.toggle() } label: { Label("Inspector", systemImage: "sidebar.right") }
+            }
+        }
+        .sheet(isPresented: $workspace.showModels) {
+            ModelLibraryView(models: models, adviser: adviser, runtime: workspace.pythonDepthService)
+                .frame(width: 660, height: 570)
+        }
+        .sheet(isPresented: $workspace.showModelRecovery) {
+            MissingModelView(workspace: workspace, models: models)
+                .frame(width: 530, height: 400)
+        }
+        .sheet(isPresented: $workspace.showAdvice) {
+            AdviceReviewView(workspace: workspace, adviser: adviser, models: models)
+                .frame(width: 600, height: 660)
+        }
+        .alert(item: $workspace.notice) { notice in
+            Alert(title: Text(notice.title), message: Text(notice.message), dismissButton: .default(Text("OK")))
+        }
+        .confirmationDialog("Large texture export", isPresented: $workspace.showMemoryWarning, titleVisibility: .visible) {
+            Button("Export \(workspace.settings.outputSize) × \(workspace.settings.outputSize)") {
+                workspace.chooseExport(models: models, memoryApproved: true)
+            }
+            Button("Use 2048 × 2048") {
+                workspace.settings.outputSize = 2048
+                workspace.chooseExport(models: models)
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Large float maps can use several gigabytes of unified memory. Core ML stays at the model’s small input size. Export is refused if the available memory budget is too low.")
+        }
+        .onOpenURL { url in
+            if url.pathExtension.lowercased() == "json" { workspace.openRecipe(url) }
+            else { workspace.importPhoto(url) }
+        }
+        .task {
+            models.refresh()
+            let args = CommandLine.arguments
+            if let index = args.firstIndex(of: "--open"), index + 1 < args.count {
+                workspace.importPhoto(URL(fileURLWithPath: args[index + 1]))
+            }
+        }
+    }
+}
+
+struct StudioSidebar: View {
+    @Bindable var workspace: TextureWorkspace
+
+    var body: some View {
+        List(selection: Binding<MaterialPreview?>(get: { workspace.selectedPreview }, set: { selection in
+            if let selection { workspace.selectPreview(selection) }
+        })) {
+            Section("Surface material") {
+                ForEach(MaterialPreview.allCases) { preview in
+                    Label(preview.rawValue, systemImage: preview.symbol)
+                    .tag(preview)
+                    .disabled(workspace.source == nil || workspace.isBusy)
+                }
+            }
+            Section("Project") {
+                Button { workspace.saveRecipe() } label: { Label("Save Recipe…", systemImage: "doc.badge.arrow.up") }
+                    .disabled(workspace.source == nil || workspace.isBusy)
+                Button { workspace.showModels = true } label: { Label("Local Models", systemImage: "shippingbox") }
+            }
+        }
+        .listStyle(.sidebar)
+        .safeAreaInset(edge: .bottom) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Texture Studio").font(.headline)
+                Text("Photo → Cycles material").font(.caption).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+        }
+    }
+}

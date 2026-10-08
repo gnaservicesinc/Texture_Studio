@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the bundled Markdown/HTML manual, with no third-party dependencies."""
+"""Rebuild the archived Qt-era Markdown/HTML manual for historical reference."""
 from __future__ import annotations
 
 import argparse
@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 
 ROOT = Path(__file__).resolve().parents[1]
-MANUAL = ROOT / "docs" / "manual"
+MANUAL = ROOT / "docs" / "legacy" / "manual"
 
 
 def inline(value: str) -> str:

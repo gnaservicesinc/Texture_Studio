@@ -1,19 +1,22 @@
 PYTHON_BASE ?= /Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14
 PYTHON ?= $(if $(wildcard .venv/bin/python),$(CURDIR)/.venv/bin/python,$(PYTHON_BASE))
-QT_CMAKE ?= $(shell ls -d /opt/Qt/6.*/macos/lib/cmake/Qt6 2>/dev/null | sort -V | tail -1)
-BUILD_DIR ?= build
-BUILD_TYPE ?= Release
+CONFIGURATION ?= Release
+DERIVED_DATA ?= $(CURDIR)/build/TextureStudio
 DESTDIR ?= /
-CMAKE_ARGS ?=
+XCODE_PROJECT := native/TextureStudio/TextureStudio.xcodeproj
+XCODE_SCHEME := TextureStudio
+APP_BUNDLE := $(DERIVED_DATA)/Build/Products/$(CONFIGURATION)/Texture Studio.app
+XCODEBUILD = xcodebuild -project "$(XCODE_PROJECT)" -scheme "$(XCODE_SCHEME)" \
+	-configuration "$(CONFIGURATION)" -destination 'platform=macOS,arch=arm64' \
+	-derivedDataPath "$(DERIVED_DATA)"
 .DEFAULT_GOAL := build
-ifeq ($(shell uname -s),Darwin)
-# Reset the previous kit's default on every configure. CMAKE_ARGS follows this
-# option so an explicit deployment target still takes precedence.
-MACOS_CMAKE_ARGS = -DCMAKE_OSX_DEPLOYMENT_TARGET="$(MACOSX_DEPLOYMENT_TARGET)"
-endif
 
-.PHONY: setup configure build package install release-check gui studio test smoke clean
+.PHONY: check-toolchain setup configure build package install release-check run gui studio test test-native test-python smoke clean
 
+check-toolchain:
+	./script/check_toolchain.sh
+
+# Retained extraction/research environment. The app manages its separate DA3 runtime in Local Models.
 setup:
 	$(PYTHON_BASE) -m venv .venv
 	.venv/bin/python -m pip install --upgrade pip
@@ -22,44 +25,37 @@ setup:
 	.venv/bin/python -m pip check
 	.venv/bin/python -m pip install --no-deps -e .
 
-configure:
-	"$(PYTHON)" scripts/configure_build.py --force --build-dir "$(BUILD_DIR)" -- \
-	cmake -S . -B "$(BUILD_DIR)" -G Ninja \
-		-U 'Qt6*_DIR' -U IPDE_QT_OFFSCREEN -U IPDE_MACDEPLOYQT \
-		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
-		-DCMAKE_PREFIX_PATH="$(QT_CMAKE)" \
-		-DIPDE_PYTHON_EXECUTABLE="$(PYTHON)" $(MACOS_CMAKE_ARGS) $(CMAKE_ARGS)
+configure: check-toolchain
+	xcodebuild -list -project "$(XCODE_PROJECT)"
 
-build:
-	"$(PYTHON)" scripts/configure_build.py --build-dir "$(BUILD_DIR)" -- \
-	cmake -S . -B "$(BUILD_DIR)" -G Ninja \
-		-U 'Qt6*_DIR' -U IPDE_QT_OFFSCREEN -U IPDE_MACDEPLOYQT \
-		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
-		-DCMAKE_PREFIX_PATH="$(QT_CMAKE)" \
-		-DIPDE_PYTHON_EXECUTABLE="$(PYTHON)" $(MACOS_CMAKE_ARGS) $(CMAKE_ARGS)
-	cmake --build "$(BUILD_DIR)"
+build: check-toolchain
+	$(XCODEBUILD) build
+	./script/stage_material_apps.sh "$(APP_BUNDLE)"
 
 package: build
-	cmake --build "$(BUILD_DIR)" --target distribution
+	./scripts/package_macos.sh "$(APP_BUNDLE)" "$(CURDIR)/dist"
 
 install: package
-	"$(PYTHON)" scripts/install_macos.py "$(BUILD_DIR)/dist/IPDE Studio.app" --destdir "$(DESTDIR)"
+	"$(PYTHON)" scripts/install_macos.py "$(APP_BUNDLE)" --destdir "$(DESTDIR)"
 
 release-check: package
 	"$(PYTHON)" scripts/check_release_version.py
-	cmake --build "$(BUILD_DIR)" --target release-check
 
-gui: build
-	open "$(CURDIR)/$(BUILD_DIR)/IPDE.app"
+run gui studio:
+	./script/build_and_run.sh
 
-studio: build
-	open "$(CURDIR)/$(BUILD_DIR)/IPDE Studio.app"
+test: test-native test-python
 
-test:
-	PYTHONPATH=$(CURDIR)/src $(PYTHON) -m unittest discover -s verification -v
+test-native: check-toolchain
+	xcodebuild -project "$(XCODE_PROJECT)" -scheme "$(XCODE_SCHEME)" \
+		-configuration Debug -destination 'platform=macOS,arch=arm64' \
+		-derivedDataPath "$(DERIVED_DATA)" test
+
+test-python:
+	PYTHONPATH=$(CURDIR)/src "$(PYTHON)" -m unittest discover -s verification -v
 
 smoke: build
-	"$(CURDIR)/$(BUILD_DIR)/IPDE.app/Contents/MacOS/IPDE" --smoke-test
+	"$(APP_BUNDLE)/Contents/MacOS/Texture Studio" --smoke-test
 
-clean:
-	cmake -E remove_directory $(BUILD_DIR)
+clean: check-toolchain
+	$(XCODEBUILD) clean

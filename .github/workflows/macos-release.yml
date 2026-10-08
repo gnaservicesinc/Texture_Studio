@@ -1,4 +1,4 @@
-name: Build and release macOS
+name: Build and release Texture Studio
 
 on:
   push:
@@ -16,28 +16,20 @@ concurrency:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
+      - name: Verify full Xcode and macOS SDK
+        run: |
+          xcodebuild -version
+          ./script/check_toolchain.sh
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
           cache: pip
-      - uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.11.1'
-          arch: clang_64
-          cache: true
-      - name: Install build tools and Python runtime packages
+      - name: Install optional backend test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install ninja
           python -m pip install -c requirements-release-macos.txt \
             -r requirements.txt -r requirements-depth.txt 'datasets>=4,<6'
           python -m pip check
@@ -47,52 +39,33 @@ jobs:
           TAG: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
         run: python scripts/check_release_version.py
-      - name: Build the complete suite
+      - name: Test native app and retained Python tools
         run: |
-          # The repository contains workstation development build files.
-          # Never reuse their absolute-path CMake cache on a hosted runner.
-          cmake -E remove_directory build
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
-            -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
-            -DIPDE_PYTHON_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')"
-          cmake --build build --parallel 3
-      - name: Verify native and backend behavior
-        env:
-          QT_QPA_PLATFORM: offscreen
+          make test-native
+          make PYTHON="$(command -v python)" test-python
+      - name: Build and verify the standalone app
         run: |
-          ctest --test-dir build --output-on-failure
-          PYTHONPATH=src python -m unittest discover -s verification -v
-          'build/IPDE Studio.app/Contents/MacOS/IPDE Studio' --smoke-test
-          PYTHONPATH=src python verification/smoke_subapps.py
-      - name: Create and verify standalone package
-        run: |
-          cmake --build build --target distribution
-          python scripts/bundle_macos.py 'build/dist/IPDE Studio.app' --audit-only
-          codesign --verify --deep --strict 'build/dist/IPDE Studio.app'
-          PYTHONPATH=src python verification/smoke_subapps.py \
-            --bundle 'build/dist/IPDE Studio.app' --bundled-python
-          codesign --verify --deep --strict 'build/dist/IPDE Studio.app'
+          make package
+          make smoke
           mkdir -p artifacts
-          ditto -c -k --sequesterRsrc --keepParent 'build/dist/IPDE Studio.app' \
-            'artifacts/IPDE-Studio-macos-${{ matrix.arch }}.zip'
-          cd artifacts
-          shasum -a 256 IPDE-Studio-macos-${{ matrix.arch }}.zip > IPDE-Studio-macos-${{ matrix.arch }}.sha256
+          cp dist/Texture-Studio-macos-arm64.zip dist/Texture-Studio-macos-arm64.sha256 artifacts/
       - uses: actions/upload-artifact@v4
         with:
-          name: IPDE-Studio-macos-${{ matrix.arch }}
+          name: Texture-Studio-macos-arm64
           path: artifacts/*
           if-no-files-found: error
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: macos-26
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -103,7 +76,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           python scripts/check_release_version.py --release-notes release-notes.md
-          args=(release create "$TAG" artifacts/* --verify-tag --title "IPDE Studio $TAG" --notes-file release-notes.md)
+          args=(release create "$TAG" artifacts/* --verify-tag --title "Texture Studio $TAG" --notes-file release-notes.md)
           if python scripts/check_release_version.py --is-prerelease; then
             args+=(--prerelease)
           fi

@@ -1,122 +1,87 @@
-# Versioning and macOS releases
+# Building and releasing Texture Studio
 
-IPDE Studio starts this development line at **0.9.0**. The 0.9.x line is
-pre-release software. Until 1.0.0, projects, save files, datasets, checkpoints
-and settings can change incompatibly. Preserve original photographs,
-scientific exports and useful checkpoints before upgrading. Migration support
-is not a compatibility promise for this development line.
+Texture Studio is the standalone native SwiftUI application in
+`native/TextureStudio/TextureStudio.xcodeproj`. The shared scheme is
+`TextureStudio`; its executable and application bundle are named **Texture
+Studio**. The bundle identifier is `org.ipde.texture-studio`.
 
-The version must agree in `CMakeLists.txt`, `pyproject.toml` and
-`src/ipde/__init__.py`. `scripts/check_release_version.py` verifies them without
-loading optional inference libraries. Release tags use `v0.9.0`, `v0.9.1`, and
-so on. No release tag is created by building locally.
+The app requires an Apple Silicon Mac, macOS 26 or later, and a full Xcode
+installation containing the macOS 26 SDK or later. Command Line Tools alone are
+insufficient. The project uses Apple's SwiftUI, AppKit, ImageIO, Core Image,
+Metal, and Core ML frameworks. Qt, CMake, Ninja, Linux, and Windows app build
+paths have been retired. The Python extraction and research tools remain
+separate from the app. The app bundles its own pinned DA3 worker and upstream
+inference source, and installs/locates a separate PyTorch/MPS environment through
+Local Models. Python and model binaries remain outside the app bundle.
 
-## Local packaging and installation
+## Local development
 
-Install the requirements into a Python environment, then run:
+Open the project in Xcode and select the TextureStudio scheme, or run:
 
 ```sh
 make build
-make package
-make install
-# For a staging directory instead of the system Applications folder:
-make DESTDIR=/path/to/staging/dir install
-# Full native dependency audit, packaged Python imports and version checks:
-make release-check
+./script/build_and_run.sh
 ```
 
-`make build` embeds the Qt frameworks and plugins in every native application,
-including the nested applications in IPDE Studio. `make package` creates
-`build/dist/IPDE Studio.app`, adding a single shared Python runtime and the
-runtime dependency closure pinned in `requirements-release-macos.txt`.
-It requires the versions in that file; unrelated installed packages are omitted.
-Bare `make` builds the apps. Only `make setup` creates the developer environment
-and installs dependencies. Repeated builds reuse the CMake configuration and
-skip unchanged native apps, Qt deployment and bundled resources. Python and
-documentation changes refresh resources without relinking the apps. A current
-portable package is reused by `make install`; after app-only changes,
-packaging reuses the already relocated Python runtime. Changes to the selected
-interpreter, the release dependency lock or actual installed package files
-invalidate that runtime. A new runtime receives an import check once.
+`make build` builds Release into `build/TextureStudio/Build/Products/Release`.
+The run script stops the existing app, builds Debug into the same DerivedData
+root, then launches the application bundle. Its optional modes are `--debug`,
+`--logs`, `--telemetry`, and `--verify`. Extra app arguments follow `--`.
+The Codex **Run** action uses this script through
+`.codex/environments/environment.toml`.
 
-`make release-check` performs the full dependency audit, packaged imports and
-source-version checks. It rejects
-references to an external Qt, Python, Homebrew, or development library. Native
-code is ad-hoc signed and verified after deployment. The recursive audit also
-reads each native binary's required macOS version and rejects one newer than
-the version declared by the app. The app is not notarized.
+```sh
+./script/build_and_run.sh --verify
+./script/build_and_run.sh run -- --open /path/to/surface.heic
+make test-native
+make smoke
+```
 
-`make setup` installs the base, teacher and optional dataset dependencies with
-the release constraints. To upgrade these intentionally, install the chosen
-versions, run `scripts/lock-release-dependencies.py`, then rerun validation.
-The lock is the dependency closure of those features for macOS Python 3.13
-and 3.14; it includes required extras and package license metadata.
-Teacher sources, model weights, datasets and personal workspace files are
-user-managed and are not included. Configure model sources/weights on the
-destination Mac before using model-based operations.
+The native XCTest target tests geometry, map exports, and model management.
+The Core Image Metal kernels are compiled with `metal -fcikernel` and
+`metallib -cikernel` by the Xcode build and embedded in the app resources.
+No model downloads are needed for the deterministic native checks. Real DA3
+smoke checks require the separately installed exact model and Metal runtime.
 
-`make install` copies the finished app into `/Applications/IPDE Studio.app`.
-`DESTDIR` is a staging **root**, so the example above produces
-`/path/to/staging/dir/Applications/IPDE Studio.app`. Installation refuses to
-replace a running installed app or one of its subapps. It copies and verifies a
-temporary replacement before swapping it with the old app, retaining the old
-app if the swap fails. On APFS, packaging and installation use file cloning to
-avoid recopying unchanged runtime bytes. System Applications may
-require an account with permission to write there.
-An identical, valid installed build is verified and retained without copying.
+Python backend checks are optional for app-only development:
 
-`PYTHON`, `PYTHON_BASE`, `QT_CMAKE`, `BUILD_DIR`, `BUILD_TYPE`, and `CMAKE_ARGS`
-can be overridden for another development installation. Qt is otherwise
-discovered from installed `/opt/Qt/6.*/macos` versions.
-The release workflow pins Qt 6.11.1. A newer Qt may require a newer macOS
-version: [Qt 6.12 requires macOS 14.4](https://doc.qt.io/qt-6.12/macos.html).
-`make build` automatically selects the greater of Qt's supported minimum and
-the bundled Python runtime's macOS 14.0 minimum. It refreshes cached Qt paths
-and the automatic target when selecting another installed kit. The compiler,
-Swift helper, About information and app plists use the same selected target.
-An explicit `CMAKE_ARGS=-DCMAKE_OSX_DEPLOYMENT_TARGET=14.4` overrides automatic
-selection; an incompatible target is rejected during configuration. The release
-workflow retains Qt 6.11.1 and its explicit 14.0 target. `make configure`
-explicitly regenerates the selected configuration. Direct CMake users can
-reset a cached automatic target with `-DCMAKE_OSX_DEPLOYMENT_TARGET=`. The audit deliberately rejects a bundle claiming an older minimum
-than one of its libraries supports.
+```sh
+make setup
+make test-python
+```
 
-## GitHub Actions
+`make test` runs both suites. `CONFIGURATION=Debug` changes the build
+configuration; `DERIVED_DATA=/path/to/build` changes the Makefile output root.
+The run script accepts `TEXTURE_STUDIO_DERIVED_DATA` for its output root.
 
-`.github/workflows/macos-release.yml` builds the Apple Silicon package,
-runs native/backend verification, deploys and audits the runtime, verifies
-signatures, and saves ZIP artifacts and SHA-256 checksums. Pushes to `main`,
-`release/**`, pull requests and manual runs build artifacts. A matching `v*`
-tag additionally publishes a GitHub Release after the package checks succeed.
-All versions below 1.0.0 are marked as pre-releases. Building or pushing a
-branch does not publish a release.
+## Packages and versions
 
-The initial release supports **Apple Silicon Macs with macOS 14 or later**.
-The application and Swift helper use that deployment floor; the current
-PyTorch runtime also requires macOS 14. Intel packages are not
-produced because current supported PyTorch wheels are required for this
-training application. See the [PyTorch macOS x86 support announcement](https://docs.pytorch.org/blog/pytorch2-2/).
+```sh
+make package
+make release-check
+# Optional: install the built app, after closing Texture Studio.
+make install
+# Or install under a staging root:
+make DESTDIR=/path/to/staging install
+```
 
-The release uses the [GitHub macOS runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
-and Qt's [macOS deployment tool](https://doc.qt.io/qt-6/macos-deployment.html).
-It does not contain signing credentials or a notarization submission. A
-downloaded app may need first-launch approval in macOS Privacy & Security.
+Packaging verifies the app's signature, identity, and arm64 executable, then
+creates `dist/Texture-Studio-macos-arm64.zip` and its SHA-256 checksum. The app
+contains Apple's system framework dependencies, native resources, and the
+standalone Python worker source.
+Optional models are stored outside the application bundle.
 
-Before tagging, review the changes, run the checks and confirm package contents.
-Update the version consistently and create an annotated tag at the reviewed
-commit. Push that tag explicitly only when publishing is intended. Inspect the
-completed workflow and release assets; a pushed tag alone does not establish
-that a downloadable release exists.
+The version must agree in `pyproject.toml`, `src/ipde/__init__.py`, and every
+`MARKETING_VERSION` entry in the Xcode project. The tag must be `v` followed by
+that version. `scripts/check_release_version.py` checks these without importing
+model runtimes. The current 0.9.x series remains a development prerelease.
 
-## Stable release branches from 1.0.0
+The macOS GitHub workflow tests the native app and retained Python tools on
+`macos-26`, builds the package, and publishes tagged artifacts. A workflow
+change is not evidence that remote CI has passed. A local package is not a
+published GitHub Release.
 
-At the first stable release, create `release/1.0` at the `v1.0.0` commit. Each
-supported stable minor line gets its own branch: `release/1.1`, `release/1.2`,
-and so on. `main` continues forward development. Create patch releases from
-the appropriate supported branch, for example `v1.0.1` from `release/1.0`.
-
-Backport selected fixes with their relevant regression coverage. Keep new
-features and format-breaking changes on `main`. Document supported release
-lines and any file-format migration guarantees when 1.0.0 is reached. Before
-publishing a backport, validate that branch's package rather than relying on
-validation of the original fix on `main`.
+Local and CI packages use ad-hoc signing and are not notarized. A public trusted
+release additionally requires a Developer ID identity, hardened runtime,
+notarization, and stapling; credentials are never stored in this repository.
+Use Xcode's archive/distribution workflow when preparing that release.
