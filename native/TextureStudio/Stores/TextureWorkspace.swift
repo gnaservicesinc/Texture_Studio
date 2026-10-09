@@ -184,6 +184,11 @@ final class TextureWorkspace {
     }
 
     func importPhoto(_ url: URL) {
+        var directory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &directory), directory.boolValue {
+            MaterialToolLauncher.open(.dataset, document: url)
+            return
+        }
         guard !isBusy else { return }
         run("Reading photo and camera information…") {
             let imported = try await self.engine.importPhoto(url)

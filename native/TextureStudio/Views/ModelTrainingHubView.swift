@@ -95,7 +95,7 @@ struct ModelTrainingHubView: View {
                     Divider()
                 }
                 switch destination ?? .overview {
-                case .overview: overview
+                case .overview: overview.modifier(DatasetManagementPresentation(store: store))
                 case .dataset: MaterialToolRootView(role: .dataset, store: store, review: review)
                 case .train: MaterialToolRootView(role: .train, store: store, review: review)
                 case .compare: MaterialToolRootView(role: .compare, store: store, review: review)
@@ -150,8 +150,8 @@ struct ModelTrainingHubView: View {
                 }
                 VStack(alignment: .leading, spacing: 14) {
                     Text("A workflow you can return to").font(.title2.bold())
-                    workflowRow("1", .dataset, "Create or open your dataset", "Name your dataset, add paired material maps, and review the original high-bit-depth data.")
-                    workflowRow("2", .train, "Train material detail", "Choose a size that fits your Mac. Complete registered maps share the exact grid shown in Dataset.")
+                    workflowRow("1", .dataset, "Set up your dataset", "Choose rendering and training resolution, import a material folder, then review the planned native crops and splits.")
+                    workflowRow("2", .train, "Train material detail", "Use the saved dataset resolution and review the memory budget. Complete registered maps share the exact grid shown in Dataset.")
                     workflowRow("3", .compare, "Compare what changed", "Use the same prepared diffuse for each checkpoint. Inspect detail, noise, inversion and relief.")
                     workflowRow("4", .review, "Inspect at full quality", "Use 100% zoom, linked dragging and pop-out windows. Export the untouched map or open an editable copy in GIMP.")
                     workflowRow("5", .checkpoints, "Keep the model", "Save the LoRA or full checkpoint, upload it to Hugging Face, and download it again when needed.")

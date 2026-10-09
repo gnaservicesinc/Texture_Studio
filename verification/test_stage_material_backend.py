@@ -149,3 +149,42 @@ print(json.dumps({"sources": len(materials), "provider": "ambientCG"}))
     assert child.returncode == 0, child.stderr
     assert json.loads(child.stdout) == {'sources': 1, 'provider': 'ambientCG'}
     assert not (bundle/'material_recreation.py').exists()
+
+
+def test_isolated_cli_runs_dataset_lifecycle_and_model_capabilities(tmp_path):
+    import json
+    import subprocess
+    import numpy as np
+    from material_dataset import write_png
+
+    bundle = tmp_path / 'MaterialBackend'
+    stage(ROOT, bundle)
+    source = tmp_path / 'Originals' / 'Nested'
+    source.mkdir(parents=True)
+    write_png(source / 'diffuse.png', np.zeros((256, 256, 3), np.uint8))
+    write_png(source / 'height.png', np.arange(65536, dtype=np.uint16).reshape(256, 256, 1))
+    original = (source / 'height.png').read_bytes()
+    dataset, plan = tmp_path / 'Dataset', tmp_path / 'plan.json'
+
+    def command(script, *arguments):
+        child = subprocess.run([sys.executable, '-I', '-B', str(bundle / script), *map(str, arguments)],
+                               cwd=tmp_path, capture_output=True, text=True)
+        assert child.returncode == 0, child.stdout + child.stderr
+        value = json.loads(child.stdout)
+        assert value['ok']
+        return value
+
+    worker = 'material_workbench.py'
+    created = command(worker, 'create-dataset', '--dataset', dataset, '--name', 'Isolated', '--training-size', 256)
+    preview = command(worker, 'scan-folder', '--dataset', dataset, '--folder', source.parent, '--plan', plan,
+                      '--expected-index-sha256', created['index_sha256'])
+    imported = command(worker, 'import-folder', '--dataset', dataset, '--folder', source.parent, '--plan', plan,
+                       '--expected-plan-sha256', preview['plan_sha256'], '--training-size', 256)
+    assert imported['source_set_count'] == 1
+    reopened = command(worker, 'dataset', '--dataset', dataset)
+    assert reopened['training_size'] == 256 and reopened['training_plans']['height']['train_count'] == 1
+    result = command('material_model_workbench.py', 'capabilities', '--memory-gib', 48, '--cache-gib', 0.5,
+                     '--scope', 'final-map')
+    assert result['training_sizes']
+    assert (source / 'height.png').read_bytes() == original
+    assert not list(bundle.rglob('__pycache__'))

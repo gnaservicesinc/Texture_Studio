@@ -13,7 +13,8 @@ struct TrainingWorkbenchView: View {
                     HStack {
                         Button("Open Dataset…") { store.chooseDataset() }
                             .help("Choose an existing dataset folder containing your material maps.")
-                        Button("Manage Datasets…") { MaterialToolLauncher.open(.dataset) }
+                        Button("Dataset Info…") { store.showDatasetInfoSheet = true }.disabled(store.dataset == nil)
+                        Button("New Dataset…") { store.showNewDatasetSheet = true }
                             .help("Open Material Dataset to create or rename datasets, edit their info, and add or remove materials.")
                     }.disabled(store.isBusy)
                     if let dataset = store.dataset {
@@ -25,10 +26,11 @@ struct TrainingWorkbenchView: View {
                     }
                     // Avoid Swift 6.3 IRGen's actor-isolated bound-method conversion.
                     Picker("Training dimensions", selection: Binding(get: { store.training.size }, set: { store.selectTrainingSize($0) })) {
-                        ForEach(store.supportedTrainingSizes, id: \.self) { size in
+                        ForEach(Array(Set(store.supportedTrainingSizes + [store.training.size])).sorted(), id: \.self) { size in
                             Text("\(size) × \(size)").tag(size)
                         }
                     }.disabled(store.isBusy || store.supportedTrainingSizes.isEmpty)
+                    if let plans = store.dataset?.trainingPlans { DatasetPlanSummary(plans: plans) }
                     Text("Every diffuse and target map uses this exact grid. Matching sources are referenced directly; each crop is saved once in temporary training storage; smaller source sets are excluded.")
                         .font(.caption).foregroundStyle(.secondary)
                     Toggle("Train only selected material", isOn: $store.training.useSelectedMaterialOnly)
@@ -37,7 +39,7 @@ struct TrainingWorkbenchView: View {
                     }
                 }
                 Section("Refine a material model") {
-                    Picker("Map", selection: $store.training.target) {
+                    Picker("Map", selection: Binding(get: { store.training.target }, set: { store.selectTrainingTarget($0) })) {
                         Text("Displacement").tag("height")
                         Text("Roughness").tag("roughness")
                         Text("Normals").tag("normal")

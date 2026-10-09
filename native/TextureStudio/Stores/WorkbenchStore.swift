@@ -5,9 +5,28 @@ import UniformTypeIdentifiers
 @MainActor @Observable
 final class WorkbenchStore {
     var dataset: WorkbenchDataset?
-    var showNewDatasetSheet = false
-    var showAddMaterialSheet = false
-    var showDatasetInfoSheet = false
+    var datasetSheet: DatasetSheetRoute?
+    var showNewDatasetSheet: Bool {
+        get { datasetSheet == .new }
+        set { if newValue { datasetSheet = .new } else if datasetSheet == .new { datasetSheet = nil } }
+    }
+    var showAddMaterialSheet: Bool {
+        get { datasetSheet == .add }
+        set { if newValue { datasetSheet = .add } else if datasetSheet == .add { datasetSheet = nil } }
+    }
+    var showDatasetInfoSheet: Bool {
+        get { datasetSheet == .info }
+        set { if newValue { datasetSheet = .info } else if datasetSheet == .info { datasetSheet = nil } }
+    }
+    var showImportFolderSheet: Bool {
+        get { datasetSheet == .folder }
+        set { if newValue { datasetSheet = .folder } else if datasetSheet == .folder { datasetSheet = nil } }
+    }
+    var pendingSourceFolder: URL?
+    var folderImport: WorkbenchFolderImport?
+    var folderImportURL: URL?
+    @ObservationIgnored var folderImportPlanURL: URL?
+    @ObservationIgnored private var queuedDatasetURL: URL?
     var showTrashDatasetConfirmation = false
     var recentDatasets: [WorkbenchDatasetLocation] = []
     var selectedSampleId: String? { didSet { saveUserSettings() } }
@@ -201,7 +220,14 @@ final class WorkbenchStore {
             self.isRestoringPreferences = true
             defer { self.isRestoringPreferences = false; self.saveUserSettings() }
             if let datasetPath, FileManager.default.fileExists(atPath: datasetPath) {
-                try await self.loadDataset(URL(fileURLWithPath: datasetPath))
+                let url = URL(fileURLWithPath: datasetPath)
+                var directory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: datasetPath, isDirectory: &directory), directory.boolValue,
+                   !FileManager.default.fileExists(atPath: url.appendingPathComponent("dataset.json").path),
+                   !(url.lastPathComponent == "sources" && FileManager.default.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("dataset.json").path)) {
+                    self.pendingSourceFolder = url
+                    self.showNewDatasetSheet = true
+                } else { try await self.loadDataset(url) }
             }
             for path in paths where FileManager.default.fileExists(atPath: path) {
                 do { try await self.loadCheckpoint(URL(fileURLWithPath: path), select: false) }
@@ -238,7 +264,7 @@ final class WorkbenchStore {
         guard !isBusy else { return }
         let panel = NSOpenPanel()
         panel.title = "Open Dataset"
-        panel.message = "Choose a dataset folder. You can also select an existing dataset.json file."
+        panel.message = "Open a saved dataset or choose a folder of material maps to set up and import. Subfolders are scanned automatically."
         panel.prompt = "Open Dataset"
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
@@ -250,10 +276,22 @@ final class WorkbenchStore {
     }
     func openDataset(_ url: URL) {
         guard !isBusy else { error = "Stop the current operation before changing datasets."; return }
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue,
+           !FileManager.default.fileExists(atPath: url.appendingPathComponent("dataset.json").path),
+           !(url.lastPathComponent == "sources" && FileManager.default.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("dataset.json").path)) {
+            if dataset != nil { importMaterialFolder(url) }
+            else { pendingSourceFolder = url; showNewDatasetSheet = true }
+            return
+        }
         operation("Reading dataset…") {
             try await self.loadDataset(url)
             self.activity = "Opened \(self.datasetName)."
         }
+    }
+    func receiveDataset(_ url: URL) {
+        if isBusy { queuedDatasetURL = url }
+        else { openDataset(url) }
     }
     func openCheckpoint(_ url: URL) {
         guard !isBusy else { error = "Stop the current operation before changing checkpoints."; return }
@@ -289,7 +327,8 @@ final class WorkbenchStore {
 
     func loadDataset(_ url: URL) async throws {
         let result: WorkbenchDataset = try WorkbenchProcess.decode(WorkbenchDataset.self,
-            output: await worker(["dataset", "--dataset", url.path, "--review-size", String(training.size)]))
+            output: await worker(["dataset", "--dataset", url.path, "--target", training.target,
+                                  "--default-review-size", String(training.size)]))
         adoptDataset(result)
         datasetPreparationSummary = ""
         saveDatasetLocation(result, requested: url)
@@ -308,6 +347,10 @@ final class WorkbenchStore {
     func adoptDataset(_ result: WorkbenchDataset, preferredMaterial: String? = nil) {
         let material = preferredMaterial ?? selectedMaterialId
         dataset = result
+        if let size = result.trainingSize {
+            training.size = size
+            applyAutomaticMemoryBudget()
+        }
         supportedTrainingSizes = backendTrainingSizes.filter { result.supportedTrainingSizes?.contains($0) ?? true }
         if !result.samples.contains(where: { $0.id == selectedSampleId }) {
             selectedSampleId = result.materials.first(where: { $0.id == material })?.samples.first?.id ?? result.samples.first?.id
@@ -317,10 +360,15 @@ final class WorkbenchStore {
     func selectTrainingSize(_ size: Int) {
         guard !isBusy else { return }
         guard supportedTrainingSizes.contains(size) else { error = "This size does not fit the current training budget."; return }
-        training.size = size
-        applyAutomaticMemoryBudget()
+        guard dataset != nil else { training.size = size; applyAutomaticMemoryBudget(); return }
+        updateDatasetInfo(name: datasetName, description: datasetDescription, size: size)
+    }
+
+    func selectTrainingTarget(_ target: String) {
+        guard !isBusy, ["height", "roughness", "normal"].contains(target) else { return }
+        training.target = target
         guard let datasetURL else { return }
-        operation("Opening \(size) × \(size) material reviews…") { try await self.loadDataset(datasetURL) }
+        operation("Updating \(target == "height" ? "displacement" : target) splits…") { try await self.loadDataset(datasetURL) }
     }
 
     func prepareTrainingDataset() {
@@ -532,7 +580,7 @@ final class WorkbenchStore {
         memoryPlans = result.memoryPlans ?? [:]
         backendTrainingSizes = result.trainingSizes.filter { [256, 512, 1024, 2048].contains($0) }.sorted()
         supportedTrainingSizes = backendTrainingSizes.filter { dataset?.supportedTrainingSizes?.contains($0) ?? true }
-        if !supportedTrainingSizes.contains(training.size), let size = supportedTrainingSizes.last {
+        if dataset?.trainingSize == nil, !supportedTrainingSizes.contains(training.size), let size = supportedTrainingSizes.last {
             training.size = size
         }
         applyAutomaticMemoryBudget()
@@ -561,17 +609,18 @@ final class WorkbenchStore {
         }
         if training.useSelectedMaterialOnly && selectedMaterialId == nil { return "Select a material first." }
         let selected = training.useSelectedMaterialOnly ? dataset?.materials.first { $0.id == selectedMaterialId }?.samples ?? [] : samples
-        let eligible = selected.filter { sample in
-            !["excluded", "rejected"].contains(sample.status) &&
-                min(sample.width, sample.height) >= training.size &&
-                (sample.availableTargets?.contains(training.target) ?? (sample.maps[training.target] != nil))
-        }
+        let eligible = selected.filter { self.sampleIsTrainable($0) }
         if eligible.isEmpty { return "No included material provides a registered \(training.target == "height" ? "16-bit displacement" : training.target) target at this size." }
         if eligible.allSatisfy({ $0.split == "validation" && $0.splitAssignment == "manual" }) {
             return "Assign at least one included material to Training in Dataset. All available materials are assigned to Validation."
         }
         if training.useWarmStart && selectedCheckpoint?.supportsTrainingWarmStart != true { return "Select a material checkpoint to refine." }
         return nil
+    }
+
+    func sampleIsTrainable(_ sample: WorkbenchSample) -> Bool {
+        !["excluded", "rejected"].contains(sample.status) && min(sample.width, sample.height) >= training.size &&
+            (sample.availableTargets?.contains(training.target) ?? (sample.maps[training.target] != nil))
     }
 
     func startTraining() {
@@ -827,7 +876,9 @@ final class WorkbenchStore {
     }
 
     func worker(_ args: [String], script requestedScript: String? = nil) async throws -> String {
-        let datasetCommands: Set<String> = ["dataset", "prepare-size", "cleanup-size", "curate", "remove-missing", "create-dataset", "edit-dataset", "add-material", "import-folder", "remove-material", "validate-delete"]
+        let datasetCommands: Set<String> = ["dataset", "prepare-size", "cleanup-size", "curate", "remove-missing", "create-dataset", "edit-dataset", "add-material", "import-folder", "scan-folder", "remove-material", "validate-delete"]
+        let includesTarget = ["create-dataset", "edit-dataset", "add-material", "import-folder", "remove-material"].contains(args.first ?? "") && !args.contains("--target")
+        let args = args + (includesTarget ? ["--target", training.target] : [])
         let script = requestedScript ?? (datasetCommands.contains(args.first ?? "") ? "material_workbench.py" : "material_model_workbench.py")
         try Task.checkCancellation()
         guard !WorkbenchLifecycle.shared.isTerminating else { throw CancellationError() }
@@ -863,6 +914,9 @@ final class WorkbenchStore {
                     self?.logText += chunk
                     if let text = self?.logText, text.count > 100000 { self?.logText = String(text.suffix(100000)) }
                     if trainingWorker { self?.recordTrainingProgress(chunk) }
+                    if args.first == "scan-folder", let progress = self?.logText.components(separatedBy: "\n").last(where: { $0.hasPrefix("IPDE_PROGRESS:") }) {
+                        self?.activity = String(progress.dropFirst("IPDE_PROGRESS:".count))
+                    }
                 }
             }
         try Task.checkCancellation()
@@ -876,6 +930,10 @@ final class WorkbenchStore {
             defer {
                 isBusy = false; isTraining = false; isResumingTraining = false; isStopping = false
                 hasTrainingStarted = false; isSavingTraining = false; isPreparingDataset = false; task = nil
+                if let url = queuedDatasetURL {
+                    queuedDatasetURL = nil
+                    openDataset(url)
+                }
             }
             do {
                 try await body()

@@ -249,7 +249,7 @@ final class TrainingPreparationTests: XCTestCase {
                 case "capabilities":
                     XCTAssertEqual(script, "material_model_workbench.py")
                     return "{\"training_sizes\":[512,1024]}"
-                case "dataset": return try self.dataset(prepared: false)
+                case "dataset", "edit-dataset": return try self.dataset(prepared: false)
                 case "prepare-size":
                     if self.holdPreparation { await withCheckedContinuation { self.continuation = $0 } }
                     return try self.dataset(prepared: true)

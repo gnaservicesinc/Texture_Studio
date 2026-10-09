@@ -628,3 +628,170 @@ def test_duplicate_original_set_detection_handles_older_records_without_color_va
     write_json(sample_path, sample)
     duplicated = add(path, original_maps, name="Another name")
     assert duplicated["material_count"] == 1 and duplicated["duplicate_material_count"] == 1
+
+
+def scan(path, folder, tmp_path):
+    return workbench.scan_folder(args(dataset=path, folder=folder, plan=tmp_path / 'preview.json'))
+
+
+def import_preview(path, preview, size=256):
+    return workbench.import_folder(args(dataset=path, folder=Path(preview['folder_path']),
+        plan=Path(preview['plan_path']), expected_plan_sha256=preview['plan_sha256'],
+        expected_index_sha256=preview['index_sha256'], training_size=size, review_size=size))
+
+
+def test_nested_folder_preview_import_resolution_and_preparation_share_exact_plan(tmp_path):
+    from material_native_size import prepare_from_records, cleanup_prepared_dataset
+    root = tmp_path / 'Original folders'
+    for name in ('soil', 'brick', 'wood'):
+        maps(root / name / 'nested', size=512, provider=True, family=name)
+    # A metadata folder inside the selected source root must not stop recursion.
+    path = root / 'Matts'
+    workbench.create_dataset(args(dataset=path, name='Matts', training_size=512))
+    before = snapshot(root)
+    preview = scan(path, root, tmp_path)
+    assert preview['source_set_count'] == preview['added_material_count'] == 3
+    assert preview['plans']['256']['height']['train_count'] == 2
+    assert preview['plans']['256']['height']['validation_count'] == 1
+    assert preview['plans']['1024']['height']['undersized_source_set_count'] == 3
+    assert not (path / 'samples').exists(), 'A preview must not add data or crop pixels'
+    assert snapshot(root) == before
+    imported = import_preview(path, preview, 256)
+    assert imported['training_size'] == imported['review_size'] == 256
+    assert imported['training_plans'] == preview['plans']['256']
+    displayed = {s['sample_id']: s['split'] for m in imported['materials'] for s in m['samples']}
+    _index, records = workbench.read_dataset(path)
+    prepared, _info = prepare_from_records(path, records, 256, automatic_validation=True)
+    _index, prepared_records = workbench.read_dataset(prepared)
+    assert displayed == {s['sample_id']: s['split'] for _, _, s in prepared_records}
+    for _, metadata_path, record in prepared_records:
+        height, _ = read_png(metadata_path.parent / record['maps']['height'])
+        original, _ = read_png(Path(record['map_metadata']['height']['source']['path']))
+        assert np.array_equal(height, original[128:384, 128:384])
+    cleanup_prepared_dataset(prepared)
+    assert all(Path(name).read_bytes() == content for name, content in before.items() if name.endswith('.png'))
+    reopened = workbench.dataset_info(args(dataset=path))
+    assert reopened['training_size'] == 256
+    assert displayed == {s['sample_id']: s['split'] for m in reopened['materials'] for s in m['samples']}
+
+
+def test_import_preview_reuses_verified_maps_without_rehash_or_decode(tmp_path, monkeypatch):
+    source = tmp_path / 'sources'
+    maps(source / 'brick', size=512, provider=True)
+    path = tmp_path / 'dataset'; create(path)
+    preview = scan(path, source, tmp_path)
+    import material_dataset
+    monkeypatch.setattr(material_dataset, 'source_summary', lambda *_: pytest.fail('Import rehashed a previewed original'))
+    result = import_preview(path, preview, 512)
+    assert result['added_material_count'] == 1
+    assert result['training_size'] == 512
+
+
+@pytest.mark.parametrize('change', ['original', 'inventory', 'dataset', 'plan'])
+def test_preview_refuses_changed_sources_membership_or_plan_without_partial_import(tmp_path, change):
+    source = tmp_path / 'sources'; files = maps(source)
+    path = tmp_path / 'dataset'; create(path)
+    preview = scan(path, source, tmp_path)
+    if change == 'original':
+        files['height'].write_bytes(files['height'].read_bytes() + b'changed')
+    elif change == 'inventory':
+        (source / 'new.png').write_bytes(files['height'].read_bytes())
+    elif change == 'dataset':
+        workbench.edit_dataset(args(dataset=path, description='new info'))
+    else:
+        Path(preview['plan_path']).write_text('{}')
+    before = (path / 'dataset.json').read_bytes()
+    with pytest.raises(ValueError, match='changed'):
+        import_preview(path, preview)
+    assert (path / 'dataset.json').read_bytes() == before
+    assert not (path / 'samples').exists()
+
+
+def test_empty_unpaired_and_duplicate_folders_explain_results(tmp_path):
+    source = tmp_path / 'sources'; source.mkdir()
+    path = tmp_path / 'dataset'; create(path)
+    empty = scan(path, source, tmp_path)
+    assert empty['added_material_count'] == 0 and empty['warnings']
+    write_png(source / 'vacation.png', np.zeros((256, 256, 3), np.uint8))
+    unpaired = scan(path, source, tmp_path)
+    assert unpaired['ignored_file_count'] == 1
+    maps(source / 'nested', provider=True)
+    preview = scan(path, source, tmp_path)
+    import_preview(path, preview)
+    duplicate = scan(path, source, tmp_path)
+    assert duplicate['duplicate_material_count'] == 1 and duplicate['added_material_count'] == 0
+    assert duplicate['plans']['256']['height']['crop_count'] == 1
+
+
+def test_resolution_is_dataset_scoped_and_edit_does_not_change_originals(tmp_path):
+    source = tmp_path / 'sources'; files = maps(source, size=512)
+    before = snapshot(source)
+    path = tmp_path / 'dataset'; create(path)
+    add(path, files)
+    changed = workbench.edit_dataset(args(dataset=path, training_size=256))
+    assert changed['training_size'] == 256
+    assert changed['materials'][0]['samples'][0]['width'] == 256
+    second = tmp_path / 'second'
+    workbench.create_dataset(args(dataset=second, name='second', training_size=512))
+    assert workbench.dataset_info(args(dataset=path))['training_size'] == 256
+    assert workbench.dataset_info(args(dataset=second))['training_size'] == 512
+    assert snapshot(source) == before
+    assert not list(path.rglob('*.png'))
+    with pytest.raises(ValueError, match='resolution'):
+        workbench.edit_dataset(args(dataset=path, training_size=777))
+    assert workbench.dataset_info(args(dataset=path))['training_size'] == 256
+
+
+def test_reset_automatic_splits_retains_approvals_notes_and_original_bytes(tmp_path):
+    root = tmp_path / 'sources'
+    for name in ('soil', 'wood', 'brick'):
+        maps(root / name, provider=True, family=name)
+    before = snapshot(root)
+    path = tmp_path / 'dataset'; create(path)
+    imported = import_preview(path, scan(path, root, tmp_path))
+    sample = next(s for m in imported['materials'] for s in m['samples'] if s['split'] == 'validation')
+    options = dict(dataset=path, sample=sample['sample_id'], status='approved', expected_index_sha256=None,
+                   review_size=256, note='Keep this detail')
+    workbench.curate(args(**options, split='train'))
+    manual = workbench.dataset_info(args(dataset=path))
+    assert manual['training_plans']['height']['validation_count'] == 0
+    workbench.curate(args(**options, split='automatic'))
+    result = workbench.dataset_info(args(dataset=path))
+    restored = next(s for m in result['materials'] for s in m['samples'] if s['sample_id'] == sample['sample_id'])
+    assert restored['split'] == 'validation' and restored['split_assignment'] == 'automatic'
+    assert restored['status'] == 'approved' and restored['note'] == 'Keep this detail'
+    assert snapshot(root) == before
+
+
+def test_scan_reports_damaged_maps_and_continues_other_folders(tmp_path):
+    root = tmp_path / 'sources'
+    maps(root / 'good', provider=True, family='good')
+    bad = root / 'bad'; bad.mkdir()
+    (bad / 'bad_diff_2k.png').write_bytes(b'not a PNG')
+    path = tmp_path / 'dataset'; create(path)
+    preview = scan(path, root, tmp_path)
+    assert preview['added_material_count'] == 1
+    assert any('bad_diff_2k.png' in message and 'Skipped' in message for message in preview['warnings'])
+    result = import_preview(path, preview)
+    assert result['material_count'] == 1
+    assert (bad / 'bad_diff_2k.png').read_bytes() == b'not a PNG'
+
+
+def test_preview_rejects_changed_reviews_even_with_same_index(tmp_path):
+    root = tmp_path / 'sources'; maps(root)
+    path = tmp_path / 'dataset'; create(path)
+    preview = scan(path, root, tmp_path)
+    (path / '.material-size-reviews.json').write_text('{}')
+    with pytest.raises(ValueError, match='changed'):
+        import_preview(path, preview)
+    assert not (path / 'samples').exists()
+
+
+def test_scan_duplicates_reuses_verified_source_fingerprints(tmp_path, monkeypatch):
+    import material_dataset
+    root = tmp_path / 'sources'; maps(root / 'brick', provider=True)
+    path = tmp_path / 'dataset'; create(path)
+    import_preview(path, scan(path, root, tmp_path))
+    monkeypatch.setattr(material_dataset, 'source_summary', lambda *_: pytest.fail('Unchanged duplicate was rehashed'))
+    preview = scan(path, root, tmp_path)
+    assert preview['duplicate_material_count'] == 1 and preview['added_material_count'] == 0

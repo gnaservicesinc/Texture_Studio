@@ -17,9 +17,15 @@ enum MaterialToolLauncher {
         if FileManager.default.fileExists(atPath: embedded.path) { return embedded }
         return bundle.deletingLastPathComponent().appendingPathComponent(role.title + ".app")
     }
-    static func open(_ role: MaterialTool) {
+    static func open(_ role: MaterialTool, document: URL? = nil) {
         let app = toolURL(role, containing: Bundle.main.bundleURL)
-        launch(app, fallbackArguments: ["--tool", role.rawValue])
+        if let document, FileManager.default.fileExists(atPath: app.path) {
+            let config = NSWorkspace.OpenConfiguration()
+            config.activates = true
+            NSWorkspace.shared.open([document], withApplicationAt: app, configuration: config)
+        } else {
+            launch(app, fallbackArguments: ["--tool", role.rawValue] + (document.map { ["--dataset", $0.path] } ?? []))
+        }
     }
     static func openStudio() {
         let app = studioURL(containing: Bundle.main.bundleURL)

@@ -1,3 +1,5 @@
+import AppKit
+import SwiftUI
 import Foundation
 import CryptoKit
 import XCTest
@@ -170,7 +172,11 @@ final class DatasetManagementTests: XCTestCase {
         store.training.size = 1024
         store.openDataset(source)
         try await settled(store)
-        XCTAssertEqual(store.error, "This folder does not contain a material dataset. Create a dataset or import material maps into one.")
+        XCTAssertNil(store.error)
+        XCTAssertTrue(store.showNewDatasetSheet)
+        XCTAssertEqual(store.pendingSourceFolder, source)
+        store.pendingSourceFolder = nil
+        store.showNewDatasetSheet = false
         store.createDataset(name: "Native Lifecycle", description: "Exact originals", parentURL: fixture.root)
         try await settled(store)
         XCTAssertNil(store.error)
@@ -202,6 +208,26 @@ final class DatasetManagementTests: XCTestCase {
         store.importMaterialFolder(source)
         try await settled(store)
         XCTAssertNil(store.error)
+        XCTAssertTrue(store.showImportFolderSheet)
+        XCTAssertEqual(store.folderImport?.addedMaterialCount, 1)
+        XCTAssertEqual(store.samples.count, 0, "Scanning is read-only until Import is pressed")
+        let indexURL = try XCTUnwrap(store.datasetFolderURL).appendingPathComponent("dataset.json")
+        var edited = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: indexURL)) as? [String: Any])
+        edited["description"] = "Changed in another window"
+        try JSONSerialization.data(withJSONObject: edited).write(to: indexURL, options: .atomic)
+        store.commitFolderImport(size: 256)
+        try await settled(store)
+        XCTAssertNotNil(store.error)
+        XCTAssertTrue(store.showImportFolderSheet)
+        XCTAssertEqual(store.samples.count, 0)
+        store.importMaterialFolder(source)
+        try await settled(store)
+        XCTAssertNil(store.error, "Scan Again must reconnect a changed dataset, not repeat the stale-index failure")
+        store.commitFolderImport(size: 256)
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertFalse(store.showImportFolderSheet)
+        XCTAssertEqual(store.datasetResolution, 256)
         XCTAssertEqual(store.samples.count, 1)
         let folder = try XCTUnwrap(store.datasetFolderURL)
         let expectedTrashedPath = folder.resolvingSymlinksInPath().standardizedFileURL.path
@@ -239,6 +265,106 @@ final class DatasetManagementTests: XCTestCase {
         XCTAssertNotNil(store.error)
     }
 
+    func testResolutionIsSavedWithDatasetAndNeverSilentlyReducedByCapabilities() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let store = fixture.store()
+        store.createDataset(name: "High detail", description: "", parentURL: fixture.root, size: 2048)
+        try await settled(store)
+        XCTAssertEqual(store.datasetResolution, 2048)
+        XCTAssertEqual(store.training.size, 2048)
+        store.updateDatasetInfo(name: "High detail", description: "", size: 512)
+        try await settled(store)
+        XCTAssertEqual(store.training.size, 512)
+        XCTAssertEqual(fixture.value("--training-size", in: fixture.calls.last!), "512")
+        let smaller = WorkbenchStore(preferences: fixture.defaults, workerOverride: { _, _ in "{\"training_sizes\":[256]}" })
+        smaller.adoptDataset(try WorkbenchProcess.decode(WorkbenchDataset.self, output: fixture.document()))
+        try await smaller.loadTrainingCapabilities()
+        XCTAssertEqual(smaller.training.size, 512, "Capabilities must report an incompatible budget without changing the dataset grid")
+        XCTAssertNotNil(smaller.trainingConfigurationIssue)
+        let reopened = fixture.store()
+        try await reopened.loadDataset(fixture.dataset)
+        XCTAssertEqual(reopened.training.size, 512)
+    }
+
+    func testRawFolderStartsSetupWithoutSendingItToDatasetReader() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let source = fixture.root.appendingPathComponent("Nested material sources")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        let store = fixture.store()
+        store.openDataset(source)
+        XCTAssertTrue(store.showNewDatasetSheet)
+        XCTAssertEqual(store.pendingSourceFolder, source)
+        XCTAssertTrue(fixture.calls.isEmpty)
+        XCTAssertNil(store.error)
+    }
+
+    func testOpeningFolderDuringRestoreIsQueuedAndSheetsHaveOneRoute() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let source = fixture.root.appendingPathComponent("Originals")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        let store = fixture.store()
+        store.operation("Restoring") { try await Task.sleep(for: .milliseconds(50)) }
+        store.receiveDataset(source)
+        try await settled(store)
+        XCTAssertTrue(store.showNewDatasetSheet)
+        XCTAssertEqual(store.pendingSourceFolder, source)
+        XCTAssertNil(store.error)
+        store.showAddMaterialSheet = true
+        XCTAssertFalse(store.showNewDatasetSheet)
+        store.showImportFolderSheet = true
+        XCTAssertFalse(store.showAddMaterialSheet)
+        XCTAssertEqual(store.datasetSheet, .folder)
+    }
+
+    func testDatasetSetupAndImportSheetsRenderAtUsableWindowSizes() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let store = fixture.store()
+        try await store.loadDataset(fixture.dataset)
+        let plan: [String: Any] = ["size": 2048, "crop_count": 329, "source_set_count": 227,
+            "train_count": 308, "validation_count": 21, "excluded_count": 0,
+            "unavailable_target_count": 0, "undersized_source_set_count": 4, "regional_families": []]
+        let summary = try WorkbenchProcess.decode(WorkbenchDatasetPlan.self,
+            output: String(decoding: JSONSerialization.data(withJSONObject: plan), as: UTF8.self))
+        store.dataset?.resolutionPlans = ["2048": ["height": summary, "roughness": summary, "normal": summary]]
+        store.dataset?.trainingSize = 2048
+        store.training.size = 2048
+        store.folderImportURL = URL(fileURLWithPath: "/opt/ipde/sources_mats")
+        store.folderImport = try WorkbenchProcess.decode(WorkbenchFolderImport.self, output: String(decoding: JSONSerialization.data(withJSONObject: [
+            "folder_path": "/opt/ipde/sources_mats", "plan_path": "/tmp/preview.json", "plan_sha256": "proof",
+            "index_sha256": "source-hash", "source_set_count": 231, "added_material_count": 231,
+            "duplicate_material_count": 0, "ignored_file_count": 18,
+            "warnings": ["Rectangular sources retain their actual dimensions; no resizing is applied."],
+            "plans": ["2048": ["height": plan, "roughness": plan, "normal": plan]]]), as: UTF8.self))
+        try await snapshotSheet(NewMaterialDatasetSheet(store: store), name: "new-dataset", size: NSSize(width: 660, height: 600))
+        try await snapshotSheet(MaterialDatasetInfoSheet(store: store), name: "dataset-info", size: NSSize(width: 700, height: 700))
+        try await snapshotSheet(ImportDatasetFolderSheet(store: store), name: "folder-import", size: NSSize(width: 780, height: 650))
+    }
+
+    private func snapshotSheet<V: View>(_ view: V, name: String, size: NSSize) async throws {
+        let host = NSHostingView(rootView: view.environment(\.colorScheme, .dark))
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderFront(nil)
+        defer { window.close() }
+        try await Task.sleep(for: .milliseconds(250))
+        host.layoutSubtreeIfNeeded()
+        let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+        let image = NSImage(cgImage: try XCTUnwrap(bitmap.cgImage), size: host.bounds.size)
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("ipde-\(name)-validation.png")
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: destination)
+        print("DATASET_LAYOUT_SNAPSHOT=\(destination.path)")
+        XCTAssertGreaterThan(host.bounds.height, 500)
+    }
+
     private func settled(_ store: WorkbenchStore) async throws {
         for _ in 0..<1000 {
             if !store.isBusy { return }
@@ -256,6 +382,7 @@ final class DatasetManagementTests: XCTestCase {
         var name = "Test Dataset"
         var description = "Native original maps"
         var failEdit = false
+        var trainingSize = 1024
         var hash: String {
             SHA256.hash(data: try! Data(contentsOf: dataset.appendingPathComponent("dataset.json")))
                 .map { String(format: "%02x", $0) }.joined()
@@ -277,7 +404,7 @@ final class DatasetManagementTests: XCTestCase {
         }
         func document(prepared: Bool = false) throws -> String {
             var object: [String: Any] = ["dataset_path": prepared ? root.appendingPathComponent("prepared").path : dataset.path,
-                "index_sha256": "source-hash", "name": name, "description": description, "materials": []]
+                "index_sha256": "source-hash", "name": name, "description": description, "training_size": trainingSize, "materials": []]
             if prepared { object["preparation"] = ["source_dataset_path": dataset.path, "source_index_sha256": "source-hash",
                 "prepared_dataset_path": root.appendingPathComponent("prepared").path, "crop_size": 1024,
                 "reused": false, "target_resized": false, "original_dataset_modified": false] }
@@ -286,6 +413,8 @@ final class DatasetManagementTests: XCTestCase {
         func store(trash: @escaping (URL) throws -> Void = { _ in }) -> WorkbenchStore {
             WorkbenchStore(preferences: defaults, trashHandler: trash, workerOverride: { args, script in
                 self.calls.append(args)
+                if ["edit-dataset", "create-dataset"].contains(args[0]), !self.failEdit,
+                   let size = self.value("--training-size", in: args).flatMap(Int.init) { self.trainingSize = size }
                 if args.first == "capabilities" { throw StudioError("Model runtime is not installed") }
                 XCTAssertEqual(script, "material_workbench.py")
                 if args.first == "edit-dataset" {

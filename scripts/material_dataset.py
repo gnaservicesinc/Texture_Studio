@@ -454,7 +454,7 @@ def source_summary(path: Path) -> dict:
 
 
 def discover_source_sets(sources: Path, source_cache: dict[str, dict] | None = None,
-                         *, source_directories: list[Path] | None = None) -> list[dict]:
+                         *, source_directories: list[Path] | None = None, progress=None, issues: list[str] | None = None) -> list[dict]:
     """Discover registered original sets without mixing resolution or color.
 
     Pixel dimensions establish registration; filenames establish the original
@@ -465,7 +465,9 @@ def discover_source_sets(sources: Path, source_cache: dict[str, dict] | None = N
     groups: dict[tuple[Path, str, int, int], dict] = {}
     source_cache = source_cache or {}
     folders = source_directories if source_directories is not None else [item for item in sources.iterdir() if item.is_dir()]
-    for folder in sorted(folders, key=lambda p: str(p).casefold()):
+    for folder_number, folder in enumerate(sorted(folders, key=lambda p: str(p).casefold()), 1):
+        if progress is not None:
+            progress(folder, folder_number, len(folders))
         manifests = []
         for manifest_path in sorted(folder.glob("material-source*.json")):
             if manifest_path.is_file() and not manifest_path.is_symlink() and manifest_path.stat().st_size <= 16 * 1024**2:
@@ -491,7 +493,13 @@ def discover_source_sets(sources: Path, source_cache: dict[str, dict] | None = N
             if cached.get("source_stat") == fingerprint:
                 header = dict(cached)
             else:
-                header = source_summary(path)
+                try:
+                    header = source_summary(path)
+                except (OSError, ValueError) as error:
+                    if issues is None:
+                        raise
+                    issues.append(f"Skipped {path}: {error}")
+                    continue
             source = {**header, "path": resolved, "filename": path.name, "suffix": suffix.casefold(),
                       "resolution_label": label.casefold(), "source_family_id": family,
                       "asset_family_id": family}

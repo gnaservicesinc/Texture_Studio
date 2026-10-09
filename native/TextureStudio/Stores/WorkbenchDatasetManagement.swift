@@ -11,6 +11,7 @@ extension WorkbenchStore {
         dataset?.name.flatMap { $0.isEmpty ? nil : $0 } ?? datasetFolderURL?.lastPathComponent ?? "Dataset"
     }
     var datasetDescription: String { dataset?.description ?? "" }
+    var datasetResolution: Int { dataset?.trainingSize ?? training.size }
 
     func rememberDataset(_ result: WorkbenchDataset) {
         let source = URL(fileURLWithPath: result.preparation?.sourceDatasetPath ?? result.datasetPath)
@@ -53,7 +54,7 @@ extension WorkbenchStore {
             if response == .OK, let url = panel.url { completion(url) }
         }
     }
-    func createDataset(name: String, description: String, parentURL: URL) {
+    func createDataset(name: String, description: String, parentURL: URL, size: Int? = nil) {
         guard !isBusy else { return }
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { error = "Give your dataset a name."; return }
@@ -62,13 +63,18 @@ extension WorkbenchStore {
         let destination = parentURL.appendingPathComponent(folderName, isDirectory: true)
         operation("Creating \(title)…") {
             let result = try WorkbenchProcess.decode(WorkbenchDataset.self, output: await self.worker([
-                "create-dataset", "--dataset", destination.path, "--name", title, "--description", description]))
+                "create-dataset", "--dataset", destination.path, "--name", title, "--description", description,
+                "--training-size", String(size ?? self.training.size)]))
             self.selectedSampleId = nil
             self.adoptDataset(result)
             self.saveDatasetLocation(result)
             self.datasetPreparationSummary = ""
             self.showNewDatasetSheet = false
             self.activity = "Created \(self.datasetName). Add material maps to get started."
+            if let folder = self.pendingSourceFolder {
+                self.pendingSourceFolder = nil
+                try await self.scanMaterialFolder(folder)
+            } else { self.showAddMaterialSheet = true }
         }
     }
 
@@ -92,7 +98,7 @@ extension WorkbenchStore {
         datasetPreparationSummary = ""
         return result
     }
-    func updateDatasetInfo(name: String, description: String) {
+    func updateDatasetInfo(name: String, description: String, size: Int? = nil) {
         guard !isBusy else { return }
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { error = "Give your dataset a name."; return }
@@ -100,7 +106,7 @@ extension WorkbenchStore {
             let current = try await self.sourceDatasetForManagement()
             try self.adoptManagedDataset(await self.worker(["edit-dataset", "--dataset", current.datasetPath,
                 "--name", title, "--description", description, "--expected-index-sha256", current.indexSha256,
-                "--review-size", String(self.training.size)]))
+                "--training-size", String(size ?? self.datasetResolution), "--review-size", String(size ?? self.datasetResolution)]))
             self.showDatasetInfoSheet = false
             self.activity = "Saved \(self.datasetName)."
         }
@@ -138,14 +144,45 @@ extension WorkbenchStore {
     }
     func importMaterialFolder(_ url: URL) {
         guard !isBusy else { return }
-        operation("Importing material folder…") {
-            let current = try await self.sourceDatasetForManagement()
+        if dataset == nil { pendingSourceFolder = url; showNewDatasetSheet = true; return }
+        operation("Scanning material folders and verifying original maps…") { try await self.scanMaterialFolder(url) }
+    }
+    private func scanMaterialFolder(_ url: URL) async throws {
+        let source = try await sourceDatasetForManagement()
+        // A rescan is also recovery from another window changing membership or
+        // reviews. Reconnect the durable index before binding a new preview.
+        try await loadDataset(URL(fileURLWithPath: source.datasetPath))
+        guard let current = dataset else { throw StudioError("Open a dataset before importing material maps.") }
+        clearFolderImport()
+        folderImportURL = url
+        showAddMaterialSheet = false
+        showImportFolderSheet = true
+        let planURL = FileManager.default.temporaryDirectory.appendingPathComponent("material-import-\(UUID().uuidString).json")
+        folderImportPlanURL = planURL
+        folderImport = try WorkbenchProcess.decode(WorkbenchFolderImport.self, output: await worker([
+            "scan-folder", "--dataset", current.datasetPath, "--folder", url.path,
+            "--expected-index-sha256", current.indexSha256, "--plan", planURL.path]))
+        activity = "Folder scan complete. Review the resolution and split counts, then import."
+    }
+    func clearFolderImport() {
+        if let folderImportPlanURL { try? FileManager.default.removeItem(at: folderImportPlanURL) }
+        folderImportPlanURL = nil
+        folderImport = nil
+    }
+    func commitFolderImport(size: Int) {
+        guard !isBusy, let preview = folderImport, let current = dataset else { return }
+        guard preview.addedMaterialCount > 0 else { return }
+        operation("Registering verified original material maps…") {
+            guard current.indexSha256 == preview.indexSha256 else { throw StudioError("The dataset changed. Scan the folder again before importing.") }
             let previous = Set(self.samples.map(\.id))
             let result = try self.adoptManagedDataset(await self.worker(["import-folder", "--dataset", current.datasetPath,
-                "--folder", url.path, "--expected-index-sha256", current.indexSha256, "--review-size", String(self.training.size)]))
+                "--folder", preview.folderPath, "--expected-index-sha256", preview.indexSha256,
+                "--plan", preview.planPath, "--expected-plan-sha256", preview.planSha256,
+                "--training-size", String(size), "--review-size", String(size)]))
             self.selectedSampleId = self.samples.first { !previous.contains($0.id) }?.id ?? self.selectedSampleId
-            self.showAddMaterialSheet = false
-            self.activity = "Imported \(result.addedMaterialCount ?? 0) materials; \(result.duplicateMaterialCount ?? 0) already in the dataset. Original maps remain in their source folder."
+            self.showImportFolderSheet = false
+            self.clearFolderImport()
+            self.activity = "Imported \(result.addedMaterialCount ?? 0) source sets at \(size) × \(size); \(preview.duplicateMaterialCount) already present. Original maps remain in their source folder."
         }
     }
     func removeSelectedMaterial() {

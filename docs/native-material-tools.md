@@ -13,9 +13,9 @@ Builds use Release unless `--debug` is selected. `make package` includes the too
 
 ## Create and manage datasets
 
-Open **Material Dataset** from Model Training. **New Dataset…** creates a named dataset; choose a save location or use the displayed default. **Open Folder…** opens a dataset folder directly. Recently opened datasets appear under **Switch Dataset**. Use **Dataset Info…** to rename the dataset or edit its description.
+Open **Material Dataset** from Model Training. **New Dataset…** creates a named dataset with a rendering/training resolution chosen before import; choose a save location or use the displayed Documents default. **Open Folder…** opens a dataset folder directly or routes a raw folder into dataset setup/import. Dropping a folder works the same way. Recently opened datasets appear under **Switch Dataset**. Use **Dataset Info…** to rename the dataset, edit its description, or change resolution while reviewing the resulting crop and split counts. The resolution is stored with the dataset and restored when switching datasets.
 
-**Add Materials…** registers a named material with a diffuse PNG and at least one displacement, roughness or normal PNG. Choose matching source dimensions and the correct normal convention. **Import Folder…** discovers matching material maps together. Both actions reference the original full-quality files without copying or changing their pixels. An empty dataset can be created before any materials are added.
+**Add Materials…** registers a named material with a diffuse PNG and at least one displacement, roughness or normal PNG. Choose matching source dimensions and the correct normal convention. **Import Folder…** recursively discovers paired maps and previews the resulting dataset at every supported grid before import. It reports duplicates, unsupported files and invalid maps; valid sets are only added when Import is pressed. Progress shows the folder being inspected. An unchanged scan is reused across resolution changes and registration; changed originals or dataset reviews require a rescan. Both actions reference the original full-quality files without copying or changing their pixels. An empty dataset can be created before any materials are added.
 
 Select a material to edit its review note, approval status or **Split**. The list shows training and validation materials; the **Show** filter can narrow it. Manual split assignments are retained when training maps are prepared. The source-family guard rejects assignments that would put related resolution sets or diffuse variants in both training and validation.
 
@@ -23,7 +23,7 @@ Select a material to edit its review note, approval status or **Split**. The lis
 
 ## Dataset pixels and storage
 
-The source folder is authoritative. The local collection is `/opt/ipde/material-dataset/sources/`; its dataset index refreshes registered resolution sets and diffuse color variants. `samples/<material>_full/sample.json` contains small manifests, not copies of the source images.
+The original source folders are authoritative; importing `/opt/ipde/sources_mats` includes its nested material folders. Each dataset keeps an index of registered resolution sets and diffuse color variants. `samples/<material>_full/sample.json` contains small manifests, not copies of the source images.
 
 Select a **Training map size** supported by the current model, available memory, and original source dimensions. The memory budget follows resolution automatically: final-map LoRA uses a 24 GiB recommendation at 1K and 48 GiB at 2K with the default 0.5 GiB map cache, when the hardware has room. Developer mode exposes a manual override. The 2K displacement path completed a real float32 forward/backward/optimizer probe at about 42.3 GiB peak Metal memory; this does not establish model quality or extended-run stability. Every diffuse and numeric target presented to training has exactly that square grid. The model receives the entire displayed native crop, with no smaller random crop, exposure augmentation, or hidden resize. A 2K run ignores all 1K sets. Training availability and generation/export resolution are separate controls.
 
@@ -33,7 +33,7 @@ Only one temporary training view is retained. Switching size removes the previou
 
 Automatic validation keeps all resolutions and colors of a source family together. Regional checks are limited to disjoint regions of a single included resolution set and are labeled as checks of a known material. A one-region fit has no independent validation set. Approval, exclusion and notes update metadata atomically; they never rewrite source images. Approval at one resolution does not automatically approve another.
 
-Opening a dataset and choosing its display grid allocate no training images. Inspection reconstructs only the viewed map into a temporary file and removes it after decoding. Size-specific review decisions live in `.material-size-reviews.json`; the full rescaled dataset is staged when training starts and purged afterward.
+Opening a dataset and choosing its display grid allocate no training images. Inspection reconstructs only the viewed map into a temporary file and removes it after decoding. Size-specific review decisions live in `.material-size-reviews.json`; the exact native crops are staged when training starts and purged afterward.
 
 **Stop** aborts preparation or model setup immediately. During training, it aborts without requesting a new checkpoint; files already saved on disk remain available. **Stop and Save** appears once training updates begin. It finishes the current update and saves the model using the selected export mode, then defers new comparison renders to a later review. Stop remains available while saving, so a pending save can also be aborted. Neither action changes original source maps.
 

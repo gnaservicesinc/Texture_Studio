@@ -447,32 +447,10 @@ def _prepared_map(details: dict, role: str, rectangle: list[int], folder: Path, 
     return output_details
 
 
-def prepare_from_records(dataset: Path, records: list[tuple[dict, Path, dict]], size: int,
-                         automatic_validation: bool = False, validation_material: str | None = None,
-                         review_records: list | None = None, target: str = "height") -> tuple[Path, dict]:
-    if type(size) is not int or size not in SUPPORTED_SIZES:
-        raise ValueError("Choose training map size 256, 512, 1024, or 2048")
-    if target not in ("height", "roughness", "normal"):
-        raise ValueError("Select a height, roughness, or normal training target")
-    dataset = dataset.resolve()
-    proof = snapshot(dataset, records)
-    selected_records = [record for record in records if record[2]["material_id"] == validation_material] if validation_material else records
-    if validation_material and not selected_records:
-        raise ValueError("Selected training material is absent from the source dataset")
-    materials = _materials(selected_records, dataset, size)
-    if not materials:
-        raise ValueError("No source set can supply the selected original training detail")
-    review_path = dataset / ".material-size-reviews.json"
-    reviews = json.loads(review_path.read_text()) if review_path.is_file() else {}
-    for _entry, _path, sample in review_records or []:
-        previous_size = sample.get("sample_pixel_dimensions", [size])[0]
-        key = _review_key(previous_size, sample)
-        current = current_review(reviews, key, sample)
-        if (("source_review_snapshot" not in sample and not current)
-                or ("source_review_snapshot" in sample and current == sample["source_review_snapshot"])):
-            reviews[key] = saved_review(sample)
-    if validation_material and validation_material not in materials:
-        raise ValueError("Selected training material is absent from the source dataset")
+def plan_material_regions(materials: dict, records: list, size: int, reviews: dict,
+                          target: str = "height", automatic_validation: bool = True,
+                          validation_material: str | None = None) -> dict:
+    """Single metadata-only plan used by import, review and pixel preparation."""
     eligible_regions = {}
     for material_id, material in materials.items():
         eligible_regions[material_id] = [region for region, _rectangle in crop_layout(*material["dimensions"], size)
@@ -523,6 +501,82 @@ def prepare_from_records(dataset: Path, records: list[tuple[dict, Path, dict]], 
     regional_families = {family for family in check_families if len(families.get(family, [])) == 1
         and len(eligible_regions[families[family][0]]) > 1}
     regional_check_regions = {family: eligible_regions[families[family][0]][-1] for family in regional_families}
+    assignments = {}
+    for material_id, material in materials.items():
+        for region, rectangle in crop_layout(*material["dimensions"], size):
+            sample = material["sample"]
+            identity = material_id + "_" + region
+            family = material["family"]
+            review = current_review(reviews, f"{size}:{identity}", sample)
+            split = review.get("split", sample.get("split", "train"))
+            manual = review.get("split_assignment") == "manual" or sample.get("split_assignment") == "manual"
+            if family in manual_family_splits:
+                split, manual = manual_family_splits[family], True
+            elif review.get("split_assignment") != "manual" and sample.get("split_assignment") == "manual":
+                split = sample["split"]
+            if automatic_validation and not manual:
+                split = ("validation" if family in check_families and
+                         (family not in regional_families or region == regional_check_regions[family]) else "train")
+            assignments[identity] = {"split": split, "split_assignment": "manual" if manual else "automatic",
+                "validation_scope": "known_disjoint_regions" if family in regional_families else "held_out_source_families",
+                "eligible": material_id in target_eligible and region in eligible_regions[material_id],
+                "target_available": material_id in target_eligible,
+                "status": review.get("status", sample["status"]), "crop_rectangle": rectangle}
+    return {"assignments": assignments, "check_families": sorted(check_families),
+            "regional_families": sorted(regional_families), "regional_check_regions": regional_check_regions,
+            "target": target, "size": size, "crop_count": len(assignments), "source_set_count": len(materials),
+            "family_count": len(families),
+            "train_count": sum(a["eligible"] and a["split"] == "train" for a in assignments.values()),
+            "validation_count": sum(a["eligible"] and a["split"] == "validation" for a in assignments.values()),
+            "excluded_count": sum(a["status"] in ("excluded", "rejected") for a in assignments.values()),
+            "unavailable_target_count": sum(not a["target_available"] for a in assignments.values())}
+
+
+def dataset_region_plan(records: list, size: int, reviews: dict, target: str = "height") -> dict:
+    """Plan without decoding pixels, writing crops, or rehashing source files."""
+    materials = {}
+    for _entry, path, sample in records:
+        sources = [d.get("source", {}) for d in sample.get("map_metadata", {}).values()] + [d.get("source", {}) for d in sample.get("input_variants", [])]
+        if not sources or any(min(s.get("width", 0), s.get("height", 0)) < size for s in sources):
+            continue
+        materials[sample["material_id"]] = {"sample": sample, "path": path, "maps": sample["map_metadata"],
+            "dimensions": sample["source_pixel_dimensions"],
+            "family": sample.get("asset_family_id", sample.get("source_family_id", sample["material_id"]))}
+    result = plan_material_regions(materials, records, size, reviews, target)
+    result["undersized_source_set_count"] = len({r[2]["material_id"] for r in records}) - len(materials)
+    return result
+
+
+def prepare_from_records(dataset: Path, records: list[tuple[dict, Path, dict]], size: int,
+                         automatic_validation: bool = False, validation_material: str | None = None,
+                         review_records: list | None = None, target: str = "height") -> tuple[Path, dict]:
+    if type(size) is not int or size not in SUPPORTED_SIZES:
+        raise ValueError("Choose training map size 256, 512, 1024, or 2048")
+    if target not in ("height", "roughness", "normal"):
+        raise ValueError("Select a height, roughness, or normal training target")
+    dataset = dataset.resolve()
+    proof = snapshot(dataset, records)
+    selected_records = [record for record in records if record[2]["material_id"] == validation_material] if validation_material else records
+    if validation_material and not selected_records:
+        raise ValueError("Selected training material is absent from the source dataset")
+    materials = _materials(selected_records, dataset, size)
+    if not materials:
+        raise ValueError("No source set can supply the selected original training detail")
+    review_path = dataset / ".material-size-reviews.json"
+    reviews = json.loads(review_path.read_text()) if review_path.is_file() else {}
+    for _entry, _path, sample in review_records or []:
+        previous_size = sample.get("sample_pixel_dimensions", [size])[0]
+        key = _review_key(previous_size, sample)
+        current = current_review(reviews, key, sample)
+        if (("source_review_snapshot" not in sample and not current)
+                or ("source_review_snapshot" in sample and current == sample["source_review_snapshot"])):
+            reviews[key] = saved_review(sample)
+    if validation_material and validation_material not in materials:
+        raise ValueError("Selected training material is absent from the source dataset")
+    plan = plan_material_regions(materials, records, size, reviews, target, automatic_validation, validation_material)
+    check_families = set(plan["check_families"])
+    regional_families = set(plan["regional_families"])
+    regional_check_regions = plan["regional_check_regions"]
     # A full lower-resolution sibling overlaps every native high-resolution
     # region. Such families must be held out in full, never split by resolution.
     signature = hashlib.sha256(json.dumps({"schema": PREPARATION_SCHEMA, "size": size,
@@ -597,16 +651,9 @@ def prepare_from_records(dataset: Path, records: list[tuple[dict, Path, dict]], 
                 identity = material_id + "_" + region
                 family = material["family"]
                 review = current_review(reviews, f"{size}:{identity}", sample)
-                split = review.get("split", sample.get("split", "train"))
-                manual = review.get("split_assignment") == "manual" or sample.get("split_assignment") == "manual"
-                if family in manual_family_splits:
-                    split = manual_family_splits[family]
-                    manual = True
-                elif review.get("split_assignment") != "manual" and sample.get("split_assignment") == "manual":
-                    split = sample["split"]
-                if automatic_validation and not manual:
-                    split = ("validation" if family in check_families and
-                             (family not in regional_families or region == regional_check_regions[family]) else "train")
+                assignment = plan["assignments"][identity]
+                split = assignment["split"]
+                manual = assignment["split_assignment"] == "manual"
                 sample.update(sample_id=identity, maps={}, map_metadata={}, input_variants=[], extra_maps={}, source_notes=[],
                     split=split, source_region_role=split, source_region_id=region,
                     asset_family_id=family, source_family_id=family,

@@ -18,6 +18,10 @@ import tempfile
 import time
 from types import SimpleNamespace
 
+# Both bridge entrypoints run directly from the installed source-only bundle.
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import numpy as np
 import torch
 from safetensors import SafetensorError

@@ -47,7 +47,8 @@ struct MaterialToolRootView: View {
         }
         .sheet(isPresented: $showModels) { CheckpointLibraryView(store: store).frame(minWidth: 850, minHeight: 620) }
         .sheet(isPresented: $showRuntime) { WorkbenchRuntimeView(store: store).frame(width: 710, height: 500) }
-        .alert("Material tool", isPresented: Binding(get: { store.error != nil || review.error != nil }, set: { if !$0 { store.error = nil; review.error = nil } })) {
+        .modifier(DatasetManagementPresentation(store: store))
+        .alert("Material tool", isPresented: Binding(get: { (store.error != nil || review.error != nil) && !store.showNewDatasetSheet && !store.showDatasetInfoSheet && !store.showAddMaterialSheet && !store.showImportFolderSheet }, set: { if !$0 { store.error = nil; review.error = nil } })) {
             Button("OK") { store.error = nil; review.error = nil }
         } message: { Text(store.error ?? review.error ?? "") }
         .task {
@@ -59,7 +60,7 @@ struct MaterialToolRootView: View {
             let directoryExists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
             let containsDataset = directoryExists && (FileManager.default.fileExists(atPath: url.appendingPathComponent("dataset.json").path)
                 || (url.lastPathComponent == "sources" && FileManager.default.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("dataset.json").path)))
-            if url.lastPathComponent == "dataset.json" || containsDataset || (role == .dataset && directoryExists) { store.openDataset(url) }
+            if url.lastPathComponent == "dataset.json" || containsDataset || (role == .dataset && directoryExists) { store.receiveDataset(url) }
             else if url.pathExtension == "json" { review.load(url) }
             else if url.pathExtension == "safetensors" { store.openCheckpoint(url) }
             else { review.groups = [MaterialReviewGroup(id: url.lastPathComponent, candidates: [MapReviewCandidate(id: url.path, label: url.lastPathComponent, mapURL: url, numeric: true)])]; review.selectedGroupId = url.lastPathComponent }

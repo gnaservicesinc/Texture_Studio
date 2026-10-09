@@ -11,7 +11,9 @@ struct DatasetWorkbenchView: View {
     private var matchingMaterials: [WorkbenchMaterial] {
         guard let original = store.dataset?.materials else { return [] }
         let materials = original.map { material in
-            WorkbenchMaterial(materialId: material.id, samples: material.samples.filter { splitFilter == "all" || $0.split == splitFilter }, name: material.name)
+            WorkbenchMaterial(materialId: material.id, samples: material.samples.filter {
+                splitFilter == "all" || ($0.split == splitFilter && store.sampleIsTrainable($0))
+            }, name: material.name)
         }
             .filter { !$0.samples.isEmpty }
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -45,6 +47,11 @@ struct DatasetWorkbenchView: View {
                         Text("Validation").tag("validation")
                     }
                     .padding(.horizontal, 12).padding(.bottom, 12)
+                    Picker("Splits for", selection: Binding(get: { store.training.target }, set: { store.selectTrainingTarget($0) })) {
+                        Text("Displacement").tag("height")
+                        Text("Roughness").tag("roughness")
+                        Text("Normals").tag("normal")
+                    }.padding(.horizontal, 12).padding(.bottom, 12).disabled(store.isBusy)
                     Divider()
                 }
                 if store.dataset == nil {
@@ -118,14 +125,12 @@ struct DatasetWorkbenchView: View {
             }
         }
         .searchable(text: $query, prompt: "Find a material")
-        .sheet(isPresented: $store.showNewDatasetSheet) {
-            NewMaterialDatasetSheet(store: store)
-        }
-        .sheet(isPresented: $store.showDatasetInfoSheet) {
-            MaterialDatasetInfoSheet(store: store)
-        }
-        .sheet(isPresented: $store.showAddMaterialSheet) {
-            AddDatasetMaterialSheet(store: store)
+        .dropDestination(for: URL.self) { urls, _ in
+            guard !store.isBusy, let url = urls.first, urls.count == 1 else { return false }
+            var directory: ObjCBool = false
+            guard (FileManager.default.fileExists(atPath: url.path, isDirectory: &directory) && directory.boolValue) || url.lastPathComponent == "dataset.json" else { return false }
+            store.openDataset(url)
+            return true
         }
         .safeAreaInset(edge: .bottom) {
             if store.isBusy || !store.activity.isEmpty {
@@ -173,10 +178,10 @@ struct DatasetWorkbenchView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(store.dataset == nil ? "Your datasets" : store.datasetName).font(.title3.bold()).lineLimit(1)
                 if let dataset = store.dataset {
-                    Text("\(dataset.materialCount ?? dataset.materials.count) materials · \(dataset.sampleCount ?? dataset.samples.count) map sets")
+                    Text("\(dataset.sourceSetCount ?? dataset.materials.count) source sets · \(dataset.sampleCount ?? dataset.samples.count) review items · \(store.datasetResolution) × \(store.datasetResolution)")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
-                    Text("Create a dataset or open a dataset folder.").font(.caption).foregroundStyle(.secondary)
+                    Text("Set a resolution, then add a folder of paired material maps. You can also drop a folder here.").font(.caption).foregroundStyle(.secondary)
                 }
             }
             if !store.recentDatasets.isEmpty {
@@ -191,6 +196,7 @@ struct DatasetWorkbenchView: View {
             Button { store.showNewDatasetSheet = true } label: { Label("New Dataset…", systemImage: "folder.badge.plus") }
             Button { store.chooseDataset() } label: { Label("Open Folder…", systemImage: "folder") }
             if store.dataset != nil {
+                Button("Import Folder…", systemImage: "folder.badge.plus") { store.importMaterialFolder() }
                 Menu {
                     Button("Show in Finder", systemImage: "folder") { store.revealDataset() }
                     Button("Close Dataset", systemImage: "xmark") { store.closeDataset() }
@@ -279,6 +285,10 @@ struct DatasetWorkbenchView: View {
                         .font(.headline)
                     Text("\(sample.id) · \(sample.width) × \(sample.height) map set · \(sample.split.capitalized)")
                         .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    if !store.sampleIsTrainable(sample) {
+                        Text("Inspection only for this target and resolution: excluded, too small, or missing a supported target map.")
+                            .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    }
                     if let map = store.selectedMap, let width = map.originalSourceWidth, let height = map.originalSourceHeight {
                         Text("Original source \(width) × \(height)")
                             .font(.caption).foregroundStyle(.secondary)
@@ -333,9 +343,10 @@ struct DatasetWorkbenchView: View {
                 Label(reviewStatus(sample.status), systemImage: sample.status == "excluded" ? "eye.slash" : sample.status == "approved" ? "checkmark.circle" : "circle.dotted")
                     .foregroundStyle(sample.status == "excluded" ? .secondary : .primary)
                 Spacer()
-                Picker("Split", selection: Binding(get: { sample.split }, set: { split in
+                Picker("Split", selection: Binding(get: { sample.splitAssignment == "manual" ? sample.split : "automatic" }, set: { split in
                     store.curateSelected(status: editableStatus(sample.status), split: split, note: reviewNote)
                 })) {
+                    Text("Automatic (\(sample.split))").tag("automatic")
                     Text("Training").tag("train")
                     Text("Validation").tag("validation")
                 }

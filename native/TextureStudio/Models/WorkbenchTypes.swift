@@ -1,6 +1,11 @@
 import Foundation
 import Darwin
 
+enum DatasetSheetRoute: String, Identifiable {
+    case new, add, info, folder
+    var id: String { rawValue }
+}
+
 enum MaterialTool: String, CaseIterable, Identifiable {
     case review, compare, dataset, train
     var id: String { rawValue }
@@ -81,6 +86,11 @@ struct WorkbenchDataset: Decodable, Sendable {
     var reviewSha256: String? = nil
     var addedMaterialCount: Int? = nil
     var duplicateMaterialCount: Int? = nil
+    var trainingSize: Int? = nil
+    var reviewSize: Int? = nil
+    var sourceSetCount: Int? = nil
+    var trainingPlans: [String: WorkbenchDatasetPlan]? = nil
+    var resolutionPlans: [String: [String: WorkbenchDatasetPlan]]? = nil
     var samples: [WorkbenchSample] { materials.flatMap(\.samples) }
     func readyForTraining(size: Int, material: String?, target: String? = nil) -> Bool {
         guard hasNativeSize(size), let policy = automaticValidation,
@@ -95,6 +105,31 @@ struct WorkbenchDataset: Decodable, Sendable {
                 sample.maps.values.allSatisfy { $0.width == size && $0.height == size }
         }
     }
+}
+
+struct WorkbenchDatasetPlan: Decodable, Sendable {
+    let size: Int
+    let cropCount: Int
+    let sourceSetCount: Int
+    let trainCount: Int
+    let validationCount: Int
+    let excludedCount: Int
+    let unavailableTargetCount: Int
+    let undersizedSourceSetCount: Int?
+    var regionalFamilies: [String] = []
+}
+
+struct WorkbenchFolderImport: Decodable, Sendable {
+    let folderPath: String
+    let planPath: String
+    let planSha256: String
+    let indexSha256: String
+    let sourceSetCount: Int
+    let addedMaterialCount: Int
+    let duplicateMaterialCount: Int
+    let ignoredFileCount: Int
+    let warnings: [String]
+    let plans: [String: [String: WorkbenchDatasetPlan]]
 }
 
 struct WorkbenchDatasetLocation: Codable, Identifiable, Equatable, Sendable {
