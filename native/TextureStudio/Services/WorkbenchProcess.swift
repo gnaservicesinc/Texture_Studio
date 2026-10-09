@@ -2,14 +2,35 @@ import Darwin
 import Foundation
 
 /// Logs are files rather than pipes, so long training runs cannot deadlock.
-/// Stop sends SIGINT: the trainer finishes its update and saves its LoRA before exit.
+/// Stop aborts a worker; Stop and Save sends SIGINT to finish a training update.
 final class WorkbenchProcess: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
     private var stopping = false
+    private var aborting = false
 
     func stop() {
+        let pid: Int32? = lock.withLock {
+            stopping = true
+            aborting = true
+            guard let process, process.isRunning else { return nil }
+            kill(process.processIdentifier, SIGTERM)
+            return process.processIdentifier
+        }
+        guard let pid else { return }
+        // A Python signal handler cannot interrupt a blocked native/Metal call.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self else { return }
+            self.lock.withLock {
+                guard let process = self.process, process.isRunning, process.processIdentifier == pid else { return }
+                kill(pid, SIGKILL)
+            }
+        }
+    }
+
+    func stopAndSave() {
         lock.withLock {
+            guard !aborting else { return }
             stopping = true
             if let process, process.isRunning { kill(process.processIdentifier, SIGINT) }
         }
@@ -82,6 +103,7 @@ final class WorkbenchProcess: @unchecked Sendable {
         lock.withLock { process = nil }
         let data = try Data(contentsOf: log)
         let output = String(decoding: data, as: UTF8.self)
+        if lock.withLock({ aborting }) { throw CancellationError() }
         guard status == 0 else { throw StudioError(String(output.suffix(4000))) }
         return output
     }

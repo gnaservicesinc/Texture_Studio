@@ -1,4 +1,5 @@
 import CoreImage
+import Darwin
 import Foundation
 import XCTest
 @testable import TextureStudio
@@ -91,7 +92,7 @@ final class WorkbenchReviewTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
 
-    func testCancellationAllowsInterruptHandlerToSaveAndDrainsItsLog() async throws {
+    func testStopAndSaveAllowsInterruptHandlerToSaveAndDrainsItsLog() async throws {
         // Exercise cooperative SIGINT/save handling without Apple's Python
         // developer-tool shim, whose startup depends on Xcode tool selection.
         let executable = URL(fileURLWithPath: "/bin/sh")
@@ -127,11 +128,49 @@ final class WorkbenchReviewTests: XCTestCase {
             XCTFail("SIGINT fixture did not become ready. Executable: \(executable.path). \(reason). Log: \(tail.suffix(4000))")
             return
         }
-        operation.cancel()
+        process.stopAndSave()
         let output = try await operation.value
         XCTAssertEqual(try String(contentsOf: checkpoint, encoding: .utf8), "saved optimizer state")
         XCTAssertEqual(output, "checkpoint saved ✓\n")
         XCTAssertEqual(collector.text, output)
+    }
+
+    func testQuitAbortsWorkerIgnoringInterruptAndTerminateWithinBoundedTime() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let ready = root.appendingPathComponent("ready")
+        let program = """
+        trap '' INT TERM
+        printf '%s' "$$" > "$1"
+        while :; do /bin/sleep .02; done
+        """
+        let process = WorkbenchProcess()
+        let lifecycle = WorkbenchLifecycle()
+        lifecycle.add(process)
+        let collector = WorkbenchLogCollector()
+        let operation = Task {
+            defer { collector.markFinished(); lifecycle.remove(process) }
+            return try await process.run(executable: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", program, "abort-fixture", ready.path], directory: nil,
+                log: root.appendingPathComponent("worker.log"), onLog: { collector.append($0) })
+        }
+        defer { operation.cancel(); process.stop() }
+        let readinessDeadline = Date().addingTimeInterval(5)
+        while !FileManager.default.fileExists(atPath: ready.path), !collector.isFinished, Date() < readinessDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let pid = try XCTUnwrap(Int32(String(contentsOf: ready, encoding: .utf8)))
+        process.stopAndSave() // This worker ignores the cooperative save request.
+        lifecycle.stopAll()   // Quitting must override a pending save and abort it.
+        let deadline = Date().addingTimeInterval(4)
+        while !collector.isFinished, Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        if !collector.isFinished {
+            kill(pid, SIGKILL) // Clean up this test's worker even if the regression returns.
+            XCTFail("Aborting a worker must not wait indefinitely for its signal handler")
+        }
+        do { _ = try await operation.value; XCTFail("An aborted worker cannot return a saved result") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertFalse(lifecycle.hasOperations)
     }
 
     func testLearnedHeightEXRMaterializationPreservesOrientationAndRawValues() throws {

@@ -25,6 +25,10 @@ Automatic validation keeps all resolutions and colors of a source family togethe
 
 Opening a dataset and choosing its display grid allocate no training images. Inspection reconstructs only the viewed map into a temporary file and removes it after decoding. Size-specific review decisions live in `.material-size-reviews.json`; the full rescaled dataset is staged when training starts and purged afterward.
 
+**Stop** aborts preparation or model setup immediately. During training, it aborts without requesting a new checkpoint; files already saved on disk remain available. **Stop and Save** appears once training updates begin. It finishes the current update and saves the model using the selected export mode, then defers new comparison renders to a later review. Stop remains available while saving, so a pending save can also be aborted. Neither action changes original source maps.
+
+If an unresponsive worker has to be forcibly terminated while creating crops, its incomplete temporary stage is removed during the next preparation.
+
 ## Review and inference
 
 Map inspection retains the original file separately from its display representation. **Export Original** preserves original bytes. Display contrast and training-grid views do not alter numerical exports. Missing generated maps can be reconstructed from intact sources. A listed sample is removed only after its original source is genuinely missing and cannot be recovered at another recorded location.

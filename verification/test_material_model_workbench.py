@@ -327,6 +327,12 @@ def train_fixture(tmp_path, monkeypatch, updates=20, minutes=10):
 
 def test_stop_finishes_current_update_exports_adapter_and_purges_training_stage(tmp_path, monkeypatch):
     args, cleaned, _ = train_fixture(tmp_path, monkeypatch)
+    comparison_labels = []
+    original_comparison = bridge.comparison
+    def comparison(*arguments, **keywords):
+        comparison_labels.append(arguments[6])
+        return original_comparison(*arguments, **keywords)
+    monkeypatch.setattr(bridge, "comparison", comparison)
     original_step = torch.optim.AdamW.step
     def step_and_stop(optimizer, *arguments, **keywords):
         result = original_step(optimizer, *arguments, **keywords)
@@ -336,7 +342,54 @@ def test_stop_finishes_current_update_exports_adapter_and_purges_training_stage(
     result = bridge.train(args)
     assert result["status"] == "stopped" and result["completed_updates"] == 1
     assert bridge.snapshot(Path(result["checkpoint_path"]))[1]["step"] == 1
+    assert result["review_deferred"] and len(comparison_labels) == 1
     assert cleaned == [args.dataset]
+
+
+@pytest.mark.parametrize("number", [signal.SIGINT, signal.SIGTERM])
+def test_stop_during_setup_aborts_without_loading_model_or_saving_adapter(tmp_path, monkeypatch, capsys, number):
+    args, cleaned, arguments = train_fixture(tmp_path, monkeypatch)
+    original_handlers = {signal_number: signal.getsignal(signal_number) for signal_number in (signal.SIGINT, signal.SIGTERM)}
+    def stop_loading(*_args):
+        signal.getsignal(number)(number, None)
+        pytest.fail("Setup must not continue after Stop")
+    monkeypatch.setattr(bridge, "load_base", stop_loading)
+    monkeypatch.setattr(bridge, "export_model", lambda *_args: pytest.fail("Setup abort cannot export an untrained adapter"))
+    assert bridge.main(arguments) == 130
+    output = capsys.readouterr().out
+    assert '"event": "aborted"' in output and '"event": "training_started"' not in output
+    assert not list(args.output.rglob("*.safetensors"))
+    assert cleaned == [args.dataset]
+    assert all(signal.getsignal(signal_number) == handler for signal_number, handler in original_handlers.items())
+
+
+def test_stop_aborts_active_update_without_overwriting_previously_saved_checkpoint(tmp_path, monkeypatch, capsys):
+    args, cleaned, _ = train_fixture(tmp_path, monkeypatch)
+    original_prediction = bridge.predicted
+    original_step = torch.optim.AdamW.step
+    calls = 0
+    def abort_second_update(model, rgb, target):
+        nonlocal calls
+        calls += 1
+        if calls == 3:  # Baseline, completed update, next update.
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            pytest.fail("Stop must not finish the next update")
+        return original_prediction(model, rgb, target)
+    def save_previous_checkpoint(optimizer, *arguments, **keywords):
+        result = original_step(optimizer, *arguments, **keywords)
+        (args.output / "checkpoint.latest.safetensors").write_bytes(b"previously saved checkpoint bytes")
+        return result
+    monkeypatch.setattr(bridge, "predicted", abort_second_update)
+    monkeypatch.setattr(torch.optim.AdamW, "step", save_previous_checkpoint)
+    monkeypatch.setattr(bridge, "export_model", lambda *_args: pytest.fail("Stop cannot begin a checkpoint export"))
+    with pytest.raises(bridge.TrainingAborted):
+        bridge.train(args)
+    report = json.loads((args.output / "run.json").read_text())
+    assert report["status"] == "aborted" and report["completed_updates"] == 1
+    assert (args.output / "checkpoint.latest.safetensors").read_bytes() == b"previously saved checkpoint bytes"
+    assert not (args.output / "export").exists()
+    assert cleaned == [args.dataset]
+    assert capsys.readouterr().out.count('"event": "training_started"') == 1
 
 
 def test_time_budget_stops_between_updates_and_keeps_completed_adapter(tmp_path, monkeypatch):

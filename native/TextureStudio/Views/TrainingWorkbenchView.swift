@@ -84,7 +84,7 @@ struct TrainingWorkbenchView: View {
                     Spacer()
                     if store.isBusy {
                         ProgressView().controlSize(.small)
-                        Button(store.isStopping ? "Saving…" : "Stop") { store.stop() }.disabled(store.isStopping)
+                        WorkbenchStopButtons(store: store)
                     }
                 }
                 ScrollView {
@@ -105,5 +105,19 @@ struct TrainingWorkbenchView: View {
         .onChange(of: store.training.automaticMemory) { store.refreshTrainingCapabilities() }
         .onChange(of: store.training.cacheGB) { store.refreshTrainingCapabilities() }
         .onChange(of: store.training.scope) { store.refreshTrainingCapabilities() }
+    }
+}
+
+struct WorkbenchStopButtons: View {
+    @Bindable var store: WorkbenchStore
+    var body: some View {
+        Button(store.isStopping && !store.isSavingTraining ? "Stopping…" : "Stop") { store.stop() }
+            .disabled(store.isStopping && !store.isSavingTraining)
+            .help("Abort immediately. Checkpoints already saved on disk are kept.")
+        if store.hasTrainingStarted || store.isSavingTraining {
+            Button(store.isSavingTraining ? "Saving…" : "Stop and Save") { store.stopAndSave() }
+                .disabled(!store.canStopAndSave)
+                .help("Finish the current update and save the material LoRA.")
+        }
     }
 }

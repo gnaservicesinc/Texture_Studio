@@ -84,7 +84,7 @@ final class TrainingPreparationTests: XCTestCase {
         XCTAssertTrue(store.selectedCheckpoint?.supportsTrainingWarmStart == true)
     }
 
-    func testStopAllowsFinalAdapterResultAndCleanup() async throws {
+    func testStopAndSaveIsEnabledOnlyAfterTrainingStartsAndAllowsFinalAdapterResult() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         fixture.holdTraining = true
@@ -94,13 +94,86 @@ final class TrainingPreparationTests: XCTestCase {
         store.training.size = 1024
         store.startTraining()
         while fixture.continuation == nil { try await Task.sleep(for: .milliseconds(5)) }
-        store.stop()
+        XCTAssertFalse(store.canStopAndSave)
+        store.recordTrainingProgress("{\"event\":\"training_")
+        XCTAssertFalse(store.canStopAndSave, "Partial log chunks cannot enable saving")
+        store.recordTrainingProgress("started\"}\n")
+        XCTAssertTrue(store.canStopAndSave)
+        store.stopAndSave()
         XCTAssertTrue(store.isStopping)
+        XCTAssertTrue(store.isSavingTraining)
         fixture.continuation?.resume()
         fixture.continuation = nil
         try await settled(store)
         XCTAssertNil(store.error)
         XCTAssertNotNil(store.selectedCheckpoint)
+        XCTAssertTrue(fixture.calls.contains { $0.first == "cleanup-size" })
+    }
+
+    func testStopDuringDatasetPreparationPreventsTrainingFromLaunching() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        fixture.holdPreparation = true
+        let store = fixture.store()
+        try await store.loadTrainingCapabilities()
+        try await store.loadDataset(fixture.original)
+        store.training.size = 1024
+        store.startTraining()
+        while fixture.continuation == nil { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertFalse(store.canStopAndSave)
+        store.stop()
+        fixture.continuation?.resume(); fixture.continuation = nil
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertFalse(fixture.calls.contains { $0.first == "train" })
+        XCTAssertNil(store.selectedCheckpoint)
+        XCTAssertEqual(try Data(contentsOf: fixture.original.appendingPathComponent("dataset.json")), Data("original".utf8))
+    }
+
+    func testSaveRequestDuringModelSetupAbortsWithoutLoadingAnAdapter() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        fixture.holdTraining = true
+        let store = fixture.store()
+        try await store.loadTrainingCapabilities()
+        try await store.loadDataset(fixture.original)
+        store.training.size = 1024
+        store.startTraining()
+        while fixture.continuation == nil { try await Task.sleep(for: .milliseconds(5)) }
+        store.stopAndSave()
+        XCTAssertTrue(store.isStopping)
+        XCTAssertFalse(store.isSavingTraining)
+        fixture.continuation?.resume(); fixture.continuation = nil
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertNil(store.selectedCheckpoint)
+        XCTAssertFalse(fixture.calls.contains { $0.first == "checkpoint" })
+        XCTAssertTrue(fixture.calls.contains { $0.first == "cleanup-size" })
+        XCTAssertEqual(store.dataset?.datasetPath, fixture.original.path)
+    }
+
+    func testStopCanAbortPendingSaveWithoutLoadingOrUploadingAnAdapter() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        fixture.holdTraining = true
+        let store = fixture.store()
+        try await store.loadTrainingCapabilities()
+        try await store.loadDataset(fixture.original)
+        store.training.size = 1024
+        store.startTraining()
+        while fixture.continuation == nil { try await Task.sleep(for: .milliseconds(5)) }
+        store.recordTrainingProgress("{\"event\":\"training_started\"}\n")
+        store.stopAndSave()
+        XCTAssertTrue(store.isSavingTraining)
+        store.stop()
+        XCTAssertFalse(store.isSavingTraining)
+        store.recordTrainingProgress("{\"event\":\"training_started\"}\n")
+        XCTAssertFalse(store.canStopAndSave, "Delayed worker logs cannot reenable a cancelled run")
+        fixture.continuation?.resume(); fixture.continuation = nil
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertNil(store.selectedCheckpoint)
+        XCTAssertFalse(fixture.calls.contains { $0.first == "checkpoint" || $0.first == "upload-selected" })
         XCTAssertTrue(fixture.calls.contains { $0.first == "cleanup-size" })
     }
 
@@ -141,6 +214,7 @@ final class TrainingPreparationTests: XCTestCase {
         var calls: [[String]] = []
         var wrongGrid = false
         var holdTraining = false
+        var holdPreparation = false
         var continuation: CheckedContinuation<Void, Never>?
         init() throws {
             root = FileManager.default.temporaryDirectory.appendingPathComponent("training-grid-\(UUID().uuidString)")
@@ -176,7 +250,9 @@ final class TrainingPreparationTests: XCTestCase {
                     XCTAssertEqual(script, "material_model_workbench.py")
                     return "{\"training_sizes\":[512,1024]}"
                 case "dataset": return try self.dataset(prepared: false)
-                case "prepare-size": return try self.dataset(prepared: true)
+                case "prepare-size":
+                    if self.holdPreparation { await withCheckedContinuation { self.continuation = $0 } }
+                    return try self.dataset(prepared: true)
                 case "train":
                     if self.holdTraining { await withCheckedContinuation { self.continuation = $0 } }
                     return try self.json(["checkpoint_path": self.root.appendingPathComponent("adapter.safetensors").path, "package_path": self.root.path])

@@ -290,6 +290,10 @@ def save_review(records, report, output):
                         "materials": list(groups.values()), "automatic_model_promotion": False})
 
 
+class TrainingAborted(Exception):
+    """An immediate stop must not produce a new checkpoint."""
+
+
 def train(args) -> dict:
     selected_path = selected_config = selected_tensors = checksum = None
     if args.checkpoint:
@@ -338,20 +342,25 @@ def train(args) -> dict:
     if hasattr(model, "ups"):
         model.ups[lora.TARGET_BRANCH[args.target]].material_gradient_checkpointing = True
     optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, weight_decay=0)
-    started, stop_requested, completed = time.monotonic(), getattr(args, "_stop_requested", False), 0
+    started, stop_requested, completed = time.monotonic(), False, 0
+    training_started = False
     previous_signals = {}
     def stop(_number, _frame):
         nonlocal stop_requested
+        if not training_started:
+            raise TrainingAborted("Training aborted during setup")
         stop_requested = True
         print(json.dumps({"event": "stopping", "message": "Finishing this update and saving the material adapter"}), flush=True)
-    for number in (signal.SIGINT, signal.SIGTERM):
-        previous_signals[number] = signal.signal(number, stop)
+    def abort(_number, _frame):
+        raise TrainingAborted("Training aborted without saving a new checkpoint")
+    previous_signals[signal.SIGINT] = signal.signal(signal.SIGINT, stop)
+    previous_signals[signal.SIGTERM] = signal.signal(signal.SIGTERM, abort)
     report = {"status": "running", "dataset": identity, "training_size": args.size, "target": args.target,
               "training_performed": True, "training_input_dimensions": [args.size, args.size],
               "image_padding": False, "image_resizing": False, "steps": []}
-    write_json(args.output / "run.json", report)
-    rng = random.Random(args.seed)
     try:
+        write_json(args.output / "run.json", report)
+        rng = random.Random(args.seed)
         for epoch in range(args.updates_per_map):
             if stop_requested:
                 break
@@ -362,6 +371,9 @@ def train(args) -> dict:
                 rgb, reference, rectangle = crop_pair(*cache.load(pair), args.size, rng, whole_maps=True)
                 rgb, reference = rgb.to(device), reference.to(device)
                 optimizer.zero_grad(set_to_none=True)
+                if not training_started:
+                    training_started = True
+                    print(json.dumps({"event": "training_started", "message": "Training updates have started"}), flush=True)
                 prediction = predicted(model, rgb, args.target)
                 loss, metrics = height_loss(prediction, reference, margin=0)
                 loss.backward()
@@ -401,13 +413,21 @@ def train(args) -> dict:
         (args.output / "checkpoint.latest.safetensors").unlink(missing_ok=True)
         report.update(result, status="stopped" if stop_requested else "completed", completed_updates=completed,
                       training_performed=completed > 0)
-        comparison_records += comparison(model, inspection, cache, args.output / "comparison", args.target,
-                                         args.size, "refined-material", args.seed, device)
+        if not stop_requested:
+            comparison_records += comparison(model, inspection, cache, args.output / "comparison", args.target,
+                                             args.size, "refined-material", args.seed, device)
+        else:
+            report["review_deferred"] = True
         review = args.output / "review-manifest.json"
         save_review(comparison_records, report, review)
         report["review_manifest"] = str(review.resolve())
         write_json(args.output / "run.json", report)
         return report
+    except TrainingAborted as error:
+        report.update(status="aborted", error=str(error), completed_updates=completed,
+                      training_performed=completed > 0)
+        write_json(args.output / "run.json", report)
+        raise
     except BaseException as error:
         if completed:
             tensors, specs = lora.adapter_state(model)
@@ -822,16 +842,18 @@ def main(argv=None):
                 "upload-selected": upload_selected, "download-model": download_model, "review-source": review_source}
     early_handlers = {}
     if args.command in ("train", "refine"):
-        args._stop_requested = False
         def stop_during_setup(_number, _frame):
-            args._stop_requested = True
-            print(json.dumps({"event": "stopping", "message": "Saving a material adapter after setup finishes"}), flush=True)
+            raise TrainingAborted("Training aborted during setup")
         for number in (signal.SIGINT, signal.SIGTERM):
             early_handlers[number] = signal.signal(number, stop_during_setup)
     try:
         result = handlers[args.command](args)
         print(json.dumps(dict(result, protocol_schema=SCHEMA, command=args.command, ok=True), allow_nan=False), flush=True)
         return 0
+    except TrainingAborted as error:
+        print(json.dumps({"protocol_schema": SCHEMA, "command": args.command, "event": "aborted", "ok": False,
+                          "error": {"code": "TrainingAborted", "message": str(error)}}), flush=True)
+        return 130
     except (OSError, ValueError, TypeError, KeyError, RuntimeError, ImportError, SafetensorError) as error:
         print(json.dumps({"protocol_schema": SCHEMA, "command": args.command, "ok": False,
                           "error": {"code": type(error).__name__, "message": str(error)}}), flush=True)

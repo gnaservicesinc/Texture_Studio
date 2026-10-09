@@ -30,6 +30,9 @@ final class WorkbenchStore {
     private(set) var isTraining = false
     private(set) var isResumingTraining = false
     private(set) var isStopping = false
+    private(set) var hasTrainingStarted = false
+    private(set) var isSavingTraining = false
+    @ObservationIgnored private var trainingEventBuffer = ""
     private(set) var isPreparingDataset = false
     private(set) var datasetPreparationSummary = ""
     private(set) var trainingPreferenceNotice: String?
@@ -62,6 +65,7 @@ final class WorkbenchStore {
     @ObservationIgnored private var isRestoringPreferences = false
 
     var samples: [WorkbenchSample] { dataset?.samples ?? [] }
+    var canStopAndSave: Bool { isTraining && hasTrainingStarted && !isStopping }
     var selectedSample: WorkbenchSample? { samples.first { $0.id == selectedSampleId } }
     var selectedMaterialId: String? { dataset?.materials.first { $0.samples.contains { $0.id == selectedSampleId } }?.materialId }
     var selectedCheckpoint: WorkbenchCheckpoint? { checkpoints.first { $0.id == selectedCheckpointId } }
@@ -557,7 +561,7 @@ final class WorkbenchStore {
                 try await self.loadCheckpoint(URL(fileURLWithPath: result.checkpointPath))
                 self.lastPackageURL = result.packagePath.map { URL(fileURLWithPath: $0) }
                 self.lastPackageCheckpointId = self.selectedCheckpointId
-                self.activity = self.isStopping ? "Stopped and saved material LoRA." : "Training finished. Review the material maps before using this model."
+                self.activity = self.isSavingTraining ? "Stopped and saved material LoRA." : "Training finished. Review the material maps before using this model."
                 try await self.cleanupTrainingDataset(prepared)
                 if self.developerMode && self.uploadAfterTraining && !self.isStopping {
                     let account = try WorkbenchProcess.decode(HuggingFaceAccountResponse.self, output: await self.worker(["hub-account"]))
@@ -570,7 +574,8 @@ final class WorkbenchStore {
                     }
                 }
             } catch {
-                try? await self.cleanupTrainingDataset(prepared)
+                // Cancellation must not prevent cleanup of a positively owned stage.
+                await Task { @MainActor in try? await self.cleanupTrainingDataset(prepared) }.value
                 throw error
             }
         }
@@ -612,9 +617,32 @@ final class WorkbenchStore {
     func stop() {
         guard isBusy else { return }
         isStopping = true
-        activity = isTraining ? "Stopping after saving the latest training checkpoint…" : "Stopping the operation…"
+        isSavingTraining = false
+        activity = isTraining ? (hasTrainingStarted ? "Aborting training…" : "Aborting training setup…") : "Stopping the operation…"
         runner?.stop()
-        if !isTraining { task?.cancel() }
+        task?.cancel()
+    }
+
+    func stopAndSave() {
+        guard canStopAndSave else { stop(); return }
+        isStopping = true
+        isSavingTraining = true
+        activity = "Finishing the current update and saving the material LoRA…"
+        runner?.stopAndSave()
+    }
+
+    func recordTrainingProgress(_ chunk: String) {
+        trainingEventBuffer += chunk
+        while let newline = trainingEventBuffer.firstIndex(of: "\n") {
+            let line = String(trainingEventBuffer[..<newline])
+            trainingEventBuffer.removeSubrange(...newline)
+            guard let data = line.data(using: .utf8),
+                  let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  event["event"] as? String == "training_started", isTraining, !isStopping else { continue }
+            hasTrainingStarted = true
+            activity = "Training material LoRA…"
+        }
+        if trainingEventBuffer.count > 100000 { trainingEventBuffer = String(trainingEventBuffer.suffix(100000)) }
     }
 
     func useSelectedInStudio() {
@@ -764,8 +792,12 @@ final class WorkbenchStore {
         let script = requestedScript ?? (datasetCommands.contains(args.first ?? "") ? "material_workbench.py" : "material_model_workbench.py")
         try Task.checkCancellation()
         guard !WorkbenchLifecycle.shared.isTerminating else { throw CancellationError() }
+        let trainingWorker = ["train", "refine"].contains(args.first ?? "")
+        if trainingWorker { trainingEventBuffer = ""; hasTrainingStarted = false }
+        defer { if trainingWorker { hasTrainingStarted = false } }
         if let workerOverride {
             let output = try await workerOverride(args, script)
+            if trainingWorker { recordTrainingProgress(output) }
             try Task.checkCancellation()
             return output
         }
@@ -791,6 +823,7 @@ final class WorkbenchStore {
                     guard self?.activeWorkerId == workerId else { return }
                     self?.logText += chunk
                     if let text = self?.logText, text.count > 100000 { self?.logText = String(text.suffix(100000)) }
+                    if trainingWorker { self?.recordTrainingProgress(chunk) }
                 }
             }
         try Task.checkCancellation()
@@ -798,9 +831,13 @@ final class WorkbenchStore {
     }
     private func operation(_ label: String, training: Bool = false, body: @escaping @MainActor () async throws -> Void) {
         guard !isBusy else { return }
-        isBusy = true; isTraining = training; isStopping = false; error = nil; activity = label; logText = ""
+        isBusy = true; isTraining = training; isStopping = false; hasTrainingStarted = false; isSavingTraining = false
+        error = nil; activity = label; logText = ""; trainingEventBuffer = ""
         task = Task {
-            defer { isBusy = false; isTraining = false; isResumingTraining = false; isStopping = false; isPreparingDataset = false; task = nil }
+            defer {
+                isBusy = false; isTraining = false; isResumingTraining = false; isStopping = false
+                hasTrainingStarted = false; isSavingTraining = false; isPreparingDataset = false; task = nil
+            }
             do { try await body() }
             catch {
                 if Task.isCancelled || error is CancellationError {

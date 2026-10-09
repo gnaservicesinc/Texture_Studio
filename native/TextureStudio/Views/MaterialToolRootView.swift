@@ -194,7 +194,7 @@ struct WorkbenchActivityView: View {
             Text(store.activity).lineLimit(2).font(.caption)
             Spacer()
             if let url = store.lastOutputURL { Button("Show Results") { NSWorkspace.shared.activateFileViewerSelecting([url]) } }
-            if store.isBusy { Button(store.isStopping ? "Stopping…" : (store.isTraining ? "Stop and Save" : "Stop")) { store.stop() }.disabled(store.isStopping) }
+            if store.isBusy { WorkbenchStopButtons(store: store) }
         }.padding(12)
     }
 }

@@ -141,6 +141,7 @@ final class HuggingFaceUploadTests: XCTestCase {
         preferences = UserDefaults(suiteName: suite)!
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         preferences.set(root.path, forKey: "workspace")
+        preferences.set(false, forKey: "uploadPublic")
     }
     func remove() {
         preferences.removePersistentDomain(forName: suite)
