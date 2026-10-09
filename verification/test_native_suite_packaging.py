@@ -10,6 +10,8 @@ import tempfile
 import unittest
 import zipfile
 
+from scripts.stage_material_backend import MATERIAL_SOURCES, stage
+
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = {"review": "Material Review", "compare": "Checkpoint Compare",
          "dataset": "Material Dataset", "train": "Material Trainer"}
@@ -64,12 +66,7 @@ class NativeSuitePackagingTests(unittest.TestCase):
             "IPDEBuildConfiguration": "Release",
             "CFBundlePackageType": "APPL", "CFBundleVersion": "1", "CFBundleShortVersionString": "0.9.3"}))
         shutil.copytree(self.icons, app / "Contents/Resources", dirs_exist_ok=True)
-        resources = app / "Contents/Resources/DA3Backend"
-        for name in ("worker.py", "setup_runtime.py", "requirements.txt", "UPSTREAM_LICENSE", "UPSTREAM_REVISION",
-                     "upstream/depth_anything_3/api.py", "upstream/depth_anything_3/configs/da3-giant.yaml"):
-            file = resources / name
-            file.parent.mkdir(parents=True, exist_ok=True)
-            file.write_text("source fixture\n")
+        stage(ROOT, app / "Contents/Resources/MaterialBackend")
         entitlements = Path(directory) / "entitlements.plist"
         entitlements.write_bytes(plistlib.dumps({"com.apple.security.network.client": True}))
         subprocess.run(["codesign", "--force", "--sign", "-", "--options", "runtime", "--entitlements",
@@ -135,8 +132,52 @@ class NativeSuitePackagingTests(unittest.TestCase):
             for name in TOOLS.values():
                 self.assertIn(f"Texture Studio.app/Contents/Applications/{name}.app/Contents/MacOS/{name}", names)
             self.assertIn("Texture Studio.app/Contents/Resources/TextureStudio.icns", names)
+            for application in ["Texture Studio.app", *(
+                    f"Texture Studio.app/Contents/Applications/{name}.app" for name in TOOLS.values())]:
+                for name in (*MATERIAL_SOURCES, "LICENSE"):
+                    self.assertIn(f"{application}/Contents/Resources/MaterialBackend/{name}", names)
+            self.assertFalse(any("/DA3Backend/" in name for name in names))
             expected = (output / "Texture-Studio-macos-arm64.sha256").read_text().split()[0]
             self.assertEqual(hashlib.sha256(archive.read_bytes()).hexdigest(), expected)
+
+    def test_packaging_rejects_missing_backend_source_in_parent_or_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.fixture(directory)
+            self.stage(app)
+            output = Path(directory) / "dist"
+            command = ["bash", str(ROOT / "scripts/package_macos.sh"), str(app), str(output)]
+            applications = [app, *(app / "Contents/Applications" / f"{name}.app" for name in TOOLS.values())]
+            for application in applications:
+                for name in (*MATERIAL_SOURCES, "LICENSE"):
+                    with self.subTest(application=application.name, resource=name):
+                        resource = application / "Contents/Resources/MaterialBackend" / name
+                        original = resource.read_bytes()
+                        resource.unlink()
+                        result = subprocess.run(command, capture_output=True, text=True)
+                        resource.write_bytes(original)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn("Missing required material backend resource", result.stderr)
+                        self.assertIn(str(resource), result.stderr)
+                        self.assertFalse(output.exists())
+
+    def test_packaging_rejects_backend_bytecode_and_runtime_payloads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = self.fixture(directory)
+            self.stage(app)
+            output = Path(directory) / "dist"
+            command = ["bash", str(ROOT / "scripts/package_macos.sh"), str(app), str(output)]
+            for name in ("__pycache__/material_workbench.pyc", "runtime/pyvenv.cfg", "model.safetensors"):
+                with self.subTest(resource=name):
+                    resource = app / "Contents/Resources/MaterialBackend" / name
+                    resource.parent.mkdir(parents=True, exist_ok=True)
+                    resource.write_bytes(b"unwanted payload")
+                    result = subprocess.run(command, capture_output=True, text=True)
+                    resource.unlink()
+                    if resource.parent.name != "MaterialBackend":
+                        resource.parent.rmdir()
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Material backend must contain source and license only", result.stderr)
+                    self.assertFalse(output.exists())
 
     def test_staging_signing_failure_keeps_original_parent_untouched(self):
         with tempfile.TemporaryDirectory() as directory:

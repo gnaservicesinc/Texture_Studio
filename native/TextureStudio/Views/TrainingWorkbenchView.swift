@@ -15,7 +15,8 @@ struct TrainingWorkbenchView: View {
                         Text("\(dataset.materials.count) materials · \(dataset.samples.count) maps")
                         Text(store.datasetNativeSizeLabel).font(.caption).foregroundStyle(.secondary)
                     }
-                    Picker("Training dimensions", selection: Binding(get: { store.training.size }, set: store.selectTrainingSize)) {
+                    // Avoid Swift 6.3 IRGen's actor-isolated bound-method conversion.
+                    Picker("Training dimensions", selection: Binding(get: { store.training.size }, set: { store.selectTrainingSize($0) })) {
                         ForEach(store.supportedTrainingSizes, id: \.self) { size in
                             Text("\(size) × \(size)").tag(size)
                         }

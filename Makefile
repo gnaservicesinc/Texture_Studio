@@ -21,7 +21,7 @@ setup:
 	$(PYTHON_BASE) -m venv .venv
 	.venv/bin/python -m pip install --upgrade pip
 	.venv/bin/python -m pip install -c requirements-release-macos.txt \
-		-r requirements.txt -r requirements-depth.txt 'datasets>=4,<6'
+		-r requirements.txt -r requirements-depth.txt -r requirements-test.txt 'datasets>=4,<6'
 	.venv/bin/python -m pip check
 	.venv/bin/python -m pip install --no-deps -e .
 
@@ -58,7 +58,7 @@ test-native: check-toolchain
 		-derivedDataPath "$(DERIVED_DATA)" test
 
 test-python:
-	PYTHONPATH=$(CURDIR)/src "$(PYTHON)" -m unittest discover -s verification -v
+	PYTHONPATH=$(CURDIR)/src "$(PYTHON)" -m pytest verification -q
 
 smoke: build
 	"$(APP_BUNDLE)/Contents/MacOS/Texture Studio" --smoke-test

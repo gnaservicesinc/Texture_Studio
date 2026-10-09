@@ -30,18 +30,8 @@ if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$PLIST" 2>/dev/nu
   echo "Texture Studio app icon is missing; rebuild before packaging." >&2
   exit 1
 fi
-DA3_RESOURCES="$APP_BUNDLE/Contents/Resources/DA3Backend"
-for REQUIRED_RESOURCE in worker.py setup_runtime.py requirements.txt UPSTREAM_LICENSE UPSTREAM_REVISION upstream/depth_anything_3/api.py upstream/depth_anything_3/configs/da3-giant.yaml; do
-  if [[ ! -f "$DA3_RESOURCES/$REQUIRED_RESOURCE" ]]; then
-    echo "Missing required standalone DA3 backend resource: $REQUIRED_RESOURCE" >&2
-    exit 1
-  fi
-done
-UNEXPECTED_RESOURCE="$(/usr/bin/find "$DA3_RESOURCES" \( -name __pycache__ -o -name '*.pyc' -o -name pyvenv.cfg -o -name '*.safetensors' -o -name '*.pt' -o -name '*.pth' \) -print -quit)"
-if [[ -n "$UNEXPECTED_RESOURCE" ]]; then
-  echo "DA3 app resources must contain source and dependency pins only: $UNEXPECTED_RESOURCE" >&2
-  exit 1
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+/usr/bin/python3 -B "$SCRIPT_DIR/verify_material_backend.py" "$APP_BUNDLE/Contents/Resources/MaterialBackend"
 UNEXPECTED_PAYLOAD="$(/usr/bin/find "$APP_BUNDLE/Contents" \( -name '*.safetensors' -o -name '*.pt' -o -name '*.pth' -o -name '*.ckpt' -o -name '*.onnx' -o -name '*.npy' -o -name '*.npz' -o -name '*.exr' -o -name '*.blend' -o -name '*.mlmodelc' -o -name '*.mlpackage' -o -name pyvenv.cfg \) -print -quit)"
 if [[ -n "$UNEXPECTED_PAYLOAD" ]]; then
   echo "Application packaging excludes model weights, numeric experiment maps and runtimes: $UNEXPECTED_PAYLOAD" >&2
@@ -66,6 +56,7 @@ for ROLE in review compare dataset train; do
     echo "Missing or malformed nested material tool: $TOOL_NAME (run make build)." >&2
     exit 1
   fi
+  /usr/bin/python3 -B "$SCRIPT_DIR/verify_material_backend.py" "$TOOL_APP/Contents/Resources/MaterialBackend"
   /usr/bin/codesign --verify --deep --strict "$TOOL_APP"
 done
 /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"

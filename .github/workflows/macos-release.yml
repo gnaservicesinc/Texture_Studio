@@ -31,7 +31,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -c requirements-release-macos.txt \
-            -r requirements.txt -r requirements-depth.txt 'datasets>=4,<6'
+            -r requirements.txt -r requirements-depth.txt -r requirements-test.txt 'datasets>=4,<6'
           python -m pip check
           python -m pip install --no-deps .
       - name: Check tag and source versions

@@ -10,9 +10,10 @@ installation containing the macOS 26 SDK or later. Command Line Tools alone are
 insufficient. The project uses Apple's SwiftUI, AppKit, ImageIO, Core Image,
 Metal, and Core ML frameworks. Qt, CMake, Ninja, Linux, and Windows app build
 paths have been retired. The Python extraction and research tools remain
-separate from the app. The app bundles its own pinned DA3 worker and upstream
-inference source, and installs/locates a separate PyTorch/MPS environment through
-Local Models. Python and model binaries remain outside the app bundle.
+separate from the app. The app bundles its current Python material backend
+source and license under `Contents/Resources/MaterialBackend`. Python,
+PyTorch/MPS, and model binaries remain outside the app bundle; configure their
+paths in the material-model workspace.
 
 ## Local development
 
@@ -41,10 +42,12 @@ make smoke
 The native XCTest target tests geometry, map exports, and model management.
 The Core Image Metal kernels are compiled with `metal -fcikernel` and
 `metallib -cikernel` by the Xcode build and embedded in the app resources.
-No model downloads are needed for the deterministic native checks. Real DA3
-smoke checks require the separately installed exact model and Metal runtime.
+No model downloads are needed for the deterministic native checks. Real material
+inference checks require the separately installed selected model and Metal runtime.
 
-Python backend checks are optional for app-only development:
+Python backend checks are optional for app-only development. `make setup`
+installs the test requirements; `make test-python` uses pytest to run both
+function-based regressions and the unittest cases:
 
 ```sh
 make setup
@@ -68,8 +71,10 @@ make DESTDIR=/path/to/staging install
 
 Packaging verifies the app's signature, identity, and arm64 executable, then
 creates `dist/Texture-Studio-macos-arm64.zip` and its SHA-256 checksum. The app
-contains native resources, the standalone Python worker source, and the four
-signed material tools under `Contents/Applications`. Children are signed before
+contains native resources, the material Python backend, and the four signed
+material tools under `Contents/Applications`. Packaging checks the backend's
+complete source list and license in the parent and each child using the same
+list as the Xcode staging step. Children are signed before
 the parent bundle is sealed. The installer refuses Debug builds and refuses to
 replace a running installed parent or child; close them and rerun `make install`.
 Optional models are stored outside the application bundle.
