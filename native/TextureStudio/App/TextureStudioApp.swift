@@ -74,7 +74,8 @@ final class StudioAppDelegate: NSObject, NSApplicationDelegate {
                 do {
                     try await StudioSmoke.run()
                     print("Texture Studio native smoke passed")
-                    NSApp.terminate(nil)
+                    // Exit the command-line check without waiting for AppKit's quit flow.
+                    exit(0)
                 } catch {
                     fputs("Texture Studio smoke failed: \(error)\n", stderr)
                     exit(1)
