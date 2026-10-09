@@ -77,7 +77,16 @@ def test_source_cache_uses_detected_headroom_without_a_512_mib_ceiling(monkeypat
             dataset.SourceDecodeCache(invalid)
 
 
-def test_source_cache_cannot_retain_arrays_when_other_apps_consume_headroom(monkeypatch):
+def test_source_cache_cannot_retain_arrays_when_other_apps_consume_headroom(tmp_path, monkeypatch):
     monkeypatch.setattr(resources, "physical_memory_bytes", lambda:64*1024**3)
     monkeypatch.setattr(resources, "available_memory_bytes", lambda:2*1024**3)
-    assert dataset.SourceDecodeCache().max_bytes == 0
+    cache = dataset.SourceDecodeCache(100000)
+    assert cache.max_bytes == 0
+    values = np.arange(256, dtype=np.uint16).reshape(16, 16, 1)
+    path = tmp_path / "source.png"
+    write_png(path, values)
+    for _ in range(2):
+        actual, _ = cache.read(path)
+        np.testing.assert_array_equal(actual, values)
+    assert cache.misses == 2 and cache.hits == 0
+    assert cache.retained_bytes == 0 and not cache.entries

@@ -5,7 +5,7 @@ import sys
 
 MATERIAL_SOURCES = (
     "material_workbench.py", "material_model_workbench.py", "material_lora.py",
-    "material_dataset.py", "material_native_size.py", "material_pbrnxt.py",
+    "material_dataset.py", "material_resources.py", "material_native_size.py", "material_pbrnxt.py",
     "material_pbrnxt_data.py", "train_material_pbrnxt.py",
 )
 

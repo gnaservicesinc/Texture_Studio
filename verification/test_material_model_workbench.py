@@ -156,8 +156,20 @@ def test_invalid_adapter_identity_or_numeric_tensors_rejected(tmp_path):
         bridge.snapshot(path)
 
 
+def training_memory(monkeypatch, gib=64):
+    """Give tiny CPU training fixtures explicit hardware for resource admission."""
+    original_sysconf = bridge.os.sysconf
+    def sysconf(name):
+        if name == "SC_PHYS_PAGES":
+            return gib * 1024**3 // 4096
+        if name == "SC_PAGE_SIZE":
+            return 4096
+        return original_sysconf(name)
+    monkeypatch.setattr(bridge.os, "sysconf", sysconf)
+
+
 def test_capabilities_filters_training_grids_and_keeps_generation_sizes(monkeypatch):
-    monkeypatch.setattr(bridge.os, "sysconf", lambda name: 16 * 1024 * 1024 if name == "SC_PHYS_PAGES" else 4096)
+    training_memory(monkeypatch)
     result = bridge.capabilities(SimpleNamespace(scope="final-map", memory_gib=48, cache_gib=1))
     assert result["training_sizes"] == [256, 512, 1024, 2048]
     assert 8192 in result["inference_sizes"]
@@ -165,6 +177,17 @@ def test_capabilities_filters_training_grids_and_keeps_generation_sizes(monkeypa
     assert result["memory_plans"]["2048"]["recommended_memory_gib"] == 48
     result = bridge.capabilities(SimpleNamespace(scope="final-map", memory_gib=32, cache_gib=1))
     assert 2048 not in result["training_sizes"]
+
+
+def test_training_rejects_budget_above_small_machine_before_loading_data_or_model(tmp_path, monkeypatch):
+    training_memory(monkeypatch, gib=8)
+    monkeypatch.setattr(bridge, "select_pairs", lambda *_args, **_kwargs: pytest.fail("dataset must not load"))
+    monkeypatch.setattr(bridge, "load_base", lambda *_args: pytest.fail("model must not load"))
+    args = bridge.parser().parse_args(["train", "--dataset", str(tmp_path / "dataset"), "--output", str(tmp_path / "run"),
+                                     "--size", "256", "--memory-gib", "48", "--cache-gib", "0", "--device", "cpu"])
+    with pytest.raises(ValueError, match="hardware budget"):
+        bridge.train(args)
+    assert not args.output.exists()
 
 
 def test_review_reconstruction_preserves_exact_integer_crop_and_normal_flip(tmp_path):
@@ -226,6 +249,7 @@ def test_inference_at_training_resolution_uses_complete_model_context_even_with_
 
 @pytest.mark.parametrize("target", ["height", "roughness", "normal"])
 def test_training_uses_entire_selected_grid_exports_both_modes_and_purges_stage(tmp_path, monkeypatch, target):
+    training_memory(monkeypatch)
     original = TinyMaterial().eval()
     source = sources(tmp_path / "architecture")
     input_path = tmp_path / "diffuse.png"
@@ -259,6 +283,7 @@ def test_training_uses_entire_selected_grid_exports_both_modes_and_purges_stage(
 
 
 def test_training_cycles_real_registered_colors_and_review_records_exact_input(tmp_path, monkeypatch):
+    training_memory(monkeypatch)
     from test_material_pbrnxt_data import add_sample, add_color_variant
     import material_pbrnxt_data as data
     folder, rgb, _ = add_sample(tmp_path / "dataset", dimensions=(256, 256))
@@ -284,6 +309,7 @@ def test_training_cycles_real_registered_colors_and_review_records_exact_input(t
 
 
 def train_fixture(tmp_path, monkeypatch, updates=20, minutes=10):
+    training_memory(monkeypatch)
     from test_material_pbrnxt_data import add_sample
     add_sample(tmp_path / "dataset", dimensions=(256, 256))
     original = TinyMaterial().eval()

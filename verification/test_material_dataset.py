@@ -93,6 +93,12 @@ class PNGPrecisionTests(unittest.TestCase):
 
 
 class SourceCacheTests(unittest.TestCase):
+    def setUp(self):
+        # Exercise retention and invalidation independently of host memory pressure.
+        budget = mock.patch.object(MODULE, "source_cache_budget", return_value=100000)
+        budget.start()
+        self.addCleanup(budget.stop)
+
     def test_cached_parent_change_is_invalidated_even_when_mtime_restored(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "parent.png"
@@ -442,7 +448,8 @@ class MaterialPreparationTests(unittest.TestCase):
         folder, maps = self.material()
         _, records = self.prepare()
         sample = self.output / "samples" / records[0]["sample_id"]
-        cache = MODULE.SourceDecodeCache(100000)
+        with mock.patch.object(MODULE, "source_cache_budget", return_value=100000):
+            cache = MODULE.SourceDecodeCache(100000)
         self.assertEqual(MODULE.verify_sample(sample, True, cache), [])
         misses = cache.misses
         self.assertEqual(MODULE.verify_sample(sample, True, cache), [])

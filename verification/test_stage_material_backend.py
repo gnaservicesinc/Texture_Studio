@@ -1,4 +1,5 @@
 """The app ships only its current material source dependency closure."""
+import ast
 from pathlib import Path
 import sys
 
@@ -46,6 +47,53 @@ def test_shipped_dependency_closure_has_no_discarded_material_experiment():
     assert 'export_material_candidate.py' not in MATERIAL_SOURCES
     for name in MATERIAL_SOURCES:
         assert (ROOT / 'scripts' / name).is_file()
+
+
+def test_shipped_sources_include_every_local_import_including_lazy_imports():
+    for name in MATERIAL_SOURCES:
+        tree = ast.parse((ROOT / 'scripts' / name).read_text(), filename=name)
+        for node in ast.walk(tree):
+            modules = []
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                modules = [node.module]
+            for module in modules:
+                dependency = module.split('.')[0] + '.py'
+                if (ROOT / 'scripts' / dependency).is_file():
+                    assert dependency in MATERIAL_SOURCES, f'{name} imports unbundled {dependency}'
+
+
+def test_isolated_shipped_bundle_decodes_source_with_resource_policy(tmp_path):
+    import subprocess
+    import numpy as np
+    from material_dataset import write_png
+
+    bundle = tmp_path / 'MaterialBackend'
+    stage(ROOT, bundle)
+    source = tmp_path / 'height.png'
+    values = np.array([0, 1, 256, 32768, 65534, 65535], dtype=np.uint16).reshape(2, 3, 1)
+    write_png(source, values)
+    child = subprocess.run([sys.executable, '-I', '-B', '-c', '''
+import sys
+from pathlib import Path
+import numpy as np
+sys.path.insert(0, sys.argv[1])
+import material_dataset
+import material_resources
+bundle = Path(sys.argv[1])
+assert Path(material_dataset.__file__).parent == bundle
+assert Path(material_resources.__file__).parent == bundle
+assert material_dataset.source_cache_budget() >= 0
+cache = material_dataset.SourceDecodeCache(0)
+actual, metadata = cache.read(Path(sys.argv[2]))
+expected = np.array([0, 1, 256, 32768, 65534, 65535], dtype=np.uint16).reshape(2, 3, 1)
+assert actual.dtype == np.uint16 and metadata["sample_bits"] == 16
+np.testing.assert_array_equal(actual, expected)
+assert cache.retained_bytes == 0 and not cache.entries
+''', str(bundle), str(source)], cwd=tmp_path, capture_output=True, text=True)
+    assert child.returncode == 0, child.stderr
+    assert not list(bundle.rglob('__pycache__'))
 
 
 def test_isolated_shipped_bundle_discovers_ambient_source_with_verified_package_sidecar(tmp_path):
