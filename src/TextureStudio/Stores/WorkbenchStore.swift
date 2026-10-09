@@ -773,7 +773,16 @@ final class WorkbenchStore {
             trainingEventBuffer.removeSubrange(...newline)
             guard let data = line.data(using: .utf8),
                   let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let kind = event["event"] as? String, isTraining else { continue }
+                  let kind = event["event"] as? String else { continue }
+            if ["preparation_started", "preparation_progress", "preparation_completed"].contains(kind) {
+                guard isPreparingDataset, !isStopping,
+                      let completed = event["completed"] as? Int, let total = event["total"] as? Int,
+                      let size = event["training_size"] as? Int, let workers = event["worker_count"] as? Int,
+                      total >= 0, completed >= 0, completed <= total, size > 0, workers > 0 else { continue }
+                activity = "Preparing \(size) × \(size) maps: \(completed)/\(total) materials · \(workers) \(workers == 1 ? "worker" : "workers")"
+                continue
+            }
+            guard isTraining else { continue }
             switch kind {
             case "training_started":
                 hasTrainingStarted = true
@@ -943,11 +952,13 @@ final class WorkbenchStore {
         try Task.checkCancellation()
         guard !WorkbenchLifecycle.shared.isTerminating else { throw CancellationError() }
         let trainingWorker = ["train", "refine"].contains(args.first ?? "")
-        if trainingWorker { trainingEventBuffer = ""; hasTrainingStarted = false }
+        let progressWorker = trainingWorker || args.first == "prepare-size"
+        if progressWorker { trainingEventBuffer = "" }
+        if trainingWorker { hasTrainingStarted = false }
         defer { if trainingWorker { hasTrainingStarted = false } }
         if let workerOverride {
             let output = try await workerOverride(args, args.first ?? "")
-            if trainingWorker { recordTrainingProgress(output) }
+            if progressWorker { recordTrainingProgress(output) }
             try Task.checkCancellation()
             return output
         }
@@ -966,7 +977,7 @@ final class WorkbenchStore {
                 guard self?.activeWorkerId == workerId else { return }
                 self?.logText += chunk
                 if let text = self?.logText, text.count > 100000 { self?.logText = String(text.suffix(100000)) }
-                if trainingWorker { self?.recordTrainingProgress(chunk) }
+                if progressWorker { self?.recordTrainingProgress(chunk) }
             }
         }
         let operation = Task { try await NativeMaterialCommands.run(arguments: args, onEvent: event, control: control) }
@@ -974,7 +985,7 @@ final class WorkbenchStore {
         defer {
             runner = nil; activeWorkerId = nil
             logText = events.text
-            if trainingWorker { recordTrainingProgress(events.text) }
+            if progressWorker { recordTrainingProgress(events.text) }
             WorkbenchLifecycle.shared.remove(control)
         }
         let output = try await withTaskCancellationHandler { try await operation.value } onCancel: { operation.cancel(); control.stop() }

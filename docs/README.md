@@ -9,5 +9,6 @@ Texture Studio and its material tools are native SwiftUI macOS applications. Bui
 - [Model setup](model-setup.md)
 - [Building and releasing](releasing.md)
 - [Native migration validation](native-migration-validation.md)
+- [Preparation performance and training crash validation](performance-validation.md)
 
 The app uses ImageIO for image and auxiliary-data access, Core Image and Metal for material processing, Accelerate for numeric statistics, MPSGraph for material inference and adapter training, and URLSession for model transfers. Original photos and numeric source maps remain separate from previews and model inputs.

@@ -39,7 +39,7 @@ func main() throws -> Int32 {
     guard version.range(of: #"^[0-9]+\.[0-9]+\.[0-9]+$"#, options: .regularExpression) != nil else {
         throw VersionFailure(description: "Source project must declare one numeric release version")
     }
-    let project = try String(contentsOf: root.appendingPathComponent("native/TextureStudio/TextureStudio.xcodeproj/project.pbxproj"), encoding: .utf8)
+    let project = try String(contentsOf: root.appendingPathComponent("src/TextureStudio/TextureStudio.xcodeproj/project.pbxproj"), encoding: .utf8)
     let nativeVersions = Set(try matches(#"MARKETING_VERSION = ([0-9.]+);"#, project))
     guard nativeVersions.count == 1, let native = nativeVersions.first else {
         throw VersionFailure(description: "Native target versions disagree: \(nativeVersions.sorted())")

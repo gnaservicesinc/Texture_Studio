@@ -1,7 +1,7 @@
 # Building and releasing Texture Studio
 
 Texture Studio is the standalone native SwiftUI application in
-`native/TextureStudio/TextureStudio.xcodeproj`. The shared scheme is
+`src/TextureStudio/TextureStudio.xcodeproj`. The shared scheme is
 `TextureStudio`; its executable and application bundle are named **Texture
 Studio**. The bundle identifier is `org.ipde.texture-studio`.
 

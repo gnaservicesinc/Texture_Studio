@@ -163,6 +163,33 @@ final class TrainingPreparationTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: fixture.original.appendingPathComponent("dataset.json")), Data("original".utf8))
     }
 
+    func testPreparationReportsParallelProgressAndIgnoresEventsAfterStopping() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        fixture.holdPreparation = true
+        let store = fixture.store()
+        try await store.loadTrainingCapabilities()
+        try await store.loadDataset(fixture.original)
+        store.training.size = 1024
+        store.prepareTrainingDataset()
+        while fixture.continuation == nil { try await Task.sleep(for: .milliseconds(5)) }
+        let initialActivity = store.activity
+        store.recordTrainingProgress("{\"event\":\"preparation_progress\",\"completed\":2,")
+        XCTAssertEqual(store.activity, initialActivity)
+        store.recordTrainingProgress("\"total\":8,\"worker_count\":4,\"training_size\":1024}\n")
+        XCTAssertTrue(store.activity.contains("2/8 materials"))
+        XCTAssertTrue(store.activity.contains("4 workers"))
+        XCTAssertFalse(store.hasTrainingStarted)
+        store.stop()
+        let stoppedActivity = store.activity
+        store.recordTrainingProgress("{\"event\":\"preparation_completed\",\"completed\":8,\"total\":8,\"worker_count\":4,\"training_size\":1024}\n")
+        XCTAssertEqual(store.activity, stoppedActivity)
+        fixture.continuation?.resume(); fixture.continuation = nil
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.dataset?.datasetPath, fixture.original.path)
+    }
+
     func testSaveRequestDuringModelSetupAbortsWithoutLoadingAnAdapter() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }

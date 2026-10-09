@@ -9,7 +9,7 @@ make build
 ./script/build_and_run.sh
 ```
 
-Open `native/TextureStudio/TextureStudio.xcodeproj` and select the shared `TextureStudio` scheme. Release is the default configuration. Build, package and install tooling uses shell and Swift. `make test-native` runs native regressions and build-tool checks; `make smoke` exercises EXR formats. `make package` produces an ad-hoc signed local archive and rejects interpreter files or retired backend resources in the bundle. Packaging does not publish or notarize the app.
+Open `src/TextureStudio/TextureStudio.xcodeproj` and select the shared `TextureStudio` scheme. Release is the default configuration. Build, package and install tooling uses shell and Swift. `make test-native` runs native regressions and build-tool checks; `make smoke` exercises EXR formats. `make package` produces an ad-hoc signed local archive and rejects interpreter files or retired backend resources in the bundle. Packaging does not publish or notarize the app.
 
 **Model Training** opens the dataset, trainer, checkpoint and review workspaces. Material Review, Checkpoint Compare, Material Dataset and Material Trainer also launch independently from the app bundle. See [native material tools](docs/native-material-tools.md).
 

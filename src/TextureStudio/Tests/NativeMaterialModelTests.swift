@@ -1,9 +1,59 @@
 import Foundation
 import Metal
+import MetalPerformanceShadersGraph
 import XCTest
 @testable import TextureStudio
 
 final class NativeMaterialModelTests: XCTestCase {
+    func testCachedProgramDoesNotRetainOwningModel() throws {
+        weak var releasedModel: NativeMaterialModel?
+        weak var releasedProgram: NativeMaterialModel.Program?
+        do {
+            let model = try NativeMaterialModelFixture().model()
+            let program = try model.program(width: 64, height: 64, target: "height")
+            releasedModel = model; releasedProgram = program
+            XCTAssertNotNil(releasedModel); XCTAssertNotNil(releasedProgram)
+        }
+        XCTAssertNil(releasedModel)
+        XCTAssertNil(releasedProgram)
+    }
+    func testGraphResultsFollowRequestedTensorIdentitiesWithEqualShapes() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        try await Task.detached {
+            let graph = MPSGraph()
+            let input = graph.placeholder(shape: [2], dataType: .float32, name: "values")
+            let doubled = graph.multiplication(input, graph.constant(2, dataType: .float32), name: nil)
+            let offset = graph.addition(input, graph.constant(10, dataType: .float32), name: nil)
+            let feeds = [input: try NativeGraphExecution.tensorData(.floats([3, 7], shape: [2]))]
+            var cache: [String: MPSGraphExecutable] = [:]
+            for _ in 0..<2 {
+                let first = try NativeGraphExecution.run(graph, feeds: feeds, targets: [offset, input, doubled], cache: &cache)
+                XCTAssertEqual(first, [[13, 17], [3, 7], [6, 14]])
+                let second = try NativeGraphExecution.run(graph, feeds: feeds, targets: [doubled, offset, input], cache: &cache)
+                XCTAssertEqual(second, [[6, 14], [13, 17], [3, 7]])
+            }
+        }.value
+    }
+    func testNearestNeighborUpsamplingPreservesFloatBitsAndSumsFourGradientCopies() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        try await Task.detached {
+            let samples: [Float] = [Float(bitPattern: 0x80000000), .leastNonzeroMagnitude, 0.125, -2, 17, 0.75]
+            let graph = MPSGraph()
+            let input = graph.placeholder(shape: [1, 1, 2, 3], dataType: .float32, name: "native_samples")
+            let output = NativeGraphExecution.nearestNeighbor2(input, graph: graph)
+            let sum = graph.reductionSum(with: output, axes: [0, 1, 2, 3], name: nil)
+            let gradient = graph.gradients(of: sum, with: [input], name: nil)[input]!
+            let result = try NativeGraphExecution.run(graph,
+                feeds: [input: NativeGraphExecution.tensorData(.floats(samples, shape: [1, 1, 2, 3]))], targets: [output, gradient])
+            XCTAssertEqual(output.shape, [1, 1, 4, 6])
+            let expected = [samples[0], samples[0], samples[1], samples[1], samples[2], samples[2],
+                            samples[0], samples[0], samples[1], samples[1], samples[2], samples[2],
+                            samples[3], samples[3], samples[4], samples[4], samples[5], samples[5],
+                            samples[3], samples[3], samples[4], samples[4], samples[5], samples[5]]
+            XCTAssertEqual(result[0].map(\.bitPattern), expected.map(\.bitPattern))
+            XCTAssertEqual(result[1], [Float](repeating: 4, count: samples.count))
+        }.value
+    }
     func testPinnedLayoutMatchesPublishedCheckpointTensorDescriptors() {
         // Digest independently recorded from the pinned archive's data.pkl
         // metadata, fetched with bounded range requests without weight data.
@@ -55,6 +105,54 @@ final class NativeMaterialModelTests: XCTestCase {
         let fused = try NativeMaterialModel(baseWeights: model.fusedWeights(), baseSHA256: "fixture", architecture: .test)
         let merged = try fused.predict(rgb: rgb, width: 64, height: 64, target: "height")
         for (first, second) in zip(changed.output, merged.values) { XCTAssertEqual(first, second, accuracy: 2e-5) }
+        }.value
+    }
+    func testValidationDoesNotConstructAutodiffOrRequireAdapters() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        try await Task.detached {
+            XCTAssertFalse(Thread.isMainThread)
+            let model = try NativeMaterialModelFixture().model()
+            let program = try model.program(width: 64, height: 64, target: "height")
+            let result = try program.execute(rgb: [Float](repeating: 0.5, count: 3 * 64 * 64),
+                adapters: [:], reference: [Float](repeating: 0.5, count: 64 * 64))
+            XCTAssertTrue(result.loss!.isFinite)
+            XCTAssertTrue(result.updated.isEmpty)
+            XCTAssertTrue(result.optimizerState.isEmpty)
+            XCTAssertFalse(program.optimizerPrepared)
+        }.value
+    }
+    func testBothTrainingScopesUpdateAllLayersIncludingDecoderUpsamplingAtRank64() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        try await Task.detached {
+            XCTAssertFalse(Thread.isMainThread)
+            let fixture = NativeMaterialModelFixture()
+            let rgb: [Float] = (0..<12_288).map { index in Float((index * 17) % 255) / 255 }
+            let baseline = try fixture.model().predict(rgb: rgb, width: 64, height: 64, target: "height")
+            for scope in ["final-map", "map-decoder"] {
+                let model = try fixture.model(scope: scope, rank: 64, alpha: 16)
+                let program = try model.program(width: 64, height: 64, target: "height")
+                XCTAssertEqual(program.frozenStageCount, 0)
+                let reference = baseline.values.map { $0 + 0.01 }
+                let validation = try program.execute(rgb: rgb, adapters: model.adapterWeights, reference: reference)
+                XCTAssertFalse(program.optimizerPrepared)
+                for (before, staged) in zip(baseline.values, validation.output) {
+                    XCTAssertEqual(before, staged, accuracy: 2e-6)
+                }
+                let updated = try program.execute(rgb: rgb, adapters: model.adapterWeights,
+                    reference: reference, learningRate: 1e-3)
+                XCTAssertTrue(program.optimizerPrepared)
+                XCTAssertEqual(program.frozenStageCount, scope == "final-map" ? 1 : 2)
+                XCTAssertEqual(Set(updated.updated.keys), Set(model.adapterWeights.keys))
+                XCTAssertEqual(updated.optimizerState.count, model.adapterWeights.count * 2)
+                let outputLayer = "ups.3.model.10.lora_B"
+                XCTAssertNotEqual(updated.updated[outputLayer]!.bytes, model.adapterWeights[outputLayer]!.bytes)
+                if scope == "map-decoder" {
+                    // This reaches the nearest-neighbor upsampler derivative
+                    // that used to abort inside MPSGraphTileOp.
+                    let firstUpsample = "gen.m_dec_3.m_up3.0.up.1.lora_B"
+                    XCTAssertNotEqual(updated.updated[firstUpsample]!.bytes, model.adapterWeights[firstUpsample]!.bytes)
+                }
+            }
         }.value
     }
     func testRejectsAlteredPixelGridAndMissingLearnedLayer() throws {
@@ -173,5 +271,22 @@ struct NativeMaterialModelFixture {
         let specs: [String: NativeMaterialModel.AdapterLayer] = adapter ? [name: .init(weightShape: shape, rank: 1, alpha: 1)] : [:]
         let adapters: [String: NativeTensor] = adapter ? [name + ".lora_A": .floats([Float](repeating: 0.1, count: shape.dropFirst().reduce(1, *)), shape: [1, shape.dropFirst().reduce(1, *)]), name + ".lora_B": .floats([0], shape: [1, 1])] : [:]
         return try NativeMaterialModel(baseWeights: weights, adapterWeights: adapters, layers: specs, baseSHA256: "fixture", architecture: .test)
+    }
+    func model(scope: String, rank: Int, alpha: Float) throws -> NativeMaterialModel {
+        let prefixes = ["ups.3."] + (scope == "map-decoder" ? ["gen.m_dec_3.", "gen.m_tail_3."] : [])
+        var layers: [String: NativeMaterialModel.AdapterLayer] = [:], factors: [String: NativeTensor] = [:]
+        var random = NativeMaterialRandom(seed: 17)
+        for key in weights.keys.sorted() where key.hasSuffix(".weight") && !key.contains(".dwconv.") && prefixes.contains(where: { key.hasPrefix($0) }) {
+            let weight = weights[key]!
+            guard [2, 4].contains(weight.shape.count) else { continue }
+            let name = String(key.dropLast(7)), incoming = weight.shape.dropFirst().reduce(1, *)
+            layers[name] = .init(weightShape: weight.shape, rank: rank, alpha: alpha)
+            factors[name + ".lora_A"] = .floats((0..<rank * incoming).map { _ in
+                (random.unit() * 2 - 1) / sqrt(Float(incoming))
+            }, shape: [rank, incoming])
+            factors[name + ".lora_B"] = .floats([Float](repeating: 0, count: weight.shape[0] * rank), shape: [weight.shape[0], rank])
+        }
+        return try NativeMaterialModel(baseWeights: weights, adapterWeights: factors, layers: layers,
+            baseSHA256: "fixture", architecture: .test)
     }
 }

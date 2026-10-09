@@ -5,6 +5,27 @@ import zlib
 @testable import TextureStudio
 
 final class NativeTorchCheckpointTests: XCTestCase {
+    func testChannelLastAndContiguousSuffixViewsKeepEveryOriginalWord() throws {
+        let shape = [2, 3, 2, 2], strides = [12, 1, 6, 3]
+        let words = (0..<24).map { UInt32($0) | 0x80000000 }
+        let storage = words.withUnsafeBytes { Data($0) }
+        let archive = try fixture(tensors: [Tensor("weight", "FloatStorage", 24, 0, shape, strides, "0")], storages: ["0": storage])
+        let result = try NativeTorchCheckpoint.load(bytes: archive)
+        var expected = Data()
+        for outer in 0..<2 { for channel in 0..<3 { for y in 0..<2 { for x in 0..<2 {
+            expected.little(words[outer * 12 + channel + y * 6 + x * 3])
+        } } } }
+        XCTAssertEqual(result.tensors["weight"]?.bytes, expected)
+
+        // The last dimension stays contiguous while outer rows are transposed.
+        let suffix = try fixture(tensors: [Tensor("weight", "FloatStorage", 24, 0, [3, 2, 4], [4, 12, 1], "0")], storages: ["0": storage])
+        let reordered = try NativeTorchCheckpoint.load(bytes: suffix)
+        expected = Data()
+        for row in 0..<3 { for plane in 0..<2 { for inner in 0..<4 {
+            expected.little(words[row * 4 + plane * 12 + inner])
+        } } }
+        XCTAssertEqual(reordered.tensors["weight"]?.bytes, expected)
+    }
     func testStoredStateDictionaryPreservesFloatAndIntegerBitsAndModuleMetadata() throws {
         let float = Data([0, 0, 0, 128, 1, 0, 0, 0, 255, 255, 127, 63, 0, 0, 128, 63])
         let integer = Data([224, 0, 0, 0, 0, 0, 0, 0])

@@ -22,6 +22,8 @@ Height, roughness and normal training tensors are planar Float32 values obtained
 
 The source folder keeps its original compressed files. Only actual crops write generated PNGs beneath the source dataset's owned `.training-data/` directory. Preparation records the dataset revision, every sample metadata checksum, source dimensions, crop rectangle, precision and lossless round-trip evidence. No clone, hard link or duplicate full image is created.
 
+Preparation processes independent materials concurrently. Worker count is bounded by CPU count and a conservative source/crop memory estimate; each worker decodes an original map once for all its crops. The activity text reports completed materials and worker count. Cancellation stops and joins every writer before releasing dataset locks or removing incomplete staging files. Lossless PNG encoding preserves integer codes and verifies them after decoding.
+
 Native operations use advisory dataset locks and a durable metadata journal. Interrupted metadata writes recover only when both the prior revision and planned replacement checksum still match. A training operation holds shared locks on its prepared and original datasets; editing or deletion from another window becomes available after that training operation finishes.
 
 Cleanup checks the exact generated files against their manifests before removing them. It preserves newer source reviews and refuses unexpected files or symbolic links. Review reconstructs the selected grid from checksum-bound originals. Export Original copies and verifies the original compressed bytes independently of display contrast.

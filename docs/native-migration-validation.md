@@ -1,5 +1,7 @@
 # Native migration validation — 2026-10-09
 
+This report records the initial migration at build 104. [Build 105 performance and crash validation](performance-validation.md) supersedes its package and installation details.
+
 Texture Studio's current source, Xcode build, Makefile, CI, installer and Release bundle have no Python runtime dependency. Retired extraction, training, research and compatibility implementations were deleted. Swift ignore rules cover generated Xcode products and local data; no virtual environment was created.
 
 ## Native implementation

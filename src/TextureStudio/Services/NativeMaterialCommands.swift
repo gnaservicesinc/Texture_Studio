@@ -9,7 +9,7 @@ enum NativeMaterialCommands {
             guard let path = value(flag), !path.isEmpty else { throw StudioError("Missing native material operation argument: \(flag)") }
             return URL(fileURLWithPath: path)
         }
-        if let result = try await NativeMaterialDatasetService.run(arguments: arguments) { return result }
+        if let result = try await NativeMaterialDatasetService.run(arguments: arguments, onEvent: onEvent) { return result }
         switch arguments.first {
         case "checkpoint":
             let file = try url("--checkpoint"), expected = value("--expected-sha256")

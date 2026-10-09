@@ -225,7 +225,11 @@ final class NativeMaterialModel: @unchecked Sendable {
         private(set) var output: MPSGraphTensor!
         private(set) var parameterFeeds: [String: MPSGraphTensor] = [:]
         private(set) var parameters: [String: NativeTensor] = [:]
-        private let model: NativeMaterialModel
+        private let baseWeights: [String: NativeTensor]
+        private let layers: [String: AdapterLayer]
+        private let architecture: Architecture
+        private let freezesForTraining: Bool
+        private var optimizationProgram: Program?
         private var constants: [String: MPSGraphTensor] = [:]
         private(set) var targetInput: MPSGraphTensor?
         private(set) var loss: MPSGraphTensor?
@@ -237,12 +241,25 @@ final class NativeMaterialModel: @unchecked Sendable {
         private var learningRate: MPSGraphTensor?
         private var optimizerStep: MPSGraphTensor?
         private var executableCache: [String: MPSGraphExecutable] = [:]
-        init(model: NativeMaterialModel, width: Int, height: Int, target: String) throws {
+        private var frozenStages: [[(source: MPSGraphTensor, feed: MPSGraphTensor)]] = []
+        var frozenStageCount: Int { frozenStages.count + (optimizationProgram?.frozenStageCount ?? 0) }
+        var optimizerPrepared: Bool { learningRate != nil || optimizationProgram?.optimizerPrepared == true }
+        convenience init(model: NativeMaterialModel, width: Int, height: Int, target: String) throws {
+            try self.init(baseWeights: model.baseWeights, layers: model.layers, architecture: model.architecture,
+                adapters: model.adapterWeights, width: width, height: height, target: target, freezesForTraining: false)
+        }
+        private init(baseWeights: [String: NativeTensor], layers: [String: AdapterLayer], architecture: Architecture,
+                     adapters: [String: NativeTensor], width: Int, height: Int, target: String, freezesForTraining: Bool) throws {
             guard ["height", "roughness", "normal"].contains(target), width >= 64, height >= 64,
                   width % 64 == 0, height % 64 == 0 else { throw StudioError("Unsupported native material grid or target.") }
-            self.model = model; self.width = width; self.height = height; self.target = target
+            // Swift dictionaries/Data share immutable storage. The lazy
+            // optimizer graph neither copies the base bytes nor retains the
+            // owning model, which would form a cycle with its program cache.
+            self.baseWeights = baseWeights; self.layers = layers; self.architecture = architecture
+            self.freezesForTraining = freezesForTraining
+            self.width = width; self.height = height; self.target = target
             input = graph.placeholder(shape: [1, 3, height, width].ns, dataType: .float32, name: "native_rgb")
-            for (name, tensor) in model.adapterWeights {
+            for (name, tensor) in adapters {
                 parameters[name] = tensor
                 parameterFeeds[name] = graph.placeholder(shape: tensor.shape.ns, dataType: .float32, name: name)
             }
@@ -263,10 +280,10 @@ final class NativeMaterialModel: @unchecked Sendable {
         private func cat(_ tensors: [MPSGraphTensor], _ axis: Int) -> MPSGraphTensor { graph.concatTensors(tensors, dimension: axis, name: nil) }
         private func tensor(_ name: String, shape required: [Int]? = nil) throws -> MPSGraphTensor {
             if let value = constants[name] { return value }
-            guard let weight = model.baseWeights[name], required == nil || weight.shape == required else { throw StudioError("Material model tensor missing or shape differs: \(name)") }
+            guard let weight = baseWeights[name], required == nil || weight.shape == required else { throw StudioError("Material model tensor missing or shape differs: \(name)") }
             let dtype: MPSDataType = weight.dtype == "I64" ? .int64 : weight.dtype == "I32" ? .int32 : .float32
             var value = graph.constant(weight.bytes, shape: weight.shape.ns, dataType: dtype)
-            if name.hasSuffix(".weight"), let spec = model.layers[String(name.dropLast(7))] {
+            if name.hasSuffix(".weight"), let spec = layers[String(name.dropLast(7))] {
                 let layer = String(name.dropLast(7))
                 guard let a = parameterFeeds[layer + ".lora_A"], let b = parameterFeeds[layer + ".lora_B"] else { throw StudioError("Missing material LoRA factors.") }
                 value = add(value, reshape(mul(graph.matrixMultiplication(primary: b, secondary: a, name: nil), c(Double(spec.alpha / Float(spec.rank)))), weight.shape))
@@ -274,25 +291,25 @@ final class NativeMaterialModel: @unchecked Sendable {
             constants[name] = value; return value
         }
         private func conv(_ value: MPSGraphTensor, _ name: String, stride: Int = 1, padding: Int? = nil, groups: Int = 1) throws -> MPSGraphTensor {
-            guard let weight = model.baseWeights[name + ".weight"], weight.dtype == "F32", weight.shape.count == 4,
+            guard let weight = baseWeights[name + ".weight"], weight.dtype == "F32", weight.shape.count == 4,
                   shape(value)[1] == weight.shape[1] * groups else { throw StudioError("Invalid learned material convolution: \(name)") }
             let descriptor = MPSGraphConvolution2DOpDescriptor(strideInX: stride, strideInY: stride, dilationRateInX: 1, dilationRateInY: 1,
                 groups: groups, paddingLeft: padding ?? weight.shape[3] / 2, paddingRight: padding ?? weight.shape[3] / 2,
                 paddingTop: padding ?? weight.shape[2] / 2, paddingBottom: padding ?? weight.shape[2] / 2,
                 paddingStyle: .explicit, dataLayout: .NCHW, weightsLayout: .OIHW)!
             var result = graph.convolution2D(value, weights: try tensor(name + ".weight"), descriptor: descriptor, name: name)
-            if let bias = model.baseWeights[name + ".bias"] {
+            if let bias = baseWeights[name + ".bias"] {
                 guard bias.shape == [weight.shape[0]], bias.dtype == "F32" else { throw StudioError("Invalid material convolution bias.") }
                 result = add(result, reshape(try tensor(name + ".bias"), [1, weight.shape[0], 1, 1]))
             }
             return result
         }
         private func linear(_ value: MPSGraphTensor, _ name: String, explicitBias: MPSGraphTensor? = nil) throws -> MPSGraphTensor {
-            guard let weight = model.baseWeights[name + ".weight"], weight.dtype == "F32", weight.shape.count == 2,
+            guard let weight = baseWeights[name + ".weight"], weight.dtype == "F32", weight.shape.count == 2,
                   shape(value).last == weight.shape[1] else { throw StudioError("Invalid learned material linear layer: \(name)") }
             var result = graph.matrixMultiplication(primary: value, secondary: permute(try tensor(name + ".weight"), [1, 0]), name: name)
             if let explicitBias { result = add(result, explicitBias) }
-            else if model.baseWeights[name + ".bias"] != nil { result = add(result, try tensor(name + ".bias", shape: [weight.shape[0]])) }
+            else if baseWeights[name + ".bias"] != nil { result = add(result, try tensor(name + ".bias", shape: [weight.shape[0]])) }
             return result
         }
         private func norm(_ value: MPSGraphTensor, _ name: String, epsilon: Double) throws -> MPSGraphTensor {
@@ -332,7 +349,7 @@ final class NativeMaterialModel: @unchecked Sendable {
             return reshape(permute(reshape(value, [1, height / 8, width / 8, 8, 8, channels]), [0, 1, 3, 2, 4, 5]), [1, height, width, channels])
         }
         private func swin(_ value: MPSGraphTensor, _ prefix: String, shifted: Bool) throws -> MPSGraphTensor {
-            let s = shape(value), h = s[1], w = s[2], channels = s[3], heads = model.architecture.heads
+            let s = shape(value), h = s[1], w = s[2], channels = s[3], heads = architecture.heads
             var x = shifted ? roll(roll(value, axis: 1, shift: -4), axis: 2, shift: -4) : value
             x = windows(x)
             let bias = cat([try tensor(prefix + ".msa.q_bias", shape: [channels]), graph.constant(0, shape: [channels].ns, dataType: .float32), try tensor(prefix + ".msa.v_bias", shape: [channels])], 0)
@@ -384,10 +401,7 @@ final class NativeMaterialModel: @unchecked Sendable {
             return add(value, try conv(cat([convolution, permute(transformer, [0, 3, 2, 1])], 1), prefix + ".conv1_2", padding: 0))
         }
         private func up2(_ value: MPSGraphTensor) -> MPSGraphTensor {
-            let s = shape(value)
-            let expanded = reshape(value, [s[0], s[1], s[2], 1, s[3], 1])
-            let tiled = graph.tileTensor(expanded, withMultiplier: [1, 1, 1, 2, 1, 2].ns, name: nil)
-            return reshape(tiled, [s[0], s[1], s[2] * 2, s[3] * 2])
+            NativeGraphExecution.nearestNeighbor2(value, graph: graph)
         }
         private func decode(_ body: MPSGraphTensor, _ skips: [MPSGraphTensor], _ branch: Int) throws -> MPSGraphTensor {
             var x = body
@@ -396,7 +410,7 @@ final class NativeMaterialModel: @unchecked Sendable {
                 x = add(x, skips[level - 1])
                 x = leaky(try conv(up2(x), prefix + ".0.up.1"))
                 x = leaky(try conv(x, prefix + ".0.up.3"))
-                for i in 0..<model.architecture.decoderBlocks {
+                for i in 0..<architecture.decoderBlocks {
                     x = try block(x, prefix + ".\(i + 1)", shifted: i % 2 == 1)
                 }
             }
@@ -411,8 +425,10 @@ final class NativeMaterialModel: @unchecked Sendable {
             return add(value, mul(x5, c(0.2)))
         }
         private func build(_ value: MPSGraphTensor) throws -> MPSGraphTensor {
-            let specification = model.architecture
-            let initial = try conv(value, "gen.m_head")
+            let specification = architecture
+            let branch = ["normal": 1, "roughness": 2, "height": 3][target]!
+            let adaptingGenerator = layers.keys.contains { $0.hasPrefix("gen.") }
+            var initial = try conv(value, "gen.m_head")
             var x = initial, skips: [MPSGraphTensor] = []
             for level in 1...3 {
                 let prefix = "gen.m_enc.m_down\(level)"
@@ -421,7 +437,26 @@ final class NativeMaterialModel: @unchecked Sendable {
                 skips.append(x)
             }
             for i in 0..<specification.encoderBlocks { x = try block(x, "gen.m_body.\(i)", shifted: i % 2 == 1) }
-            let decoded = try (0..<4).map { try decode(x, skips, $0) }
+            // Frozen features cross a GPU tensor boundary. MPSGraph has no
+            // public stopGradient API; a new placeholder disconnects only the
+            // weights known to contain no adapters, without CPU readback.
+            let encoderFrozen = freezesForTraining && adaptingGenerator && !layers.keys.contains {
+                $0.hasPrefix("gen.m_head") || $0.hasPrefix("gen.m_enc.") || $0.hasPrefix("gen.m_body.")
+            }
+            if encoderFrozen {
+                let features = freeze([initial] + skips + [x], name: "frozen_encoder")
+                initial = features[0]; skips = Array(features[1...3]); x = features[4]
+            }
+            var decoded = try (0..<4).map { try decode(x, skips, $0) }
+            if encoderFrozen {
+                let frozen = (0..<4).filter { index in
+                    !layers.keys.contains { $0.hasPrefix("gen.m_dec_\(index).") }
+                }
+                if !frozen.isEmpty {
+                    let features = freeze(frozen.map { decoded[$0] }, name: "frozen_decoders")
+                    for (offset, index) in frozen.enumerated() { decoded[index] = features[offset] }
+                }
+            }
             let concatenated = cat(decoded, 1)
             x = try conv(concatenated, "gen.m_fuse.0")
             for i in 0..<specification.fusionBlocks { x = try block(x, "gen.m_fuse.\(i + 1)", shifted: i % 2 == 1) }
@@ -429,8 +464,11 @@ final class NativeMaterialModel: @unchecked Sendable {
             let generator = try (0..<4).map { branch in
                 try conv(add(slice(x, 1, branch * specification.dim, specification.dim), initial), "gen.m_tail_\(branch).0")
             }
-            x = cat([value, cat(generator, 1)], 1)
-            let branch = ["normal": 1, "roughness": 2, "height": 3][target]!
+            var generatorFeatures = cat(generator, 1)
+            if freezesForTraining && !adaptingGenerator && !layers.isEmpty {
+                generatorFeatures = freeze([generatorFeatures], name: "frozen_generator")[0]
+            }
+            x = cat([value, generatorFeatures], 1)
             let prefix = "ups.\(branch).model"
             x = try conv(x, prefix + ".0")
             let residual = x
@@ -444,15 +482,30 @@ final class NativeMaterialModel: @unchecked Sendable {
             for index in [3, 6, 8] { x = leaky(try conv(x, prefix + ".\(index)")) }
             return try conv(x, prefix + ".10")
         }
+        private func freeze(_ sources: [MPSGraphTensor], name: String) -> [MPSGraphTensor] {
+            let stage = sources.enumerated().map { index, source in
+                (source: source, feed: graph.placeholder(shape: source.shape, dataType: .float32, name: "\(name)_\(index)"))
+            }
+            frozenStages.append(stage)
+            return stage.map(\.feed)
+        }
         struct Execution { let output: [Float]; let loss: Float?, valueLoss: Float?, gradientLoss: Float?; let updated: [String: NativeTensor]; let optimizerState: [String: NativeTensor] }
         func execute(rgb: [Float], adapters: [String: NativeTensor], reference: [Float]? = nil,
                      learningRate: Float? = nil, step: Int = 1, optimizerState: [String: NativeTensor] = [:]) throws -> Execution {
+            if reference != nil, learningRate != nil, !freezesForTraining {
+                if optimizationProgram == nil {
+                    optimizationProgram = try Program(baseWeights: baseWeights, layers: layers, architecture: architecture,
+                        adapters: parameters, width: width, height: height, target: target, freezesForTraining: true)
+                }
+                return try optimizationProgram!.execute(rgb: rgb, adapters: adapters, reference: reference,
+                    learningRate: learningRate, step: step, optimizerState: optimizerState)
+            }
             var feeds: [MPSGraphTensor: MPSGraphTensorData] = [:]
             feeds[input] = try NativeGraphExecution.tensorData(.floats(rgb, shape: [1, 3, height, width]))
             for (name, placeholder) in parameterFeeds { feeds[placeholder] = try NativeGraphExecution.tensorData(adapters[name]!) }
             var targets = [output!]
             if let reference {
-                try prepareTraining()
+                try prepareLoss()
                 guard reference.count == width * height * (target == "normal" ? 3 : 1), reference.allSatisfy(\.isFinite) else { throw StudioError("Native training target grid or values are invalid.") }
                 feeds[targetInput!] = try NativeGraphExecution.tensorData(.floats(reference, shape: shape(output)))
                 targets += [loss!, valueLoss!, gradientLoss!]
@@ -460,6 +513,7 @@ final class NativeMaterialModel: @unchecked Sendable {
             let optimize = reference != nil && learningRate != nil
             var ordered: [String] = []
             if optimize {
+                try prepareOptimizer()
                 guard let learningRate, learningRate.isFinite, learningRate > 0 else { throw StudioError("Invalid learning rate.") }
                 feeds[self.learningRate!] = try NativeGraphExecution.tensorData(.floats([learningRate], shape: []))
                 feeds[optimizerStep!] = try NativeGraphExecution.tensorData(.floats([Float(step)], shape: []))
@@ -470,6 +524,10 @@ final class NativeMaterialModel: @unchecked Sendable {
                 }
                 ordered = optimizerOutputs.keys.sorted()
                 targets += ordered.map { optimizerOutputs[$0]! }
+            }
+            for stage in frozenStages {
+                let data = try NativeGraphExecution.runData(graph, feeds: feeds, targets: stage.map(\.source), cache: &executableCache)
+                for (index, feature) in stage.enumerated() { feeds[feature.feed] = data[index] }
             }
             let result = try NativeGraphExecution.run(graph, feeds: feeds, targets: targets, cache: &executableCache)
             guard result[0].allSatisfy(\.isFinite), reference == nil || result[1][0].isFinite else { throw StudioError("Material model produced nonfinite values; weights remain untouched.") }
@@ -484,9 +542,8 @@ final class NativeMaterialModel: @unchecked Sendable {
             }
             return Execution(output: result[0], loss: reference == nil ? nil : result[1][0], valueLoss: reference == nil ? nil : result[2][0], gradientLoss: reference == nil ? nil : result[3][0], updated: updated, optimizerState: state)
         }
-        private func prepareTraining() throws {
+        private func prepareLoss() throws {
             if targetInput != nil { return }
-            guard !parameterFeeds.isEmpty else { throw StudioError("Native training needs recorded material LoRA layers.") }
             let reference = graph.placeholder(shape: output.shape, dataType: .float32, name: "native_linear_target")
             targetInput = reference
             let axes = [0, 1, 2, 3].ns
@@ -500,6 +557,11 @@ final class NativeMaterialModel: @unchecked Sendable {
                 detail = add(detail, div(term, c(Double(step))))
             } }
             valueLoss = absolute; gradientLoss = detail; loss = add(absolute, mul(detail, c(4)))
+        }
+        private func prepareOptimizer() throws {
+            if optimizerPrepared { return }
+            guard !parameterFeeds.isEmpty else { throw StudioError("Native training needs recorded material LoRA layers.") }
+            try prepareLoss()
             let allParameters = parameterFeeds.keys.sorted()
             let derivative = graph.gradients(of: loss!, with: allParameters.map { parameterFeeds[$0]! }, name: "material_lora_gradients")
             var normSquared = c(0)
@@ -532,6 +594,16 @@ final class NativeMaterialModel: @unchecked Sendable {
 }
 
 enum NativeGraphExecution {
+    static func nearestNeighbor2(_ value: MPSGraphTensor, graph: MPSGraph) -> MPSGraphTensor {
+        let shape = value.shape!.map(\.intValue)
+        let expanded = graph.reshape(value, shape: [shape[0], shape[1], shape[2], 1, shape[3], 1].ns, name: nil)
+        // MPSGraphTileOp has no autodiff implementation. Concatenating the
+        // singleton axes repeats the exact same nearest-neighbor samples,
+        // while its derivative sums both copies back into the source.
+        let rows = graph.concatTensors([expanded, expanded], dimension: 3, name: nil)
+        let samples = graph.concatTensors([rows, rows], dimension: 5, name: nil)
+        return graph.reshape(samples, shape: [shape[0], shape[1], shape[2] * 2, shape[3] * 2].ns, name: nil)
+    }
     static func tensorData(_ value: NativeTensor) throws -> MPSGraphTensorData {
         guard let device = MTLCreateSystemDefaultDevice() else { throw StudioError("Metal is unavailable for native material inference.") }
         return MPSGraphTensorData(device: MPSGraphDevice(mtlDevice: device), data: value.bytes, shape: value.shape.ns, dataType: .float32)
@@ -541,6 +613,16 @@ enum NativeGraphExecution {
         return try run(graph, feeds: feeds, targets: targets, cache: &cache)
     }
     static func run(_ graph: MPSGraph, feeds: [MPSGraphTensor: MPSGraphTensorData], targets: [MPSGraphTensor], cache: inout [String: MPSGraphExecutable]) throws -> [[Float]] {
+        let result = try runData(graph, feeds: feeds, targets: targets, cache: &cache)
+        return result.map { value in
+            let count = value.shape.reduce(1) { $0 * $1.intValue }
+            var values = [Float](repeating: 0, count: count)
+            values.withUnsafeMutableBytes { value.mpsndarray().readBytes($0.baseAddress!, strideBytes: nil) }
+            return values
+        }
+    }
+    /// Retains frozen intermediate features on the GPU between graph stages.
+    static func runData(_ graph: MPSGraph, feeds: [MPSGraphTensor: MPSGraphTensorData], targets: [MPSGraphTensor], cache: inout [String: MPSGraphExecutable]) throws -> [MPSGraphTensorData] {
         try Task.checkCancellation()
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else { throw StudioError("Metal is unavailable for native material computation.") }
         let key = targets.map { String(describing: ObjectIdentifier($0)) }.joined(separator: "|")
@@ -556,11 +638,14 @@ enum NativeGraphExecution {
         let executionInputs = executable.feedTensors!.map { feeds[$0]! }
         let result = executable.run(with: queue, inputs: executionInputs, results: nil, executionDescriptor: nil)
         try Task.checkCancellation()
-        return result.map { value in
-            let count = value.shape.reduce(1) { $0 * $1.intValue }
-            var values = [Float](repeating: 0, count: count)
-            values.withUnsafeMutableBytes { value.mpsndarray().readBytes($0.baseAddress!, strideBytes: nil) }
-            return values
+        guard let compiledTargets = executable.targetTensors, compiledTargets.count == result.count else {
+            throw StudioError("Native material graph returned incomplete result identities.")
+        }
+        var byTensor: [MPSGraphTensor: MPSGraphTensorData] = [:]
+        for (index, tensor) in compiledTargets.enumerated() { byTensor[tensor] = result[index] }
+        return try targets.map { tensor in
+            guard let value = byTensor[tensor] else { throw StudioError("Native material graph omitted a requested result.") }
+            return value
         }
     }
 }

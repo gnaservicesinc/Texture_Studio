@@ -1,7 +1,7 @@
 CONFIGURATION ?= Release
 DERIVED_DATA ?= $(CURDIR)/build/TextureStudio
 DESTDIR ?= /
-XCODE_PROJECT := native/TextureStudio/TextureStudio.xcodeproj
+XCODE_PROJECT := src/TextureStudio/TextureStudio.xcodeproj
 XCODE_SCHEME := TextureStudio
 APP_BUNDLE := $(DERIVED_DATA)/Build/Products/$(CONFIGURATION)/Texture Studio.app
 XCODEBUILD = xcodebuild -project "$(XCODE_PROJECT)" -scheme "$(XCODE_SCHEME)" \

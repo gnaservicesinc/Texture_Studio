@@ -45,7 +45,7 @@ fi
 while read -r PID EXECUTABLE; do
   if [[ "$EXECUTABLE" == "$APP_BINARY" ]]; then kill "$PID" 2>/dev/null || true; fi
 done < <(/bin/ps -axo pid=,comm=)
-/usr/bin/xcodebuild -project "$ROOT_DIR/native/TextureStudio/TextureStudio.xcodeproj" \
+/usr/bin/xcodebuild -project "$ROOT_DIR/src/TextureStudio/TextureStudio.xcodeproj" \
   -scheme TextureStudio -configuration "$CONFIGURATION" -destination 'platform=macOS,arch=arm64' \
   -derivedDataPath "$DERIVED_DATA" build
 "$ROOT_DIR/script/stage_material_apps.sh" "$PARENT_APP"

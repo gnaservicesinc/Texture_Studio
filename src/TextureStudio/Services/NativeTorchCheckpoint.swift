@@ -101,17 +101,37 @@ enum NativeTorchCheckpoint {
             return storage.subdata(in: start..<start + byteCount)
         }
         var output = Data(count: byteCount)
+        // Copy contiguous suffixes in bulk. Walk the remaining dimensions with
+        // an odometer so channel-last weights need no division per scalar.
+        var outerDimensions = tensor.shape.count, blockElements = 1
+        while outerDimensions > 0 {
+            let axis = outerDimensions - 1
+            if tensor.shape[axis] > 1, tensor.stride[axis] != blockElements { break }
+            blockElements = try multiplied(blockElements, tensor.shape[axis])
+            outerDimensions -= 1
+        }
+        let blockBytes = try multiplied(blockElements, width), blocks = count / blockElements
+        let byteStrides = try tensor.shape.indices.prefix(outerDimensions).map { axis in
+            try multiplied(tensor.shape[axis] > 1 ? tensor.stride[axis] : 0, width)
+        }
         try output.withUnsafeMutableBytes { destination in
             try storage.withUnsafeBytes { source in
-                for linear in 0..<count {
-                    if linear & 0x3ffff == 0 { try Task.checkCancellation() }
-                    var remaining = linear, index = tensor.offset
-                    for axis in tensor.shape.indices.reversed() {
-                        let coordinate = remaining % tensor.shape[axis]
-                        remaining /= tensor.shape[axis]
-                        index += coordinate * tensor.stride[axis]
+                var coordinates = [Int](repeating: 0, count: outerDimensions)
+                var sourceOffset = try multiplied(tensor.offset, width)
+                for block in 0..<blocks {
+                    if block & 0x3ffff == 0 { try Task.checkCancellation() }
+                    destination.baseAddress!.advanced(by: block * blockBytes).copyMemory(
+                        from: source.baseAddress!.advanced(by: sourceOffset), byteCount: blockBytes)
+                    if block + 1 == blocks { break }
+                    for axis in (0..<outerDimensions).reversed() {
+                        coordinates[axis] += 1
+                        if coordinates[axis] < tensor.shape[axis] {
+                            sourceOffset += byteStrides[axis]
+                            break
+                        }
+                        coordinates[axis] = 0
+                        sourceOffset -= (tensor.shape[axis] - 1) * byteStrides[axis]
                     }
-                    destination.baseAddress!.advanced(by: linear * width).copyMemory(from: source.baseAddress!.advanced(by: index * width), byteCount: width)
                 }
             }
         }
