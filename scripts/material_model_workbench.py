@@ -80,6 +80,7 @@ def checkpoint_information(path: Path, configuration: dict, checksum: str) -> di
             "supports_training_warm_start": True, "supports_studio_inference": True,
             "refinement_policy": "native_material_lora", "base": configuration["base"],
             "training_size": configuration.get("training_size"), "scope": configuration.get("scope"),
+            "validation": configuration.get("validation"),
             "model_directory": str(path.parent) if (path.parent / "source").is_dir() else None,
             "code_directory": str(path.parent / "source") if (path.parent / "source").is_dir() else None}
 
@@ -298,6 +299,34 @@ class TrainingAborted(Exception):
     """An immediate stop must not produce a new checkpoint."""
 
 
+def validation_check(model, checks, cache, target, size, seed, device, *, limit=0, step=0) -> dict:
+    """Evaluate the configured extra crops; never substitute training images."""
+    selected = list(checks)
+    if limit and len(selected) > limit:
+        selected = random.Random(f"validation/{seed}/{step}").sample(selected, limit)
+    result = {"step": step, "scope": "full" if len(selected) == len(checks) else "quick",
+              "sample_count": len(selected), "pool_count": len(checks), "samples": [],
+              "metric": "mean_absolute_error_native_code_fraction", "validation_scope": "known_subject_diagnostic" if checks and checks[0]["metadata"].get("validation_scope") == "known_subject_diagnostic" else "held_out", "status": "unavailable"}
+    was_training = model.training
+    try:
+        model.eval()
+        with torch.no_grad():
+            for pair in selected:
+                sample = pair["metadata"]["sample_id"]
+                pair = select_input_variant(pair, random.Random(f"validation-input/{seed}/{sample}"))
+                rgb, reference, _rectangle = crop_pair(*cache.load(pair), size, random.Random(seed), whole_maps=True)
+                prediction = predicted(model, rgb.to(device), target)
+                error = float((prediction - reference.to(device)).abs().mean().cpu())
+                if not math.isfinite(error) or error <= 0:
+                    raise ValueError(f"Validation error for {sample} is nonfinite or exactly zero; inspect the model and reference data")
+                result["samples"].append({"sample_id": sample, "mae": error})
+        if selected:
+            result.update(status="checked", mae=sum(item["mae"] for item in result["samples"]) / len(selected))
+        return result
+    finally:
+        model.train(was_training)
+
+
 def train(args) -> dict:
     selected_path = selected_config = selected_tensors = checksum = None
     if args.checkpoint:
@@ -311,6 +340,10 @@ def train(args) -> dict:
     if args.updates_per_map < 1 or not math.isfinite(args.max_minutes) or args.max_minutes <= 0 or not math.isfinite(args.learning_rate) or args.learning_rate <= 0:
         raise ValueError("Updates, time limit and learning rate must be positive")
     training, checks, identity = select_pairs(args.dataset, args.material, expected_size=args.size, target=args.target)
+    from material_native_size import validation_settings
+    validation = validation_settings(identity.get("validation_settings"))
+    if args.validation_every < 1 or args.checkpoint_every < 0:
+        raise ValueError("Quick-check frequency must be positive; checkpoint frequency must be nonnegative")
     if args.output.exists() and any(args.output.iterdir()):
         raise ValueError("Choose a new run folder")
     args.output.mkdir(parents=True, exist_ok=True)
@@ -347,6 +380,7 @@ def train(args) -> dict:
         model.ups[lora.TARGET_BRANCH[args.target]].material_gradient_checkpointing = True
     optimizer = torch.optim.AdamW(parameters, lr=args.learning_rate, weight_decay=0)
     started, stop_requested, completed = time.monotonic(), False, 0
+    checkpoint_requested = False
     training_started = False
     previous_signals = {}
     def stop(_number, _frame):
@@ -357,13 +391,46 @@ def train(args) -> dict:
         print(json.dumps({"event": "stopping", "message": "Finishing this update and saving the material adapter"}), flush=True)
     def abort(_number, _frame):
         raise TrainingAborted("Training aborted without saving a new checkpoint")
+    def request_checkpoint(_number, _frame):
+        nonlocal checkpoint_requested
+        checkpoint_requested = True
+        print(json.dumps({"event": "checkpoint_queued", "message": "Full validation and checkpoint queued after this update"}), flush=True)
+    previous_signals[signal.SIGUSR1] = signal.signal(signal.SIGUSR1, request_checkpoint)
     previous_signals[signal.SIGINT] = signal.signal(signal.SIGINT, stop)
     previous_signals[signal.SIGTERM] = signal.signal(signal.SIGTERM, abort)
     report = {"status": "running", "dataset": identity, "training_size": args.size, "target": args.target,
-              "training_performed": True, "training_input_dimensions": [args.size, args.size],
-              "image_padding": False, "image_resizing": False, "steps": []}
+              "training_performed": False, "training_input_dimensions": [args.size, args.size],
+              "image_padding": False, "image_resizing": False, "steps": [], "validation_settings": validation,
+              "validation_history": [], "checkpoints": []}
+    def check(full=False):
+        result = validation_check(model, checks, cache, args.target, args.size, args.seed, device,
+                                  limit=0 if full else validation["quick_count"], step=step + completed)
+        report["validation_history"].append(result)
+        if len(report["validation_history"]) > 200:
+            del report["validation_history"][:-200]
+        with (args.output / "validation.jsonl").open("a") as stream:
+            stream.write(json.dumps(result, allow_nan=False) + "\n")
+        print(json.dumps(dict({k: v for k, v in result.items() if k != "samples"}, event="validation"), allow_nan=False), flush=True)
+        return result
+    def save_checkpoint():
+        if report.get("last_checkpoint_step") == step + completed:
+            return report["last_full_validation"]
+        result = check(full=True)
+        configuration = dict(configuration_for(model, args, base, step + completed), validation=result)
+        values, specs = lora.adapter_state(model)
+        path = args.output / f"checkpoint-step-{step + completed:08d}.safetensors"
+        lora.save_tensors(path, values, dict(configuration, layers=specs))
+        info = checkpoint_information(path.resolve(), configuration, sha256(path))
+        report["checkpoints"].append(info)
+        report.update(last_checkpoint_step=step + completed, last_full_validation=result)
+        if result["status"] == "checked" and result["mae"] < report.get("best_validation_mae", float("inf")):
+            report.update(best_validation_mae=result["mae"], best_checkpoint_path=str(path.resolve()))
+        write_json(args.output / "run.json", report)
+        print(json.dumps(dict(info, event="checkpoint_saved", validation={k: v for k, v in result.items() if k != "samples"})), flush=True)
+        return result
     try:
         write_json(args.output / "run.json", report)
+        report["baseline_validation"] = check()
         rng = random.Random(args.seed)
         for epoch in range(args.updates_per_map):
             if stop_requested:
@@ -380,12 +447,15 @@ def train(args) -> dict:
                     print(json.dumps({"event": "training_started", "message": "Training updates have started"}), flush=True)
                 prediction = predicted(model, rgb, args.target)
                 loss, metrics = height_loss(prediction, reference, margin=0)
+                if not torch.isfinite(loss) or float(loss.detach().cpu()) <= 0:
+                    raise ValueError("Training error is nonfinite or exactly zero; stopped before updating material weights")
                 loss.backward()
                 gradient_norm = torch.nn.utils.clip_grad_norm_(parameters, 1)
                 if not torch.isfinite(gradient_norm):
                     raise ValueError("Nonfinite gradient; stopped before updating material weights")
                 optimizer.step()
                 completed += 1
+                report["training_performed"] = True
                 event = {"event": "update", "step": step + completed, "epoch": epoch + 1,
                          "sample": training[index]["metadata"]["sample_id"], "source_rectangle": rectangle,
                          "diffuse_variant_id": pair.get("input_variant", {}).get("variant_id"),
@@ -403,16 +473,18 @@ def train(args) -> dict:
                 report["updates_log"] = str((args.output / "updates.jsonl").resolve())
                 print(json.dumps(event, allow_nan=False), flush=True)
                 del rgb, reference, prediction, loss
-                if completed % 20 == 0:
-                    values, specs = lora.adapter_state(model)
-                    lora.save_tensors(args.output / "checkpoint.latest.safetensors", values,
-                                      dict(configuration_for(model, args, base, step + completed), layers=specs))
+                if checkpoint_requested or (args.checkpoint_every and completed % args.checkpoint_every == 0):
+                    checkpoint_requested = False
+                    save_checkpoint()
+                elif completed % args.validation_every == 0:
+                    check()
                     write_json(args.output / "run.json", report)
                 if stop_requested or time.monotonic() - started >= args.max_minutes * 60:
                     break
             if stop_requested or time.monotonic() - started >= args.max_minutes * 60:
                 break
-        configuration = configuration_for(model, args, base, step + completed)
+        report["final_validation"] = save_checkpoint()
+        configuration = dict(configuration_for(model, args, base, step + completed), validation=report["final_validation"])
         result = export_model(model, configuration, args.output / "export", args.developer_mode, source)
         (args.output / "checkpoint.latest.safetensors").unlink(missing_ok=True)
         report.update(result, status="stopped" if stop_requested else "completed", completed_updates=completed,
@@ -801,6 +873,8 @@ def parser():
             p.add_argument("--lora-rank", type=int, choices=(1, 2, 4, 8, 16, 32), default=8)
             p.add_argument("--lora-alpha", type=float, default=8)
             p.add_argument("--check-count", type=int, default=3)
+            p.add_argument("--validation-every", type=int, default=20, help="Updates between quick validation checks")
+            p.add_argument("--checkpoint-every", type=int, default=0, help="Updates between full validation and saved checkpoints; 0 saves on request and at the end")
             p.add_argument("--seed", type=int, default=17)
             p.add_argument("--device", choices=("cpu", "mps"), default="mps" if torch.backends.mps.is_available() else "cpu")
             p.add_argument("--download", action="store_true")

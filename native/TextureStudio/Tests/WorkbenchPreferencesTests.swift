@@ -210,7 +210,7 @@ final class WorkbenchPreferencesTests: XCTestCase {
         var document: [String: Any] = ["dataset_path": path, "index_sha256": prepared ? "prepared-sha" : "source-sha",
             "materials": [["material_id": "soil", "samples": samples]]]
         if prepared {
-            document["automatic_validation"] = ["policy": "source-family-native-regions-v1", "material_ids": ["soil"]]
+            document["automatic_validation"] = ["policy": "subject-extra-crops-v2", "material_ids": ["soil"]]
             document["preparation"] = ["source_dataset_path": source, "source_index_sha256": "source-sha",
                 "prepared_dataset_path": path, "crop_size": size, "reused": true, "target_resized": false,
                 "original_dataset_modified": false, "split_lineage_changed": true]

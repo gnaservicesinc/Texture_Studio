@@ -398,7 +398,7 @@ def test_management_cli_is_one_json_object_for_create_edit_import_remove_and_del
     assert deletion["trash_paths"] == [str(path)]
 
 
-def test_manual_validation_choice_survives_automatic_preparation_and_cache_cleanup(tmp_path):
+def test_legacy_crop_holdout_becomes_training_without_losing_review(tmp_path):
     path = tmp_path / "dataset"
     create(path)
     first = add(path, maps(tmp_path / "originals"))
@@ -410,15 +410,15 @@ def test_manual_validation_choice_survives_automatic_preparation_and_cache_clean
     after = workbench.dataset_info(args(dataset=path, review_size=256))
     prepared = workbench.prepare_size(args(dataset=path, size=256, automatic_validation=True,
         expected_index_sha256=after["index_sha256"], expected_review_sha256=after["review_sha256"]))
-    assert prepared["materials"][0]["samples"][0]["split"] == "validation"
-    assert prepared["automatic_validation"]["source_family_ids"] == ["surface"]
+    assert prepared["materials"][0]["samples"][0]["split"] == "train"
+    assert prepared["automatic_validation"]["source_family_ids"] == []
     workbench.cleanup_size(args(dataset=Path(prepared["dataset_path"])))
     repeated = workbench.prepare_size(args(dataset=path, size=256, automatic_validation=True,
                                          expected_index_sha256=after["index_sha256"]))
-    assert repeated["materials"][0]["samples"][0]["split"] == "validation"
+    assert repeated["materials"][0]["samples"][0]["split"] == "train"
 
 
-def test_manual_assignment_propagates_across_resolution_siblings_to_prevent_leakage(tmp_path):
+def test_legacy_assignments_cannot_remove_resolution_siblings_from_training(tmp_path):
     path = tmp_path / "dataset"
     create(path)
     add(path, maps(tmp_path / "low", size=256), name="Same family")
@@ -429,10 +429,10 @@ def test_manual_assignment_propagates_across_resolution_siblings_to_prevent_leak
         note=None, review_size=256, expected_index_sha256=selected["index_sha256"],
         expected_review_sha256=selected["review_sha256"]))
     after = workbench.dataset_info(args(dataset=path, review_size=256))
-    assert all(sample["split"] == "validation" for material in after["materials"] for sample in material["samples"])
+    assert all(sample["split"] == "train" for material in after["materials"] for sample in material["samples"])
     prepared = workbench.prepare_size(args(dataset=path, size=256, automatic_validation=True,
         expected_index_sha256=after["index_sha256"], expected_review_sha256=after["review_sha256"]))
-    assert all(sample["split"] == "validation" for material in prepared["materials"] for sample in material["samples"])
+    assert all(sample["split"] == "train" for material in prepared["materials"] for sample in material["samples"])
 
 
 def test_manual_region_assignment_survives_automatic_assignment_without_overlapping_pixels(tmp_path, monkeypatch):
@@ -511,7 +511,7 @@ def test_restoring_exact_originals_preserves_their_review(tmp_path):
     workbench.remove_material(args(dataset=path, material=selected["materials"][0]["material_id"], expected_index_sha256=None))
     restored = add(path, original_maps, review_size=256)
     sample = restored["materials"][0]["samples"][0]
-    assert sample["status"] == "approved" and sample["note"] == "Verified original" and sample["split"] == "validation"
+    assert sample["status"] == "approved" and sample["note"] == "Verified original" and sample["split"] == "train"
 
 
 def test_dead_preparation_stage_does_not_trap_dataset_deletion(tmp_path):
@@ -558,11 +558,11 @@ def test_editing_original_below_selected_grid_persists_to_eligible_training_size
         expected_review_sha256=selected["review_sha256"]))
     eligible = workbench.dataset_info(args(dataset=path, review_size=256))
     sample = eligible["materials"][0]["samples"][0]
-    assert sample["split"] == "validation" and sample["status"] == "approved"
+    assert sample["split"] == "train" and sample["status"] == "approved"
     assert sample["note"] == "User edited the original material"
     prepared = workbench.prepare_size(args(dataset=path, size=256, automatic_validation=True,
                                           expected_index_sha256=eligible["index_sha256"]))
-    assert prepared["materials"][0]["samples"][0]["split"] == "validation"
+    assert prepared["materials"][0]["samples"][0]["split"] == "train"
 
 
 def test_new_source_review_survives_cleanup_of_older_unchanged_prepared_cache(tmp_path):
@@ -579,7 +579,7 @@ def test_new_source_review_survives_cleanup_of_older_unchanged_prepared_cache(tm
     prepared = workbench.prepare_size(args(dataset=path, size=256, automatic_validation=True,
         expected_index_sha256=current["index_sha256"], expected_review_sha256=current["review_sha256"]))
     sample = prepared["materials"][0]["samples"][0]
-    assert sample["status"] == "approved" and sample["split"] == "validation"
+    assert sample["status"] == "approved" and sample["split"] == "train"
     assert sample["note"] == "New source-side review wins"
     assert not Path(old["dataset_path"]).exists()
 
@@ -647,11 +647,11 @@ def test_nested_folder_preview_import_resolution_and_preparation_share_exact_pla
         maps(root / name / 'nested', size=512, provider=True, family=name)
     # A metadata folder inside the selected source root must not stop recursion.
     path = root / 'Matts'
-    workbench.create_dataset(args(dataset=path, name='Matts', training_size=512))
+    workbench.create_dataset(args(dataset=path, name='Matts', training_size=512, validation_percent=50))
     before = snapshot(root)
     preview = scan(path, root, tmp_path)
     assert preview['source_set_count'] == preview['added_material_count'] == 3
-    assert preview['plans']['256']['height']['train_count'] == 2
+    assert preview['plans']['256']['height']['train_count'] == 3
     assert preview['plans']['256']['height']['validation_count'] == 1
     assert preview['plans']['1024']['height']['undersized_source_set_count'] == 3
     assert not (path / 'samples').exists(), 'A preview must not add data or crop pixels'
@@ -667,7 +667,8 @@ def test_nested_folder_preview_import_resolution_and_preparation_share_exact_pla
     for _, metadata_path, record in prepared_records:
         height, _ = read_png(metadata_path.parent / record['maps']['height'])
         original, _ = read_png(Path(record['map_metadata']['height']['source']['path']))
-        assert np.array_equal(height, original[128:384, 128:384])
+        x, y, width, height_size = record['crop_rectangle_top_left_xywh']
+        assert np.array_equal(height, original[y:y+height_size, x:x+width])
     cleanup_prepared_dataset(prepared)
     assert all(Path(name).read_bytes() == content for name, content in before.items() if name.endswith('.png'))
     reopened = workbench.dataset_info(args(dataset=path))
@@ -742,25 +743,36 @@ def test_resolution_is_dataset_scoped_and_edit_does_not_change_originals(tmp_pat
     assert workbench.dataset_info(args(dataset=path))['training_size'] == 256
 
 
-def test_reset_automatic_splits_retains_approvals_notes_and_original_bytes(tmp_path):
+def test_folder_validation_flags_retain_reviews_and_original_bytes(tmp_path):
     root = tmp_path / 'sources'
     for name in ('soil', 'wood', 'brick'):
-        maps(root / name, provider=True, family=name)
+        maps(root / name, size=512, provider=True, family=name)
     before = snapshot(root)
     path = tmp_path / 'dataset'; create(path)
-    imported = import_preview(path, scan(path, root, tmp_path))
-    sample = next(s for m in imported['materials'] for s in m['samples'] if s['split'] == 'validation')
-    options = dict(dataset=path, sample=sample['sample_id'], status='approved', expected_index_sha256=None,
-                   review_size=256, note='Keep this detail')
-    workbench.curate(args(**options, split='train'))
-    manual = workbench.dataset_info(args(dataset=path))
-    assert manual['training_plans']['height']['validation_count'] == 0
-    workbench.curate(args(**options, split='automatic'))
+    workbench.edit_dataset(args(dataset=path, training_size=256, validation_percent=50))
+    imported = import_preview(path, scan(path, root, tmp_path), 256)
+    sample = next(s for m in imported['materials'] for s in m['samples'] if s['split'] == 'train')
+    workbench.curate(args(dataset=path, sample=sample['sample_id'], status='approved', expected_index_sha256=None,
+                         review_size=256, note='Keep this detail', split=None))
+    subjects = imported['subjects']
+    selected_subject = next(subject for subject in subjects if subject['selected'])
+    workbench.edit_dataset(args(dataset=path, validation_subject=selected_subject['subject_id'], subject_validation='disabled'))
+    unflagged = workbench.dataset_info(args(dataset=path))
+    assert unflagged['training_plans']['height']['validation_count'] == 0, 'Unchecking a folder must not select a replacement'
+    for subject in subjects:
+        workbench.edit_dataset(args(dataset=path, validation_subject=subject['subject_id'], subject_validation='disabled'))
+    disabled = workbench.dataset_info(args(dataset=path))
+    assert disabled['training_plans']['height']['validation_count'] == 0
+    chosen = subjects[-1]['subject_id']
+    workbench.edit_dataset(args(dataset=path, validation_subject=chosen, subject_validation='enabled'))
     result = workbench.dataset_info(args(dataset=path))
+    assert result['training_plans']['height']['validation_count'] == 1
+    assert next(s for s in result['subjects'] if s['selected'])['subject_id'] == chosen
     restored = next(s for m in result['materials'] for s in m['samples'] if s['sample_id'] == sample['sample_id'])
-    assert restored['split'] == 'validation' and restored['split_assignment'] == 'automatic'
-    assert restored['status'] == 'approved' and restored['note'] == 'Keep this detail'
+    assert restored['split'] == 'train' and restored['status'] == 'approved' and restored['note'] == 'Keep this detail'
     assert snapshot(root) == before
+    with pytest.raises(ValueError, match='exceed the validation limit'):
+        workbench.edit_dataset(args(dataset=path, validation_subject=subjects[0]['subject_id'], subject_validation='enabled'))
 
 
 def test_scan_reports_damaged_maps_and_continues_other_folders(tmp_path):

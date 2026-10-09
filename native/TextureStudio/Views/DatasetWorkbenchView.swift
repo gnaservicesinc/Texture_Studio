@@ -3,19 +3,15 @@ import SwiftUI
 struct DatasetWorkbenchView: View {
     @Bindable var store: WorkbenchStore
     @State private var query = ""
-    @State private var splitFilter = "all"
+    @State private var expandedFolders: Set<String> = []
+    @State private var expandedCrops: Set<String> = []
     @State private var reviewNote = ""
     @State private var viewport = InspectionViewport()
     @State private var showRemoveMaterial = false
 
     private var matchingMaterials: [WorkbenchMaterial] {
         guard let original = store.dataset?.materials else { return [] }
-        let materials = original.map { material in
-            WorkbenchMaterial(materialId: material.id, samples: material.samples.filter {
-                splitFilter == "all" || ($0.split == splitFilter && store.sampleIsTrainable($0))
-            }, name: material.name)
-        }
-            .filter { !$0.samples.isEmpty }
+        let materials = original.filter { !$0.samples.isEmpty }
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return materials }
         return materials.filter { material in
@@ -23,6 +19,14 @@ struct DatasetWorkbenchView: View {
                 || (material.name?.localizedStandardContains(text) ?? false)
                 || material.samples.contains { $0.id.localizedStandardContains(text) }
         }
+    }
+
+    private var subjectGroups: [DatasetSubjectGroup] {
+        Dictionary(grouping: matchingMaterials, by: { $0.subjectId ?? $0.id })
+            .map { key, materials in DatasetSubjectGroup(id: key,
+                name: materials.first?.sourceDirectory.map { URL(fileURLWithPath: $0).lastPathComponent }
+                    ?? materials.first?.name ?? key, materials: materials) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
     var body: some View {
@@ -33,7 +37,7 @@ struct DatasetWorkbenchView: View {
             VStack(spacing: 0) {
                 if store.dataset != nil {
                     HStack {
-                        Text("Materials").font(.headline)
+                        Text("Subject folders").font(.headline)
                         Spacer()
                         Button { store.showAddMaterialSheet = true } label: {
                             Label("Add Materials…", systemImage: "plus")
@@ -41,17 +45,8 @@ struct DatasetWorkbenchView: View {
                         .disabled(store.isBusy)
                     }
                     .padding(12)
-                    Picker("Show", selection: $splitFilter) {
-                        Text("All materials").tag("all")
-                        Text("Training").tag("train")
-                        Text("Validation").tag("validation")
-                    }
-                    .padding(.horizontal, 12).padding(.bottom, 12)
-                    Picker("Splits for", selection: Binding(get: { store.training.target }, set: { store.selectTrainingTarget($0) })) {
-                        Text("Displacement").tag("height")
-                        Text("Roughness").tag("roughness")
-                        Text("Normals").tag("normal")
-                    }.padding(.horizontal, 12).padding(.bottom, 12).disabled(store.isBusy)
+                    Text("Folder → crops → images. Each folder is one subject; the folder checkbox enables one validation crop for all its maps.")
+                        .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12).padding(.bottom, 10)
                     Divider()
                 }
                 if store.dataset == nil {
@@ -66,20 +61,42 @@ struct DatasetWorkbenchView: View {
                             .buttonStyle(.glassProminent).disabled(store.isBusy)
                     }
                 } else if matchingMaterials.isEmpty {
-                    ContentUnavailableView("No matching materials", systemImage: "line.3.horizontal.decrease", description: Text("Choose All materials or clear the search to see the rest of this dataset."))
+                    ContentUnavailableView("No matching materials", systemImage: "line.3.horizontal.decrease", description: Text("Clear the search to see the rest of this dataset."))
                 } else {
                     ScrollViewReader { proxy in
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 3) {
-                                ForEach(matchingMaterials) { material in
-                                    Text(material.name ?? material.materialId.replacingOccurrences(of: "_", with: " "))
-                                        .font(.caption.bold()).foregroundStyle(.secondary).padding(.top, 12).padding(.horizontal, 10)
-                                    ForEach(material.samples) { sample in
-                                        MaterialSidebarRow(selected: store.selectedSampleId == sample.id,
-                                                           action: { store.selectedSampleId = sample.id }) {
-                                            DatasetCropRow(sample: sample)
-                                        }.id(sample.id)
-                                    }
+                                ForEach(subjectGroups) { group in
+                                    DisclosureGroup(isExpanded: expansion(group.id, in: $expandedFolders)) {
+                                        ForEach(group.materials) { material in
+                                            ForEach(material.samples) { sample in
+                                                DisclosureGroup(isExpanded: expansion(sample.id, in: $expandedCrops)) {
+                                                    ForEach(["input", "height", "roughness", "normal"].filter { sample.maps[$0] != nil }, id: \.self) { role in
+                                                        MaterialSidebarRow(selected: store.selectedSampleId == sample.id && store.selectedRole == role,
+                                                            action: { store.selectedSampleId = sample.id; store.selectedRole = role }) {
+                                                            Label(mapTitle(role), systemImage: "photo")
+                                                        }
+                                                    }
+                                                } label: {
+                                                    Button { store.selectedSampleId = sample.id } label: { DatasetCropRow(sample: sample) }
+                                                        .buttonStyle(.plain)
+                                                }.id(sample.id).padding(.leading, 4)
+                                            }
+                                        }
+                                    } label: {
+                                        HStack {
+                                            Label(group.name, systemImage: "folder").font(.callout.bold())
+                                            Spacer()
+                                            if let subject = store.dataset?.subjects?.first(where: { $0.id == group.id }) {
+                                                Toggle("Validation", isOn: Binding(get: { subject.selected }, set: {
+                                                    store.setSubjectValidation(subject, enabled: $0)
+                                                })).labelsHidden().toggleStyle(.checkbox)
+                                                    .accessibilityLabel("Validation for \(group.name)")
+                                                    .disabled(!subject.available || store.dataset?.validation?.enabled == false)
+                                                    .help(subject.reason ?? "Enable one extra learning-check crop for this subject, within the dataset percentage and count limits.")
+                                            }
+                                        }
+                                    }.padding(.vertical, 5)
                                 }
                             }.padding(8)
                         }
@@ -116,7 +133,10 @@ struct DatasetWorkbenchView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                     Divider()
-                    cropReview(sample)
+                    if sample.split == "validation" {
+                        Text("This extra crop checks the model. All of this folder’s ordinary crops remain in training. Change its validation flag in the folder tree.")
+                            .font(.callout).foregroundStyle(.secondary).padding(14)
+                    } else { cropReview(sample) }
                 } else {
                     datasetWelcome
                 }
@@ -149,15 +169,16 @@ struct DatasetWorkbenchView: View {
             Text("Remove this dataset from the library and move its dataset metadata to Trash. Original source maps are kept. You can restore the metadata from Trash.\n\n\(store.datasetFolderURL?.path ?? "")")
         }
         .confirmationDialog("Remove “\(store.selectedMaterialName ?? store.selectedMaterialId ?? "material")” from this dataset?", isPresented: $showRemoveMaterial, titleVisibility: .visible) {
-            Button("Remove Material", role: .destructive) { store.removeSelectedMaterial() }
+            Button("Remove Source Set", role: .destructive) { store.removeSelectedMaterial() }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("All map sets for this material will be removed from the dataset. The original map files stay in place.")
+            Text("Remove this source resolution and all of its paired maps from the dataset. The original files stay in place.")
         }
         .onChange(of: store.selectedSampleId) { _, _ in
             reviewNote = store.selectedSample?.note ?? ""
             viewport.fitToView = true
             selectAvailableMap()
+            revealSelection()
         }
         .onChange(of: store.dataset?.indexSha256) { _, _ in
             selectVisibleCrop()
@@ -168,9 +189,8 @@ struct DatasetWorkbenchView: View {
             selectVisibleCrop()
             reviewNote = store.selectedSample?.note ?? ""
         }
-        .onChange(of: splitFilter) { _, _ in selectVisibleCrop() }
         .onChange(of: query) { _, _ in selectVisibleCrop() }
-        .onAppear { selectVisibleCrop(); selectAvailableMap(); reviewNote = store.selectedSample?.note ?? "" }
+        .onAppear { selectVisibleCrop(); selectAvailableMap(); revealSelection(); reviewNote = store.selectedSample?.note ?? "" }
     }
 
     private var datasetHeader: some View {
@@ -247,7 +267,7 @@ struct DatasetWorkbenchView: View {
             } else if store.samples.isEmpty {
                 Text("Choose a diffuse map with displacement, roughness or normal maps. You can also import a folder of matching material maps.")
             } else {
-                Text("Choose a material on the left to inspect its maps, edit its note and assign its training split.")
+                Text("Choose a material on the left to inspect its maps, inspect its crops and maps, edit its note and enable folder validation.")
             }
         } actions: {
             if store.dataset == nil {
@@ -261,6 +281,17 @@ struct DatasetWorkbenchView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity).disabled(store.isBusy)
     }
 
+    private func expansion(_ id: String, in values: Binding<Set<String>>) -> Binding<Bool> {
+        Binding(get: { values.wrappedValue.contains(id) }, set: { expanded in
+            if expanded { values.wrappedValue.insert(id) } else { values.wrappedValue.remove(id) }
+        })
+    }
+    private func revealSelection() {
+        guard let sample = store.selectedSampleId,
+              let folder = subjectGroups.first(where: { $0.materials.contains { $0.samples.contains { $0.id == sample } } }) else { return }
+        expandedFolders.insert(folder.id)
+        expandedCrops.insert(sample)
+    }
     private func selectVisibleCrop() {
         if !matchingMaterials.flatMap(\.samples).contains(where: { $0.id == store.selectedSampleId }) {
             store.selectedSampleId = matchingMaterials.first?.samples.first?.id
@@ -283,10 +314,10 @@ struct DatasetWorkbenchView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(store.selectedMaterialName ?? (store.selectedMaterialId ?? sample.id).replacingOccurrences(of: "_", with: " "))
                         .font(.headline)
-                    Text("\(sample.id) · \(sample.width) × \(sample.height) map set · \(sample.split.capitalized)")
+                    Text("\(sample.id) · \(sample.width) × \(sample.height) map set · \(sample.split == "validation" ? "Extra validation crop" : "Training crop")")
                         .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                    if !store.sampleIsTrainable(sample) {
-                        Text("Inspection only for this target and resolution: excluded, too small, or missing a supported target map.")
+                    if min(sample.width, sample.height) < store.datasetResolution {
+                        Text("This source is smaller than the selected rendering and training resolution. Choose a smaller grid in Dataset Info to train with it.")
                             .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                     }
                     if let map = store.selectedMap, let width = map.originalSourceWidth, let height = map.originalSourceHeight {
@@ -300,7 +331,7 @@ struct DatasetWorkbenchView: View {
                 }
                 Spacer()
                 Menu {
-                    Button("Remove Material…", role: .destructive) { showRemoveMaterial = true }
+                    Button("Remove Source Set…", role: .destructive) { showRemoveMaterial = true }
                 } label: { Label("Material Actions", systemImage: "ellipsis.circle") }
                     .disabled(store.isBusy)
                 Button { store.inspectSelectedMap() } label: {
@@ -343,15 +374,6 @@ struct DatasetWorkbenchView: View {
                 Label(reviewStatus(sample.status), systemImage: sample.status == "excluded" ? "eye.slash" : sample.status == "approved" ? "checkmark.circle" : "circle.dotted")
                     .foregroundStyle(sample.status == "excluded" ? .secondary : .primary)
                 Spacer()
-                Picker("Split", selection: Binding(get: { sample.splitAssignment == "manual" ? sample.split : "automatic" }, set: { split in
-                    store.curateSelected(status: editableStatus(sample.status), split: split, note: reviewNote)
-                })) {
-                    Text("Automatic (\(sample.split))").tag("automatic")
-                    Text("Training").tag("train")
-                    Text("Validation").tag("validation")
-                }
-                .frame(width: 210)
-                .help("Assign this material to training or validation data.")
                 Button(sample.status == "excluded" ? "Reapprove" : "Approve") {
                     store.curateSelected(status: "approved", note: reviewNote)
                 }
@@ -374,7 +396,7 @@ struct DatasetWorkbenchView: View {
                 } label: { Label("More Review Actions", systemImage: "ellipsis") }
                 .menuStyle(.borderlessButton).fixedSize().help("Mark this material for another review")
             }
-            Text("Approve usable materials or exclude problems. Edit the note or split above; changes are saved to the dataset.")
+            Text("Approve usable materials or exclude problems. All maps share these review settings. Enable validation at the folder level.")
                 .font(.caption).foregroundStyle(.secondary)
             if let diffuse = store.selectedDiffuseMap, let map = store.selectedMap,
                ["height", "roughness", "normal"].contains(store.selectedRole) {
@@ -425,10 +447,16 @@ private struct DatasetCropRow: View {
         HStack(spacing: 9) {
             Image(systemName: sample.status == "excluded" ? "eye.slash" : "photo").foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text(sample.id).lineLimit(1)
-                Text("\(sample.width) × \(sample.height) · \(sample.split.capitalized)")
+                Text(sample.split == "validation" ? "Learning check" : (sample.sourceRegionId ?? "original").replacingOccurrences(of: "_", with: " ").capitalized + " crop").lineLimit(1)
+                Text("\(sample.width) × \(sample.height) · \(sample.split == "validation" ? "Extra validation crop" : "Training crop")")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
         }
     }
+}
+
+private struct DatasetSubjectGroup: Identifiable {
+    let id: String
+    let name: String
+    let materials: [WorkbenchMaterial]
 }

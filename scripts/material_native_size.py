@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -25,7 +26,7 @@ SOURCE_STORAGE = "original-source-references-v1"
 STAGING_ROOT = ".training-data"
 PREPARING_MARKER = ".native-crop-preparation.json"
 CURATION_FIELDS = ("status", "split", "split_assignment", "review_status", "curation_note", "source_binding_sha256")
-NOTICE = "Checks group source families; disjoint 8K regions measure known-material quality, not unseen-material generalization."
+NOTICE = "Known-material learning checks use a different crop, which may share pixels with training. Test novel images separately."
 SUPPORTED_SIZES = (256, 512, 1024, 2048)
 
 
@@ -447,92 +448,139 @@ def _prepared_map(details: dict, role: str, rectangle: list[int], folder: Path, 
     return output_details
 
 
+VALIDATION_POLICY = "subject-extra-crops-v2"
+
+
+def validation_settings(value: dict | None = None) -> dict:
+    result = dict(enabled=True, percent=5.0, max_crops=0, quick_count=4, folders={})
+    result.update(value or {})
+    if (type(result["enabled"]) is not bool or type(result["percent"]) not in (int, float)
+            or not math.isfinite(result["percent"]) or not 0 <= result["percent"] <= 100
+            or any(type(result[k]) is not int or result[k] < 0 for k in ("max_crops", "quick_count"))
+            or result["quick_count"] < 1 or not isinstance(result["folders"], dict)
+            or any(not isinstance(k, str) or type(v) is not bool for k, v in result["folders"].items())):
+        raise ValueError("Validation needs an enabled flag, a percentage from 0 to 100, a nonnegative crop limit, and at least one quick-check crop")
+    return result
+
+
+def subject_id(sample: dict) -> str:
+    # A source folder is one subject, including its resolution/color siblings.
+    folder = sample.get("source_directory")
+    return str(Path(folder).resolve()) if folder else sample.get("source_family_id", sample.get("asset_family_id", sample["material_id"]))
+
+
+def normalized_rectangle(rectangle, dimensions):
+    x, y, w, h = rectangle
+    width, height = dimensions
+    return [x / width, y / height, w / width, h / height]
+
+
+def spare_rectangle(dimensions, size, occupied):
+    """Find a native square outside all training regions in common subject UVs.
+
+    Rectangle edges give a complete finite search for an axis-aligned free
+    square; this also catches overlaps with lower-resolution siblings.
+    """
+    from material_dataset import rectangles_overlap
+    width, height = dimensions
+    xs, ys = {0, width - size}, {0, height - size}
+    for x, y, w, h in occupied:
+        xs.update((math.ceil((x + w) * width), math.floor(x * width) - size))
+        ys.update((math.ceil((y + h) * height), math.floor(y * height) - size))
+    for y in sorted(ys, reverse=True):
+        for x in sorted(xs):
+            rectangle = [x, y, size, size]
+            if 0 <= x <= width - size and 0 <= y <= height - size and not any(
+                    rectangles_overlap(normalized_rectangle(rectangle, dimensions), r) for r in occupied):
+                return rectangle
+    return None
+
+
 def plan_material_regions(materials: dict, records: list, size: int, reviews: dict,
                           target: str = "height", automatic_validation: bool = True,
-                          validation_material: str | None = None) -> dict:
-    """Single metadata-only plan used by import, review and pixel preparation."""
-    eligible_regions = {}
-    for material_id, material in materials.items():
-        eligible_regions[material_id] = [region for region, _rectangle in crop_layout(*material["dimensions"], size)
-            if current_review(reviews, f"{size}:{material_id}_{region}", material["sample"]).get("status", material["sample"]["status"])
-            not in ("excluded", "rejected")]
-    target_eligible = {material_id for material_id, material in materials.items()
-        if target in material["maps"] and (target != "height" or material["maps"][target]["source"]["sample_bits"] == 16)
-        and target in material["sample"].get("available_targets", [target])}
-    included = [material_id for material_id in sorted(materials) if eligible_regions[material_id] and material_id in target_eligible]
-    if validation_material and validation_material not in target_eligible:
-        raise ValueError(f"Selected source set does not supply a supported {target} training target")
-    families = {}
-    for material_id in included:
-        families.setdefault(materials[material_id]["family"], []).append(material_id)
-    source_sets_by_family = {}
-    for _entry, _path, record in records:
-        family = record.get("asset_family_id", record.get("source_family_id", record["material_id"]))
-        source_sets_by_family.setdefault(family, set()).add(record.get("source_set_id", record["material_id"]))
-    manual_family_splits = {}
-    for material_id, material in materials.items():
+                          validation_material: str | None = None, validation: dict | None = None) -> dict:
+    """Shared crop membership for every target; checks add a different subject view."""
+    settings = validation_settings(validation)
+    assignments, subjects, occupied = {}, {}, {}
+    target_eligible = {mid for mid, m in materials.items() if target in m["maps"]
+        and (target != "height" or m["maps"][target]["source"]["sample_bits"] == 16)
+        and target in m["sample"].get("available_targets", [target])}
+    for mid, material in sorted(materials.items()):
+        sample, dimensions = material["sample"], material["dimensions"]
+        subject = subject_id(sample)
         family = material["family"]
-        if len(source_sets_by_family.get(family, [])) < 2:
-            continue
-        decisions = [current_review(reviews, f"{size}:{material_id}_{region}", material["sample"])
-                     for region, _rectangle in crop_layout(*material["dimensions"], size)]
-        decisions.append(material["sample"])
-        explicit = {review["split"] for review in decisions if review.get("split_assignment") == "manual"}
-        if len(explicit) > 1:
-            raise ValueError("Resolution/color siblings in a source family must share one manual training/validation assignment")
-        if explicit:
-            chosen = explicit.pop()
-            if family in manual_family_splits and manual_family_splits[family] != chosen:
-                raise ValueError("Resolution/color siblings in a source family must share one manual training/validation assignment")
-            manual_family_splits[family] = chosen
-    check_families = set()
-    if automatic_validation:
-        if validation_material:
-            family = materials[validation_material]["family"]
-            if len(families.get(family, [])) == 1 and len(eligible_regions[validation_material]) > 1:
-                check_families = {family}
-        elif len(families) > 1:
-            count = max(1, int(len(families) * .05))
-            check_families = set(sorted(families, key=lambda m: hashlib.sha256(m.encode()).digest())[:count])
-        elif len(families) == 1 and len(families[next(iter(families))]) == 1:
-            sole = families[next(iter(families))][0]
-            if len(eligible_regions[sole]) > 1:
-                check_families = set(families)
-    regional_families = {family for family in check_families if len(families.get(family, [])) == 1
-        and len(eligible_regions[families[family][0]]) > 1}
-    regional_check_regions = {family: eligible_regions[families[family][0]][-1] for family in regional_families}
-    assignments = {}
-    for material_id, material in materials.items():
-        for region, rectangle in crop_layout(*material["dimensions"], size):
-            sample = material["sample"]
-            identity = material_id + "_" + region
-            family = material["family"]
+        for region, rectangle in crop_layout(*dimensions, size):
+            identity = mid + "_" + region
             review = current_review(reviews, f"{size}:{identity}", sample)
-            split = review.get("split", sample.get("split", "train"))
-            manual = review.get("split_assignment") == "manual" or sample.get("split_assignment") == "manual"
-            if family in manual_family_splits:
-                split, manual = manual_family_splits[family], True
-            elif review.get("split_assignment") != "manual" and sample.get("split_assignment") == "manual":
-                split = sample["split"]
-            if automatic_validation and not manual:
-                split = ("validation" if family in check_families and
-                         (family not in regional_families or region == regional_check_regions[family]) else "train")
-            assignments[identity] = {"split": split, "split_assignment": "manual" if manual else "automatic",
-                "validation_scope": "known_disjoint_regions" if family in regional_families else "held_out_source_families",
-                "eligible": material_id in target_eligible and region in eligible_regions[material_id],
-                "target_available": material_id in target_eligible,
-                "status": review.get("status", sample["status"]), "crop_rectangle": rectangle}
-    return {"assignments": assignments, "check_families": sorted(check_families),
-            "regional_families": sorted(regional_families), "regional_check_regions": regional_check_regions,
-            "target": target, "size": size, "crop_count": len(assignments), "source_set_count": len(materials),
-            "family_count": len(families),
-            "train_count": sum(a["eligible"] and a["split"] == "train" for a in assignments.values()),
-            "validation_count": sum(a["eligible"] and a["split"] == "validation" for a in assignments.values()),
-            "excluded_count": sum(a["status"] in ("excluded", "rejected") for a in assignments.values()),
-            "unavailable_target_count": sum(not a["target_available"] for a in assignments.values())}
+            status = review.get("status", sample["status"])
+            included = status not in ("excluded", "rejected")
+            assignments[identity] = dict(material_id=mid, region=region, subject_id=subject,
+                split="train", split_assignment="automatic", validation_scope="known_subject_diagnostic",
+                eligible=included and mid in target_eligible, target_available=mid in target_eligible,
+                status=status, crop_rectangle=rectangle)
+            if included:
+                subjects.setdefault(subject, set()).add(mid)
+                rect = normalized_rectangle(rectangle, dimensions)
+                occupied.setdefault(("subject", subject), []).append(rect)
+                occupied.setdefault(("family", family), []).append(rect)
+    # Percent means a strict upper bound on subject count, never rounded up.
+    cap = math.floor(len(subjects) * settings["percent"] / 100)
+    if settings["max_crops"]:
+        cap = min(cap, settings["max_crops"])
+    if not automatic_validation or not settings["enabled"]:
+        cap = 0
+    candidates, subject_plans, candidate_priority = {}, {}, {}
+    for subject, mids in sorted(subjects.items()):
+        for mid in sorted(mids, key=lambda m: (-math.prod(materials[m]["dimensions"]), m)):
+            material = materials[mid]
+            # Prefer unused pixels in this original (the fourth 8K corner).
+            # These are known-subject diagnostics: a corner may overlap a
+            # centered crop or a lower-resolution sibling, but must be a
+            # different view, never an existing training crop.
+            blocked = [normalized_rectangle(a["crop_rectangle"], material["dimensions"])
+                       for a in assignments.values() if a["material_id"] == mid and a["status"] not in ("excluded", "rejected")]
+            all_views = occupied.get(("subject", subject), []) + occupied.get(("family", material["family"]), [])
+            rectangle = spare_rectangle(material["dimensions"], size, blocked)
+            width, height = material["dimensions"]
+            corners = [[0, height - size, size, size], [width - size, height - size, size, size],
+                       [0, 0, size, size], [width - size, 0, size, size]]
+            rectangle = next((r for r in ([rectangle] if rectangle else []) + corners
+                              if normalized_rectangle(r, material["dimensions"]) not in all_views), None)
+            if rectangle:
+                from material_dataset import rectangles_overlap
+                candidates[subject] = (mid, rectangle)
+                candidate_priority[subject] = any(rectangles_overlap(normalized_rectangle(rectangle, material["dimensions"]), r) for r in blocked)
+                break
+        subject_plans[subject] = dict(subject_id=subject, name=Path(subject).name, selected=False,
+            available=subject in candidates, preference=settings["folders"].get(subject),
+            reason=None if subject in candidates else "No different crop fits this source at the selected resolution.")
+    ordered = sorted((subject for subject in candidates if settings["folders"].get(subject) is not False),
+        key=lambda subject: (settings["folders"].get(subject) is not True, candidate_priority[subject], hashlib.sha256(subject.encode()).digest()))
+    checks = []
+    for subject in ordered[:cap]:
+        mid, rectangle = candidates[subject]
+        identity = mid + "_validation"
+        assignments[identity] = dict(material_id=mid, region="validation", subject_id=subject,
+            split="validation", split_assignment="automatic", validation_scope="known_subject_diagnostic",
+            eligible=mid in target_eligible, target_available=mid in target_eligible,
+            status="unreviewed", crop_rectangle=rectangle)
+        subject_plans[subject]["selected"] = True
+        subject_plans[subject]["sample_id"] = identity
+        checks.append(materials[mid]["family"])
+    return dict(assignments=assignments, subjects=list(subject_plans.values()), validation_settings=settings,
+        validation_limit=cap, validation_candidate_count=len(candidates),
+        shared_validation_count=sum(a["split"] == "validation" for a in assignments.values()),
+        check_families=sorted(set(checks)), regional_families=sorted(set(checks)),
+        regional_check_regions={family: "validation" for family in checks},
+        target=target, size=size, crop_count=sum(a["split"] == "train" for a in assignments.values()),
+        source_set_count=len(materials), family_count=len(subjects), subject_count=len(subjects),
+        train_count=sum(a["eligible"] and a["split"] == "train" for a in assignments.values()),
+        validation_count=sum(a["eligible"] and a["split"] == "validation" for a in assignments.values()),
+        excluded_count=sum(a["status"] in ("excluded", "rejected") for a in assignments.values()),
+        unavailable_target_count=sum(not a["target_available"] for a in assignments.values()))
 
 
-def dataset_region_plan(records: list, size: int, reviews: dict, target: str = "height") -> dict:
+def dataset_region_plan(records: list, size: int, reviews: dict, target: str = "height", validation: dict | None = None) -> dict:
     """Plan without decoding pixels, writing crops, or rehashing source files."""
     materials = {}
     for _entry, path, sample in records:
@@ -542,7 +590,7 @@ def dataset_region_plan(records: list, size: int, reviews: dict, target: str = "
         materials[sample["material_id"]] = {"sample": sample, "path": path, "maps": sample["map_metadata"],
             "dimensions": sample["source_pixel_dimensions"],
             "family": sample.get("asset_family_id", sample.get("source_family_id", sample["material_id"]))}
-    result = plan_material_regions(materials, records, size, reviews, target)
+    result = plan_material_regions(materials, records, size, reviews, target, validation=validation)
     result["undersized_source_set_count"] = len({r[2]["material_id"] for r in records}) - len(materials)
     return result
 
@@ -573,15 +621,15 @@ def prepare_from_records(dataset: Path, records: list[tuple[dict, Path, dict]], 
             reviews[key] = saved_review(sample)
     if validation_material and validation_material not in materials:
         raise ValueError("Selected training material is absent from the source dataset")
-    plan = plan_material_regions(materials, records, size, reviews, target, automatic_validation, validation_material)
+    settings = json.loads((dataset / "dataset.json").read_text()).get("validation")
+    plan = plan_material_regions(materials, records, size, reviews, target, automatic_validation, validation_material, settings)
     check_families = set(plan["check_families"])
     regional_families = set(plan["regional_families"])
     regional_check_regions = plan["regional_check_regions"]
-    # A full lower-resolution sibling overlaps every native high-resolution
-    # region. Such families must be held out in full, never split by resolution.
-    signature = hashlib.sha256(json.dumps({"schema": PREPARATION_SCHEMA, "size": size,
+    # Bind the shared diagnostic policy and configuration to each owned stage.
+    signature = hashlib.sha256(json.dumps({"schema": PREPARATION_SCHEMA, "policy": VALIDATION_POLICY, "validation": plan["validation_settings"], "size": size,
         "snapshot": proof, "checks": sorted(check_families), "regional_checks": regional_check_regions,
-        "automatic_validation": automatic_validation, "validation_material": validation_material, "target": target,
+        "automatic_validation": automatic_validation, "validation_material": validation_material,
         "reviews": reviews}, sort_keys=True).encode()).hexdigest()
     root = dataset / STAGING_ROOT
     root.mkdir(exist_ok=True)
@@ -621,8 +669,9 @@ def prepare_from_records(dataset: Path, records: list[tuple[dict, Path, dict]], 
             reviews = json.loads(review_path.read_text()) if review_path.is_file() else reviews
             root.mkdir(exist_ok=True)
     required = 0
-    for material in materials.values():
-        for _region, rectangle in crop_layout(*material["dimensions"], size):
+    for mid, material in materials.items():
+        for assignment in (a for a in plan["assignments"].values() if a["material_id"] == mid):
+            rectangle = assignment["crop_rectangle"]
             if rectangle == [0, 0, *material["dimensions"]]:
                 continue
             details = [d for role, d in material["maps"].items() if role != "input"] + material["input_variants"]
@@ -646,20 +695,20 @@ def prepare_from_records(dataset: Path, records: list[tuple[dict, Path, dict]], 
             if min(width, height) < size:
                 raise ValueError(f"{material_id} cannot supply {size}×{size} original training detail")
             material_samples = []
-            for region, rectangle in crop_layout(width, height, size):
+            for assignment in (a for a in plan["assignments"].values() if a["material_id"] == material_id):
+                region, rectangle = assignment["region"], assignment["crop_rectangle"]
                 sample = copy.deepcopy(material["sample"])
                 identity = material_id + "_" + region
                 family = material["family"]
                 review = current_review(reviews, f"{size}:{identity}", sample)
                 assignment = plan["assignments"][identity]
                 split = assignment["split"]
-                manual = assignment["split_assignment"] == "manual"
                 sample.update(sample_id=identity, maps={}, map_metadata={}, input_variants=[], extra_maps={}, source_notes=[],
                     split=split, source_region_role=split, source_region_id=region,
                     asset_family_id=family, source_family_id=family,
                     source_set_id=sample.get("source_set_id", f"{family}_{width}x{height}"),
-                    split_strategy="source-family-native-regions-v1",
-                    validation_scope="known_disjoint_regions" if family in regional_families else "held_out_source_families",
+                    split_strategy=VALIDATION_POLICY,
+                    validation_scope="known_subject_diagnostic",
                     sample_pixel_dimensions=[size, size], source_pixel_dimensions=[width, height],
                     crop_rectangle_top_left_xywh=rectangle,
                     source_normalized_rectangle_xywh=[rectangle[0] / width, rectangle[1] / height, size / width, size / height],
@@ -669,8 +718,7 @@ def prepare_from_records(dataset: Path, records: list[tuple[dict, Path, dict]], 
                 sample.update(review)
                 sample["source_review_snapshot"] = copy.deepcopy(review)
                 sample["split"] = split
-                if manual:
-                    sample["split_assignment"] = "manual"
+                sample["split_assignment"] = "automatic"
                 sample["source_binding_sha256"] = source_binding(material["sample"])
                 folder = stage / "samples" / identity
                 folder.mkdir(parents=True)
@@ -706,29 +754,29 @@ def prepare_from_records(dataset: Path, records: list[tuple[dict, Path, dict]], 
         train_families = {sample["asset_family_id"] for sample in prepared
                           if sample["split"] == "train" and sample["status"] not in ("excluded", "rejected")}
         regional_families = check_families & train_families
-        from material_dataset import rectangles_overlap
         for family in regional_families:
             training = [sample for sample in prepared if sample["asset_family_id"] == family and sample["split"] == "train"]
-            validation = [sample for sample in prepared if sample["asset_family_id"] == family and sample["split"] == "validation"]
-            if any(rectangles_overlap(check["crop_rectangle_top_left_xywh"], train["crop_rectangle_top_left_xywh"])
-                   for check in validation for train in training):
-                raise ValueError("Validation cannot overlap training pixels from the same source family")
+            validation_crops = [sample for sample in prepared if sample["asset_family_id"] == family and sample["split"] == "validation"]
+            if any(check["source_normalized_rectangle_xywh"] == train["source_normalized_rectangle_xywh"]
+                   for check in validation_crops for train in training if train["status"] not in ("excluded", "rejected")):
+                raise ValueError("A learning-check crop must differ from the existing training crops")
         regional_check_regions = {family: next(sample["source_region_id"] for sample in prepared
                                               if sample["asset_family_id"] == family and sample["split"] == "validation")
                                   for family in regional_families}
         for sample in prepared:
-            sample["validation_scope"] = "known_disjoint_regions" if sample["asset_family_id"] in regional_families else "held_out_source_families"
+            sample["validation_scope"] = "known_subject_diagnostic"
             # Final scope depends on actual user-selected splits, so publish it
             # after reviewing the complete family rather than before it.
             write_json(stage / "samples" / sample["sample_id"] / "sample.json", sample)
-        automatic = {"policy": "source-family-native-regions-v1", "fraction": .05, "target": target,
+        automatic = {"policy": VALIDATION_POLICY, "fraction": plan["validation_settings"]["percent"] / 100,
                      "source_family_ids": sorted(check_families), "regional_family_ids": sorted(regional_families),
                      "regional_check_regions": regional_check_regions,
                      "material_ids": sorted(m for m in materials if materials[m]["family"] in check_families),
                      "quick_fit_material_id": validation_material}
         derived = {"schema_version": 2, "generator": GENERATOR, "crop_size": size,
-            "training_pixel_dimensions": [size, size], "split_strategy": "source-family-native-regions-v1",
-            "validation_scope": "held_out_source_families_and_disjoint_known_regions" if regional_families else "held_out_source_families",
+            "training_pixel_dimensions": [size, size], "split_strategy": VALIDATION_POLICY,
+            "validation": plan["validation_settings"],
+            "validation_scope": "known_subject_diagnostic",
             "original_sources_required_for_training": True, "source_images_modified": False,
             "native_size_preparation": {"schema": PREPARATION_SCHEMA, "ephemeral": True,
                 "source_dataset_path": str(dataset), "source_snapshot": proof, "target_resized": False,

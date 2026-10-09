@@ -60,6 +60,7 @@ struct WorkbenchSample: Decodable, Identifiable, Sendable {
     var inputVariants: [WorkbenchMap]? = nil
     var availableTargets: [String]? = nil
     var splitAssignment: String? = nil
+    var sourceRegionId: String? = nil
     var id: String { sampleId }
 }
 
@@ -67,6 +68,8 @@ struct WorkbenchMaterial: Decodable, Identifiable, Sendable {
     let materialId: String
     let samples: [WorkbenchSample]
     var name: String? = nil
+    var subjectId: String? = nil
+    var sourceDirectory: String? = nil
     var id: String { materialId }
 }
 
@@ -91,11 +94,12 @@ struct WorkbenchDataset: Decodable, Sendable {
     var sourceSetCount: Int? = nil
     var trainingPlans: [String: WorkbenchDatasetPlan]? = nil
     var resolutionPlans: [String: [String: WorkbenchDatasetPlan]]? = nil
+    var validation: WorkbenchValidationSettings? = nil
+    var subjects: [WorkbenchSubject]? = nil
     var samples: [WorkbenchSample] { materials.flatMap(\.samples) }
     func readyForTraining(size: Int, material: String?, target: String? = nil) -> Bool {
         guard hasNativeSize(size), let policy = automaticValidation,
-              policy.policy == "source-family-native-regions-v1" else { return false }
-        if let target, let preparedTarget = policy.target, preparedTarget != target { return false }
+              policy.policy == "subject-extra-crops-v2" else { return false }
         if let material { return policy.quickFitMaterialId == material }
         return policy.quickFitMaterialId == nil
     }
@@ -117,6 +121,33 @@ struct WorkbenchDatasetPlan: Decodable, Sendable {
     let unavailableTargetCount: Int
     let undersizedSourceSetCount: Int?
     var regionalFamilies: [String] = []
+    var subjectCount: Int? = nil
+    var sharedValidationCount: Int? = nil
+    var validationLimit: Int? = nil
+    var validationCandidateCount: Int? = nil
+    var subjects: [WorkbenchSubject]? = nil
+}
+
+struct WorkbenchValidationSettings: Codable, Equatable, Sendable {
+    var enabled = true
+    var percent = 5.0
+    var maxCrops = 0
+    var quickCount = 4
+    var folders: [String: Bool] = [:]
+    var arguments: [String] {
+        ["--validation-enabled", enabled ? "yes" : "no", "--validation-percent", String(percent),
+         "--validation-max-crops", String(maxCrops), "--validation-quick-count", String(quickCount)]
+    }
+}
+
+struct WorkbenchSubject: Decodable, Identifiable, Sendable {
+    let subjectId: String
+    let name: String
+    let selected: Bool
+    let available: Bool
+    let preference: Bool?
+    let reason: String?
+    var id: String { subjectId }
 }
 
 struct WorkbenchFolderImport: Decodable, Sendable {
@@ -213,11 +244,13 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
     var loraRank = 8
     var loraAlpha = 8.0
     var cacheGB = 0.5
+    var validationEvery = 20
+    var checkpointEvery = 0
 
     init() {}
 
     enum CodingKeys: String, CodingKey {
-        case target, scope, size, updatesPerCrop, maxMinutes, memoryGB, automaticMemory, useSelectedMaterialOnly, useWarmStart, loraRank, loraAlpha, cacheGB
+        case target, scope, size, updatesPerCrop, maxMinutes, memoryGB, automaticMemory, useSelectedMaterialOnly, useWarmStart, loraRank, loraAlpha, cacheGB, validationEvery, checkpointEvery
     }
 
     init(from decoder: Decoder) throws {
@@ -235,6 +268,8 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
         loraRank = try values.decodeIfPresent(Int.self, forKey: .loraRank) ?? loraRank
         loraAlpha = try values.decodeIfPresent(Double.self, forKey: .loraAlpha) ?? loraAlpha
         cacheGB = try values.decodeIfPresent(Double.self, forKey: .cacheGB) ?? cacheGB
+        validationEvery = try values.decodeIfPresent(Int.self, forKey: .validationEvery) ?? validationEvery
+        checkpointEvery = try values.decodeIfPresent(Int.self, forKey: .checkpointEvery) ?? checkpointEvery
     }
 
     /// A stored memory setting can come from a different Mac. Preserve every
@@ -247,6 +282,8 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
         result.loraRank = min(64, max(1, result.loraRank))
         result.loraAlpha = result.loraAlpha.isFinite ? min(128, max(0.01, result.loraAlpha)) : 8
         result.cacheGB = result.cacheGB.isFinite ? min(4, max(0, result.cacheGB)) : 0.5
+        result.validationEvery = min(10000, max(1, result.validationEvery))
+        result.checkpointEvery = min(100000, max(0, result.checkpointEvery))
         result.updatesPerCrop = min(10_000, max(1, result.updatesPerCrop))
         result.maxMinutes = result.maxMinutes.isFinite ? min(240, max(1, result.maxMinutes)) : 30
         if resources.trainingMemoryIssue(result.memoryGB) != nil {

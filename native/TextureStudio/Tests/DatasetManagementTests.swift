@@ -195,7 +195,7 @@ final class DatasetManagementTests: XCTestCase {
         store.curateSelected(status: "approved", split: "validation", note: "Retain native precision")
         try await settled(store)
         XCTAssertNil(store.error)
-        XCTAssertEqual(store.selectedSample?.split, "validation")
+        XCTAssertEqual(store.selectedSample?.split, "train")
         XCTAssertEqual(store.selectedSample?.note, "Retain native precision")
         store.curateSelected(status: "approved", note: "")
         try await settled(store)
@@ -332,6 +332,7 @@ final class DatasetManagementTests: XCTestCase {
         store.dataset?.resolutionPlans = ["2048": ["height": summary, "roughness": summary, "normal": summary]]
         store.dataset?.trainingSize = 2048
         store.training.size = 2048
+        store.folderImportSize = 2048
         store.folderImportURL = URL(fileURLWithPath: "/opt/ipde/sources_mats")
         store.folderImport = try WorkbenchProcess.decode(WorkbenchFolderImport.self, output: String(decoding: JSONSerialization.data(withJSONObject: [
             "folder_path": "/opt/ipde/sources_mats", "plan_path": "/tmp/preview.json", "plan_sha256": "proof",
@@ -342,6 +343,57 @@ final class DatasetManagementTests: XCTestCase {
         try await snapshotSheet(NewMaterialDatasetSheet(store: store), name: "new-dataset", size: NSSize(width: 660, height: 600))
         try await snapshotSheet(MaterialDatasetInfoSheet(store: store), name: "dataset-info", size: NSSize(width: 700, height: 700))
         try await snapshotSheet(ImportDatasetFolderSheet(store: store), name: "folder-import", size: NSSize(width: 780, height: 650))
+    }
+
+    func testFolderScanRetainsResolutionEditsWithoutRepeatingScan() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        fixture.trainingSize = 2048
+        let folder = fixture.root.appendingPathComponent("Original subjects")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let store = WorkbenchStore(preferences: fixture.defaults, workerOverride: { args, _ in
+            fixture.calls.append(args)
+            if args[0] == "scan-folder" {
+                try await Task.sleep(for: .milliseconds(150))
+                let document: [String: Any] = ["folder_path": folder.path, "plan_path": "/tmp/test-plan.json",
+                    "plan_sha256": "plan-proof", "index_sha256": "source-hash", "source_set_count": 4,
+                    "added_material_count": 4, "duplicate_material_count": 0, "ignored_file_count": 0,
+                    "warnings": [], "plans": [:]]
+                return String(decoding: try JSONSerialization.data(withJSONObject: document), as: UTF8.self)
+            }
+            if args[0] == "import-folder" { fixture.trainingSize = Int(fixture.value("--training-size", in: args)!)! }
+            return try fixture.document()
+        })
+        try await store.loadDataset(fixture.dataset)
+        store.importMaterialFolder(folder)
+        for _ in 0..<100 {
+            if store.isScanningFolder { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(store.isScanningFolder)
+        XCTAssertEqual(store.folderImportSize, 2048, "The sheet must open at the saved dataset resolution")
+        store.folderImportSize = 512
+        try await settled(store)
+        XCTAssertEqual(store.folderImportSize, 512, "Scan completion cannot reset the user's choice")
+        store.commitFolderImport(size: store.folderImportSize)
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.datasetResolution, 512)
+        XCTAssertEqual(fixture.calls.filter { $0[0] == "scan-folder" }.count, 1)
+        XCTAssertEqual(fixture.value("--folder", in: fixture.calls.last!), folder.path)
+    }
+
+    func testChangingTrainingTargetDoesNotReloadOrReassignDataset() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let store = fixture.store()
+        try await store.loadDataset(fixture.dataset)
+        let calls = fixture.calls.count
+        let hash = store.dataset?.indexSha256
+        for target in ["height", "roughness", "normal"] { store.selectTrainingTarget(target) }
+        XCTAssertEqual(fixture.calls.count, calls)
+        XCTAssertEqual(store.dataset?.indexSha256, hash)
+        XCTAssertFalse(store.isBusy)
     }
 
     private func snapshotSheet<V: View>(_ view: V, name: String, size: NSSize) async throws {

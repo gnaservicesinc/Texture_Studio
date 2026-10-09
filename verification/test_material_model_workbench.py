@@ -507,3 +507,62 @@ def test_reexport_fused_checkpoint_requires_no_original_base_weights(tmp_path, m
         _, full, tensors, _ = bridge.snapshot(Path(reexported["checkpoint_path"]))
         assert full["fused_adapter_sha256"] == hashes["adapter.safetensors"]
         assert all(torch.equal(value, lora.fused_state(model)[name]) for name, value in tensors.items())
+
+
+def test_quick_checks_are_capped_but_requested_and_final_checkpoints_use_full_pool(tmp_path, monkeypatch):
+    args, cleaned, _ = train_fixture(tmp_path, monkeypatch, updates=3)
+    from test_material_pbrnxt_data import add_sample
+    for number in range(6):
+        add_sample(args.dataset, f'check_{number}', f'subject_{number}', split='validation', dimensions=(256, 256))
+    args.validation_every = 1
+    original_step = torch.optim.AdamW.step
+    calls = 0
+    original_signal = signal.getsignal(signal.SIGUSR1)
+    def request_while_updating(optimizer, *arguments, **keywords):
+        nonlocal calls
+        result = original_step(optimizer, *arguments, **keywords)
+        calls += 1
+        if calls == 2:
+            signal.getsignal(signal.SIGUSR1)(signal.SIGUSR1, None)
+        return result
+    monkeypatch.setattr(torch.optim.AdamW, 'step', request_while_updating)
+    result = bridge.train(args)
+    history = result['validation_history']
+    assert [(item['step'], item['scope'], item['sample_count']) for item in history] == [
+        (0, 'quick', 4), (1, 'quick', 4), (2, 'full', 6), (3, 'quick', 4), (3, 'full', 6)]
+    assert result['completed_updates'] == 3
+    assert [checkpoint['step'] for checkpoint in result['checkpoints']] == [2, 3]
+    for checkpoint in result['checkpoints']:
+        configuration, _ = lora.read(Path(checkpoint['checkpoint_path']))
+        assert configuration['validation']['scope'] == 'full'
+        assert len({sample['sample_id'] for sample in configuration['validation']['samples']}) == 6
+    assert Path(result['best_checkpoint_path']).is_file()
+    assert signal.getsignal(signal.SIGUSR1) == original_signal and cleaned == [args.dataset]
+
+
+def test_zero_error_learning_check_is_reported_as_failure_and_restores_model_mode():
+    class Model(nn.Module):
+        def map(self, rgb, target):
+            return rgb[:, :1]
+    model = Model().train()
+    pair = {'metadata': {'sample_id': 'same'}, 'paths': {}}
+    class Cache:
+        def load(self, pair):
+            return torch.ones(1, 3, 256, 256), torch.ones(1, 1, 256, 256)
+    with pytest.raises(ValueError, match='exactly zero'):
+        bridge.validation_check(model, [pair], Cache(), 'height', 256, 17, torch.device('cpu'))
+    assert model.training
+
+
+def test_failed_initial_check_does_not_claim_training_or_publish_checkpoint(tmp_path, monkeypatch):
+    args, cleaned, _ = train_fixture(tmp_path, monkeypatch, updates=1)
+    def fail_initial_check(*_args, **_kwargs):
+        raise ValueError('Validation error is exactly zero')
+    monkeypatch.setattr(bridge, 'validation_check', fail_initial_check)
+    with pytest.raises(ValueError, match='exactly zero'):
+        bridge.train(args)
+    report = json.loads((args.output / 'run.json').read_text())
+    assert report['status'] == 'failed' and report['completed_updates'] == 0
+    assert report['training_performed'] is False
+    assert not list(args.output.rglob('*.safetensors'))
+    assert cleaned == [args.dataset]

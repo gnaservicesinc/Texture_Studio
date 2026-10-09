@@ -7,6 +7,7 @@ struct NewMaterialDatasetSheet: View {
     @State private var description = ""
     @State private var parentURL: URL?
     @State private var size = 1024
+    @State private var validation = WorkbenchValidationSettings()
     @FocusState private var nameFocused: Bool
 
     private var cleanName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -14,12 +15,13 @@ struct NewMaterialDatasetSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Label("New Dataset", systemImage: "folder.badge.plus").font(.title2.bold())
-            Text("Choose the resolution first, then import and review the exact material crops and splits.")
+            Text("Choose the resolution first, then import and review the exact material crops and validation checks.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Form {
                 TextField("Name", text: $name).focused($nameFocused)
                 TextField("Description", text: $description, axis: .vertical).lineLimit(3...5)
                 DatasetResolutionPicker(size: $size)
+                DatasetValidationControls(settings: $validation)
                 if let folder = store.pendingSourceFolder {
                     LabeledContent("Source folder", value: folder.path)
                 }
@@ -41,7 +43,7 @@ struct NewMaterialDatasetSheet: View {
                 Button("Cancel") { store.pendingSourceFolder = nil; dismiss() }.keyboardShortcut(.cancelAction).disabled(store.isBusy)
                 Button("Create Dataset") {
                     guard let parentURL else { return }
-                    store.createDataset(name: cleanName, description: description, parentURL: parentURL, size: size)
+                    store.createDataset(name: cleanName, description: description, parentURL: parentURL, size: size, validation: validation)
                 }
                 .buttonStyle(.glassProminent).keyboardShortcut(.defaultAction)
                 .disabled(cleanName.isEmpty || parentURL == nil || store.isBusy)
@@ -69,6 +71,7 @@ struct MaterialDatasetInfoSheet: View {
     @State private var name: String
     @State private var description: String
     @State private var size: Int
+    @State private var validation: WorkbenchValidationSettings
     @FocusState private var nameFocused: Bool
 
     init(store: WorkbenchStore) {
@@ -76,10 +79,11 @@ struct MaterialDatasetInfoSheet: View {
         _name = State(initialValue: store.datasetName)
         _description = State(initialValue: store.datasetDescription)
         _size = State(initialValue: store.datasetResolution)
+        _validation = State(initialValue: store.dataset?.validation ?? .init())
     }
 
     private var cleanName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var hasChanges: Bool { cleanName != store.datasetName || description != store.datasetDescription || size != store.dataset?.trainingSize }
+    private var hasChanges: Bool { cleanName != store.datasetName || description != store.datasetDescription || size != store.dataset?.trainingSize || validation != (store.dataset?.validation ?? .init()) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -89,8 +93,9 @@ struct MaterialDatasetInfoSheet: View {
                 TextField("Name", text: $name).focused($nameFocused)
                 TextField("Description", text: $description, axis: .vertical).lineLimit(3...5)
                 DatasetResolutionPicker(size: $size)
+                DatasetValidationControls(settings: $validation)
                 if let plans = store.dataset?.resolutionPlans?[String(size)] {
-                    DatasetPlanSummary(plans: plans)
+                    DatasetPlanSummary(plans: plans, validation: validation)
                 }
                 if let dataset = store.dataset {
                     LabeledContent("Contents", value: "\(dataset.sourceSetCount ?? dataset.materials.count) original source sets")
@@ -110,7 +115,7 @@ struct MaterialDatasetInfoSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).disabled(store.isBusy)
                 Button("Save Changes") {
-                    store.updateDatasetInfo(name: cleanName, description: description, size: size)
+                    store.updateDatasetInfo(name: cleanName, description: description, size: size, validation: validation)
                 }
                 .buttonStyle(.glassProminent).keyboardShortcut(.defaultAction)
                 .disabled(cleanName.isEmpty || !hasChanges || store.isBusy)
@@ -249,48 +254,70 @@ struct DatasetResolutionPicker: View {
     }
 }
 
+struct DatasetValidationControls: View {
+    @Binding var settings: WorkbenchValidationSettings
+    var body: some View {
+        Section("Validation · shared by all map targets") {
+            Toggle("Generate separate validation crops", isOn: $settings.enabled)
+            LabeledContent("Maximum subject percentage") {
+                TextField("Percent", value: $settings.percent, format: .number).labelsHidden().frame(width: 65)
+                Text("%")
+            }.disabled(!settings.enabled)
+            Stepper("Maximum validation crops: \(settings.maxCrops == 0 ? "percentage limit" : String(settings.maxCrops))",
+                    value: $settings.maxCrops, in: 0...10000).disabled(!settings.enabled)
+            Stepper("Quick checks: up to \(settings.quickCount) crops", value: $settings.quickCount, in: 1...100).disabled(!settings.enabled)
+            Text("At most one different crop per subject folder. Prefer the unused 8K corner; another corner may overlap training pixels. All targets use the same folders and crops. Quick checks run during training; checkpoint saves and final exports check the entire configured pool. Zero maximum crops uses the percentage limit.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
 struct DatasetPlanSummary: View {
     let plans: [String: WorkbenchDatasetPlan]
+    var validation: WorkbenchValidationSettings? = nil
+    private func limit(_ plan: WorkbenchDatasetPlan) -> Int {
+        guard let validation else { return plan.validationLimit ?? 0 }
+        guard validation.enabled, validation.percent.isFinite else { return 0 }
+        let cap = Int((Double(plan.subjectCount ?? 0) * min(100, max(0, validation.percent)) / 100).rounded(.down))
+        return validation.maxCrops > 0 ? min(cap, validation.maxCrops) : cap
+    }
+    private func count(_ plan: WorkbenchDatasetPlan) -> Int {
+        guard let validation else { return plan.sharedValidationCount ?? plan.validationCount }
+        let available = plan.subjects?.filter { $0.available && validation.folders[$0.id] != false }.count ?? plan.validationCandidateCount ?? 0
+        return min(limit(plan), available)
+    }
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text("Crops and splits").font(.headline)
-            Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 7) {
-                GridRow {
-                    Text("Target"); Text("Training"); Text("Validation"); Text("No target")
-                }.font(.caption.bold()).foregroundStyle(.secondary)
+        if let plan = plans["height"] ?? plans.values.first {
+            VStack(alignment: .leading, spacing: 9) {
+                Text("Shared crop plan").font(.headline)
+                Text("\(plan.subjectCount ?? plan.sourceSetCount) subject folders · \(plan.cropCount) training crops · \(count(plan)) extra validation crops")
+                    .font(.callout).monospacedDigit()
+                Text("Validation limit: \(limit(plan)) folders. \(plan.validationCandidateCount ?? 0) folders can supply a different crop at this size. Existing training crops stay in training.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if (plan.undersizedSourceSetCount ?? 0) > 0 || plan.excludedCount > 0 {
+                    Text("\(plan.undersizedSourceSetCount ?? 0) source sets are too small; \(plan.excludedCount) crops are excluded.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 ForEach(["height", "roughness", "normal"], id: \.self) { target in
-                    if let plan = plans[target] {
-                        GridRow {
-                            Text(target == "height" ? "Displacement" : target.capitalized)
-                            Text(plan.trainCount.formatted())
-                            Text(plan.validationCount.formatted())
-                            Text(plan.unavailableTargetCount.formatted())
-                        }
+                    if let targetPlan = plans[target], targetPlan.unavailableTargetCount > 0 {
+                        Text("\(target == "height" ? "Displacement" : target.capitalized): \(targetPlan.unavailableTargetCount) crops lack a supported target map.")
+                            .font(.caption).foregroundStyle(.orange)
                     }
                 }
-            }.font(.callout).monospacedDigit()
-            if let plan = plans["height"] {
-                Text("\(plan.sourceSetCount) source sets supply \(plan.cropCount) native crops. \(plan.undersizedSourceSetCount ?? 0) source sets are too small; \(plan.excludedCount) crops are excluded.")
+                if count(plan) == 0 {
+                    Text("No validation crops at these settings. Raise the percentage or use sources larger than the selected crop size.")
+                        .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
+                Text("These check learning on known materials. Review novel images after training to judge generalization.")
                     .font(.caption).foregroundStyle(.secondary)
-            }
-            Text("Automatic validation holds out source families (about 5%). Resolution and color siblings stay together. A lone 8K set can use disjoint regions. You can edit splits after import.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if plans.values.contains(where: { $0.trainCount > 0 && $0.validationCount == 0 }) {
-                Text("Some targets have no independent validation data. Add another material family or an eligible 8K source set for a validation check.")
-                    .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-            }
-        }.padding(.vertical, 6)
+            }.padding(.vertical, 6)
+        }
     }
 }
 
 struct ImportDatasetFolderSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable var store: WorkbenchStore
-    @State private var size: Int
-    init(store: WorkbenchStore) {
-        self.store = store
-        _size = State(initialValue: store.datasetResolution)
-    }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Label("Import Material Folder", systemImage: "folder.badge.plus").font(.title2.bold())
@@ -299,11 +326,11 @@ struct ImportDatasetFolderSheet: View {
                 .foregroundStyle(.secondary).textSelection(.enabled)
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    DatasetResolutionPicker(size: $size).disabled(store.isBusy)
+                    DatasetResolutionPicker(size: $store.folderImportSize).disabled(store.isBusy && !store.isScanningFolder)
                     if let preview = store.folderImport {
                         Text("Found \(preview.sourceSetCount) paired source sets · \(preview.addedMaterialCount) new · \(preview.duplicateMaterialCount) already present")
                             .font(.headline)
-                        if let plans = preview.plans[String(size)] { DatasetPlanSummary(plans: plans) }
+                        if let plans = preview.plans[String(store.folderImportSize)] { DatasetPlanSummary(plans: plans) }
                         if !preview.warnings.isEmpty {
                             DisclosureGroup("\(preview.warnings.count) source notices") {
                                 ForEach(Array(preview.warnings.enumerated()), id: \.offset) { _, warning in
@@ -317,7 +344,7 @@ struct ImportDatasetFolderSheet: View {
                                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         }
                     } else if store.isBusy {
-                        Text("Scanning subfolders and verifying full-quality original maps. Large collections can take a minute. Resolution changes after the scan are immediate.")
+                        Text("Scanning subfolders and verifying full-quality original maps. Large collections can take a minute. You can change resolution while this scan continues; no restart is needed.")
                             .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     DatasetSheetOperationNotice(store: store)
@@ -325,12 +352,12 @@ struct ImportDatasetFolderSheet: View {
             }
             HStack {
                 Button("Choose Another Folder…") { store.importMaterialFolder() }.disabled(store.isBusy)
-                if store.error != nil, let url = store.folderImportURL {
+                if store.error != nil || (!store.isBusy && store.folderImport == nil), let url = store.folderImportURL {
                     Button("Scan Again") { store.importMaterialFolder(url) }.disabled(store.isBusy)
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).disabled(store.isBusy)
-                Button("Import \(store.folderImport?.addedMaterialCount ?? 0) Sets") { store.commitFolderImport(size: size) }
+                Button("Import \(store.folderImport?.addedMaterialCount ?? 0) Sets") { store.commitFolderImport(size: store.folderImportSize) }
                     .buttonStyle(.glassProminent).keyboardShortcut(.defaultAction)
                     .disabled(store.isBusy || (store.folderImport?.addedMaterialCount ?? 0) == 0)
             }

@@ -114,14 +114,14 @@ def test_cleanup_preserves_size_reviews_and_never_removes_originals(tmp_path):
     assert native.cleanup_prepared_dataset(root)['removed'] is False
 
 
-def test_automatic_validation_holds_out_complete_materials_at_same_size(tmp_path):
+def test_full_size_images_stay_training_when_no_different_validation_crop_fits(tmp_path):
     root = sources(tmp_path, names=('first','second','third'))
     result = prepare(root, automatic_validation=True)
     training, checks, identity = select_pairs(Path(result['dataset_path']), expected_size=1024)
-    assert len(training)==2 and len(checks)==1
+    assert len(training)==3 and len(checks)==0
     assert not ({p['metadata']['material_id'] for p in training} & {p['metadata']['material_id'] for p in checks})
     assert all(p['dimensions']==(1024,1024) for p in training+checks)
-    assert 'held-out' in identity['check_scope'].lower()
+    assert 'Known-material' in identity['check_scope']
 
 
 def test_restore_moved_parent_uses_matching_source_identity(tmp_path):
@@ -271,6 +271,9 @@ def test_native_corner_training_and_validation_are_independent_and_preserve_code
     # Exercise preparation with small arrays using the exact same disjoint
     # corner geometry, while the literal 8K policy is checked above.
     root = sources(tmp_path, size=2048)
+    index = json.loads((root/'dataset.json').read_text())
+    index['validation'] = {'percent': 100}
+    write_json(root/'dataset.json', index)
     real_layout = native.crop_layout
     def three_regions(width, height, size):
         if (width, height, size) == (2048, 2048, 512):
@@ -281,10 +284,11 @@ def test_native_corner_training_and_validation_are_independent_and_preserve_code
     result = prepare(root, size=512, automatic_validation=True)
     stage = Path(result['dataset_path'])
     training, checks, _identity = select_pairs(stage, expected_size=512)
-    assert len(training) == 2 and len(checks) == 1
-    assert checks[0]['metadata']['source_region_id'] == 'bottom_right'
-    assert checks[0]['metadata']['validation_scope'] == 'known_disjoint_regions'
-    assert len(list(stage.rglob('*.png'))) == 12
+    assert len(training) == 3 and len(checks) == 1
+    assert checks[0]['metadata']['source_region_id'] == 'validation'
+    assert checks[0]['metadata']['crop_rectangle_top_left_xywh'] == [0, 1536, 512, 512]
+    assert checks[0]['metadata']['validation_scope'] == 'known_subject_diagnostic'
+    assert len(list(stage.rglob('*.png'))) == 16
     original, _ = read_png(root/'sources/surface/surface_disp_2k.png')
     for pair in training + checks:
         x, y, width, height = pair['metadata']['crop_rectangle_top_left_xywh']
@@ -383,19 +387,19 @@ def test_missing_alternate_color_removes_only_that_variant_and_blocks_rediscover
     assert len(list(Path(prepared['dataset_path']).rglob('*.png'))) == 4
 
 
-def test_validation_selects_only_families_with_the_requested_target(tmp_path):
+def test_validation_membership_is_shared_across_targets_even_with_missing_maps(tmp_path):
     root = sources(tmp_path, names=('height_a', 'height_b', 'normal_only'))
     (root/'sources/normal_only/normal_only_disp_2k.png').unlink()
-    # Build these as fresh provider sets; the normal-only material never
-    # promised a displacement source that must later be restored.
-    write_json(root/'dataset.json', {'schema_version':2, 'samples':[]})
-    result = prepare(root, size=1024, automatic_validation=True, target='height')
-    index = json.loads((Path(result['dataset_path'])/'dataset.json').read_text())
-    assert index['automatic_validation']['target'] == 'height'
-    assert 'normal_only' not in index['automatic_validation']['source_family_ids']
-    training, checks, _ = select_pairs(Path(result['dataset_path']), expected_size=1024, target='height')
-    assert training and checks
-    assert all('height' in pair['paths'] for pair in training + checks)
+    write_json(root/'dataset.json', {'schema_version':2, 'samples':[], 'validation': {'percent':100}})
+    plans = []
+    for target in ('height', 'normal'):
+        result = prepare(root, size=256, automatic_validation=True, target=target)
+        index = json.loads((Path(result['dataset_path'])/'dataset.json').read_text())
+        assert 'target' not in index['automatic_validation']
+        plans.append({s['sample_id']: s['split'] for s in index['samples']})
+        training, checks, _ = select_pairs(Path(result['dataset_path']), expected_size=256, target=target)
+        assert len(training) == len(checks) == (2 if target == 'height' else 3)
+    assert plans[0] == plans[1]
 
 
 def test_quick_fit_stages_only_the_selected_material_and_no_other_changed_maps(tmp_path):
@@ -423,3 +427,79 @@ def test_insufficient_disk_and_failed_crop_leave_no_owned_training_junk(tmp_path
         prepare(root, size=1024)
     assert not (root/native.STAGING_ROOT).exists()
     assert len(list((root/'sources').rglob('*.png'))) == 4
+
+
+def test_folder_percentage_and_count_caps_are_shared_and_never_take_training_crops():
+    materials = {}
+    for number in range(40):
+        for side in (2048, 4096, 8192):
+            mid = f'subject{number}_{side}'
+            source = {'width': side, 'height': side, 'sample_bits': 16}
+            maps = {key: {'source': source} for key in ('input', 'height', 'normal', 'roughness')}
+            sample = {'material_id': mid, 'status': 'approved', 'source_directory': f'/subjects/{number}',
+                      'available_targets': ['height', 'normal', 'roughness'], 'split': 'validation', 'split_assignment': 'manual'}
+            materials[mid] = {'sample': sample, 'maps': maps, 'dimensions': [side, side], 'family': f'family{number}'}
+    signatures = []
+    for target in ('height', 'normal', 'roughness'):
+        plan = native.plan_material_regions(materials, [], 2048, {}, target, validation={'percent': 7.5, 'max_crops': 2})
+        assignments = plan['assignments']
+        checks = [a for a in assignments.values() if a['split'] == 'validation']
+        assert len(checks) == 2 and len({a['subject_id'] for a in checks}) == 2
+        assert plan['train_count'] == 40 * 5  # full 2K, center 4K, three 8K corners
+        assert all(a['material_id'].endswith('_8192') and a['crop_rectangle'] == [0, 6144, 2048, 2048] for a in checks)
+        signatures.append({identity: (a['split'], a['crop_rectangle']) for identity, a in assignments.items()})
+    assert signatures[0] == signatures[1] == signatures[2]
+    assert native.plan_material_regions(materials, [], 2048, {}, validation={'percent': 7.5})['validation_count'] == 3
+    assert native.plan_material_regions(materials, [], 2048, {}, validation={'percent': 1})['validation_count'] == 0
+    assert native.plan_material_regions(materials, [], 2048, {}, validation={'enabled': False})['validation_count'] == 0
+
+
+def test_center_training_gets_different_corner_diagnostic_with_exact_original_codes(tmp_path):
+    root = sources(tmp_path, size=512)
+    index = json.loads((root / 'dataset.json').read_text())
+    index['validation'] = {'percent': 100, 'max_crops': 1}
+    write_json(root / 'dataset.json', index)
+    before = {p: p.read_bytes() for p in (root / 'sources').rglob('*.png')}
+    result = prepare(root, size=256, automatic_validation=True)
+    stage = Path(result['dataset_path'])
+    training, checks, identity = select_pairs(stage, expected_size=256)
+    assert len(training) == len(checks) == 1
+    assert training[0]['metadata']['crop_rectangle_top_left_xywh'] == [128, 128, 256, 256]
+    assert checks[0]['metadata']['crop_rectangle_top_left_xywh'] == [0, 256, 256, 256]
+    assert 'may overlap' in identity['check_scope']
+    for pair in training + checks:
+        x, y, w, h = pair['metadata']['crop_rectangle_top_left_xywh']
+        original, _ = read_png(Path(pair['metadata']['map_metadata']['height']['source']['path']))
+        crop, _ = read_png(pair['paths']['height'])
+        np.testing.assert_array_equal(crop, original[y:y+h, x:x+w])
+    assert all(p.read_bytes() == data for p, data in before.items())
+    native.cleanup_prepared_dataset(stage)
+    review = workbench.dataset_info(SimpleNamespace(dataset=root, review_size=256))
+    assert sum(s['split'] == 'validation' for m in review['materials'] for s in m['samples']) == 1
+
+
+@pytest.mark.parametrize('value', [{'percent': -1}, {'percent': 101}, {'percent': float('nan')},
+                                  {'max_crops': -1}, {'max_crops': 1.5}, {'quick_count': 0}, {'folders': {'x': 'yes'}}])
+def test_invalid_validation_settings_fail_before_preparing_pixels(value):
+    with pytest.raises(ValueError, match='Validation needs'):
+        native.validation_settings(value)
+
+
+def test_automatic_checks_prefer_unused_source_regions_before_overlapping_centers():
+    import hashlib
+    subjects = sorted((f'/subjects/{n}' for n in range(20)), key=lambda s: hashlib.sha256(s.encode()).digest())
+    materials = {}
+    for n, subject in enumerate(subjects):
+        # Hash-only selection would choose the first 4K folder. The one 8K
+        # folder sorts last, but offers an unused corner and must win.
+        side = 8192 if n == 19 else 4096
+        mid = f'asset{n}'
+        maps = {role: {'source': {'width': side, 'height': side, 'sample_bits': 16}} for role in ('input', 'height')}
+        materials[mid] = {'sample': {'material_id': mid, 'status': 'approved', 'source_directory': subject},
+                          'dimensions': [side, side], 'family': mid, 'maps': maps}
+    plan = native.plan_material_regions(materials, [], 2048, {}, validation={'percent': 5})
+    checks = [a for a in plan['assignments'].values() if a['split'] == 'validation']
+    assert len(checks) == 1 and checks[0]['material_id'] == 'asset19'
+    assert checks[0]['crop_rectangle'] == [0, 6144, 2048, 2048]
+    manual = native.plan_material_regions(materials, [], 2048, {}, validation={'percent': 5, 'folders': {subjects[0]: True}})
+    assert next(a for a in manual['assignments'].values() if a['split'] == 'validation')['material_id'] == 'asset0'

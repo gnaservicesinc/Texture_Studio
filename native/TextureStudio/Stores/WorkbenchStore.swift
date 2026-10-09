@@ -24,6 +24,8 @@ final class WorkbenchStore {
     }
     var pendingSourceFolder: URL?
     var folderImport: WorkbenchFolderImport?
+    var folderImportSize = 1024
+    var isScanningFolder = false
     var folderImportURL: URL?
     @ObservationIgnored var folderImportPlanURL: URL?
     @ObservationIgnored private var queuedDatasetURL: URL?
@@ -56,6 +58,8 @@ final class WorkbenchStore {
     private(set) var isStopping = false
     private(set) var hasTrainingStarted = false
     private(set) var isSavingTraining = false
+    private(set) var isCheckpointPending = false
+    private(set) var validationSummary = ""
     @ObservationIgnored private var trainingEventBuffer = ""
     private(set) var isPreparingDataset = false
     var datasetPreparationSummary = ""
@@ -367,8 +371,6 @@ final class WorkbenchStore {
     func selectTrainingTarget(_ target: String) {
         guard !isBusy, ["height", "roughness", "normal"].contains(target) else { return }
         training.target = target
-        guard let datasetURL else { return }
-        operation("Updating \(target == "height" ? "displacement" : target) splits…") { try await self.loadDataset(datasetURL) }
     }
 
     func prepareTrainingDataset() {
@@ -639,6 +641,7 @@ final class WorkbenchStore {
                 "--target", self.training.target, "--scope", self.training.scope, "--memory-gib", String(self.training.memoryGB),
                 "--cache-gib", String(self.training.cacheGB), "--max-minutes", String(self.training.maxMinutes),
                 "--updates-per-map", String(self.training.updatesPerCrop),
+                "--validation-every", String(self.training.validationEvery), "--checkpoint-every", String(self.training.checkpointEvery),
                 "--lora-rank", String(self.training.loraRank), "--lora-alpha", String(self.training.loraAlpha)] + self.dependencyArguments
             if self.developerMode { args += ["--developer-mode"] }
             if self.training.useSelectedMaterialOnly, let id = self.selectedMaterialId { args += ["--material", id] }
@@ -719,6 +722,13 @@ final class WorkbenchStore {
         runner?.stopAndSave()
     }
 
+    func saveCheckpointNow() {
+        guard canStopAndSave, !isCheckpointPending else { return }
+        isCheckpointPending = true
+        activity = "Full validation and checkpoint queued after this update…"
+        runner?.saveCheckpoint()
+    }
+
     func recordTrainingProgress(_ chunk: String) {
         trainingEventBuffer += chunk
         while let newline = trainingEventBuffer.firstIndex(of: "\n") {
@@ -726,9 +736,26 @@ final class WorkbenchStore {
             trainingEventBuffer.removeSubrange(...newline)
             guard let data = line.data(using: .utf8),
                   let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  event["event"] as? String == "training_started", isTraining, !isStopping else { continue }
-            hasTrainingStarted = true
-            activity = "Training material LoRA…"
+                  let kind = event["event"] as? String, isTraining else { continue }
+            switch kind {
+            case "training_started":
+                hasTrainingStarted = true
+                if !isStopping { activity = "Training material LoRA…" }
+            case "checkpoint_saved":
+                if let checkpoint = try? WorkbenchProcess.decode(WorkbenchCheckpoint.self, output: line) {
+                    if !checkpoints.contains(where: { $0.id == checkpoint.id }) { checkpoints.append(checkpoint) }
+                    preferences.set(checkpoints.map(\.checkpointPath), forKey: "checkpoints")
+                }
+                isCheckpointPending = false
+                if !isStopping { activity = "Checkpoint saved after full validation. Training continues…" }
+            case "validation":
+                let count = event["sample_count"] as? Int ?? 0
+                let pool = event["pool_count"] as? Int ?? 0
+                if let error = event["mae"] as? Double {
+                    validationSummary = "\(event["scope"] as? String == "full" ? "Full validation" : "Quick check"): \(count)/\(pool) crops · error \(error.formatted(.number.precision(.fractionLength(6))))"
+                } else { validationSummary = "No validation crops are available for this run." }
+            default: break
+            }
         }
         if trainingEventBuffer.count > 100000 { trainingEventBuffer = String(trainingEventBuffer.suffix(100000)) }
     }
@@ -924,12 +951,13 @@ final class WorkbenchStore {
     }
     func operation(_ label: String, training: Bool = false, body: @escaping @MainActor () async throws -> Void) {
         guard !isBusy else { return }
+        isCheckpointPending = false; validationSummary = ""
         isBusy = true; isTraining = training; isStopping = false; hasTrainingStarted = false; isSavingTraining = false
         error = nil; activity = label; logText = ""; trainingEventBuffer = ""
         task = Task {
             defer {
                 isBusy = false; isTraining = false; isResumingTraining = false; isStopping = false
-                hasTrainingStarted = false; isSavingTraining = false; isPreparingDataset = false; task = nil
+                hasTrainingStarted = false; isSavingTraining = false; isCheckpointPending = false; isPreparingDataset = false; task = nil
                 if let url = queuedDatasetURL {
                     queuedDatasetURL = nil
                     openDataset(url)

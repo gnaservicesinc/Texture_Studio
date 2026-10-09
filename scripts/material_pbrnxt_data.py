@@ -159,22 +159,35 @@ def select_pairs(dataset: Path, materials: list[str] | None = None, expected_siz
         for train in training:
             check_family = check["metadata"].get("source_family_id") or check["metadata"].get("asset_family_id") or check["metadata"]["material_id"]
             train_family = train["metadata"].get("source_family_id") or train["metadata"].get("asset_family_id") or train["metadata"]["material_id"]
-            if check_family == train_family:
-                check_set = check["metadata"].get("source_set_id")
-                train_set = train["metadata"].get("source_set_id")
-                if check_set != train_set or check["metadata"]["source_pixel_dimensions"] != train["metadata"]["source_pixel_dimensions"]:
-                    raise ValueError("Validation would leak the same material across source-resolution sets; hold out that entire asset family")
-                if rectangles_overlap(check["metadata"]["crop_rectangle_top_left_xywh"], train["metadata"]["crop_rectangle_top_left_xywh"]):
-                    raise ValueError("Check crop overlaps training pixels")
+            if check_family == train_family or (check["metadata"].get("source_directory") and check["metadata"].get("source_directory") == train["metadata"].get("source_directory")):
+                from material_native_size import normalized_rectangle
+                check_rect = normalized_rectangle(check["metadata"]["crop_rectangle_top_left_xywh"], check["metadata"]["source_pixel_dimensions"])
+                train_rect = normalized_rectangle(train["metadata"]["crop_rectangle_top_left_xywh"], train["metadata"]["source_pixel_dimensions"])
+                if index.get("validation_scope") == "known_subject_diagnostic":
+                    if check_rect == train_rect:
+                        raise ValueError("Learning-check crop repeats an existing training view")
+                    continue
+                if (check["metadata"].get("source_set_id") != train["metadata"].get("source_set_id")
+                        or check["metadata"]["source_pixel_dimensions"] != train["metadata"]["source_pixel_dimensions"]):
+                    raise ValueError("Validation would leak the same material across source-resolution sets")
+                if rectangles_overlap(check_rect, train_rect):
+                    raise ValueError("Check crop overlaps training pixels across source-resolution sets")
+    if index.get("split_strategy") == "subject-extra-crops-v2":
+        from material_native_size import subject_id
+        subjects = [subject_id(pair["metadata"]) for pair in checks]
+        if len(subjects) != len(set(subjects)):
+            raise ValueError("Validation permits at most one crop per subject folder")
     regional_checks = any((check["metadata"].get("source_family_id") or check["metadata"]["material_id"])
                           == (train["metadata"].get("source_family_id") or train["metadata"]["material_id"])
                           for check in checks for train in training)
     check_scope = ("Held-out source families plus non-overlapping regions of known materials; regional validation does not establish unseen-material generalization"
                    if regional_checks else "Complete held-out source families at the same training resolution")
+    if index.get("validation_scope") == "known_subject_diagnostic":
+        check_scope = "Known-material learning checks; alternate crops may overlap training pixels. Evaluate novel images separately."
     identity = {"path": str(dataset.resolve()), "index_sha256": digest(index_path),
                 "materials": len(found), "training_pairs": len(training), "check_pairs": len(checks),
                 "check_scope": check_scope, "validation_scope": index.get("validation_scope"),
-                "target": target, "source_bits": (next(iter({pair["metadata"]["map_metadata"][target]["sample_bits"] for pair in pairs}))
+                "validation_settings": index.get("validation"), "target": target, "source_bits": (next(iter({pair["metadata"]["map_metadata"][target]["sample_bits"] for pair in pairs}))
                     if len({pair["metadata"]["map_metadata"][target]["sample_bits"] for pair in pairs}) == 1
                     else sorted({pair["metadata"]["map_metadata"][target]["sample_bits"] for pair in pairs})),
                 "data_transfer": "native auxiliary integer codes / integer maximum; no gamma or per-image range normalization",

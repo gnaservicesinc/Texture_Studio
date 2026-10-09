@@ -54,7 +54,7 @@ extension WorkbenchStore {
             if response == .OK, let url = panel.url { completion(url) }
         }
     }
-    func createDataset(name: String, description: String, parentURL: URL, size: Int? = nil) {
+    func createDataset(name: String, description: String, parentURL: URL, size: Int? = nil, validation: WorkbenchValidationSettings = .init()) {
         guard !isBusy else { return }
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { error = "Give your dataset a name."; return }
@@ -64,7 +64,7 @@ extension WorkbenchStore {
         operation("Creating \(title)…") {
             let result = try WorkbenchProcess.decode(WorkbenchDataset.self, output: await self.worker([
                 "create-dataset", "--dataset", destination.path, "--name", title, "--description", description,
-                "--training-size", String(size ?? self.training.size)]))
+                "--training-size", String(size ?? self.training.size)] + validation.arguments))
             self.selectedSampleId = nil
             self.adoptDataset(result)
             self.saveDatasetLocation(result)
@@ -98,7 +98,7 @@ extension WorkbenchStore {
         datasetPreparationSummary = ""
         return result
     }
-    func updateDatasetInfo(name: String, description: String, size: Int? = nil) {
+    func updateDatasetInfo(name: String, description: String, size: Int? = nil, validation: WorkbenchValidationSettings? = nil) {
         guard !isBusy else { return }
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { error = "Give your dataset a name."; return }
@@ -106,7 +106,7 @@ extension WorkbenchStore {
             let current = try await self.sourceDatasetForManagement()
             try self.adoptManagedDataset(await self.worker(["edit-dataset", "--dataset", current.datasetPath,
                 "--name", title, "--description", description, "--expected-index-sha256", current.indexSha256,
-                "--training-size", String(size ?? self.datasetResolution), "--review-size", String(size ?? self.datasetResolution)]))
+                "--training-size", String(size ?? self.datasetResolution), "--review-size", String(size ?? self.datasetResolution)] + (validation ?? self.dataset?.validation ?? .init()).arguments))
             self.showDatasetInfoSheet = false
             self.activity = "Saved \(self.datasetName)."
         }
@@ -148,13 +148,17 @@ extension WorkbenchStore {
         operation("Scanning material folders and verifying original maps…") { try await self.scanMaterialFolder(url) }
     }
     private func scanMaterialFolder(_ url: URL) async throws {
+        let continuingImport = showImportFolderSheet
         let source = try await sourceDatasetForManagement()
         // A rescan is also recovery from another window changing membership or
         // reviews. Reconnect the durable index before binding a new preview.
         try await loadDataset(URL(fileURLWithPath: source.datasetPath))
         guard let current = dataset else { throw StudioError("Open a dataset before importing material maps.") }
         clearFolderImport()
+        if !continuingImport { folderImportSize = datasetResolution }
         folderImportURL = url
+        isScanningFolder = true
+        defer { isScanningFolder = false }
         showAddMaterialSheet = false
         showImportFolderSheet = true
         let planURL = FileManager.default.temporaryDirectory.appendingPathComponent("material-import-\(UUID().uuidString).json")
@@ -162,7 +166,7 @@ extension WorkbenchStore {
         folderImport = try WorkbenchProcess.decode(WorkbenchFolderImport.self, output: await worker([
             "scan-folder", "--dataset", current.datasetPath, "--folder", url.path,
             "--expected-index-sha256", current.indexSha256, "--plan", planURL.path]))
-        activity = "Folder scan complete. Review the resolution and split counts, then import."
+        activity = "Folder scan complete. Review the resolution, training crops and validation checks, then import."
     }
     func clearFolderImport() {
         if let folderImportPlanURL { try? FileManager.default.removeItem(at: folderImportPlanURL) }
@@ -183,6 +187,16 @@ extension WorkbenchStore {
             self.showImportFolderSheet = false
             self.clearFolderImport()
             self.activity = "Imported \(result.addedMaterialCount ?? 0) source sets at \(size) × \(size); \(preview.duplicateMaterialCount) already present. Original maps remain in their source folder."
+        }
+    }
+    func setSubjectValidation(_ subject: WorkbenchSubject, enabled: Bool) {
+        guard !isBusy else { return }
+        operation("Saving folder validation…") {
+            let current = try await self.sourceDatasetForManagement()
+            try self.adoptManagedDataset(await self.worker(["edit-dataset", "--dataset", current.datasetPath,
+                "--expected-index-sha256", current.indexSha256, "--validation-subject", subject.id,
+                "--subject-validation", enabled ? "enabled" : "disabled"]))
+            self.activity = "Saved shared folder validation for every material target."
         }
     }
     func removeSelectedMaterial() {

@@ -64,6 +64,17 @@ struct TrainingWorkbenchView: View {
                     Button("Train Material", systemImage: "play.fill") { store.startTraining() }
                         .buttonStyle(.borderedProminent).disabled(store.isBusy || store.trainingConfigurationIssue != nil)
                 }.disabled(store.isBusy)
+                Section("Validation & checkpoints") {
+                    if let validation = store.dataset?.validation {
+                        Text(validation.enabled ? "Up to \(validation.quickCount) crops per quick check; full \(validation.percent.formatted())% pool when saving." : "Validation is disabled in Dataset Info.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Stepper("Quick check every \(store.training.validationEvery) updates", value: $store.training.validationEvery, in: 1...10000)
+                    Stepper("Save every \(store.training.checkpointEvery == 0 ? "request or final export" : "\(store.training.checkpointEvery) updates")",
+                            value: $store.training.checkpointEvery, in: 0...100000)
+                    Text("Every saved checkpoint runs full validation. Save Checkpoint Now finishes the current update and continues training after saving.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.disabled(store.isBusy)
                 if developerMode {
                     Section("Developer controls") {
                         Toggle("Automatic memory budget", isOn: $store.training.automaticMemory)
@@ -102,6 +113,7 @@ struct TrainingWorkbenchView: View {
                         .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }.frame(maxHeight: .infinity)
+                if !store.validationSummary.isEmpty { Text(store.validationSummary).font(.callout) }
                 if !store.activity.isEmpty { Text(store.activity).font(.caption).foregroundStyle(.secondary) }
                 if let error = store.error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
                 HStack {
@@ -125,6 +137,9 @@ struct WorkbenchStopButtons: View {
             .disabled(store.isStopping && !store.isSavingTraining)
             .help("Abort immediately. Checkpoints already saved on disk are kept.")
         if store.hasTrainingStarted || store.isSavingTraining {
+            Button(store.isCheckpointPending ? "Checkpoint Queued…" : "Save Checkpoint Now") { store.saveCheckpointNow() }
+                .disabled(!store.canStopAndSave || store.isCheckpointPending)
+                .help("Run full validation, save a checkpoint, and continue training.")
             Button(store.isSavingTraining ? "Saving…" : "Stop and Save") { store.stopAndSave() }
                 .disabled(!store.canStopAndSave)
                 .help("Finish the current update and save the material LoRA.")

@@ -1,0 +1,47 @@
+[
+  {
+    "app": "/Applications/Texture Studio.app",
+    "version": "0.9.12",
+    "build": "104",
+    "smoke": "passed",
+    "backend_source_parity": true,
+    "isolated_dataset_contract": "passed",
+    "training_cli": "passed"
+  },
+  {
+    "app": "/Applications/Texture Studio.app/Contents/Applications/Checkpoint Compare.app",
+    "version": "0.9.12",
+    "build": "104",
+    "smoke": "passed",
+    "backend_source_parity": true,
+    "isolated_dataset_contract": "passed",
+    "training_cli": "passed"
+  },
+  {
+    "app": "/Applications/Texture Studio.app/Contents/Applications/Material Dataset.app",
+    "version": "0.9.12",
+    "build": "104",
+    "smoke": "passed",
+    "backend_source_parity": true,
+    "isolated_dataset_contract": "passed",
+    "training_cli": "passed"
+  },
+  {
+    "app": "/Applications/Texture Studio.app/Contents/Applications/Material Review.app",
+    "version": "0.9.12",
+    "build": "104",
+    "smoke": "passed",
+    "backend_source_parity": true,
+    "isolated_dataset_contract": "passed",
+    "training_cli": "passed"
+  },
+  {
+    "app": "/Applications/Texture Studio.app/Contents/Applications/Material Trainer.app",
+    "version": "0.9.12",
+    "build": "104",
+    "smoke": "passed",
+    "backend_source_parity": true,
+    "isolated_dataset_contract": "passed",
+    "training_cli": "passed"
+  }
+]

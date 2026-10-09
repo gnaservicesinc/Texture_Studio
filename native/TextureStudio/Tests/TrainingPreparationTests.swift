@@ -34,13 +34,13 @@ final class TrainingPreparationTests: XCTestCase {
         "samples":[{"sample_id":"soil_4k_center","status":"approved","split":"train","width":2048,"height":2048,
         "maps":{"input":{"path":"/crop/diffuse.png","width":2048,"height":2048},
         "height":{"path":"/crop/height.png","width":2048,"height":2048}}}]}],
-        "automatic_validation":{"policy":"source-family-native-regions-v1","material_ids":[],
+        "automatic_validation":{"policy":"subject-extra-crops-v2","material_ids":[],
         "quick_fit_material_id":"soil_4k","target":"height"}}
         """.replacingOccurrences(of: "\n", with: "")
         let dataset = try WorkbenchProcess.decode(WorkbenchDataset.self, output: document)
         XCTAssertTrue(dataset.readyForTraining(size: 2048, material: "soil_4k", target: "height"))
         XCTAssertFalse(dataset.readyForTraining(size: 2048, material: nil, target: "height"))
-        XCTAssertFalse(dataset.readyForTraining(size: 2048, material: "soil_4k", target: "normal"))
+        XCTAssertTrue(dataset.readyForTraining(size: 2048, material: "soil_4k", target: "normal"), "Prepared crops are shared across targets")
         XCTAssertFalse(dataset.readyForTraining(size: 2048, material: "other", target: "height"))
     }
 
@@ -108,6 +108,39 @@ final class TrainingPreparationTests: XCTestCase {
         XCTAssertNil(store.error)
         XCTAssertNotNil(store.selectedCheckpoint)
         XCTAssertTrue(fixture.calls.contains { $0.first == "cleanup-size" })
+    }
+
+    func testCheckpointRequestKeepsTrainingActiveAndRegistersSavedModel() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        fixture.holdTraining = true
+        let store = fixture.store()
+        try await store.loadTrainingCapabilities()
+        try await store.loadDataset(fixture.original)
+        store.uploadAfterTraining = false
+        store.training.size = 1024
+        store.startTraining()
+        for _ in 0..<200 {
+            if fixture.continuation != nil { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertNotNil(fixture.continuation)
+        store.recordTrainingProgress("{\"event\":\"training_started\"}\n")
+        store.saveCheckpointNow()
+        XCTAssertTrue(store.isCheckpointPending)
+        XCTAssertFalse(store.isStopping)
+        store.recordTrainingProgress("{\"event\":\"validation\",\"scope\":\"full\",\"sample_count\":5,\"pool_count\":5,\"mae\":0.025}\n")
+        let event: [String: Any] = ["event": "checkpoint_saved", "checkpoint_path": "/tmp/step-2.safetensors",
+            "sha256": "checkpoint-proof", "schema": "texture-studio-material-lora-v1", "target": "height",
+            "step": 2, "compatible": true, "variant": "lora", "supports_training_warm_start": true]
+        store.recordTrainingProgress(String(decoding: try JSONSerialization.data(withJSONObject: event), as: UTF8.self) + "\n")
+        XCTAssertFalse(store.isCheckpointPending)
+        XCTAssertTrue(store.isTraining)
+        XCTAssertTrue(store.validationSummary.contains("5/5"))
+        XCTAssertEqual(store.checkpoints.last?.step, 2)
+        fixture.continuation?.resume(); fixture.continuation = nil
+        try await settled(store)
+        XCTAssertNil(store.error)
     }
 
     func testStopDuringDatasetPreparationPreventsTrainingFromLaunching() async throws {
@@ -235,7 +268,7 @@ final class TrainingPreparationTests: XCTestCase {
                 "height": ["path": root.appendingPathComponent("height.png").path, "width": wrongGrid && isPrepared ? 512 : size, "height": size]]
             var value: [String: Any] = ["dataset_path": isPrepared ? prepared.path : original.path,
                 "index_sha256": isPrepared ? "prepared-sha" : "source-sha", "supported_training_sizes": [512, 1024, 2048],
-                "automatic_validation": ["policy": "source-family-native-regions-v1", "material_ids": ["soil"]],
+                "automatic_validation": ["policy": "subject-extra-crops-v2", "material_ids": ["soil"]],
                 "materials": [["material_id": "soil", "samples": [["sample_id": "soil", "status": "approved", "split": "train", "width": size, "height": size, "maps": maps]]]]]
             if isPrepared { value["preparation"] = ["source_dataset_path": original.path, "source_index_sha256": "source-sha",
                 "prepared_dataset_path": prepared.path, "crop_size": size, "reused": false, "target_resized": false, "target_cropped": true,

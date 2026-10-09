@@ -150,7 +150,7 @@ struct ModelTrainingHubView: View {
                 }
                 VStack(alignment: .leading, spacing: 14) {
                     Text("A workflow you can return to").font(.title2.bold())
-                    workflowRow("1", .dataset, "Set up your dataset", "Choose rendering and training resolution, import a material folder, then review the planned native crops and splits.")
+                    workflowRow("1", .dataset, "Set up your dataset", "Choose rendering and training resolution, import a material folder, then review the planned native crops and validation checks.")
                     workflowRow("2", .train, "Train material detail", "Use the saved dataset resolution and review the memory budget. Complete registered maps share the exact grid shown in Dataset.")
                     workflowRow("3", .compare, "Compare what changed", "Use the same prepared diffuse for each checkpoint. Inspect detail, noise, inversion and relief.")
                     workflowRow("4", .review, "Inspect at full quality", "Use 100% zoom, linked dragging and pop-out windows. Export the untouched map or open an editable copy in GIMP.")

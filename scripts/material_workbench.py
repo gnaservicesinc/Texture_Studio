@@ -200,7 +200,7 @@ def training_active(dataset: Path) -> bool:
 
 def dataset_info(args) -> dict:
     from material_dataset import png_image_header, resolve_map_path
-    from material_native_size import SUPPORTED_SIZES, current_review, recover_original, dataset_region_plan
+    from material_native_size import SUPPORTED_SIZES, current_review, recover_original, dataset_region_plan, validation_settings, subject_id
     args.dataset = canonical_dataset(args.dataset)
     with dataset_lock(args.dataset):
         index, records = read_dataset(args.dataset)
@@ -214,19 +214,30 @@ def dataset_info(args) -> dict:
         original_records = records
         plans, resolution_plans = {}, {}
         if review_size and not index.get("native_size_preparation"):
-            resolution_plans = {str(size): {target: dataset_region_plan(records, size, reviews, target)
+            resolution_plans = {str(size): {target: dataset_region_plan(records, size, reviews, target, metadata.get("validation"))
                                 for target in ("height", "roughness", "normal")} for size in SUPPORTED_SIZES}
             plans = resolution_plans[str(review_size)]
         selected_plan = plans.get(getattr(args, "target", "height"), {})
         if review_size and not index.get("native_size_preparation"):
             records = review_records_with_fallback(records, review_size)
+            sources = {sample["material_id"]: (entry, path, sample) for entry, path, sample in original_records}
+            for identity, assignment in selected_plan.get("assignments", {}).items():
+                if assignment["split"] != "validation":
+                    continue
+                entry, path, original = sources[assignment["material_id"]]
+                sample = dict(original, sample_id=identity, source_region_id="validation",
+                    sample_pixel_dimensions=[review_size, review_size],
+                    crop_rectangle_top_left_xywh=assignment["crop_rectangle"])
+                records.append((entry, path, sample))
         materials = {}
         for _item, path, sample in records:
             if review_size and not index.get("native_size_preparation"):
                 sample = dict(sample)
                 sample.update(current_review(reviews, f"{review_size}:{sample['sample_id']}", sample))
                 assignment = selected_plan.get("assignments", {}).get(sample["sample_id"], {})
-                sample.update({key: assignment[key] for key in ("split", "split_assignment", "validation_scope") if key in assignment})
+                sample.update({key: assignment[key] for key in ("split", "split_assignment", "validation_scope", "status") if key in assignment})
+                if not assignment:
+                    sample.update(split="train", split_assignment="automatic")
             maps = {}
             for role, filename in sample.get("maps", {}).items():
                 details = sample.get("map_metadata", {}).get(role, {})
@@ -291,7 +302,8 @@ def dataset_info(args) -> dict:
             material = materials.setdefault(sample["material_id"], {"material_id": sample["material_id"],
                 "name": sample.get("name", sample["material_id"].replace("_", " ")),
                 "asset_family_id": sample.get("asset_family_id", sample.get("source_family_id", sample["material_id"])),
-                "source_set_id": sample.get("source_set_id"), "samples": []})
+                "source_set_id": sample.get("source_set_id"), "subject_id": subject_id(sample),
+                "source_directory": sample.get("source_directory"), "samples": []})
             material["samples"].append({"sample_id": sample["sample_id"], "status": sample["status"], "split": sample["split"], "split_assignment": sample.get("split_assignment"), "width": width, "height": height, "maps": maps, "crop_rectangle": sample.get("crop_rectangle_top_left_xywh"), "note": sample.get("curation_note"), "metadata_path": str(path), "input_variant_count": len(input_variants) or 1, "input_variants": input_variants,
                 "asset_family_id": sample.get("asset_family_id", sample.get("source_family_id", sample["material_id"])),
                 "source_family_id": sample.get("source_family_id", sample.get("asset_family_id", sample["material_id"])),
@@ -314,12 +326,13 @@ def dataset_info(args) -> dict:
             "original_dataset_path": str(original_dataset.resolve()), "review_sha256": review_digest(original_dataset),
             "material_count": len(materials), "sample_count": len(records),
             "training_size": metadata.get("training_size"), "review_size": review_size,
+            "validation": validation_settings(metadata.get("validation")), "subjects": selected_plan.get("subjects", []),
             "source_set_count": len(original_records),
             "training_plans": {key: {k: v for k, v in plan.items() if k != "assignments"} for key, plan in plans.items()},
             "resolution_plans": {size: {key: {k: v for k, v in plan.items() if k != "assignments"}
                                  for key, plan in targets.items()} for size, targets in resolution_plans.items()},
             "supported_training_sizes": eligible_sizes,
-            "split_strategy": index.get("split_strategy"), "validation_scope": index.get("validation_scope"),
+            "split_strategy": index.get("split_strategy"), "validation_scope": "known_subject_diagnostic" if selected_plan else index.get("validation_scope"),
             "cross_size_validation_notice": index.get("native_size_preparation", {}).get("cross_size_validation_notice"),
             "automatic_validation": index.get("automatic_validation"), "materials": [materials[key] for key in sorted(materials)]}
 
@@ -343,7 +356,7 @@ def remove_missing(args) -> dict:
             raise ValueError("Dataset changed since selection; reload it before removing a missing source")
         if getattr(args, "review_size", None) and not index.get("native_size_preparation"):
             records = review_records_with_fallback(records, args.review_size)
-        selected = next(((entry, path, record) for entry, path, record in records if record["sample_id"] == args.sample), None)
+        selected = next(((entry, path, record) for entry, path, record in records if record["sample_id"] == args.sample or (not index.get("native_size_preparation") and record["material_id"] + "_validation" == args.sample)), None)
         if selected is None:
             return {"dataset_path": str(dataset), "sample_id": args.sample, "removed": False}
         entry, metadata_path, record = selected
@@ -624,6 +637,26 @@ def checked_training_size(value: int) -> int:
     return value
 
 
+def edited_validation(previous: dict, args) -> dict:
+    from material_native_size import validation_settings
+    result = validation_settings(previous)
+    for key in ("enabled", "percent", "max_crops", "quick_count"):
+        value = getattr(args, "validation_" + key, None)
+        if value is not None:
+            result[key] = value == "yes" if key == "enabled" else value
+    subject = getattr(args, "validation_subject", None)
+    if subject:
+        result["folders"] = dict(result["folders"])
+        mode = getattr(args, "subject_validation", None)
+        if mode == "automatic":
+            result["folders"].pop(subject, None)
+        elif mode in ("enabled", "disabled"):
+            result["folders"][subject] = mode == "enabled"
+        else:
+            raise ValueError("Choose automatic, enabled or disabled folder validation")
+    return validation_settings(result)
+
+
 def create_dataset(args) -> dict:
     """Create a small owned metadata directory without creating image copies."""
     name = checked_name(args.name)
@@ -654,7 +687,7 @@ def create_dataset(args) -> dict:
                 "dataset_management": {"schema": MANAGEMENT_SCHEMA, "owns_directory": True},
                 "storage_policy": SOURCE_STORAGE, "source_images_modified": False,
                 "original_sources_required_for_training": True, "split_strategy": "whole-material-v1",
-                "validation_scope": "held_out_materials", "training_size": size, "samples": []}
+                "validation_scope": "known_subject_diagnostic", "validation": edited_validation({}, args), "training_size": size, "samples": []}
             atomic_bytes(dataset / "dataset.json", json_bytes(index))
     except BaseException:
         if created and not (dataset / "dataset.json").exists():
@@ -672,13 +705,38 @@ def edit_dataset(args) -> dict:
     dataset = canonical_dataset(args.dataset)
     check_idle(dataset)
     with dataset_lock(dataset):
-        index, _records = editable_index(dataset, args)
+        index, records = editable_index(dataset, args)
         if getattr(args, "name", None) is not None:
             index["name"] = checked_name(args.name)
         if getattr(args, "description", None) is not None:
             index["description"] = checked_description(args.description)
         if getattr(args, "training_size", None) is not None:
             index["training_size"] = checked_training_size(args.training_size)
+        subject = getattr(args, "validation_subject", None)
+        previous_validation = index.get("validation", {})
+        if subject and getattr(args, "subject_validation", None) != "automatic":
+            from material_native_size import dataset_region_plan
+            reviews_path = dataset / ".material-size-reviews.json"
+            reviews = json.loads(reviews_path.read_text()) if reviews_path.is_file() else {}
+            current = dataset_region_plan(records, index.get("training_size", 1024), reviews, validation=previous_validation)
+            # A checkbox edits this selection. Turning one folder off must not
+            # silently turn a different folder on to fill the percentage cap.
+            previous_validation = dict(previous_validation, folders={
+                **previous_validation.get("folders", {}), **{s["subject_id"]: s["selected"] for s in current["subjects"]}})
+        index["validation"] = edited_validation(previous_validation, args)
+        if subject:
+            from material_native_size import subject_id, dataset_region_plan
+            if subject not in {subject_id(sample) for _entry, _path, sample in records}:
+                raise ValueError("This subject folder is no longer in the dataset; reload it")
+            if getattr(args, "subject_validation", None) == "enabled":
+                reviews_path = dataset / ".material-size-reviews.json"
+                reviews = json.loads(reviews_path.read_text()) if reviews_path.is_file() else {}
+                plan = dataset_region_plan(records, index.get("training_size", 1024), reviews, validation=index["validation"])
+                if not any(s["subject_id"] == subject and s["available"] for s in plan["subjects"]):
+                    raise ValueError("This folder cannot supply a different validation crop at this resolution")
+                enabled = sum(index["validation"]["folders"].get(s["subject_id"]) is True for s in plan["subjects"])
+                if enabled > plan["validation_limit"]:
+                    raise ValueError("Folder flags exceed the validation limit. Disable another folder or raise the percentage/crop limit in Dataset Info.")
         index["updated_utc"] = timestamp()
         commit_metadata(dataset, [(dataset / "dataset.json", index)])
     return refreshed(dataset, review_size=getattr(args, "review_size", None), target=getattr(args, "target", "height"))
@@ -980,7 +1038,7 @@ def scan_folder(args) -> dict:
     if not materials:
         warnings.append("No paired PNG material maps were recognized. Choose a folder of named diffuse, displacement, roughness or normal maps, or add maps manually.")
     combined = records + [({}, dataset / "dataset.json", source_record(material)) for material in accepted]
-    plans = {str(size): {target: {k: v for k, v in dataset_region_plan(combined, size, reviews, target).items() if k != "assignments"}
+    plans = {str(size): {target: {k: v for k, v in dataset_region_plan(combined, size, reviews, target, index.get("validation")).items() if k != "assignments"}
              for target in ("height", "roughness", "normal")} for size in SUPPORTED_SIZES}
     # The verified source metadata is reused only while every original's file
     # identity and stat still match. Changing resolution never rehashes the GBs.
@@ -1095,6 +1153,12 @@ def parser() -> argparse.ArgumentParser:
             sub.add_argument("--name", required=name == "create-dataset")
             sub.add_argument("--description", default="" if name == "create-dataset" else None)
             sub.add_argument("--training-size", type=int, choices=(256, 512, 1024, 2048))
+            sub.add_argument("--validation-enabled", choices=("yes", "no"))
+            sub.add_argument("--validation-percent", type=float)
+            sub.add_argument("--validation-max-crops", type=int)
+            sub.add_argument("--validation-quick-count", type=int)
+            sub.add_argument("--validation-subject")
+            sub.add_argument("--subject-validation", choices=("automatic", "enabled", "disabled"))
         if name in ("edit-dataset", "add-material", "import-folder", "scan-folder", "remove-material", "validate-delete"):
             sub.add_argument("--expected-index-sha256")
         if name == "add-material":

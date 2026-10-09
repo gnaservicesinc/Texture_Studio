@@ -36,6 +36,13 @@ final class WorkbenchProcess: @unchecked Sendable {
         }
     }
 
+    func saveCheckpoint() {
+        lock.withLock {
+            guard !stopping, let process, process.isRunning else { return }
+            kill(process.processIdentifier, SIGUSR1)
+        }
+    }
+
     func run(executable: URL, arguments: [String], directory: URL?, log: URL,
              onLog: @escaping @Sendable (String) -> Void) async throws -> String {
         try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
