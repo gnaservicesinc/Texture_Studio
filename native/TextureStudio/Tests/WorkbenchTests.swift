@@ -88,13 +88,13 @@ final class WorkbenchTests: XCTestCase {
         let text = """
         {"dataset_path":"/second/dataset.json","index_sha256":"abc","materials":[{"material_id":"soil","samples":[{"sample_id":"soil_2","status":"approved","split":"train","width":2048,"height":2048,"maps":{"height":{"path":"/second/height.png","sha256":"123","source_bits":16,"encoding":"linear_data"}}}]}]}
         """
-        let dataset = try WorkbenchProcess.decode(WorkbenchDataset.self, output: text)
+        let dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: text)
         XCTAssertEqual(dataset.datasetPath, "/second/dataset.json")
         XCTAssertEqual(dataset.samples.first?.maps["height"]?.sourceBits, 16)
-        let result = try WorkbenchProcess.decode(MaterialInferenceResponse.self, output:
+        let result = try WorkbenchResult.decode(MaterialInferenceResponse.self, output:
             "{\"outputs\":{\"height\":{\"path\":\"/native/height.exr\"}},\"checkpoint_sha256\":\"selected\"}")
         XCTAssertEqual(result.checkpointSha256, "selected")
-        XCTAssertThrowsError(try WorkbenchProcess.decode(MaterialInferenceResponse.self, output: "{\"ok\":false}"))
+        XCTAssertThrowsError(try WorkbenchResult.decode(MaterialInferenceResponse.self, output: "{\"ok\":false}"))
     }
 
     func testMaterialCheckpointRecipeIsAnExplicitSource() throws {

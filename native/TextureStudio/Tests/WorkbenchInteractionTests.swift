@@ -25,7 +25,7 @@ final class WorkbenchInteractionTests: XCTestCase {
         let defaults = try isolatedPreferences()
         defer { defaults.removePersistentDomain(forName: defaultsSuite) }
         let store = WorkbenchStore(preferences: defaults)
-        store.dataset = try WorkbenchProcess.decode(WorkbenchDataset.self, output: """
+        store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: """
         {"dataset_path":"/dataset","index_sha256":"index","materials":[{"material_id":"soil","samples":[
           {"sample_id":"soil","status":"approved","split":"train","width":1024,"height":1024,"maps":{},
            "input_variants":[{"path":"/dataset/color.png","variant_id":"color"}]}]}]}
@@ -167,7 +167,7 @@ final class WorkbenchInteractionTests: XCTestCase {
         return try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
     }
     private func checkpoint(id: String, target: String, scope: String) throws -> WorkbenchCheckpoint {
-        try WorkbenchProcess.decode(WorkbenchCheckpoint.self, output: checkpointJSON(id: id, target: target, scope: scope))
+        try WorkbenchResult.decode(WorkbenchCheckpoint.self, output: checkpointJSON(id: id, target: target, scope: scope))
     }
     private func checkpointJSON(id: String, target: String, scope: String) -> String {
         """

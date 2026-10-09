@@ -24,6 +24,6 @@ The local decision model can rank detail, visual appeal and visible artifacts an
 
 Height uses original UInt16 numeric codes transferred to Float32 by division by 65535. Roughness and normal maps use their actual integer precision. Raw predictions export lossless unclipped Float32 EXR; display PNGs are separate derivatives. Source images remain unchanged.
 
-Memory preflight determines which training grids are offered for the selected scope and budget. Generation may tile larger prepared diffuse maps independently of training size. Hardware estimates and a successful run describe runtime feasibility, not model quality.
+The selected native grid is never reduced to fit a hardware estimate. Training and inference evaluate complete grids with Apple MPSGraph; actual working memory and throughput depend on the installed model and chosen map size. A successful run establishes runtime feasibility, not model quality.
 
-Hub exports retain model metadata, licenses, source files and base identity and exclude source photographs and optimizer state. Successfully uploaded models remain in the app's download catalog by repository revision. Local full checkpoints can be used as a different base without silently changing architecture or tensor layout.
+Hub exports retain numeric weights, metadata, license notices and base identity and exclude executable sources, source photographs and optimizer state. Successfully uploaded models remain in the app's download catalog by exact repository revision. Local full checkpoints can be used as a different base without silently changing architecture or tensor layout.

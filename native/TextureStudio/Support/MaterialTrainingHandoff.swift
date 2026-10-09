@@ -96,7 +96,6 @@ struct MaterialTrainingHandoff: Codable, Sendable {
               training.maxMinutes.isFinite, (1...240).contains(training.maxMinutes),
               (1...64).contains(training.loraRank),
               training.loraAlpha.isFinite, (0.01...128).contains(training.loraAlpha),
-              training.cacheGB.isFinite, (0...4).contains(training.cacheGB),
               (1...10_000).contains(training.validationEvery),
               (0...100_000).contains(training.checkpointEvery),
               sampleID?.isEmpty != true, inputVariantID?.isEmpty != true else {

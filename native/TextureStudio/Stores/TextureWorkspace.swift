@@ -138,7 +138,7 @@ final class TextureWorkspace {
     private func checkpointCacheKey(_ checkpoint: SelectedMaterialCheckpoint) -> String {
         let file = URL(fileURLWithPath: checkpoint.checkpointPath)
         let values = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-        return "\(checkpoint.selectionIdentity)|\(checkpoint.pythonPath)|\(checkpoint.modelDirectory)|\(checkpoint.codeDirectory)|\(settings.outputSize)|\(source.map { ObjectIdentifier($0.orientedImage).debugDescription } ?? "")|\(values?.fileSize ?? -1)|\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+        return "\(checkpoint.selectionIdentity)|\(checkpoint.modelDirectory)|\(settings.outputSize)|\(source.map { ObjectIdentifier($0.orientedImage).debugDescription } ?? "")|\(values?.fileSize ?? -1)|\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
     }
 
     func reloadSelectedCheckpoint(activate: Bool = false, target: String? = nil) {
@@ -420,6 +420,30 @@ final class TextureWorkspace {
         markEdited()
     }
 
+    func chooseAuxiliaryExport() {
+        guard let source, !isBusy else { return }
+        let panel = NSSavePanel()
+        panel.title = "Export Original Auxiliary Data"
+        panel.message = "Copy the photograph's original depth, mattes and gain-map buffers at their native precision."
+        panel.nameFieldStringValue = source.url.deletingPathExtension().lastPathComponent + "-auxiliary"
+        panel.canCreateDirectories = true
+        panel.prompt = "Export Data"
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            self?.exportAuxiliary(to: url)
+        }
+    }
+
+    func exportAuxiliary(to url: URL, reveal: Bool = true) {
+        guard let source, !isBusy else { return }
+        run("Copying original auxiliary data…") {
+            let report = try await NativeAuxiliaryExporter.export(sourceURL: source.url, to: url)
+            self.exportURL = url
+            self.activity = "Exported \(report.auxiliaryCount) original auxiliary buffers."
+            if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+        }
+    }
+
     func chooseExport(models: ModelManager) {
         guard source != nil, !isBusy else { return }
         if depthChoice == .model, models.availableURL(for: modelID) == nil {
@@ -452,7 +476,7 @@ final class TextureWorkspace {
             let exportSettings = self.settings
             self.activity = "Writing PNG, linear EXR maps and material metadata…"
             try await cache.export(to: staging, precision: self.settings.exrPrecision, settings: exportSettings, engine: self.engine)
-            try BlenderMaterialScript.write(to: staging, settings: exportSettings)
+            try BlenderMaterialSetup.write(to: staging, settings: exportSettings)
             if self.depthChoice == .model, let provenance = self.generatedProvenance {
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 try encoder.encode(provenance).write(to: staging.appendingPathComponent("depth-source.json"), options: .atomic)
@@ -531,7 +555,7 @@ final class TextureWorkspace {
     func materialCheckpointProvenance() throws -> Data {
         let checkpoint = try currentMaterialCheckpoint()
         return try JSONSerialization.data(withJSONObject: [
-            "backend": "PyTorch / Metal", "model_type": "PBRnxt material refinement",
+            "backend": "Apple MPSGraph / Metal", "model_type": "PBRnxt material refinement",
             "input": "Prepared diffuse map shared with material rendering", "checkpoint_path": checkpoint.checkpointPath,
             "checkpoint_sha256": checkpoint.sha256, "target": checkpoint.target,
             "model_name": checkpoint.title, "height_interpretation": "surface height; no camera-depth normalization"

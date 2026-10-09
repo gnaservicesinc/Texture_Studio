@@ -31,7 +31,7 @@ enum StudioSmoke {
         for precision in EXRPrecision.allCases {
             let folder = temporary.appendingPathComponent(precision.rawValue)
             let exported = try await engine.export(material, to: folder, precision: precision)
-            try BlenderMaterialScript.write(to: folder, settings: settings)
+            try BlenderMaterialSetup.write(to: folder, settings: settings)
             guard exported.count >= 4 else { throw StudioError("Missing material export maps") }
             for name in ["roughness.exr", "normal.exr", "displacement.exr"] {
                 let url = folder.appendingPathComponent(name)

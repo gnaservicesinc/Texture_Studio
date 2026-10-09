@@ -51,7 +51,7 @@ actor ReviewImageLoader {
             guard transform.sourceSHA256 == hash else { throw ReviewImageError.sourceChanged }
             guard transform.algorithm == MapReviewDisplayTransform.exactCrop, (1...16384).contains(transform.size),
                   ["input", "height", "roughness", "normal"].contains(transform.mapType),
-                  ["opengl", "directx"].contains(transform.normalConvention) else {
+                  ["opengl", "directx"].contains(transform.normalConvention.lowercased()) else {
                 throw StudioError("The recorded training crop is unsupported. Recreate the review with the current material trainer.")
             }
             let dimensions = Self.pixelDimensions(bytes)
@@ -62,7 +62,7 @@ actor ReviewImageLoader {
                     throw StudioError("The recorded training crop is outside the original source map.")
                 }
             }
-            if dimensions != [transform.size, transform.size] || (transform.mapType == "normal" && transform.normalConvention == "directx") {
+            if dimensions != [transform.size, transform.size] || (transform.mapType == "normal" && transform.normalConvention.lowercased() == "directx") {
                 let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("material-review-\(UUID().uuidString)")
                 try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: false)
                 defer { try? FileManager.default.removeItem(at: temporary) }
@@ -119,26 +119,54 @@ actor ReviewImageLoader {
               let height = (properties[kCGImagePropertyPixelHeight as String] as? NSNumber)?.intValue else { return [] }
         return [width, height]
     }
-    private static func reconstructSource(_ source: URL, _ transform: MapReviewDisplayTransform, _ output: URL) async throws {
-        let defaults = UserDefaults(suiteName: "org.ipde.material-tools") ?? .standard
-        let workspace = defaults.string(forKey: "workspace") ?? FileManager.default.currentDirectoryPath
-        let python = defaults.string(forKey: "python") ?? MaterialWorkbenchRuntime.defaultPython(workspace: URL(fileURLWithPath: workspace))
-        let backend = Bundle.main.resourceURL!.appendingPathComponent("MaterialBackend/material_model_workbench.py")
-        guard FileManager.default.isExecutableFile(atPath: python), FileManager.default.fileExists(atPath: backend.path) else {
-            throw StudioError("Locate the material Python runtime in Settings to reconstruct this training grid.")
+    static func reconstructSource(_ source: URL, _ transform: MapReviewDisplayTransform, _ output: URL) async throws {
+        try Task.checkCancellation()
+        guard transform.algorithm == MapReviewDisplayTransform.exactCrop,
+              (1...16384).contains(transform.size), ["input", "height", "roughness", "normal"].contains(transform.mapType),
+              ["opengl", "directx"].contains(transform.normalConvention.lowercased()) else {
+            throw StudioError("The recorded training crop is unsupported.")
         }
-        let process = WorkbenchProcess()
-        await WorkbenchLifecycle.shared.add(process)
-        do {
-            var arguments = ["-B", backend.path, "review-source",
-                "--image", source.path, "--expected-sha256", transform.sourceSHA256, "--size", String(transform.size), "--output", output.path,
-                "--map-type", transform.mapType, "--normal-convention", transform.normalConvention]
-            if let rectangle = transform.cropRectangle { arguments += ["--source-rectangle"] + rectangle.map(String.init) }
-            _ = try await process.run(executable: URL(fileURLWithPath: python), arguments: arguments,
-                directory: FileManager.default.fileExists(atPath: workspace) ? URL(fileURLWithPath: workspace) : nil,
-                log: output.deletingLastPathComponent().appendingPathComponent("worker.log"), onLog: { _ in })
-            await WorkbenchLifecycle.shared.remove(process)
-        } catch { await WorkbenchLifecycle.shared.remove(process); throw error }
+        let bytes = try readSource(source)
+        guard hash(bytes) == transform.sourceSHA256 else { throw ReviewImageError.sourceChanged }
+        let decoded = try NativePNG.decode(bytes)
+        let rectangle = transform.cropRectangle ?? [0, 0, transform.size, transform.size]
+        guard rectangle.count == 4, rectangle[2] == transform.size, rectangle[3] == transform.size,
+              transform.cropRectangle != nil || (decoded.header.width == transform.size && decoded.header.height == transform.size) else {
+            throw StudioError("Reviewing a larger original requires its exact recorded training crop.")
+        }
+        let selected = try decoded.crop(rectangle, flipGreen: transform.mapType == "normal" && transform.normalConvention.lowercased() == "directx")
+        let encoded = try selected.encoded()
+        try Task.checkCancellation()
+        try encoded.write(to: output, options: .withoutOverwriting)
+    }
+    static func runNativeSource(arguments: [String]) async throws -> String? {
+        guard arguments.first == "review-source" else { return nil }
+        var options: [String: String] = [:], rectangle: [Int]?, cursor = 1
+        while cursor < arguments.count {
+            let key = arguments[cursor]
+            if key == "--source-rectangle" {
+                guard cursor + 4 < arguments.count else { throw StudioError("Incomplete recorded source rectangle.") }
+                let values = arguments[cursor + 1...cursor + 4].compactMap(Int.init)
+                guard values.count == 4 else { throw StudioError("Invalid recorded source rectangle.") }
+                rectangle = values; cursor += 5
+            } else {
+                guard cursor + 1 < arguments.count else { throw StudioError("Incomplete source reconstruction arguments.") }
+                options[key] = arguments[cursor + 1]; cursor += 2
+            }
+        }
+        guard let source = options["--image"], let expected = options["--expected-sha256"],
+              let size = options["--size"].flatMap(Int.init), let destination = options["--output"] else {
+            throw StudioError("Choose the original map, its recorded checksum, native size and output path.")
+        }
+        let output = URL(fileURLWithPath: destination)
+        let transform = MapReviewDisplayTransform(size: size, sourceSHA256: expected, algorithm: MapReviewDisplayTransform.exactCrop,
+            mapType: options["--map-type"] ?? "input", normalConvention: options["--normal-convention"] ?? "opengl", cropRectangle: rectangle)
+        try await reconstructSource(URL(fileURLWithPath: source), transform, output)
+        let bytes = try Data(contentsOf: output)
+        let fields: [String: Any] = ["ok": true, "path": output.path, "sha256": hash(bytes), "source_sha256": expected,
+            "native_dimensions": [size, size], "source_bits": try NativePNG.inspect(output).bits,
+            "source_resize_algorithm": MapReviewDisplayTransform.exactCrop, "source_crop_rectangle": rectangle as Any? ?? NSNull()]
+        return String(decoding: try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]), as: UTF8.self)
     }
     /// Report the stored channel precision, not the 8-bit display conversion.
     /// These header reads leave the original samples completely untouched.

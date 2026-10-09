@@ -34,7 +34,8 @@ enum DatasetFileOperations {
 
     private static func verifyOwnedFolder(_ root: URL) throws {
         let metadataFiles: Set<String> = ["dataset.json", ".material-workbench.lock", ".material-size-reviews.json", ".DS_Store"]
-        guard let entries = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isSymbolicLinkKey, .isRegularFileKey], options: []) else {
+        var enumerationFailed = false
+        guard let entries = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isSymbolicLinkKey, .isRegularFileKey], options: [], errorHandler: { _, _ in enumerationFailed = true; return false }) else {
             throw StudioError("Dataset folder could not be checked before moving it to Trash.")
         }
         for case let entry as URL in entries {
@@ -53,6 +54,7 @@ enum DatasetFileOperations {
                 }
             }
         }
+        guard !enumerationFailed else { throw changedFolder() }
     }
 
     private static func referencesInsideFolder(_ value: Any, root: URL) -> Bool {

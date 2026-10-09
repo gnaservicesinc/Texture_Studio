@@ -8,12 +8,13 @@ Studio**. The bundle identifier is `org.ipde.texture-studio`.
 The app requires an Apple Silicon Mac, macOS 26 or later, and a full Xcode
 installation containing the macOS 26 SDK or later. Command Line Tools alone are
 insufficient. The project uses Apple's SwiftUI, AppKit, ImageIO, Core Image,
-Metal, and Core ML frameworks. Qt, CMake, Ninja, Linux, and Windows app build
-paths have been retired. The Python extraction and research tools remain
-separate from the app. The app bundles its current Python material backend
-source and license under `Contents/Resources/MaterialBackend`. Python,
-PyTorch/MPS, and model binaries remain outside the app bundle; configure their
-paths in the material-model workspace.
+Metal, Accelerate, Metal Performance Shaders Graph and Core ML frameworks.
+Qt, CMake, Ninja, Linux, and Windows app build paths have been retired.
+
+The Xcode build phases and native build, package, install and release-check
+targets invoke only shell and Apple tools. The app does not stage an interpreter
+or a source backend. Packaging rejects retired backend resources and interpreter
+files in the parent and every nested material tool.
 
 ## Local development
 
@@ -40,21 +41,14 @@ make smoke
 ```
 
 The native XCTest target tests geometry, map exports, and model management.
+`make test-native` also checks native bundle contents and Swift installation rollback;
+`make test-build-tools` runs those tooling checks independently.
 The Core Image Metal kernels are compiled with `metal -fcikernel` and
 `metallib -cikernel` by the Xcode build and embedded in the app resources.
 No model downloads are needed for the deterministic native checks. Real material
 inference checks require the separately installed selected model and Metal runtime.
 
-Python backend checks are optional for app-only development. `make setup`
-installs the test requirements; `make test-python` uses pytest to run both
-function-based regressions and the unittest cases:
-
-```sh
-make setup
-make test-python
-```
-
-`make test` runs both suites. `CONFIGURATION=Debug` changes the build
+`make test` runs native app and build-tool checks. `CONFIGURATION=Debug` changes the build
 configuration; `DERIVED_DATA=/path/to/build` changes the Makefile output root.
 The run script accepts `TEXTURE_STUDIO_DERIVED_DATA` for its output root.
 
@@ -71,10 +65,8 @@ make DESTDIR=/path/to/staging install
 
 Packaging verifies the app's signature, identity, and arm64 executable, then
 creates `dist/Texture-Studio-macos-arm64.zip` and its SHA-256 checksum. The app
-contains native resources, the material Python backend, and the four signed
-material tools under `Contents/Applications`. Packaging checks the backend's
-complete source list and license in the parent and each child using the same
-list as the Xcode staging step. Children are signed before
+contains native resources and the four signed material tools under
+`Contents/Applications`. Children are signed before
 the parent bundle is sealed. The installer refuses Debug builds and refuses to
 replace a running installed parent or child; close them and rerun `make install`.
 Optional models are stored outside the application bundle.
@@ -85,13 +77,13 @@ suite is closed. Model weights, datasets and generated outputs are excluded;
 configure Git LFS before embedding model binaries. Tags identify deliberately
 published versions; building a Release configuration does not publish a GitHub Release.
 
-The version must agree in `pyproject.toml`, `src/ipde/__init__.py`, and every
+The version must agree in `VERSION` and every
 `MARKETING_VERSION` entry in the Xcode project. The tag must be `v` followed by
-that version. `scripts/check_release_version.py` checks these without importing
+that version. `xcrun swift script/check_release_version.swift` checks these without importing
 model runtimes. The current 0.9.x series remains a development prerelease.
 
-The macOS GitHub workflow tests the native app and retained Python tools on
-`macos-26`, builds the package, and publishes tagged artifacts. A workflow
+The macOS GitHub workflow builds and tests the native app on `macos-26` without
+installing an interpreter. Tagged publication requires the native build job. A workflow
 change is not evidence that remote CI has passed. A local package is not a
 published GitHub Release.
 

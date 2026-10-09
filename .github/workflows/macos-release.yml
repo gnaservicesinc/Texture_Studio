@@ -23,26 +23,13 @@ jobs:
         run: |
           xcodebuild -version
           ./script/check_toolchain.sh
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.13'
-          cache: pip
-      - name: Install optional backend test dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -c requirements-release-macos.txt \
-            -r requirements.txt -r requirements-depth.txt -r requirements-test.txt 'datasets>=4,<6'
-          python -m pip check
-          python -m pip install --no-deps .
       - name: Check tag and source versions
         env:
           TAG: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
-        run: python scripts/check_release_version.py
-      - name: Test native app and retained Python tools
-        run: |
-          make test-native
-          make PYTHON="$(command -v python)" test-python
+        run: xcrun swift script/check_release_version.swift
+      - name: Test native app and build tools
+        run: make test-native
       - name: Build and verify the standalone app
         run: |
           make package
@@ -57,15 +44,12 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build]
     runs-on: macos-26
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.13'
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -75,9 +59,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          python scripts/check_release_version.py --release-notes release-notes.md
+          xcrun swift script/check_release_version.swift --release-notes release-notes.md
           args=(release create "$TAG" artifacts/* --verify-tag --title "Texture Studio $TAG" --notes-file release-notes.md)
-          if python scripts/check_release_version.py --is-prerelease; then
+          if xcrun swift script/check_release_version.swift --is-prerelease; then
             args+=(--prerelease)
           fi
           gh "${args[@]}"

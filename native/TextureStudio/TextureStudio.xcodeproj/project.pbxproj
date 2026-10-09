@@ -6,7 +6,7 @@
 	objects = {
 		A10000000000000000000001 /* Texture Studio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Texture Studio.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000002 /* TextureStudioTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TextureStudioTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		A20000000000000000000001 = {isa = PBXGroup; children = (A30000000000000000000001, A30000000000000000000002, A30000000000000000000003, A30000000000000000000004, A30000000000000000000005, A30000000000000000000006, A30000000000000000000007, A30000000000000000000008, A20000000000000000000002); sourceTree = "<group>"; };
+		A20000000000000000000001 = {isa = PBXGroup; children = (A30000000000000000000001, A30000000000000000000002, A30000000000000000000003, A30000000000000000000004, A30000000000000000000005, A30000000000000000000006, A30000000000000000000007, A30000000000000000000008, A3000000000000000000000A, A20000000000000000000002); sourceTree = "<group>"; };
 		A20000000000000000000002 /* Products */ = {isa = PBXGroup; children = (A10000000000000000000001, A10000000000000000000002); name = Products; sourceTree = "<group>"; };
 		A30000000000000000000001 /* App */ = {isa = PBXFileSystemSynchronizedRootGroup; path = App; sourceTree = "<group>"; };
 		A30000000000000000000002 /* Views */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Views; sourceTree = "<group>"; };
@@ -16,14 +16,15 @@
 		A30000000000000000000006 /* Models */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Models; sourceTree = "<group>"; };
 		A30000000000000000000007 /* Services */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Services; sourceTree = "<group>"; };
 		A30000000000000000000008 /* Tests */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Tests; sourceTree = "<group>"; };
+		A3000000000000000000000A /* Resources */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Resources; sourceTree = "<group>"; };
 		A30000000000000000000009 /* Custom Core Image Metal compilation */ = {isa = PBXFileSystemSynchronizedBuildFileExceptionSet; membershipExceptions = (TextureKernels.ci.metal); target = A40000000000000000000001; };
 		A40000000000000000000001 /* TextureStudio */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = A80000000000000000000002;
-			buildPhases = (A50000000000000000000009, A50000000000000000000008, A50000000000000000000007, A50000000000000000000001, A50000000000000000000002, A50000000000000000000003);
+			buildPhases = (A50000000000000000000009, A50000000000000000000007, A50000000000000000000001, A50000000000000000000002, A50000000000000000000003);
 			buildRules = ();
 			dependencies = ();
-			fileSystemSynchronizedGroups = (A30000000000000000000001, A30000000000000000000002, A30000000000000000000003, A30000000000000000000004, A30000000000000000000005, A30000000000000000000006, A30000000000000000000007);
+			fileSystemSynchronizedGroups = (A30000000000000000000001, A30000000000000000000002, A30000000000000000000003, A30000000000000000000004, A30000000000000000000005, A30000000000000000000006, A30000000000000000000007, A3000000000000000000000A);
 			name = TextureStudio;
 			productName = "Texture Studio";
 			productReference = A10000000000000000000001;
@@ -58,18 +59,6 @@
 			shellPath = /bin/bash;
 			shellScript = "set -euo pipefail\nmkdir -p \"${DERIVED_FILE_DIR}\" \"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nxcrun --sdk macosx metal -fcikernel -c \"${SCRIPT_INPUT_FILE_0}\" -o \"${DERIVED_FILE_DIR}/TextureKernels.air\"\nxcrun --sdk macosx metallib -cikernel \"${DERIVED_FILE_DIR}/TextureKernels.air\" -o \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 		};
-		A50000000000000000000008 /* Stage material Python backend */ = {
-            isa = PBXShellScriptBuildPhase;
-            buildActionMask = 2147483647;
-            files = ();
-            inputPaths = ();
-            outputPaths = ();
-            alwaysOutOfDate = 1;
-            name = "Stage material Python backend";
-            runOnlyForDeploymentPostprocessing = 0;
-            shellPath = /bin/bash;
-            shellScript = "/usr/bin/python3 \"${SRCROOT}/../../scripts/stage_material_backend.py\" \"${SRCROOT}/../..\" \"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/MaterialBackend\"\n";
-        };
         A50000000000000000000009 /* Generate application icons */ = {
             isa = PBXShellScriptBuildPhase;
             buildActionMask = 2147483647;

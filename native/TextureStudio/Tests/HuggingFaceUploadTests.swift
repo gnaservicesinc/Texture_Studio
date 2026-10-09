@@ -154,7 +154,7 @@ final class HuggingFaceUploadTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: ["checkpoint_path": root.appendingPathComponent(directory).appendingPathComponent("adapter.safetensors").path,
             "sha256": hash, "schema": "texture-studio-material-lora-v1", "target": "height", "step": 25,
             "compatible": true, "variant": "lora"])
-        return try WorkbenchProcess.decode(WorkbenchCheckpoint.self, output: String(decoding: data, as: UTF8.self))
+        return try WorkbenchResult.decode(WorkbenchCheckpoint.self, output: String(decoding: data, as: UTF8.self))
     }
     func uploadResponse(repository: String, checksum: String, path: String, isPrivate: Bool) throws -> String {
         String(decoding: try JSONSerialization.data(withJSONObject: ["repository": repository, "private": isPrivate,

@@ -5,6 +5,34 @@ import XCTest
 
 @MainActor
 final class MaterialSelectionTests: XCTestCase {
+    func testNativeAdapterRetainsItsExactCustomBaseAcrossReopenAndStudioSelection() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let registry = root.appendingPathComponent("selected.json")
+        let suite = "material-base-selection-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let fullURL = root.appendingPathComponent("full.safetensors")
+        let adapterURL = root.appendingPathComponent("adapter.safetensors")
+        let fullSHA = String(repeating: "a", count: 64)
+        let store = WorkbenchStore(preferences: defaults, managedWorkspaceURL: root, selectedCheckpointRegistryURL: registry,
+            workerOverride: { args, _ in
+                let path = args[try XCTUnwrap(args.firstIndex(of: "--checkpoint")) + 1]
+                let full = path == fullURL.path
+                return "{\"checkpoint_path\":\"\(path)\",\"sha256\":\"\(full ? fullSHA : String(repeating: "b", count: 64))\",\"schema\":\"texture-studio-material-\(full ? "checkpoint" : "lora")-v1\",\"target\":\"height\",\"step\":1,\"compatible\":true,\"variant\":\"\(full ? "full" : "lora")\",\"base\":{\"sha256\":\"\(fullSHA)\"}}"
+            })
+        try await store.loadCheckpoint(fullURL)
+        try await store.loadCheckpoint(adapterURL)
+        let adapter = try XCTUnwrap(store.selectedCheckpoint)
+        XCTAssertEqual(store.dependencyArguments(for: adapter), ["--model-directory", fullURL.path])
+        store.useSelectedInStudio()
+        store.workspacePath = root.appendingPathComponent("new-workspace").path
+        store.saveConfiguration()
+        XCTAssertEqual(try SelectedMaterialCheckpoint.read(from: registry).modelDirectory, fullURL.path)
+        let reopened = WorkbenchStore(preferences: defaults, managedWorkspaceURL: root)
+        XCTAssertEqual(reopened.baseDirectory(for: adapter), fullURL.path)
+    }
+
     func testMaterialCheckpointActivatesAndPinsRecipeIdentity() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -29,7 +57,7 @@ final class MaterialSelectionTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = WorkbenchStore(preferences: defaults, managedWorkspaceURL: root, selectedCheckpointRegistryURL: registry)
-        let model = try WorkbenchProcess.decode(WorkbenchCheckpoint.self, output: """
+        let model = try WorkbenchResult.decode(WorkbenchCheckpoint.self, output: """
         {"checkpoint_path":"/models/soil/model.safetensors","sha256":"soil-sha","schema":"texture-studio-material-checkpoint-v1","target":"height","step":120,"compatible":true,"variant":"full","supports_training_warm_start":true}
         """)
         store.checkpoints = [model]; store.selectedCheckpointId = model.id
@@ -37,7 +65,6 @@ final class MaterialSelectionTests: XCTestCase {
         XCTAssertNil(store.error)
         let saved = try SelectedMaterialCheckpoint.read(from: registry)
         XCTAssertEqual(saved.sha256, "soil-sha")
-        XCTAssertEqual(saved.pythonPath, store.pythonPath)
         XCTAssertTrue(model.supportsStudioInference)
         XCTAssertTrue(model.supportsTrainingWarmStart)
     }
@@ -76,8 +103,8 @@ final class MaterialSelectionTests: XCTestCase {
     }
 
     private func selection(path: String, hash: String) -> SelectedMaterialCheckpoint {
-        SelectedMaterialCheckpoint(checkpointPath: path, sha256: hash, target: "height", pythonPath: "/python",
-            workspacePath: "/workspace", modelDirectory: "/encoder", codeDirectory: "/code")
+        SelectedMaterialCheckpoint(checkpointPath: path, sha256: hash, target: "height",
+            workspacePath: "/workspace", modelDirectory: "/encoder")
     }
     private func temporaryDirectory() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("selection-\(UUID().uuidString)")

@@ -34,7 +34,7 @@ struct MaterialToolRootView: View {
                 Button { showModels = true } label: { Label("Checkpoints", systemImage: "shippingbox") }
                     .help("Inspect saved checkpoints, compare their outputs or export a portable package.")
                 Button { showRuntime = true } label: { Label("Runtime", systemImage: "gearshape") }
-                    .help("Configure the local Python environment and working folder. Developer mode exposes material model controls.")
+                    .help("Configure the working folder and native model weights. Developer mode exposes material model controls.")
                 Menu {
                     ForEach(MaterialTool.allCases) { tool in
                         Button(tool.title, systemImage: tool.symbol) { MaterialToolLauncher.open(tool) }
@@ -232,25 +232,38 @@ struct WorkbenchRuntimeView: View {
     @AppStorage(StudioPreferences.developerModeKey, store: StudioPreferences.defaults) private var developerMode = false
     @Bindable var store: WorkbenchStore
     @Environment(\.dismiss) private var dismiss
+    @State private var hubToken = ""
+    @State private var credentialMessage = ""
     var body: some View {
         VStack {
             Form {
-                Section("Local Python and workspace") {
-                    runtimeRow("Python", path: store.pythonPath, choose: store.choosePython)
+                Section("Working folder") {
                     runtimeRow("Workspace", path: store.workspacePath, choose: store.chooseWorkspace)
-                    Text("Choose a working folder for datasets, results and logs. Use a local Python environment with the dependencies required by your model backend.")
+                    Text("Choose a working folder for datasets, results and logs. Material processing and training use Apple frameworks on this Mac.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Material base") {
                     runtimeRow("Weights", path: store.modelDirectory, choose: store.chooseEncoder)
-                    if developerMode {
-                        runtimeRow("Architecture source", path: store.codeDirectory, choose: store.chooseEncoderCode)
-                    }
                     HStack {
                         Button("Download Base Model") { store.installEncoder() }.disabled(store.isBusy)
                         Button("Remove Downloaded Base Weights", role: .destructive) { store.removeDownloadedEncoder() }.disabled(store.isBusy)
                     }
                     Text("Keep the base while refining a LoRA. A full fused checkpoint contains its weights; downloaded base weights can then be removed and obtained again.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Hugging Face account") {
+                    SecureField("Access token", text: $hubToken)
+                    HStack {
+                        Button("Save Token") {
+                            do { try NativeHubCredentials.save(hubToken); hubToken = ""; credentialMessage = "Token saved in Keychain."; store.refreshUploadAccount() }
+                            catch { credentialMessage = error.localizedDescription }
+                        }.disabled(hubToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.isBusy)
+                        Button("Sign Out") {
+                            do { try NativeHubCredentials.save(""); credentialMessage = "Saved token removed."; store.refreshUploadAccount() }
+                            catch { credentialMessage = error.localizedDescription }
+                        }.disabled(store.isBusy)
+                    }
+                    Text(credentialMessage.isEmpty ? "Store a token with the permissions needed for your model repositories. Credentials are saved in Apple Keychain." : credentialMessage)
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Settings") {

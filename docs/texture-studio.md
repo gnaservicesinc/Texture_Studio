@@ -1,45 +1,39 @@
 # Native Texture Studio workflow
 
-Texture Studio prepares a surface photograph as a diffuse map and uses a refined material model or a registered source-height map to create editable material maps. Original files remain unchanged. JSON recipes and Blender exports provide file-based interoperability.
+Texture Studio is a macOS Swift app. Image import, auxiliary extraction, image processing, dataset management, material inference, training, model transfers and exports run through native services. The app uses ImageIO, Core Image, Accelerate, Metal and Metal Performance Shaders; it does not launch an interpreter.
 
-## Geometry and photographic preparation
+## Photograph and material preparation
 
-Perspective controls use a camera-centered pinhole projection of a plane. Camera metadata can supply an approximate focal length; a user override is available. The square crop stays inside the projected footprint. Nonplanar surfaces remain a planar approximation.
+ImageIO supplies the primary photo, camera metadata, HDR gain maps and available auxiliary data. Perspective controls project a plane through a camera-centered pinhole model. Camera metadata can supply approximate focal length; a user override is available. The square crop remains inside the projected footprint. Nonplanar surfaces remain an approximation.
 
-ImageIO supplies the primary photo, camera metadata, gain maps and any registered spatial companions. The primary photograph anchors supporting-view registration. Exposure and color matching and agreement checks determine whether companion samples contribute; occlusions, parallax and poor matches keep the primary evidence.
+Photographic processing uses extended linear sRGB and a Metal Float32 context. HDR color is decoded before geometry and cropping. Broad illumination correction and a photographic highlight rolloff prepare the diffuse map. The finished diffuse pixels are shared by preview, export and model inference. Illumination correction cannot reconstruct fully hidden shadows or clipped highlights.
 
-Photographic processing uses extended linear sRGB and a Metal Float32 context. HDR color is decoded as a complete frame before geometry or crop operations. Broad illumination correction and a smooth photographic highlight rolloff prepare the diffuse map. The high-frequency photo detail is retained: the photo path does not apply a spatial denoiser. Companion evidence can reduce capture noise without inventing texture.
+Numeric maps use a separate color-unmanaged Float32 context. Height, roughness and normals receive no photographic gamma or tone mapping. Registered surface height keeps its supplied amplitude through explicit relief controls. Height-derived normals use mathematical differences, material width and displacement amplitude, following OpenGL +Y. Embedded portrait scene depth is not material displacement; with no attached material height or selected material model, the default displacement is flat.
 
-The finished diffuse pixels are frozen and shared by preview, export and material inference. Checkpoint testing invokes this same preparation. The model backend accepts a prepared diffuse PNG and rejects untreated photographic input. Illumination correction cannot guarantee reconstruction of a completely obscured shadow or saturated highlight; inspect the diffuse result before judging the model.
+## Precision and export
 
-## Processing and precision
+Source bit depth, model arithmetic and container precision are separate. Diffuse export is 16-bit sRGB PNG. Numeric maps use HALF or FLOAT EXR according to the selected precision. The explicit FLOAT writer stores Float32 samples without range stretching or lossy compression. Changing output dimensions or container precision does not add source detail.
 
-Numeric maps use a separate color-unmanaged Float32 context. Height, roughness and normals receive no color-profile gamma or photographic tone mapping. A map explicitly identified as **surface height** retains its supplied amplitude through registration and explicit relief controls. Normals derived from height use mathematical differences, material width and displacement amplitude and follow OpenGL +Y.
+Original-map exports copy checksum-verified file bytes. Display contrast affects only previews. Native training-grid reconstruction reverses PNG compression, row filters and Adam7 directly on integer codes, then copies the exact recorded crop. It never applies a display color conversion to the source maps.
 
-Embedded portrait depth does not supply material displacement. With no material model or attached height, displacement is flat. Photographic brightness relief remains an explicit artistic control rather than a default source of geometry.
+Material exports include `BLENDER.txt` and `material-nodes.json`. They record filenames, sRGB diffuse and Non-Color numeric maps, OpenGL +Y normals, material width and displacement scale in meters. Choose normal shading or geometric displacement; disable the equivalent height-derived normal contribution when geometry supplies that same relief.
 
-Source bit depth, model arithmetic and export precision are recorded separately. Diffuse export is 16-bit sRGB PNG, using the same encoding as the model input. Numeric maps use HALF or FLOAT EXR according to the export choice; Float32 output uses the explicit lossless FLOAT writer. Changing container precision cannot add source or model detail.
+## Datasets and training
 
-Blender uses **Non-Color** for scalar height, roughness and encoded RGB normals. The generated setup script keeps geometric displacement and normal contribution explicit so equivalent height relief is not accidentally applied twice. Original exports remain separate from display contrast, previews and temporary training-grid views.
+Material Dataset creates named datasets, registers original diffuse and surface maps, scans import folders, edits notes and review status, removes membership and moves verified owned metadata to Trash. Original image files remain untouched. Folder import previews are bound to the dataset revision, review revision and original file identities. Another window changing any of these requires a new scan.
 
-## Training and generation
+One native grid applies to diffuse variants, targets and learning-check crops. Exact-size maps are referenced directly. Larger sources use a centered integer crop; sources at least 8K on both axes use three corner crops. Sources below the selected size remain inspectable and are unavailable for that run. Crop coordinates match across roles and colors. Owned temporary training files live under `.training-data/`; cleanup retains source-bound reviews and refuses unrelated files.
 
-The current experimental material network is a complete pinned PBRnxt adaptation with native input/output grids. It supports LoRA refinement for height, roughness and normals. Training consumes complete diffuse and target crop grids at exactly the selected dimensions. Registered diffuse colors can alternate while target geometry stays fixed. Training sizes follow the model grids and original source dimensions. Memory estimates do not hide sizes, disable actions or veto runs. Generation/export sizes are independently selectable.
+The native PBRnxt graph uses its SCUNetV2 encoder, generator fusion and complete selected RRDB output branch. Native-grid adaptation retains the learned upscale convolutions and omits the final 4× image enlargement. Metal executes inference, gradients and Adam updates for LoRA refinement. Final-map scope refines the selected output branch; map-decoder scope also refines the corresponding generator decoder and tail. Numeric training targets enter Float32 tensors as integer code divided by the declared type maximum. The model input color transfer is explicit and separate from source storage.
 
-Numeric controls accept direct typing and paste, including Quick check every and Save checkpoint every. Sliders are optional shortcuts. Each field names its units and rejects invalid input without rounding the stored value. The trainer identifies the selected dataset, material and starting checkpoint. Opening a checkpoint for refinement selects its recorded map and scope and opens the trainer. Developer mode keeps automatic upload after training when signed in to Hugging Face; the trainer shows the destination and visibility. Public visibility defaults to off and saved upload choices are preserved.
+Native checkpoints use `.safetensors` with recorded architecture, exact base checksum, target, scope and adapter shape. Normal mode packages the adapter; Developer mode can package fused full weights. Weighted adapter mixing requires matching base identity and module layout. Model downloads use recorded repository revisions. Upload visibility defaults to private, and automatic upload is shown before it is enabled.
 
-Unchanged exact-size files use original source paths. Larger 4K sources use one center native crop; sources at least 8K use three disjoint corners. Crop coordinates are recorded and matched across all roles and diffuse colors. Source sets smaller than the selected grid are excluded. Only the final temporary training files are written. After a run or size switch, those owned files are removed, while small reviews remain and the original dataset returns to view. Inspection reconstructs the exact training grid from originals in memory when necessary.
+Numeric fields accept direct typing and paste, state their units and reject invalid values. Resolution choices follow the model grids and original dimensions. The trainer names the selected dataset, material and starting checkpoint. Checkpoint actions allow saving at an update boundary, saving and stopping, or aborting. Model memory and machine headroom are reported independently of the selected image grid.
 
-Developer mode in Settings exposes refinement scope, adapter controls, base overrides and upload controls. It exports a fused full `.safetensors` checkpoint and keeps the separate LoRA. Normal mode exports the LoRA. Weighted adapter mixing requires the same recorded base, target and compatible module layout. Saved Hub models remain downloadable by their recorded repository revision.
+## Adviser and quality review
 
-## Local decision adviser
+The optional local Clef adviser receives bounded display copies through Ollama. It returns typed recommendations for preparation or map review; the user chooses which to apply. Adviser display images never replace numerical originals, and model scores do not establish physical accuracy.
 
-The optional local Clef adviser receives bounded display copies of photos or diffuse/output map pairs. It uses typed choices and scores to suggest preparation settings and review recommendations for detail, visual appeal and artifacts. Outputs are validated as decisions, not executable instructions. The user controls which recommendations are applied or saved.
+Compare reference, base and refined outputs on identical prepared diffuse pixels at the actual model grid. Inspect grain, relief placement, inversion, halos, seams, edge frames and displaced geometry under neutral and grazing light. Automatic learning checks use a different crop of a known subject and may share pixels with other training views. They do not measure unseen-material generalization.
 
-The adviser runs through local Ollama and releases its model memory after requests. Its large model download is explicitly managed in the app. Numerical original maps are not replaced by the adviser's display images, and model scores do not establish geometric or physical accuracy.
-
-## Quality acceptance
-
-Compare source references, base and trained outputs on the same diffuse pixels at the real model grid. Inspect grain, bump placement, inversion, halos, seams, false relief from color, edge frames and smoothing. Inspect displaced geometry under neutral and grazing light. Automatic checks hold out complete source families across resolutions and colors. Disjoint regional checks are permitted for a single included resolution set and are labeled accordingly; a one-region fit has no independent validation set.
-
-The planned V1 catalog uses validated refined full models as the bases for later task-specific refinement. That quality remains a separate acceptance decision. See [native material tools](native-material-tools.md), [data contract](material-training-data.md), and [model acceptance](material-model-vetting.md).
+Tiny native graph, gradient and checkpoint fixtures validate the implementation. Production-size published weights and visual parity require a separate run with the selected base and real reference materials. See the [data contract](material-training-data.md) and [native material tools](native-material-tools.md).

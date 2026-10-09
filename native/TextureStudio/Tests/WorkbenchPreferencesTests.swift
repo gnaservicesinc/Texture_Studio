@@ -12,7 +12,6 @@ final class WorkbenchPreferencesTests: XCTestCase {
         first.training.size = 2048
         first.training.updatesPerCrop = 875
         first.training.maxMinutes = 120
-        first.training.memoryGB = 56
         first.training.useSelectedMaterialOnly = true
         first.training.useWarmStart = true
         first.selectedSampleId = "soil_crop_002"
@@ -26,7 +25,6 @@ final class WorkbenchPreferencesTests: XCTestCase {
 
         let reopened = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
         XCTAssertEqual(reopened.training, first.training)
-        XCTAssertEqual(reopened.training.memoryGB, 56, "A valid setting above the recommendation must stay selected")
         XCTAssertEqual(reopened.selectedSampleId, "soil_crop_002")
         XCTAssertEqual(reopened.selectedRole, "roughness")
         XCTAssertEqual(reopened.selectedCheckpointId, "second-checkpoint")
@@ -83,43 +81,32 @@ final class WorkbenchPreferencesTests: XCTestCase {
         XCTAssertEqual(next.comparisonCheckpointIds, ["second"])
     }
 
-    func testCapabilityDiscoveryAndResolutionIgnoreLegacyMemoryPreferences() async throws {
+    func testCapabilityDiscoveryPreservesSupportedResolutionSelection() async throws {
         let fixture = try PreferencesFixture()
         defer { fixture.remove() }
         let store = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources, workerOverride: { arguments, _ in
-            XCTAssertFalse(arguments.contains("--memory-gib"))
             return "{\"training_sizes\":[1024,2048]}"
         })
         store.training.size = 2048
-        store.training.memoryGB = 8
         try await store.loadTrainingCapabilities()
-        XCTAssertEqual(store.training.size, 2048, "A stale small budget cannot hide a resolution the machine can train")
-        XCTAssertEqual(store.training.memoryGB, 8)
+        XCTAssertEqual(store.training.size, 2048)
         store.selectTrainingSize(1024)
-        XCTAssertEqual(store.training.memoryGB, 8)
+        XCTAssertEqual(store.training.size, 1024)
         store.selectTrainingSize(2048)
-        XCTAssertEqual(store.training.memoryGB, 8)
-        store.training.automaticMemory = false
-        store.training.memoryGB = 50
+        XCTAssertEqual(store.training.size, 2048)
         try await store.loadTrainingCapabilities()
-        XCTAssertEqual(store.training.memoryGB, 50)
         let reopened = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
-        XCTAssertFalse(reopened.training.automaticMemory)
-        XCTAssertEqual(reopened.training.memoryGB, 50)
+        XCTAssertEqual(reopened.training.size, 2048)
     }
 
-    func testValidDatasetCanRunBeforeCapabilityDiscoveryWithAnyLegacyMemoryChoice() throws {
+    func testValidDatasetCanRunBeforeCapabilityDiscovery() throws {
         let fixture = try PreferencesFixture()
         defer { fixture.remove() }
         let resources = MachineResources(physicalBytes: 8 * MachineResources.gibibyte)
         let store = WorkbenchStore(preferences: fixture.defaults, resources: resources)
-        store.dataset = try WorkbenchProcess.decode(WorkbenchDataset.self, output: Self.datasetJSON())
+        store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: Self.datasetJSON())
         store.training.size = 1024
-        store.training.automaticMemory = false
-        for memory in [0.0, 1.0, 56.0, 1000.0] {
-            store.training.memoryGB = memory
-            XCTAssertNil(store.trainingConfigurationIssue, "Legacy memory preferences cannot disable an otherwise valid run")
-        }
+        XCTAssertNil(store.trainingConfigurationIssue)
         XCTAssertTrue(store.supportedTrainingSizes.contains(1024))
     }
 
@@ -128,16 +115,12 @@ final class WorkbenchPreferencesTests: XCTestCase {
         defer { fixture.remove() }
         let first = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
         first.workspacePath = fixture.root.path
-        first.pythonPath = "/located/python"
         first.modelDirectory = "/located/model"
-        first.codeDirectory = "/located/code"
         first.uploadRepo = "artist/material-height"
         first.uploadPublic = true
         let reopened = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
         XCTAssertEqual(reopened.workspacePath, fixture.root.path)
-        XCTAssertEqual(reopened.pythonPath, "/located/python")
         XCTAssertEqual(reopened.modelDirectory, "/located/model")
-        XCTAssertEqual(reopened.codeDirectory, "/located/code")
         XCTAssertEqual(reopened.uploadRepo, "artist/material-height")
         XCTAssertTrue(reopened.uploadPublic)
     }
@@ -146,15 +129,13 @@ final class WorkbenchPreferencesTests: XCTestCase {
         let fixture = try PreferencesFixture()
         defer { fixture.remove() }
         let options = try JSONDecoder().decode(MaterialTrainingOptions.self,
-            from: Data("{\"size\":2048,\"memoryGB\":56}".utf8))
+            from: Data("{\"size\":2048}".utf8))
         XCTAssertEqual(options.size, 2048)
-        XCTAssertEqual(options.memoryGB, 56)
         XCTAssertEqual(options.target, "height")
         XCTAssertEqual(options.restored(for: fixture.resources), options)
-        fixture.defaults.set(Data("{\"training\":{\"size\":2048,\"memoryGB\":56}}".utf8), forKey: WorkbenchPreferences.key)
+        fixture.defaults.set(Data("{\"training\":{\"size\":2048}}".utf8), forKey: WorkbenchPreferences.key)
         let restored = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
         XCTAssertEqual(restored.training.size, 2048)
-        XCTAssertEqual(restored.training.memoryGB, 56)
         XCTAssertTrue(restored.comparisonIncludesBase)
     }
 
@@ -162,21 +143,19 @@ final class WorkbenchPreferencesTests: XCTestCase {
         let fixture = try PreferencesFixture()
         defer { fixture.remove() }
         var options = MaterialTrainingOptions()
-        options.memoryGB = 56
         options.size = 2048
         options.updatesPerCrop = 800
         options.maxMinutes = 150
         WorkbenchPreferences(training: options).save(to: fixture.defaults)
         let smaller = MachineResources(physicalBytes: 16 * MachineResources.gibibyte)
         let restored = WorkbenchStore(preferences: fixture.defaults, resources: smaller)
-        XCTAssertEqual(restored.training.memoryGB, 56)
         XCTAssertEqual(restored.training.size, 2048)
         XCTAssertEqual(restored.training.updatesPerCrop, 800)
         XCTAssertEqual(restored.training.maxMinutes, 150)
         XCTAssertTrue(restored.activity.isEmpty)
         fixture.defaults.set(Data("not JSON".utf8), forKey: WorkbenchPreferences.key)
         let fallback = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
-        XCTAssertEqual(fallback.training.memoryGB, fixture.resources.defaultTrainingGiB)
+        XCTAssertEqual(fallback.training.size, MaterialTrainingOptions().size)
     }
 
     func testStudioPreferencesRoundTripAndMissingFieldsKeepDefaultsAvailable() throws {

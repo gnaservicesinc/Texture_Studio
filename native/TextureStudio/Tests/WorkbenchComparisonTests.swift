@@ -79,7 +79,7 @@ final class WorkbenchComparisonTests: XCTestCase {
             let output = arguments[try XCTUnwrap(arguments.firstIndex(of: "--output")) + 1]
             return "{\"outputs\":{\"height\":{\"path\":\"\(output)/height.exr\"}},\"checkpoint_sha256\":\"exact-sha\"}"
         })
-        store.dataset = try WorkbenchProcess.decode(WorkbenchDataset.self, output: """
+        store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: """
         {"dataset_path":"/dataset","index_sha256":"dataset-sha","materials":[{"material_id":"soil","samples":[{"sample_id":"soil_crop_002","status":"approved","split":"train","width":2048,"height":2048,"maps":{"input":{"path":"/dataset/soil/photo.png"},"height":{"path":"/dataset/soil/displacement.png","source_bits":16}}}]}]}
         """)
         store.selectedSampleId = "soil_crop_002"
@@ -227,7 +227,7 @@ final class WorkbenchComparisonTests: XCTestCase {
     }
 
     private func checkpoint(sha: String, target: String) throws -> WorkbenchCheckpoint {
-        try WorkbenchProcess.decode(WorkbenchCheckpoint.self, output: """
+        try WorkbenchResult.decode(WorkbenchCheckpoint.self, output: """
         {"checkpoint_path":"/runs/material-2k/model.safetensors","sha256":"\(sha)","schema":"texture-studio-material-checkpoint-v1","target":"\(target)","step":42,"compatible":true}
         """)
     }

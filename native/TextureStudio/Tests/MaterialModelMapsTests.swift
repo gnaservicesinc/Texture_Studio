@@ -80,8 +80,8 @@ final class MaterialModelMapsTests: XCTestCase {
 
     private func selected(target: String, root: URL, hash: String = String(repeating: "c", count: 64)) -> SelectedMaterialCheckpoint {
         SelectedMaterialCheckpoint(checkpointPath: root.appendingPathComponent(target + ".safetensors").path,
-            sha256: hash, target: target, pythonPath: "/bin/sh", workspacePath: root.path,
-            modelDirectory: root.appendingPathComponent("base").path, codeDirectory: root.appendingPathComponent("code").path)
+            sha256: hash, target: target, workspacePath: root.path,
+            modelDirectory: root.appendingPathComponent("base").path)
     }
     private static func prediction(_ target: String, size: Int) -> MaterialModelMap {
         let color = target == "normal" ? CIColor(red: 0.13, green: 0.62, blue: 0.9, alpha: 1)

@@ -1,23 +1,13 @@
 # Texture Studio documentation
 
-The current desktop app is **Texture Studio**, a standalone SwiftUI app for
-photo-based Blender materials. Start with the repository README and
-[building and releasing](releasing.md).
+Texture Studio and its material tools are native SwiftUI macOS applications. Building requires Xcode and the Apple SDK; no separate interpreter or package environment is used.
 
-The [native material tools](native-material-tools.md) provide full-detail map review,
-checkpoint comparisons, crop curation, native 1K/2K training and explicit model export.
+- [Surface and Blender workflow](texture-studio.md)
+- [Native dataset, review and training tools](native-material-tools.md)
+- [Training and precision contract](material-training-data.md)
+- [Training workflow](material-training-workflow.md)
+- [Model setup](model-setup.md)
+- [Building and releasing](releasing.md)
+- [Native migration validation](native-migration-validation.md)
 
-See the [surface workflow](texture-studio.md) and [material refinement research](material-refinement-research.md)
-for the DA3 backend, depth-to-height conversion and Poly Haven/MatSynth training options.
-The [surface validation record](texture-surface-validation-2026-10-07.md) reports actual
-supplied-photo inference, EXR checks and Blender Cycles renders.
-The [training data contract](material-training-data.md) defines original 16-bit targets,
-curated native-resolution crops and separate disk/compute precision.
-The [automated preparation and training workflow](material-training-workflow.md)
-provides the crop, naming, metadata, verification and native-height pilot commands.
-
-The [legacy documentation](legacy/README.md) records the retired Qt studio
-interfaces. It does not describe the native app or its build requirements.
-Scientific extraction and training audits remain useful references for the
-retained Python command-line tools; those tools do not communicate with Texture
-Studio automatically.
+The app uses ImageIO for image and auxiliary-data access, Core Image and Metal for material processing, Accelerate for numeric statistics, MPSGraph for material inference and adapter training, and URLSession for model transfers. Original photos and numeric source maps remain separate from previews and model inputs.

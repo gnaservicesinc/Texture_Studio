@@ -60,14 +60,6 @@ final class MaterialTrainingHandoffTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: unrelated), Data("keep".utf8))
     }
 
-    func testHandoffAllowsLegacyMemoryPreferenceWithoutUsingItForAdmission() throws {
-        var training = options()
-        training.memoryGB = 1000
-        let handoff = try MaterialTrainingHandoff(checkpoint: checkpoint(), dataset: nil, training: training,
-                                                sampleID: nil, inputVariantID: nil)
-        XCTAssertEqual(handoff.training.memoryGB, 1000)
-    }
-
     private func fixture() throws -> MaterialTrainingHandoff {
         try MaterialTrainingHandoff(checkpoint: checkpoint(), dataset: URL(fileURLWithPath: "/datasets/second/dataset.json"),
                                     training: options(), sampleID: "selected-material-crop", inputVariantID: "col2")
@@ -83,7 +75,7 @@ final class MaterialTrainingHandoffTests: XCTestCase {
         return options
     }
     private func checkpoint() throws -> WorkbenchCheckpoint {
-        try WorkbenchProcess.decode(WorkbenchCheckpoint.self, output: """
+        try WorkbenchResult.decode(WorkbenchCheckpoint.self, output: """
         {"checkpoint_path":"/models/chosen/adapter.safetensors","sha256":"\(String(repeating: "A", count: 64))",
          "schema":"texture-studio-material-lora-v1","target":"normal","scope":"map-decoder",
          "step":42,"compatible":true,"supports_training_warm_start":true}

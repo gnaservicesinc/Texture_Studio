@@ -1,62 +1,13 @@
 # Native material tools
 
-Texture Studio's **Model Training** workspace prepares paired material maps, trains a local material LoRA, reviews results, and exports or uploads the selected model. Material Review, Checkpoint Compare, Material Dataset, and Material Trainer also launch independently from the main app bundle.
+Texture Studio contains Dataset Studio, Model Training, Checkpoint Compare and Material Review as SwiftUI tools. Open them from the app's Tools menu. They use the same native services and model selections as the main application.
 
-```sh
-./script/build_and_run.sh run --tool review
-./script/build_and_run.sh run --tool compare
-./script/build_and_run.sh run --tool dataset
-./script/build_and_run.sh run --tool train
-```
+Dataset Studio creates and edits current material datasets, scans/imports folders, curates samples, prepares exact native crops and removes owned temporary preparation data. It preserves original map bytes and records hashes, bit depth, original dimensions, crop rectangles and split ancestry. Dataset removal validates the selected dataset and its deletion scope again before moving owned data to Trash. Unsupported source formats are rejected explicitly rather than converted through a display pipeline.
 
-Builds use Release unless `--debug` is selected. `make package` includes the tool suite. Datasets, model weights, generated maps and app bundles stay outside Git.
+Model Training evaluates and refines the pinned PBRnxt material mapping with Apple MPSGraph on Metal. It preserves the selected grid and keeps Float32 inference, gradients and optimizer state. Checkpoints use a data-only safetensors format. Package export includes configuration, SHA-256 inventory and upstream notices. A complete fused checkpoint runs without a separately installed base.
 
-## Create and manage datasets
+Checkpoint Compare and Material Review show reference, base and checkpoint maps with linked views, numeric display modes and crop reconstruction. Review transformations operate on exact decoded PNG integer samples. Original maps remain untouched; any model-input transfer or declared normal convention is recorded separately.
 
-Open **Material Dataset** from Model Training. **New Dataset…** creates a named dataset with a rendering/training resolution chosen before import; choose a save location or use the displayed Documents default. **Open Folder…** opens a dataset folder directly or routes a raw folder into dataset setup/import. Dropping a folder works the same way. Recently opened datasets appear under **Switch Dataset**. Use **Dataset Info…** to rename the dataset, edit its description, or change resolution while reviewing the resulting crop and validation counts. The resolution is stored with the dataset and restored when switching datasets.
+Settings choose a working folder, model weights and a Hugging Face token stored in Apple Keychain. Native URLSession services handle accounts, catalogs, verified downloads and LFS uploads. Uploads contain model packages only. Source photos and dataset maps are excluded.
 
-**Add Materials…** registers a named material with a diffuse PNG and at least one displacement, roughness or normal PNG. Choose matching source dimensions and the correct normal convention. **Import Folder…** recursively discovers paired maps and previews the resulting dataset at every supported grid before import. It reports duplicates, unsupported files and invalid maps; valid sets are only added when Import is pressed. Progress shows the folder being inspected. An unchanged scan is reused across resolution changes and registration; changed originals or dataset reviews require a rescan. Both actions reference the original full-quality files without copying or changing their pixels. An empty dataset can be created before any materials are added.
-
-Select a folder, expand its crops, and select a diffuse or target image. Review notes and approval/exclusion apply to the crop across all targets. The checkbox beside each folder enables its extra learning-check crop within the dataset limits. The import resolution remains editable while a folder scan is running.
-
-**Remove Material…** removes that material's dataset entries while keeping its original map files. **Delete Dataset…** asks for confirmation, moves the dataset metadata to Trash and removes it from the recent library. Original source maps remain in place. Restore the metadata from Trash to reopen a deleted dataset. Creation and edits keep their form values if a save fails, so you can correct the problem and retry.
-
-## Dataset pixels and storage
-
-The original source folders are authoritative; importing `/opt/ipde/sources_mats` includes its nested material folders. Each dataset keeps an index of registered resolution sets and diffuse color variants. `samples/<material>_full/sample.json` contains small manifests, not copies of the source images.
-
-Select a **Training map size** supported by the current model and original source dimensions. Memory badges, predictive admission checks and memory export confirmations have been removed. Training, comparison, export and the local adviser do not use memory estimates to disable a run. Every diffuse and numeric target presented to training has exactly that square grid. The model receives the entire displayed native crop, with no smaller random crop, exposure augmentation, or hidden resize. A 2K run ignores all 1K sets. Training availability and generation/export resolution are separate controls.
-
-Type or paste numeric values directly into each field. **Quick check every** specifies updates between quick checks. **Save checkpoint every** specifies updates between automatic saves; zero means manual requests and final export only. Optional sliders remain available for photographic and display settings. Display edits never alter numerical exports.
-
-At the selected dimensions, unchanged maps use their original paths. Larger 4K sources produce one center crop. Sources at least 8K on both axes produce three disjoint corner crops, with a fourth corner available for an extra validation check. Every map and diffuse color variant uses the same source rectangle. Each changed crop is saved once under `.training-data/`; numeric integer codes retain original precision with no resampling, gamma, range stretching or denoising. The diffuse color picker previews each registered variant, and training randomly selects among them for the same target geometry.
-
-Only one temporary training view is retained. Switching size removes the previous view after saving its review fields. Completion or cancellation removes prepared images and manifests, returns the workspace to the original source dataset, and keeps small review records per size. Review recreates the exact selected grid from the original in memory when needed. This avoids permanently storing several resolutions or full source copies.
-
-Validation is shared across map targets and enabled at the subject-folder level. The dataset tree shows folders, crops, and their image/map leaves; select the output map in Trainer. All existing crops remain training crops. At most one extra validation crop is generated per folder, with a default strict 5% subject limit and an optional maximum count. Prefer the unused fourth 8K corner; another corner may overlap the center or resolution siblings but cannot repeat an existing view. These quick checks measure learning on known materials; test novel images after training. Dataset Info controls the percentage, count cap, and default four-image quick check. Approval, exclusion and notes update metadata atomically; they never rewrite source images. Approval at one resolution does not automatically approve another.
-
-Opening a dataset and choosing its display grid allocate no training images. Inspection reconstructs only the viewed map into a temporary file and removes it after decoding. Size-specific review decisions live in `.material-size-reviews.json`; the exact native crops are staged when training starts and purged afterward.
-
-**Save Checkpoint Now** queues a full validation pass and an immutable checkpoint at a safe update boundary, then continues training. Quick checks run at the selected update interval; automatic saves can be disabled or scheduled by update count. Each save and final export uses the full configured check pool. Error scope, sample count and identities are recorded, and best-checkpoint ranking uses full checks only. Nonfinite errors stop the run for inspection; a finite zero error is accepted.
-
-**Stop** aborts preparation or model setup immediately. During training, it aborts without requesting a new checkpoint; files already saved on disk remain available. **Stop and Save** appears once training updates begin. It finishes the current update and saves the model using the selected export mode, then defers new comparison renders to a later review. Stop remains available while saving, so a pending save can also be aborted. Neither action changes original source maps.
-
-If an unresponsive worker has to be forcibly terminated while creating crops, its incomplete temporary stage is removed during the next preparation.
-
-## Review and inference
-
-Map inspection retains the original file separately from its display representation. **Export Original** preserves original bytes. Display contrast and training-grid views do not alter numerical exports. Missing generated maps can be reconstructed from intact sources. A listed sample is removed only after its original source is genuinely missing and cannot be recovered at another recorded location.
-
-Comparison labels identify the source, target, model/checkpoint and training step. Predictions use unclipped Float32 EXR; display PNGs are separate views. Review can ask the local decision model to assess detail, visual appeal and artifacts and preselect a recommendation. The user controls the saved decision.
-
-A test photo goes through Texture Studio's geometry, illumination and color preparation before inference. The model receives the same diffuse map used by material generation. Passing an untreated photo to the backend is rejected. No spatial denoiser is applied to the photo; registered companion evidence can reduce capture noise while retaining detail.
-
-## Model exports and Hugging Face
-
-Normal mode saves a `.safetensors` LoRA. Enable **Developer mode** in Settings to expose rank, alpha, refinement scope, base override and upload controls, and to export a full fused `.safetensors` checkpoint plus the separate LoRA. The full checkpoint contains the base with adapter deltas merged; both outputs retain the exact base identity and model metadata. Export packages exclude source photographs and optimizer state.
-
-Compatible LoRAs can be combined with explicit weights. Compatibility requires the same base identity, target and module layout; image size alone is insufficient. The individual LoRA remains available alongside a fused export.
-
-Use **Refresh Account** to read a saved Hugging Face login. Upload uses the selected model, destination and visibility shown in the workspace. Developer mode offers upload after training. The saved Hub catalog includes successfully uploaded models with a **Download** action, so removable local files can be obtained again from their recorded repository revision. Base removal affects only app-owned files; external bases are unlinked.
-
-The current material backend is an experimental native-scale PBRnxt adaptation. A future V1 catalog is intended to contain refined full checkpoints for height, roughness and normals. The shipped quality must be established through full-resolution map and displaced-surface review; successful training or a lower loss does not establish that quality.
+File → Export Original Auxiliary Data exports all ImageIO-exposed auxiliary types from every image index into a new directory. It saves untouched data buffers, stride/layout descriptions and metadata; supported scalar buffers also receive exact NPY files. It preserves the original photo and does not gamma-correct, normalize or tone-map these scientific arrays. Apple ImageIO does not enumerate arbitrary private HEIF items, so the report states that coverage limit.

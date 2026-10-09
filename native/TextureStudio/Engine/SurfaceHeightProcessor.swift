@@ -17,7 +17,7 @@ enum SurfaceHeightProcessor {
         guard width > 1,height > 1,values.count == width*height else {
             throw TextureError.invalidDepth("Invalid surface-depth grid.")
         }
-        let finite = values.filter(\.isFinite).sorted()
+        let finite = NumericStatistics.sorted(values.filter(\.isFinite))
         guard finite.count >= max(16,values.count/2) else {
             throw TextureError.invalidDepth("The selected depth map has too many missing samples to form a material surface.")
         }
@@ -54,7 +54,7 @@ enum SurfaceHeightProcessor {
                 relief[y*width+x] = direction*Float(Double(repaired[y*width+x])-baseline)
             }
         }
-        let initial = relief.sorted()
+        let initial = NumericStatistics.sorted(relief)
         let initialSpan = percentile(initial,0.98)-percentile(initial,0.02)
         guard initialSpan > max(numericalFloor,rawSpan*0.00001) else {
             return Result(values:[Float](repeating:0.5,count:values.count),hasRelief:false,
@@ -63,7 +63,7 @@ enum SurfaceHeightProcessor {
         if cleanup > 0 {
             relief = try clean(relief,width:width,height:height,span:initialSpan,amount:cleanup)
         }
-        let sorted = relief.sorted()
+        let sorted = NumericStatistics.sorted(relief)
         let centre = percentile(sorted,0.5)
         let radius = max(centre-percentile(sorted,0.02),percentile(sorted,0.98)-centre)
         guard radius > numericalFloor else {

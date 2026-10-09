@@ -29,10 +29,9 @@ struct MachineResources: Equatable, Sendable {
     }
 
     static let current: MachineResources = {
-        let ratio = ProcessInfo.processInfo.environment["PYTORCH_MPS_HIGH_WATERMARK_RATIO"].flatMap(Double.init) ?? 1.7
         return MachineResources(physicalBytes: ProcessInfo.processInfo.physicalMemory,
                                 metalRecommendedBytes: MTLCreateSystemDefaultDevice()?.recommendedMaxWorkingSetSize,
-                                highWatermarkRatio: ratio)
+                                highWatermarkRatio: 1)
     }()
 
     var maximumTrainingGiB: Double { Double(maximumTrainingBytes) / Double(Self.gibibyte) }

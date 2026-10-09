@@ -31,7 +31,7 @@ if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$PLIST" 2>/dev/nu
   exit 1
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-/usr/bin/python3 -B "$SCRIPT_DIR/verify_material_backend.py" "$APP_BUNDLE/Contents/Resources/MaterialBackend"
+"$SCRIPT_DIR/../script/verify_native_bundle.sh" "$APP_BUNDLE"
 UNEXPECTED_PAYLOAD="$(/usr/bin/find "$APP_BUNDLE/Contents" \( -name '*.safetensors' -o -name '*.pt' -o -name '*.pth' -o -name '*.ckpt' -o -name '*.onnx' -o -name '*.npy' -o -name '*.npz' -o -name '*.exr' -o -name '*.blend' -o -name '*.mlmodelc' -o -name '*.mlpackage' -o -name pyvenv.cfg \) -print -quit)"
 if [[ -n "$UNEXPECTED_PAYLOAD" ]]; then
   echo "Application packaging excludes model weights, numeric experiment maps and runtimes: $UNEXPECTED_PAYLOAD" >&2
@@ -56,7 +56,7 @@ for ROLE in review compare dataset train; do
     echo "Missing or malformed nested material tool: $TOOL_NAME (run make build)." >&2
     exit 1
   fi
-  /usr/bin/python3 -B "$SCRIPT_DIR/verify_material_backend.py" "$TOOL_APP/Contents/Resources/MaterialBackend"
+  "$SCRIPT_DIR/../script/verify_native_bundle.sh" "$TOOL_APP"
   /usr/bin/codesign --verify --deep --strict "$TOOL_APP"
 done
 /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"

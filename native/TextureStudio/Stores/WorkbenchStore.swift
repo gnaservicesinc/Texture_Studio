@@ -80,11 +80,9 @@ final class WorkbenchStore {
     private(set) var uploadAccountChecked = false
     private(set) var lastUploadURL: URL?
     var workspacePath: String { didSet { preferences.set(workspacePath, forKey: "workspace") } }
-    var pythonPath: String { didSet { preferences.set(pythonPath, forKey: "python") } }
     var modelDirectory: String { didSet { preferences.set(modelDirectory, forKey: "materialModelDirectory") } }
-    var codeDirectory: String { didSet { preferences.set(codeDirectory, forKey: "materialCodeDirectory") } }
     let resources: MachineResources
-    @ObservationIgnored private var runner: WorkbenchProcess?
+    @ObservationIgnored private var runner: NativeMaterialTrainingControl?
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var activeWorkerId: UUID?
     @ObservationIgnored let preferences: UserDefaults
@@ -93,6 +91,9 @@ final class WorkbenchStore {
     @ObservationIgnored private let managedWorkspaceURL: URL
     @ObservationIgnored private let selectedCheckpointRegistryURL: URL
     @ObservationIgnored private var hasRestored = false
+    @ObservationIgnored private var materialBaseLocations: [String: String] {
+        didSet { preferences.set(materialBaseLocations, forKey: "nativeMaterialBaseLocations") }
+    }
     @ObservationIgnored private var isRestoringPreferences = false
 
     var samples: [WorkbenchSample] { dataset?.samples ?? [] }
@@ -143,8 +144,10 @@ final class WorkbenchStore {
         return matching ? "\(width.formatted()) × \(height.formatted()) native maps" : "Mixed native map sizes"
     }
     var workspaceURL: URL { URL(fileURLWithPath: workspacePath).standardizedFileURL }
-    var backendDirectory: URL { Bundle.main.resourceURL!.appendingPathComponent("MaterialBackend") }
-    var dependencyArguments: [String] { ["--model-directory", modelDirectory, "--code-directory", codeDirectory] }
+    var dependencyArguments: [String] { ["--model-directory", modelDirectory] }
+    func dependencyArguments(for checkpoint: WorkbenchCheckpoint) -> [String] {
+        ["--model-directory", baseDirectory(for: checkpoint)]
+    }
 
     init(preferences defaults: UserDefaults = UserDefaults(suiteName: "org.ipde.material-tools")!,
          managedWorkspaceURL: URL? = nil,
@@ -153,6 +156,7 @@ final class WorkbenchStore {
          trashHandler: @escaping (URL) throws -> Void = { url in try FileManager.default.trashItem(at: url, resultingItemURL: nil) },
          workerOverride: (@MainActor ([String], String) async throws -> String)? = nil) {
         preferences = defaults
+        materialBaseLocations = defaults.dictionary(forKey: "nativeMaterialBaseLocations") as? [String: String] ?? [:]
         self.trashHandler = trashHandler
         if let data = defaults.data(forKey: "recentDatasets.v1"),
            let locations = try? JSONDecoder().decode([WorkbenchDatasetLocation].self, from: data) {
@@ -170,11 +174,9 @@ final class WorkbenchStore {
         let configuredWorkspace = defaults.string(forKey: "workspace") ?? local
         let workspace = configuredWorkspace.isEmpty ? self.managedWorkspaceURL.path : URL(fileURLWithPath: configuredWorkspace).standardizedFileURL.path
         workspacePath = workspace
-        pythonPath = defaults.string(forKey: "python") ?? MaterialWorkbenchRuntime.defaultPython(workspace: URL(fileURLWithPath: workspace))
         let cache = URL(fileURLWithPath: workspace).appendingPathComponent("out/material-training/transfer-models")
         let materialBasePath = defaults.string(forKey: "materialModelDirectory") ?? cache.appendingPathComponent("pbrnxt-base").path
         modelDirectory = materialBasePath
-        codeDirectory = defaults.string(forKey: "materialCodeDirectory") ?? URL(fileURLWithPath: materialBasePath).appendingPathComponent("source").path
         let saved = WorkbenchPreferences.load(from: defaults)
         if let options = saved.training {
             training = options.restored(for: resources)
@@ -182,7 +184,7 @@ final class WorkbenchStore {
                 trainingPreferenceNotice = "Saved training settings were adapted to supported values. Review the training settings before starting."
                 activity = trainingPreferenceNotice!
             }
-        } else { training.memoryGB = resources.defaultTrainingGiB }
+        }
         selectedSampleId = saved.selectedSampleId
         selectedInputVariantId = saved.selectedInputVariantId
         if let role = saved.selectedRole, ["input", "height", "roughness", "normal"].contains(role) { selectedRole = role }
@@ -249,16 +251,16 @@ final class WorkbenchStore {
 
     func saveConfiguration(refreshSelectedRuntime: Bool = true) {
         preferences.set(workspacePath, forKey: "workspace")
-        preferences.set(pythonPath, forKey: "python")
         preferences.set(modelDirectory, forKey: "materialModelDirectory")
-        preferences.set(codeDirectory, forKey: "materialCodeDirectory")
         saveUploadConfiguration()
         if refreshSelectedRuntime {
             do {
                 for target in ["height", "roughness", "normal"] {
-                    try SelectedMaterialCheckpoint.refreshRuntime(pythonPath: pythonPath, workspacePath: workspacePath,
-                        modelDirectory: modelDirectory, codeDirectory: codeDirectory,
-                        at: SelectedMaterialCheckpoint.registryURL(for: target, heightRegistryURL: selectedCheckpointRegistryURL))
+                    let registry = SelectedMaterialCheckpoint.registryURL(for: target, heightRegistryURL: selectedCheckpointRegistryURL)
+                    let selectedBase = (try? SelectedMaterialCheckpoint.read(from: registry))?.modelDirectory
+                    let base = selectedBase.flatMap { materialBaseLocations.values.contains($0) ? $0 : nil } ?? modelDirectory
+                    try SelectedMaterialCheckpoint.refreshRuntime(workspacePath: workspacePath,
+                        modelDirectory: base, at: registry)
                 }
             } catch {
                 self.error = "Runtime settings were saved, but Texture Studio could not reconnect its selected checkpoint: \(error.localizedDescription)"
@@ -316,23 +318,20 @@ final class WorkbenchStore {
     func chooseSourceImage() {
         chooseFile(types: [.image], title: "Choose a surface photo to prepare as diffuse for every checkpoint") { self.sourceImageURL = $0 }
     }
-    func choosePython() {
-        chooseFile(title: "Locate Python with PyTorch, OpenImageIO and MPS") { url in
-            self.pythonPath = url.path; self.saveConfiguration()
-        }
-    }
     func chooseWorkspace() {
         chooseFolder(title: "Choose a working folder for material runs") { url in self.workspacePath = url.path; self.saveConfiguration() }
     }
     func chooseEncoder() {
-        chooseFolder(title: "Locate the material base model folder") { url in self.modelDirectory = url.path; self.saveConfiguration() }
-    }
-    func chooseEncoderCode() {
-        chooseFolder(title: "Locate the material architecture source folder") { url in self.codeDirectory = url.path; self.saveConfiguration() }
+        guard !isBusy else { return }
+        let panel = NSOpenPanel(); panel.title = "Locate material weights or their folder"
+        panel.canChooseFiles = true; panel.canChooseDirectories = true
+        panel.begin { response in
+            if response == .OK, let url = panel.url { self.modelDirectory = url.path; self.saveConfiguration() }
+        }
     }
 
     func loadDataset(_ url: URL) async throws {
-        let result: WorkbenchDataset = try WorkbenchProcess.decode(WorkbenchDataset.self,
+        let result: WorkbenchDataset = try WorkbenchResult.decode(WorkbenchDataset.self,
             output: await worker(["dataset", "--dataset", url.path, "--target", training.target,
                                   "--default-review-size", String(training.size)]))
         adoptDataset(result)
@@ -402,7 +401,7 @@ final class WorkbenchStore {
             "--automatic-validation", "--expected-index-sha256", current.indexSha256]
         if let reviewHash = current.reviewSha256 { arguments += ["--expected-review-sha256", reviewHash] }
         if let checkMaterial { arguments += ["--material", checkMaterial] }
-        let result: WorkbenchDataset = try WorkbenchProcess.decode(WorkbenchDataset.self, output: await worker(arguments))
+        let result: WorkbenchDataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: await worker(arguments))
         guard result.readyForTraining(size: size, material: checkMaterial, target: target), let preparation = result.preparation,
               preparation.cropSize == size, !preparation.originalDatasetModified,
               URL(fileURLWithPath: preparation.preparedDatasetPath).standardizedFileURL == URL(fileURLWithPath: result.datasetPath).standardizedFileURL else {
@@ -416,9 +415,8 @@ final class WorkbenchStore {
     }
     func loadCheckpoint(_ url: URL, select: Bool = true) async throws {
         let output = try await worker(["checkpoint", "--checkpoint", url.path])
-        let checkpoint = try WorkbenchProcess.decode(WorkbenchCheckpoint.self, output: output)
-        let runtime = try WorkbenchProcess.decode(CheckpointRuntimeLocation.self, output: output)
-        if let source = runtime.codeDirectory { codeDirectory = source }
+        let checkpoint = try WorkbenchResult.decode(WorkbenchCheckpoint.self, output: output)
+        if checkpoint.variant == "full" { materialBaseLocations[checkpoint.sha256] = checkpoint.checkpointPath }
         guard checkpoint.compatible else { throw StudioError("This checkpoint is not supported by the material backend.") }
         if let i = checkpoints.firstIndex(where: { $0.id == checkpoint.id }) { checkpoints[i] = checkpoint }
         else { checkpoints.append(checkpoint) }
@@ -427,6 +425,10 @@ final class WorkbenchStore {
             comparisonCheckpointIds.insert(checkpoint.id)
         }
         if !isRestoringPreferences { preferences.set(checkpoints.map(\.checkpointPath), forKey: "checkpoints") }
+    }
+
+    func baseDirectory(for checkpoint: WorkbenchCheckpoint) -> String {
+        checkpoint.base.flatMap { materialBaseLocations[$0.sha256] } ?? modelDirectory
     }
 
     func curateSelected(status: String, split: String? = nil, note: String? = nil) {
@@ -521,9 +523,9 @@ final class WorkbenchStore {
             }
             if includeBase, let reference = selected.first {
                 self.activity = "Running the material base model"
-                let result: MaterialInferenceResponse = try WorkbenchProcess.decode(MaterialInferenceResponse.self, output: await self.worker([
+                let result: MaterialInferenceResponse = try WorkbenchResult.decode(MaterialInferenceResponse.self, output: await self.worker([
                     "infer", "--baseline", "--checkpoint", reference.checkpointPath, "--expected-sha256", reference.sha256,
-                    "--image", modelImage.path, "--output", parent.appendingPathComponent("base-untrained").path, "--device", "mps"] + self.dependencyArguments))
+                    "--image", modelImage.path, "--output", parent.appendingPathComponent("base-untrained").path] + self.dependencyArguments(for: reference)))
                 guard result.checkpointSha256 == reference.sha256, let map = result.outputs[target] else {
                     throw StudioError("The base comparison did not match the selected checkpoint architecture and map type.")
                 }
@@ -536,9 +538,9 @@ final class WorkbenchStore {
             for (i, checkpoint) in selected.enumerated() {
                 self.activity = "Running checkpoint \(i + 1)/\(selected.count): \(checkpoint.title)"
                 let child = parent.appendingPathComponent("candidate-\(i + 1)")
-                let result: MaterialInferenceResponse = try WorkbenchProcess.decode(MaterialInferenceResponse.self, output: await self.worker([
+                let result: MaterialInferenceResponse = try WorkbenchResult.decode(MaterialInferenceResponse.self, output: await self.worker([
                     "infer", "--checkpoint", checkpoint.checkpointPath, "--expected-sha256", checkpoint.sha256,
-                    "--image", modelImage.path, "--output", child.path, "--device", "mps"] + self.dependencyArguments))
+                    "--image", modelImage.path, "--output", child.path] + self.dependencyArguments(for: checkpoint)))
                 guard result.checkpointSha256 == checkpoint.sha256, let map = result.outputs[checkpoint.target] else {
                     throw StudioError("The comparison did not use the selected checkpoint or map type.")
                 }
@@ -582,8 +584,8 @@ final class WorkbenchStore {
     }
 
     func loadTrainingCapabilities() async throws {
-        let result = try WorkbenchProcess.decode(WorkbenchTrainingCapabilities.self,
-            output: await worker(["capabilities", "--cache-gib", String(training.cacheGB), "--scope", training.scope]))
+        let result = try WorkbenchResult.decode(WorkbenchTrainingCapabilities.self,
+            output: await worker(["capabilities", "--scope", training.scope]))
         backendTrainingSizes = result.trainingSizes.filter { [256, 512, 1024, 2048].contains($0) }.sorted()
         supportedTrainingSizes = backendTrainingSizes.filter { dataset?.supportedTrainingSizes?.contains($0) ?? true }
         if dataset?.trainingSize == nil, !supportedTrainingSizes.contains(training.size), let size = supportedTrainingSizes.last {
@@ -635,7 +637,7 @@ final class WorkbenchStore {
     private func runTraining(checkpoint: WorkbenchCheckpoint?) {
         let options = training
         let selectedMaterial = selectedMaterialId
-        let dependencies = dependencyArguments
+        let dependencies = checkpoint.map { dependencyArguments(for: $0) } ?? dependencyArguments
         let developer = developerMode
         let publishAfterTraining = developer && uploadAfterTraining
         operation(checkpoint == nil ? "Training material LoRA…" : "Refining material LoRA…", training: true) {
@@ -645,7 +647,7 @@ final class WorkbenchStore {
             var args = [checkpoint == nil ? "train" : "refine", "--dataset", prepared.datasetPath,
                 "--output", output.path, "--size", String(options.size), "--whole-maps",
                 "--target", options.target, "--scope", options.scope,
-                "--cache-gib", String(options.cacheGB), "--max-minutes", String(options.maxMinutes),
+                "--max-minutes", String(options.maxMinutes),
                 "--updates-per-map", String(options.updatesPerCrop),
                 "--validation-every", String(options.validationEvery), "--checkpoint-every", String(options.checkpointEvery),
                 "--lora-rank", String(options.loraRank), "--lora-alpha", String(options.loraAlpha)] + dependencies
@@ -654,14 +656,14 @@ final class WorkbenchStore {
             if let checkpoint { args += ["--checkpoint", checkpoint.checkpointPath, "--expected-sha256", checkpoint.sha256] }
             self.isResumingTraining = checkpoint != nil
             do {
-                let result = try WorkbenchProcess.decode(WorkbenchTrainingResponse.self, output: await self.worker(args))
+                let result = try WorkbenchResult.decode(WorkbenchTrainingResponse.self, output: await self.worker(args))
                 try await self.loadCheckpoint(URL(fileURLWithPath: result.checkpointPath))
                 self.lastPackageURL = result.packagePath.map { URL(fileURLWithPath: $0) }
                 self.lastPackageCheckpointId = self.selectedCheckpointId
                 self.activity = self.isSavingTraining ? "Stopped and saved material LoRA." : "Training finished. Review the material maps before using this model."
                 try await self.cleanupTrainingDataset(prepared)
                 if publishAfterTraining && !self.isStopping {
-                    let account = try WorkbenchProcess.decode(HuggingFaceAccountResponse.self, output: await self.worker(["hub-account"]))
+                    let account = try WorkbenchResult.decode(HuggingFaceAccountResponse.self, output: await self.worker(["hub-account"]))
                     self.uploadAccount = account.authenticated ? account.username : nil
                     self.uploadAccountChecked = true
                     if let checkpoint = self.selectedCheckpoint, self.canUploadSelectedCheckpoint {
@@ -681,7 +683,7 @@ final class WorkbenchStore {
     private func cleanupTrainingDataset(_ prepared: WorkbenchDataset) async throws {
         guard prepared.preparation != nil else { return }
         let output = try await worker(["cleanup-size", "--dataset", prepared.datasetPath])
-        _ = try WorkbenchProcess.decode(WorkbenchDatasetCleanup.self, output: output)
+        _ = try WorkbenchResult.decode(WorkbenchDatasetCleanup.self, output: output)
         try await loadDataset(URL(fileURLWithPath: prepared.preparation!.sourceDatasetPath))
         datasetPreparationSummary = "Training files cleared. Original source maps are selected."
     }
@@ -777,7 +779,7 @@ final class WorkbenchStore {
                 hasTrainingStarted = true
                 if !isStopping { activity = "Training material LoRA…" }
             case "checkpoint_saved":
-                if let checkpoint = try? WorkbenchProcess.decode(WorkbenchCheckpoint.self, output: line) {
+                if let checkpoint = try? WorkbenchResult.decode(WorkbenchCheckpoint.self, output: line) {
                     if !checkpoints.contains(where: { $0.id == checkpoint.id }) { checkpoints.append(checkpoint) }
                     preferences.set(checkpoints.map(\.checkpointPath), forKey: "checkpoints")
                 }
@@ -799,8 +801,8 @@ final class WorkbenchStore {
         guard let checkpoint = selectedCheckpoint, checkpoint.supportsStudioInference else { return }
         do {
             try SelectedMaterialCheckpoint(checkpointPath: checkpoint.checkpointPath, sha256: checkpoint.sha256,
-                target: checkpoint.target, pythonPath: pythonPath, workspacePath: workspacePath,
-                modelDirectory: modelDirectory, codeDirectory: codeDirectory,
+                target: checkpoint.target, workspacePath: workspacePath,
+                modelDirectory: baseDirectory(for: checkpoint),
                 displayName: checkpoint.title, modelSummary: checkpoint.modelSummary)
                 .save(to: SelectedMaterialCheckpoint.registryURL(for: checkpoint.target, heightRegistryURL: selectedCheckpointRegistryURL))
             activity = "Selected \(checkpoint.title) for Texture Studio."
@@ -811,7 +813,7 @@ final class WorkbenchStore {
         chooseFolder(title: "Choose a folder for a new model package") { parent in
             self.operation("Exporting selected model package…") {
                 let destination = parent.appendingPathComponent("material-\(checkpoint.target)-\(UUID().uuidString.prefix(8))")
-                var args = ["package", "--checkpoint", checkpoint.checkpointPath, "--expected-sha256", checkpoint.sha256, "--output", destination.path] + self.dependencyArguments
+                var args = ["package", "--checkpoint", checkpoint.checkpointPath, "--expected-sha256", checkpoint.sha256, "--output", destination.path] + self.dependencyArguments(for: checkpoint)
                 if self.developerMode { args += ["--developer-mode"] }
                 for adapter in self.adapterMix { args += ["--adapter", "\(adapter.path)=\(adapter.weight)"] }
                 _ = try await self.worker(args)
@@ -839,14 +841,14 @@ final class WorkbenchStore {
     func refreshUploadAccount() {
         guard !isBusy else { return }
         operation("Checking saved Hugging Face account…") {
-            let result = try WorkbenchProcess.decode(HuggingFaceAccountResponse.self,
+            let result = try WorkbenchResult.decode(HuggingFaceAccountResponse.self,
                 output: await self.worker(["hub-account"]))
             self.uploadAccount = result.authenticated ? result.username : nil
             self.uploadAccountChecked = true
             self.uploadAccountMessage = result.message
             self.activity = result.message
             if result.authenticated {
-                let models = try WorkbenchProcess.decode(WorkbenchHubModels.self, output: await self.worker(["hub-models"]))
+                let models = try WorkbenchResult.decode(WorkbenchHubModels.self, output: await self.worker(["hub-models"]))
                 self.hubModels = models.models
             }
         }
@@ -855,7 +857,7 @@ final class WorkbenchStore {
         guard let checkpoint = selectedCheckpoint else { error = "Select a model checkpoint to upload."; return }
         let repository = effectiveUploadRepo
         guard uploadAccount != nil else {
-            uploadAccountMessage = "Run hf auth login in Terminal, then click Refresh Account."
+            uploadAccountMessage = "Save a Hugging Face token in settings, then click Refresh Account."
             return
         }
         guard HuggingFaceUpload.validRepository(repository) else {
@@ -872,8 +874,8 @@ final class WorkbenchStore {
             "--expected-sha256", checkpoint.sha256, "--output", package.path, "--repo", repository]
         if isPublic { args += ["--public"] }
         if developerMode { args += ["--developer-mode"] }
-        args += dependencyArguments
-        let result = try WorkbenchProcess.decode(HuggingFaceUploadResponse.self, output: await worker(args))
+        args += dependencyArguments(for: checkpoint)
+        let result = try WorkbenchResult.decode(HuggingFaceUploadResponse.self, output: await worker(args))
         guard result.sourceCheckpointSha256 == checkpoint.sha256, result.repository == repository,
               result.private == !isPublic else {
             throw StudioError("The upload response did not match the selected checkpoint and destination. See the operation log.")
@@ -885,7 +887,7 @@ final class WorkbenchStore {
         }
         lastUploadURL = URL(string: result.commitUrl ?? result.url)
         activity = "Uploaded \(checkpoint.title) to \(repository) (\(isPublic ? "public" : "private"))."
-        let models = try WorkbenchProcess.decode(WorkbenchHubModels.self, output: await worker(["hub-models"]))
+        let models = try WorkbenchResult.decode(WorkbenchHubModels.self, output: await worker(["hub-models"]))
         hubModels = models.models
     }
     var managedEncoderURL: URL {
@@ -896,7 +898,6 @@ final class WorkbenchStore {
         operation("Downloading the material base…") {
             _ = try await self.worker(["install-base", "--destination", self.managedEncoderURL.path])
             self.modelDirectory = self.managedEncoderURL.path
-            self.codeDirectory = self.managedEncoderURL.appendingPathComponent("source").path
             self.saveConfiguration()
             self.activity = "Material base installed."
         }
@@ -909,7 +910,7 @@ final class WorkbenchStore {
     }
     func refreshHubModels() {
         operation("Finding your Hugging Face material models…") {
-            let result = try WorkbenchProcess.decode(WorkbenchHubModels.self, output: await self.worker(["hub-models"]))
+            let result = try WorkbenchResult.decode(WorkbenchHubModels.self, output: await self.worker(["hub-models"]))
             self.hubModels = result.models
         }
     }
@@ -918,8 +919,7 @@ final class WorkbenchStore {
             let destination = self.managedEncoderURL.deletingLastPathComponent().appendingPathComponent(model.repository.replacingOccurrences(of: "/", with: "--"))
             var args = ["download-model", "--repo", model.repository, "--destination", destination.path]
             if let revision = model.revision { args += ["--revision", revision] }
-            let result = try WorkbenchProcess.decode(WorkbenchCheckpoint.self, output: await self.worker(args))
-            self.codeDirectory = destination.appendingPathComponent("source").path
+            let result = try WorkbenchResult.decode(WorkbenchCheckpoint.self, output: await self.worker(args))
             self.saveConfiguration()
             try await self.loadCheckpoint(result.url)
         }
@@ -937,50 +937,48 @@ final class WorkbenchStore {
         preferences.set(checkpoints.map(\.checkpointPath), forKey: "checkpoints")
     }
 
-    func worker(_ args: [String], script requestedScript: String? = nil) async throws -> String {
-        let datasetCommands: Set<String> = ["dataset", "prepare-size", "cleanup-size", "curate", "remove-missing", "create-dataset", "edit-dataset", "add-material", "import-folder", "scan-folder", "remove-material", "validate-delete"]
+    func worker(_ args: [String]) async throws -> String {
         let includesTarget = ["create-dataset", "edit-dataset", "add-material", "import-folder", "remove-material"].contains(args.first ?? "") && !args.contains("--target")
         let args = args + (includesTarget ? ["--target", training.target] : [])
-        let script = requestedScript ?? (datasetCommands.contains(args.first ?? "") ? "material_workbench.py" : "material_model_workbench.py")
         try Task.checkCancellation()
         guard !WorkbenchLifecycle.shared.isTerminating else { throw CancellationError() }
         let trainingWorker = ["train", "refine"].contains(args.first ?? "")
         if trainingWorker { trainingEventBuffer = ""; hasTrainingStarted = false }
         defer { if trainingWorker { hasTrainingStarted = false } }
         if let workerOverride {
-            let output = try await workerOverride(args, script)
+            let output = try await workerOverride(args, args.first ?? "")
             if trainingWorker { recordTrainingProgress(output) }
             try Task.checkCancellation()
             return output
         }
-        guard FileManager.default.isExecutableFile(atPath: pythonPath) else { throw StudioError("Python is missing. Locate your PyTorch environment in Runtime settings.") }
-        let worker = backendDirectory.appendingPathComponent(script)
-        guard FileManager.default.fileExists(atPath: worker.path) else { throw StudioError("The bundled material backend is missing. Rebuild the apps.") }
         saveConfiguration(refreshSelectedRuntime: false)
         let logs = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Texture Studio/Worklogs")
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
         let log = logs.appendingPathComponent("\(UUID().uuidString).log")
         lastLogURL = log
-        let process = WorkbenchProcess(); runner = process
+        let events = NativeWorkbenchLog(url: log)
+        let control = NativeMaterialTrainingControl(); runner = control
         let workerId = UUID(); activeWorkerId = workerId
-        WorkbenchLifecycle.shared.add(process)
+        let event: @Sendable (String) -> Void = { [weak self] chunk in
+            events.append(chunk)
+            Task { @MainActor in
+                guard self?.activeWorkerId == workerId else { return }
+                self?.logText += chunk
+                if let text = self?.logText, text.count > 100000 { self?.logText = String(text.suffix(100000)) }
+                if trainingWorker { self?.recordTrainingProgress(chunk) }
+            }
+        }
+        let operation = Task { try await NativeMaterialCommands.run(arguments: args, onEvent: event, control: control) }
+        WorkbenchLifecycle.shared.add(control, cancel: { operation.cancel() })
         defer {
             runner = nil; activeWorkerId = nil
-            if let completed = try? String(contentsOf: log, encoding: .utf8) { logText = String(completed.suffix(100000)) }
-            WorkbenchLifecycle.shared.remove(process)
+            logText = events.text
+            if trainingWorker { recordTrainingProgress(events.text) }
+            WorkbenchLifecycle.shared.remove(control)
         }
-        let output = try await process.run(executable: URL(fileURLWithPath: pythonPath), arguments: ["-B", worker.path] + args,
-            directory: FileManager.default.fileExists(atPath: workspacePath) ? workspaceURL : nil, log: log) { [weak self] chunk in
-                Task { @MainActor in
-                    guard self?.activeWorkerId == workerId else { return }
-                    self?.logText += chunk
-                    if let text = self?.logText, text.count > 100000 { self?.logText = String(text.suffix(100000)) }
-                    if trainingWorker { self?.recordTrainingProgress(chunk) }
-                    if args.first == "scan-folder", let progress = self?.logText.components(separatedBy: "\n").last(where: { $0.hasPrefix("IPDE_PROGRESS:") }) {
-                        self?.activity = String(progress.dropFirst("IPDE_PROGRESS:".count))
-                    }
-                }
-            }
+        let output = try await withTaskCancellationHandler { try await operation.value } onCancel: { operation.cancel(); control.stop() }
+        events.append(output + "\n")
         try Task.checkCancellation()
         return output
     }
@@ -1037,8 +1035,4 @@ final class WorkbenchStore {
         let panel = NSOpenPanel(); panel.title = title; panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.begin { response in if response == .OK, let url = panel.url { selected(url) } }
     }
-}
-
-private struct CheckpointRuntimeLocation: Decodable {
-    let codeDirectory: String?
 }

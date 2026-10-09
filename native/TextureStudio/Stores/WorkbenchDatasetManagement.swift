@@ -62,7 +62,7 @@ extension WorkbenchStore {
         guard folderName != ".", folderName != ".." else { error = "Choose a descriptive dataset name."; return }
         let destination = parentURL.appendingPathComponent(folderName, isDirectory: true)
         operation("Creating \(title)…") {
-            let result = try WorkbenchProcess.decode(WorkbenchDataset.self, output: await self.worker([
+            let result = try WorkbenchResult.decode(WorkbenchDataset.self, output: await self.worker([
                 "create-dataset", "--dataset", destination.path, "--name", title, "--description", description,
                 "--training-size", String(size ?? self.training.size)] + validation.arguments))
             self.selectedSampleId = nil
@@ -92,7 +92,7 @@ extension WorkbenchStore {
         return dataset!
     }
     @discardableResult private func adoptManagedDataset(_ output: String) throws -> WorkbenchDataset {
-        let result = try WorkbenchProcess.decode(WorkbenchDataset.self, output: output)
+        let result = try WorkbenchResult.decode(WorkbenchDataset.self, output: output)
         adoptDataset(result)
         saveDatasetLocation(result)
         datasetPreparationSummary = ""
@@ -163,7 +163,7 @@ extension WorkbenchStore {
         showImportFolderSheet = true
         let planURL = FileManager.default.temporaryDirectory.appendingPathComponent("material-import-\(UUID().uuidString).json")
         folderImportPlanURL = planURL
-        folderImport = try WorkbenchProcess.decode(WorkbenchFolderImport.self, output: await worker([
+        folderImport = try WorkbenchResult.decode(WorkbenchFolderImport.self, output: await worker([
             "scan-folder", "--dataset", current.datasetPath, "--folder", url.path,
             "--expected-index-sha256", current.indexSha256, "--plan", planURL.path]))
         activity = "Folder scan complete. Review the resolution, training crops and validation checks, then import."
@@ -212,7 +212,7 @@ extension WorkbenchStore {
         guard !isBusy, dataset != nil else { return }
         operation("Moving dataset metadata to Trash…") {
             let current = try await self.sourceDatasetForManagement()
-            let plan = try WorkbenchProcess.decode(WorkbenchDatasetDeletion.self, output: await self.worker([
+            let plan = try WorkbenchResult.decode(WorkbenchDatasetDeletion.self, output: await self.worker([
                 "validate-delete", "--dataset", current.datasetPath, "--expected-index-sha256", current.indexSha256]))
             try DatasetFileOperations.trash(plan, expectedDataset: URL(fileURLWithPath: current.datasetPath), handler: self.trashHandler)
             let folder = URL(fileURLWithPath: current.datasetPath).resolvingSymlinksInPath().standardizedFileURL.path

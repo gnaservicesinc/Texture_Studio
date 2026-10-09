@@ -50,7 +50,7 @@ struct TextureRecipe: Codable {
     var materialMapCheckpoints: [String: MaterialCheckpointIdentity]? = nil
 }
 
-/// Recipes identify model data, never an executable or a Python environment.
+/// Recipes identify model data, independently of the native runtime.
 struct MaterialCheckpointIdentity: Codable, Sendable {
     let checkpointPath: String
     let sha256: String
@@ -68,8 +68,8 @@ struct MaterialCheckpointIdentity: Codable, Sendable {
 
     func resolve(using runtime: SelectedMaterialCheckpoint) -> SelectedMaterialCheckpoint {
         SelectedMaterialCheckpoint(checkpointPath: checkpointPath, sha256: sha256, target: target,
-            pythonPath: runtime.pythonPath, workspacePath: runtime.workspacePath,
-            modelDirectory: runtime.modelDirectory, codeDirectory: runtime.codeDirectory,
+            workspacePath: runtime.workspacePath,
+            modelDirectory: runtime.modelDirectory,
             displayName: displayName, modelSummary: modelSummary)
     }
 }

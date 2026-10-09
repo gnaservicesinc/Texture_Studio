@@ -132,8 +132,8 @@ final class StudioWorkflowTests: XCTestCase {
             camera: CameraMetadata(), pixelWidth: 32, pixelHeight: 32)
     }
     private func checkpoint(_ url: URL, sha: String) -> SelectedMaterialCheckpoint {
-        SelectedMaterialCheckpoint(checkpointPath: url.path, sha256: sha, target: "height", pythonPath: "/python",
-            workspacePath: url.deletingLastPathComponent().path, modelDirectory: "/encoder", codeDirectory: "/code")
+        SelectedMaterialCheckpoint(checkpointPath: url.path, sha256: sha, target: "height",
+            workspacePath: url.deletingLastPathComponent().path, modelDirectory: "/encoder")
     }
     private func directory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("studio-workflow-\(UUID().uuidString)")

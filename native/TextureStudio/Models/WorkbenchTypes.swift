@@ -198,6 +198,7 @@ struct WorkbenchDatasetPreparation: Decodable, Sendable {
 }
 
 struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
+    struct Base: Decodable, Sendable { let sha256: String }
     let checkpointPath: String
     let sha256: String
     let schema: String
@@ -209,8 +210,9 @@ struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
     let refinementPolicy: String?
     var architecture: String? = nil
     var scope: String? = nil
+    var base: Base? = nil
     enum CodingKeys: String, CodingKey {
-        case checkpointPath, sha256, schema, target, step, compatible, variant, refinementPolicy, architecture, scope
+        case checkpointPath, sha256, schema, target, step, compatible, variant, refinementPolicy, architecture, scope, base
         case warmStartSupported = "supportsTrainingWarmStart"
     }
     var supportsTrainingWarmStart: Bool { compatible && warmStartSupported == true }
@@ -236,21 +238,17 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
     var size = 1024
     var updatesPerCrop = 100
     var maxMinutes = 30.0
-    /// GiB throughout the UI and CLI; retain the field name for existing callers.
-    var memoryGB = MachineResources.current.defaultTrainingGiB
-    var automaticMemory = true
     var useSelectedMaterialOnly = false
     var useWarmStart = false
     var loraRank = 8
     var loraAlpha = 8.0
-    var cacheGB = 0.5
     var validationEvery = 20
     var checkpointEvery = 0
 
     init() {}
 
     enum CodingKeys: String, CodingKey {
-        case target, scope, size, updatesPerCrop, maxMinutes, memoryGB, automaticMemory, useSelectedMaterialOnly, useWarmStart, loraRank, loraAlpha, cacheGB, validationEvery, checkpointEvery
+        case target, scope, size, updatesPerCrop, maxMinutes, useSelectedMaterialOnly, useWarmStart, loraRank, loraAlpha, validationEvery, checkpointEvery
     }
 
     init(from decoder: Decoder) throws {
@@ -261,19 +259,15 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
         size = try values.decodeIfPresent(Int.self, forKey: .size) ?? size
         updatesPerCrop = try values.decodeIfPresent(Int.self, forKey: .updatesPerCrop) ?? updatesPerCrop
         maxMinutes = try values.decodeIfPresent(Double.self, forKey: .maxMinutes) ?? maxMinutes
-        memoryGB = try values.decodeIfPresent(Double.self, forKey: .memoryGB) ?? memoryGB
-        automaticMemory = try values.decodeIfPresent(Bool.self, forKey: .automaticMemory) ?? true
         useSelectedMaterialOnly = try values.decodeIfPresent(Bool.self, forKey: .useSelectedMaterialOnly) ?? useSelectedMaterialOnly
         useWarmStart = try values.decodeIfPresent(Bool.self, forKey: .useWarmStart) ?? useWarmStart
         loraRank = try values.decodeIfPresent(Int.self, forKey: .loraRank) ?? loraRank
         loraAlpha = try values.decodeIfPresent(Double.self, forKey: .loraAlpha) ?? loraAlpha
-        cacheGB = try values.decodeIfPresent(Double.self, forKey: .cacheGB) ?? cacheGB
         validationEvery = try values.decodeIfPresent(Int.self, forKey: .validationEvery) ?? validationEvery
         checkpointEvery = try values.decodeIfPresent(Int.self, forKey: .checkpointEvery) ?? checkpointEvery
     }
 
-    /// Preserve supported choices when reopening on another Mac. Legacy memory
-    /// preferences are retained for compatibility and do not govern admission.
+    /// Preserve supported choices when reopening on another Mac.
     func restored(for resources: MachineResources) -> Self {
         var result = self
         if !["height", "roughness", "normal"].contains(result.target) { result.target = "height" }
@@ -281,7 +275,6 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
         if ![256, 512, 1024, 2048].contains(result.size) { result.size = 1024 }
         result.loraRank = min(64, max(1, result.loraRank))
         result.loraAlpha = result.loraAlpha.isFinite ? min(128, max(0.01, result.loraAlpha)) : 8
-        result.cacheGB = result.cacheGB.isFinite ? min(4, max(0, result.cacheGB)) : 0.5
         result.validationEvery = min(10000, max(1, result.validationEvery))
         result.checkpointEvery = min(100000, max(0, result.checkpointEvery))
         result.updatesPerCrop = min(10_000, max(1, result.updatesPerCrop))
@@ -315,22 +308,6 @@ struct WorkbenchPreferences: Codable {
     }
 }
 
-enum MaterialWorkbenchRuntime {
-    /// Reuse a located Studio runtime when a distribution has no repository
-    /// environment. Existence is only discovery; the backend verifies imports.
-    static func defaultPython(workspace: URL, registry: URL? = nil) -> String {
-        let repositoryPython = workspace.appendingPathComponent(".venv/bin/python")
-        if FileManager.default.isExecutableFile(atPath: repositoryPython.path) { return repositoryPython.path }
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let registryURL = registry ?? support.appendingPathComponent("Texture Studio/Runtimes/python-runtime.json")
-        if let data = try? Data(contentsOf: registryURL),
-           let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let path = record["path"] as? String, path.hasPrefix("/"),
-           FileManager.default.isExecutableFile(atPath: path) { return path }
-        return repositoryPython.path
-    }
-}
-
 struct MaterialInferenceResponse: Decodable, Sendable {
     struct Output: Decodable, Sendable { let path: String }
     let outputs: [String: Output]
@@ -341,10 +318,8 @@ struct SelectedMaterialCheckpoint: Codable, Sendable {
     let checkpointPath: String
     let sha256: String
     let target: String
-    let pythonPath: String
     let workspacePath: String
     let modelDirectory: String
-    let codeDirectory: String
     var displayName: String? = nil
     var modelSummary: String? = nil
     var supportsStudioInference: Bool { ["height", "normal", "roughness"].contains(target) && URL(fileURLWithPath: checkpointPath).pathExtension == "safetensors" }
@@ -386,23 +361,19 @@ struct SelectedMaterialCheckpoint: Codable, Sendable {
 
     /// Runtime changes reconnect the existing selected model. They never select
     /// a library row or change its checkpoint identity as a side effect.
-    static func refreshRuntime(pythonPath: String, workspacePath: String, modelDirectory: String,
-                               codeDirectory: String, at url: URL = registryURL) throws {
+    static func refreshRuntime(workspacePath: String, modelDirectory: String, at url: URL = registryURL) throws {
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         try withRegistryLock(at: url) {
             let raw = try Data(contentsOf: url)
             let selected = try JSONDecoder().decode(Self.self, from: raw)
-            guard selected.pythonPath != pythonPath || selected.workspacePath != workspacePath
-                    || selected.modelDirectory != modelDirectory || selected.codeDirectory != codeDirectory else { return }
+            guard selected.workspacePath != workspacePath || selected.modelDirectory != modelDirectory else { return }
             guard var document = try JSONSerialization.jsonObject(with: raw) as? [String: Any] else {
                 throw CocoaError(.fileReadCorruptFile)
             }
             // Preserve any newer metadata fields alongside the exact selected
             // checkpoint path, SHA256 and target.
-            document["pythonPath"] = pythonPath
             document["workspacePath"] = workspacePath
             document["modelDirectory"] = modelDirectory
-            document["codeDirectory"] = codeDirectory
             try JSONSerialization.data(withJSONObject: document, options: [.sortedKeys])
                 .write(to: url, options: .atomic)
         }

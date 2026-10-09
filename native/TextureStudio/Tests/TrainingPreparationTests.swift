@@ -37,7 +37,7 @@ final class TrainingPreparationTests: XCTestCase {
         "automatic_validation":{"policy":"subject-extra-crops-v2","material_ids":[],
         "quick_fit_material_id":"soil_4k","target":"height"}}
         """.replacingOccurrences(of: "\n", with: "")
-        let dataset = try WorkbenchProcess.decode(WorkbenchDataset.self, output: document)
+        let dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: document)
         XCTAssertTrue(dataset.readyForTraining(size: 2048, material: "soil_4k", target: "height"))
         XCTAssertFalse(dataset.readyForTraining(size: 2048, material: nil, target: "height"))
         XCTAssertTrue(dataset.readyForTraining(size: 2048, material: "soil_4k", target: "normal"), "Prepared crops are shared across targets")
@@ -280,7 +280,7 @@ final class TrainingPreparationTests: XCTestCase {
                 self.calls.append(args)
                 switch args.first {
                 case "capabilities":
-                    XCTAssertEqual(script, "material_model_workbench.py")
+                    XCTAssertEqual(script, args.first)
                     return "{\"training_sizes\":[512,1024]}"
                 case "dataset", "edit-dataset": return try self.dataset(prepared: false)
                 case "prepare-size":

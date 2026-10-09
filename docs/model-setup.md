@@ -1,20 +1,11 @@
-# Local material model setup
+# Native material models
 
-The material workbench uses a local Python/PyTorch backend and a complete revision-pinned PBRnxt base. The base's source, tensor layout and checksum are checked before loading. No different architecture or base checkpoint is silently substituted.
+The material workbench implements the pinned PBRnxt SCUNetV2 and RRDB mapping in Apple MPSGraph. Training and inference use Float32 with reduced precision fast math disabled. All learned decoder and output-branch operations are retained; the final enlargement is omitted so predictions use the declared native grid. No alternative model or reduced resolution is silently substituted.
 
-Install or locate the base from the Model Training workspace. A saved full material `.safetensors` checkpoint can also become the starting base. Normal-mode refinement saves a separate LoRA tied to the exact base; Developer mode additionally exports the full model with that adapter merged.
+Open the tool's settings to select a working folder and model weights. Download Base Model obtains the pinned 349,493,406-byte PBRnxt tensor archive at revision `73ab49a0cc0de5ea70e7aa94fb1a7234dd59ab35`, with SHA-256 `3f25b03e950c6199b53a3e1581296831e71555e1928ad209232b757f75153b7d`. The native data parser reads only the expected ZIP tensor state dictionary and rejects executable object constructors. Architecture implementation and original license notices are shipped with the application.
 
-```sh
-python scripts/material_model_workbench.py install-base --destination /path/to/pbrnxt-base
-python scripts/material_model_workbench.py capabilities --memory-gib 32 --cache-gib 1 --scope final-map
-```
+A LoRA requires its exact recorded base. A full fused material checkpoint contains the complete learned weights and can run after the separately downloaded base is removed. Export packages contain safetensors, configuration, checksums and license notices. They carry no executable model sources or source images.
 
-The installation command downloads the pinned upstream source and weights. Training and inference use local files. Python needs the repository's declared dependencies, including PyTorch, NumPy, unchanged-depth OpenCV decoding and OpenEXR. HEIF extraction separately requires `pillow-heif>=1.5.0`.
+Hugging Face account, catalog, download and upload requests use HTTPS through URLSession. Save an access token in settings; the app stores it in Apple Keychain. `HF_TOKEN` is also available for development automation. Model downloads bind to an exact revision and verify the complete package before publishing it locally. Uploads verify weights, destination and visibility before creating the commit.
 
-Use **Refresh Account** to read a saved Hugging Face login. Upload packages only the selected material model, its model metadata and dependency/license files; source photos and optimizer state are excluded. Successfully uploaded models are recorded in the app's Hub catalog and offer a **Download** action using the recorded repository revision and checkpoint identity.
-
-App-owned downloaded bases can be removed. Located external bases are unlinked without deleting the user's files. Retain a full checkpoint or a recorded download origin before removing a base needed by an adapter. A separate LoRA needs the exact matching base again for inference or further refinement.
-
-Inference consumes a prepared diffuse PNG. A photo dropped into the native app first receives the shared geometry, color and illumination preparation. The backend rejects `--input-kind photo` so an untreated image cannot be mistaken for a valid material-model test.
-
-All model exports use `.safetensors`. Full checkpoints and LoRAs are distinct formats with explicit architecture, target, base and module metadata; current readers do not implement compatibility for removed development experiments.
+The migration is checked with synthetic complete-operation Metal fixtures, real dataset metadata and exact numeric export fixtures. Full pretrained-weight quality, peak memory and production-grid throughput must be measured with the actual pinned model installed. Smaller fixture results are not an image-quality or full-model performance claim.

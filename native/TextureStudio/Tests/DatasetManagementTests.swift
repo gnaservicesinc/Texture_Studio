@@ -71,7 +71,7 @@ final class DatasetManagementTests: XCTestCase {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let store = fixture.store()
-        store.dataset = try WorkbenchProcess.decode(WorkbenchDataset.self, output: fixture.document(prepared: true))
+        store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: fixture.document(prepared: true))
         store.updateDatasetInfo(name: "Source renamed", description: "")
         try await settled(store)
         XCTAssertNil(store.error)
@@ -136,38 +136,25 @@ final class DatasetManagementTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.dataset.appendingPathComponent("original.png").path))
     }
 
-    func testNativeLifecycleAgainstBundledPythonContractKeepsOriginalBytes() async throws {
-        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-        let python = repository.appendingPathComponent(".venv/bin/python")
-        guard FileManager.default.isExecutableFile(atPath: python.path) else { throw XCTSkip("Local backend runtime is unavailable") }
+    func testNativeLifecycleKeepsOriginalBytes() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let source = fixture.root.appendingPathComponent("Sources")
-        let generator = WorkbenchProcess()
-        _ = try await generator.run(executable: python, arguments: ["-B", "-c", """
-            import sys
-            from pathlib import Path
-            sys.path.insert(0, sys.argv[1])
-            import numpy as np
-            from material_dataset import write_png
-            root = Path(sys.argv[2]); root.mkdir()
-            write_png(root/'diffuse.png', np.full((256,256,3), 127, np.uint8))
-            write_png(root/'height.png', np.arange(65536, dtype=np.uint16).reshape(256,256,1))
-            """, repository.appendingPathComponent("scripts").path, source.path], directory: repository,
-            log: fixture.root.appendingPathComponent("generate.log"), onLog: { _ in })
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: false)
         let input = source.appendingPathComponent("diffuse.png")
         let height = source.appendingPathComponent("height.png")
+        let diffuse = NativePNG(header: .init(width: 256, height: 256, bits: 8, channels: 3, color: 2, interlace: 0),
+            pixels: Data(repeating: 127, count: 256 * 256 * 3), colorChunks: [])
+        var samples = Data()
+        for code in 0..<65536 { samples.append(UInt8(code >> 8)); samples.append(UInt8(code & 255)) }
+        let scalar = NativePNG(header: .init(width: 256, height: 256, bits: 16, channels: 1, color: 0, interlace: 0), pixels: samples, colorChunks: [])
+        try diffuse.encoded().write(to: input)
+        try scalar.encoded().write(to: height)
         let originalBytes = try Data(contentsOf: height)
-        let backend = repository.appendingPathComponent("scripts/material_workbench.py")
         var trashed: [URL] = []
         let store = WorkbenchStore(preferences: fixture.defaults, trashHandler: { url in
             trashed.append(url)
             try FileManager.default.moveItem(at: url, to: fixture.root.appendingPathComponent("Recovered Dataset"))
-        }, workerOverride: { args, script in
-            XCTAssertEqual(script, "material_workbench.py")
-            return try await WorkbenchProcess().run(executable: python, arguments: ["-B", backend.path] + args,
-                directory: repository, log: fixture.root.appendingPathComponent(UUID().uuidString + ".log"), onLog: { _ in })
         })
         store.training.size = 1024
         store.openDataset(source)
@@ -278,7 +265,7 @@ final class DatasetManagementTests: XCTestCase {
         XCTAssertEqual(store.training.size, 512)
         XCTAssertEqual(fixture.value("--training-size", in: fixture.calls.last!), "512")
         let smaller = WorkbenchStore(preferences: fixture.defaults, workerOverride: { _, _ in "{\"training_sizes\":[256]}" })
-        smaller.adoptDataset(try WorkbenchProcess.decode(WorkbenchDataset.self, output: fixture.document()))
+        smaller.adoptDataset(try WorkbenchResult.decode(WorkbenchDataset.self, output: fixture.document()))
         try await smaller.loadTrainingCapabilities()
         XCTAssertEqual(smaller.training.size, 512, "Capabilities must report an incompatible budget without changing the dataset grid")
         XCTAssertNotNil(smaller.trainingConfigurationIssue)
@@ -327,14 +314,14 @@ final class DatasetManagementTests: XCTestCase {
         let plan: [String: Any] = ["size": 2048, "crop_count": 329, "source_set_count": 227,
             "train_count": 308, "validation_count": 21, "excluded_count": 0,
             "unavailable_target_count": 0, "undersized_source_set_count": 4, "regional_families": []]
-        let summary = try WorkbenchProcess.decode(WorkbenchDatasetPlan.self,
+        let summary = try WorkbenchResult.decode(WorkbenchDatasetPlan.self,
             output: String(decoding: JSONSerialization.data(withJSONObject: plan), as: UTF8.self))
         store.dataset?.resolutionPlans = ["2048": ["height": summary, "roughness": summary, "normal": summary]]
         store.dataset?.trainingSize = 2048
         store.training.size = 2048
         store.folderImportSize = 2048
         store.folderImportURL = URL(fileURLWithPath: "/opt/ipde/sources_mats")
-        store.folderImport = try WorkbenchProcess.decode(WorkbenchFolderImport.self, output: String(decoding: JSONSerialization.data(withJSONObject: [
+        store.folderImport = try WorkbenchResult.decode(WorkbenchFolderImport.self, output: String(decoding: JSONSerialization.data(withJSONObject: [
             "folder_path": "/opt/ipde/sources_mats", "plan_path": "/tmp/preview.json", "plan_sha256": "proof",
             "index_sha256": "source-hash", "source_set_count": 231, "added_material_count": 231,
             "duplicate_material_count": 0, "ignored_file_count": 18,
@@ -468,7 +455,7 @@ final class DatasetManagementTests: XCTestCase {
                 if ["edit-dataset", "create-dataset"].contains(args[0]), !self.failEdit,
                    let size = self.value("--training-size", in: args).flatMap(Int.init) { self.trainingSize = size }
                 if args.first == "capabilities" { throw StudioError("Model runtime is not installed") }
-                XCTAssertEqual(script, "material_workbench.py")
+                XCTAssertEqual(script, args.first)
                 if args.first == "edit-dataset" {
                     if self.failEdit { throw StudioError("Dataset changed since selection") }
                     self.name = self.value("--name", in: args) ?? self.name

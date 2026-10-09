@@ -104,9 +104,6 @@ struct TrainingWorkbenchView: View {
                         }
                         NumericField("LoRA rank", value: $store.training.loraRank, in: 1...64)
                         NumericField("LoRA alpha", value: $store.training.loraAlpha, in: 0.01...128)
-                        NumericField("Decoded map cache", value: $store.training.cacheGB, in: 0...4, unit: "GiB")
-                        Text("Set cache to 0 to decode maps when needed without retaining a decoded map cache.")
-                            .font(.caption).foregroundStyle(.secondary)
                     }.disabled(store.isBusy)
                 }
                 Section { Button("Saved Models & Export…") { showCheckpoints = true } }

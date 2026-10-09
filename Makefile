@@ -1,5 +1,3 @@
-PYTHON_BASE ?= /Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14
-PYTHON ?= $(if $(wildcard .venv/bin/python),$(CURDIR)/.venv/bin/python,$(PYTHON_BASE))
 CONFIGURATION ?= Release
 DERIVED_DATA ?= $(CURDIR)/build/TextureStudio
 DESTDIR ?= /
@@ -11,19 +9,10 @@ XCODEBUILD = xcodebuild -project "$(XCODE_PROJECT)" -scheme "$(XCODE_SCHEME)" \
 	-derivedDataPath "$(DERIVED_DATA)"
 .DEFAULT_GOAL := build
 
-.PHONY: check-toolchain setup configure build package install install-if-closed release-check run gui studio debug test test-native test-python smoke clean
+.PHONY: check-toolchain configure build package install install-if-closed release-check run gui studio debug test test-native test-build-tools smoke clean
 
 check-toolchain:
 	./script/check_toolchain.sh
-
-# Extraction and material-model development environment.
-setup:
-	$(PYTHON_BASE) -m venv .venv
-	.venv/bin/python -m pip install --upgrade pip
-	.venv/bin/python -m pip install -c requirements-release-macos.txt \
-		-r requirements.txt -r requirements-depth.txt -r requirements-test.txt 'datasets>=4,<6'
-	.venv/bin/python -m pip check
-	.venv/bin/python -m pip install --no-deps -e .
 
 configure: check-toolchain
 	xcodebuild -list -project "$(XCODE_PROJECT)"
@@ -36,13 +25,13 @@ package: build
 	./scripts/package_macos.sh "$(APP_BUNDLE)" "$(CURDIR)/dist"
 
 install: package
-	"$(PYTHON)" scripts/install_macos.py "$(APP_BUNDLE)" --destdir "$(DESTDIR)"
+	/usr/bin/xcrun swift script/install_macos.swift "$(APP_BUNDLE)" --destdir "$(DESTDIR)"
 
 install-if-closed: package
-	"$(PYTHON)" scripts/install_macos.py "$(APP_BUNDLE)" --destdir "$(DESTDIR)" --if-closed
+	/usr/bin/xcrun swift script/install_macos.swift "$(APP_BUNDLE)" --destdir "$(DESTDIR)" --if-closed
 
 release-check: package
-	"$(PYTHON)" scripts/check_release_version.py
+	/usr/bin/xcrun swift script/check_release_version.swift
 
 run gui studio:
 	./script/build_and_run.sh
@@ -50,15 +39,15 @@ run gui studio:
 debug:
 	./script/build_and_run.sh --debug
 
-test: test-native test-python
+test: test-native
 
-test-native: check-toolchain
+test-native: check-toolchain test-build-tools
 	xcodebuild -project "$(XCODE_PROJECT)" -scheme "$(XCODE_SCHEME)" \
 		-configuration Debug -destination 'platform=macOS,arch=arm64' \
 		-derivedDataPath "$(DERIVED_DATA)" test
 
-test-python:
-	PYTHONPATH=$(CURDIR)/src "$(PYTHON)" -m pytest verification -q
+test-build-tools: check-toolchain
+	./script/test_build_tools.sh
 
 smoke: build
 	"$(APP_BUNDLE)/Contents/MacOS/Texture Studio" --smoke-test

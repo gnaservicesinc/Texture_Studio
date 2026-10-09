@@ -154,7 +154,7 @@ struct CheckpointLibraryView: View {
                 HStack(alignment: .firstTextBaseline) {
                     LabeledContent("Account", value: store.uploadAccount ?? "Not signed in")
                     Button("Refresh Account") { store.refreshUploadAccount() }.disabled(store.isBusy)
-                        .help("Check the saved Hugging Face CLI login in this Python environment. No files are uploaded.")
+                        .help("Check the saved Hugging Face token in Apple Keychain. No files are uploaded.")
                 }
                 if store.uploadAccount == nil {
                     Text(store.uploadAccountMessage).font(.caption).foregroundStyle(.secondary)

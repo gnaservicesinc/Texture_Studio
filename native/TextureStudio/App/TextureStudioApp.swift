@@ -67,6 +67,30 @@ final class StudioAppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // App-hosted unit tests drive their own lifecycle. Bringing their host
+        // forward can redirect a user's Quit command into an asynchronous test.
+        guard NSClassFromString("XCTestCase") == nil else { return }
+        if let index = CommandLine.arguments.firstIndex(of: "--export-auxiliary") {
+            Task {
+                do {
+                    let arguments = CommandLine.arguments
+                    guard arguments.indices.contains(index + 1), let outputIndex = arguments.firstIndex(of: "--output"),
+                          arguments.indices.contains(outputIndex + 1) else {
+                        throw StudioError("Usage: Texture Studio --export-auxiliary SOURCE --output NEW_FOLDER")
+                    }
+                    let report = try await NativeAuxiliaryExporter.export(sourceURL: URL(fileURLWithPath: arguments[index + 1]),
+                        to: URL(fileURLWithPath: arguments[outputIndex + 1]))
+                    let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+                    FileHandle.standardOutput.write(try encoder.encode(report))
+                    FileHandle.standardOutput.write(Data([10]))
+                    exit(0)
+                } catch {
+                    fputs("Auxiliary export failed: \(error)\n", stderr)
+                    exit(1)
+                }
+            }
+            return
+        }
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         if CommandLine.arguments.contains("--smoke-test") {
@@ -135,6 +159,8 @@ struct StudioCommands: Commands {
                 }
                     .keyboardShortcut("e")
                     .disabled(workspace?.source == nil || workspace?.isBusy == true || models == nil)
+                Button("Export Original Auxiliary Data…") { workspace?.chooseAuxiliaryExport() }
+                    .disabled(workspace?.source == nil || workspace?.isBusy == true)
             }
         }
         CommandMenu("Dataset") {
