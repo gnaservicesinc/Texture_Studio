@@ -99,7 +99,13 @@ struct WorkbenchDataset: Decodable, Sendable {
     var samples: [WorkbenchSample] { materials.flatMap(\.samples) }
     func readyForTraining(size: Int, material: String?, target: String? = nil) -> Bool {
         guard hasNativeSize(size), let policy = automaticValidation,
-              policy.policy == "subject-extra-crops-v2" else { return false }
+              policy.policy == "subject-extra-crops-v2",
+              target == nil || policy.target == nil || policy.target == target else { return false }
+        if let target {
+            let candidates = materials.filter { material == nil || $0.id == material }.flatMap(\.samples)
+                .filter { !["excluded", "rejected"].contains($0.status) }
+            guard !candidates.isEmpty, candidates.allSatisfy({ Set($0.maps.keys) == Set(["input", target]) }) else { return false }
+        }
         if let material { return policy.quickFitMaterialId == material }
         return policy.quickFitMaterialId == nil
     }

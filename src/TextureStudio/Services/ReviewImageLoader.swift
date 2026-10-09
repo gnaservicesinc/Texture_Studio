@@ -128,13 +128,13 @@ actor ReviewImageLoader {
         }
         let bytes = try readSource(source)
         guard hash(bytes) == transform.sourceSHA256 else { throw ReviewImageError.sourceChanged }
-        let decoded = try NativePNG.decode(bytes)
+        let header = try NativePNG.inspect(source)
         let rectangle = transform.cropRectangle ?? [0, 0, transform.size, transform.size]
         guard rectangle.count == 4, rectangle[2] == transform.size, rectangle[3] == transform.size,
-              transform.cropRectangle != nil || (decoded.header.width == transform.size && decoded.header.height == transform.size) else {
+              transform.cropRectangle != nil || (header.width == transform.size && header.height == transform.size) else {
             throw StudioError("Reviewing a larger original requires its exact recorded training crop.")
         }
-        let selected = try decoded.crop(rectangle, flipGreen: transform.mapType == "normal" && transform.normalConvention.lowercased() == "directx")
+        let selected = try NativePNG.crop(bytes, rectangle: rectangle, flipGreen: transform.mapType == "normal" && transform.normalConvention.lowercased() == "directx")
         let encoded = try selected.encoded()
         try Task.checkCancellation()
         try encoded.write(to: output, options: .withoutOverwriting)

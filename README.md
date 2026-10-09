@@ -43,7 +43,7 @@ Saved models can be uploaded to Hugging Face using the selected account, reposit
 
 The optional local Clef decision model can advise on photo preparation, dataset suitability and output detail, appeal and artifacts. Review recommendations remain editable. Full-resolution maps and displaced surfaces determine acceptance; a lower loss or an adviser score does not automatically select a shipped model.
 
-See [training workflow](docs/material-training-workflow.md), [data contract](docs/material-training-data.md), [quality acceptance](docs/material-model-vetting.md), and [model setup](docs/model-setup.md).
+See [training workflow](docs/material-training-workflow.md), [data contract](docs/material-training-data.md), [quality acceptance](docs/material-model-vetting.md), and [model setup](docs/model-setup.md). The [standalone product specification](docs/app-product-specification.md) describes the required behavior for a fresh implementation.
 
 ## Precision-preserving extraction
 

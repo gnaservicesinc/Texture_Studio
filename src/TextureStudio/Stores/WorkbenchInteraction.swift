@@ -1,6 +1,15 @@
 import Foundation
 
 extension WorkbenchStore {
+    /// Folder and crop selection always display their diffuse image first.
+    func selectDatasetSample(_ sample: WorkbenchSample, role: String? = nil) {
+        guard !isBusy else { return }
+        if selectedSampleId != sample.id { selectedInputVariantId = nil }
+        selectedSampleId = sample.id
+        selectedRole = role.flatMap { sample.maps[$0] != nil ? $0 : nil }
+            ?? ["input", "height", "roughness", "normal"].first(where: { sample.maps[$0] != nil }) ?? "input"
+    }
+
     /// Both library and file-picker refinement use the checkpoint's recorded setup.
     @discardableResult
     func selectCheckpointForRefinement(_ checkpoint: WorkbenchCheckpoint, navigate: Bool = true) -> Bool {

@@ -4,13 +4,16 @@ import Metal
 /// Machine-local capacity. Map dimensions and model contracts have separate limits.
 struct MachineResources: Equatable, Sendable {
     static let gibibyte: UInt64 = 1_073_741_824
+    let availableProcessorCount: Int
     let physicalBytes: UInt64
     let metalRecommendedBytes: UInt64?
     let practicalBytes: UInt64
     let maximumTrainingBytes: UInt64
     let defaultTrainingBytes: UInt64
 
-    init(physicalBytes: UInt64, metalRecommendedBytes: UInt64? = nil, highWatermarkRatio: Double? = 1.7) {
+    init(physicalBytes: UInt64, metalRecommendedBytes: UInt64? = nil, highWatermarkRatio: Double? = 1.7,
+         availableProcessorCount: Int = ProcessInfo.processInfo.activeProcessorCount) {
+        self.availableProcessorCount = max(1, availableProcessorCount)
         self.physicalBytes = physicalBytes
         self.metalRecommendedBytes = metalRecommendedBytes.flatMap { $0 > 0 ? $0 : nil }
         let tenthRoundedUp = physicalBytes / 10 + (physicalBytes % 10 == 0 ? 0 : 1)

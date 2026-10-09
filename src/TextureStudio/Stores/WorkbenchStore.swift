@@ -47,6 +47,14 @@ final class WorkbenchStore {
         set { StudioPreferences.defaults.set(newValue, forKey: StudioPreferences.developerModeKey) }
     }
     var uploadAfterTraining = true { didSet { preferences.set(uploadAfterTraining, forKey: "uploadAfterTraining") } }
+    private var configuredPreparationWorkers: Int
+    var preparationWorkers: Int {
+        get { configuredPreparationWorkers }
+        set {
+            configuredPreparationWorkers = min(resources.availableProcessorCount, max(1, newValue))
+            preferences.set(configuredPreparationWorkers, forKey: "preparationWorkers")
+        }
+    }
     private(set) var supportedTrainingSizes: [Int] = [256, 512, 1024, 2048]
     private var backendTrainingSizes: [Int] = [256, 512, 1024, 2048]
     private(set) var hubModels: [WorkbenchHubModel] = []
@@ -166,6 +174,9 @@ final class WorkbenchStore {
         uploadPublic = defaults.bool(forKey: "uploadPublic")
         uploadAfterTraining = defaults.object(forKey: "uploadAfterTraining") == nil ? true : defaults.bool(forKey: "uploadAfterTraining")
         self.resources = resources
+        configuredPreparationWorkers = defaults.object(forKey: "preparationWorkers") == nil
+            ? resources.availableProcessorCount
+            : min(resources.availableProcessorCount, max(1, defaults.integer(forKey: "preparationWorkers")))
         self.selectedCheckpointRegistryURL = selectedCheckpointRegistryURL
         self.workerOverride = workerOverride
         self.managedWorkspaceURL = (managedWorkspaceURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -948,7 +959,9 @@ final class WorkbenchStore {
 
     func worker(_ args: [String]) async throws -> String {
         let includesTarget = ["create-dataset", "edit-dataset", "add-material", "import-folder", "remove-material"].contains(args.first ?? "") && !args.contains("--target")
+        let includesPreparationWorkers = args.first == "prepare-size" && !args.contains("--preparation-workers")
         let args = args + (includesTarget ? ["--target", training.target] : [])
+            + (includesPreparationWorkers ? ["--preparation-workers", String(preparationWorkers)] : [])
         try Task.checkCancellation()
         guard !WorkbenchLifecycle.shared.isTerminating else { throw CancellationError() }
         let trainingWorker = ["train", "refine"].contains(args.first ?? "")

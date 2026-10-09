@@ -20,6 +20,34 @@ final class NativePNGTests: XCTestCase {
         } }
     }
 
+    func testStreamingCropsMatchEveryFilterAndAdam7AtNativePrecision() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("streaming-crop-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: url) }
+        for bits in [8, 16] { for (color, channels) in [(UInt8(0), 1), (2, 3), (4, 2), (6, 4)] {
+            for (width, height) in [(1, 1), (1, 7), (9, 7)] {
+                let header = NativePNG.Header(width: width, height: height, bits: bits, channels: channels, color: color, interlace: 0)
+                let codes = Data((0..<width * height * header.bytesPerPixel).map { UInt8(truncatingIfNeeded: $0 * 97 + $0 / 7 * 31) })
+                let rectangles = [[0, 0, width, height], [width / 2, height / 2, max(1, width / 2), max(1, height / 2)]]
+                for interlace: UInt8 in [0, 1] { for filter: UInt8 in 0...4 {
+                    let fixture = try independentPNG(header: header, codes: codes, filter: filter, interlace: interlace, idatChunkBytes: 7)
+                    try fixture.write(to: url)
+                    let streamed = try NativePNG.crops(url, rectangles: rectangles), original = try NativePNG.decode(fixture)
+                    for offset in rectangles.indices { XCTAssertEqual(streamed[offset].pixels, try original.crop(rectangles[offset]).pixels) }
+                    if channels >= 3 { XCTAssertEqual(try NativePNG.crop(fixture, rectangle: rectangles[1], flipGreen: true).pixels, try original.crop(rectangles[1], flipGreen: true).pixels) }
+                } }
+            }
+        } }
+    }
+
+    func testStreamingCropRejectsCorruptionTruncationAndOutOfGridRegions() throws {
+        let png = NativePNG(header: .init(width: 9, height: 7, bits: 16, channels: 1, color: 0, interlace: 0), pixels: Data(repeating: 97, count: 9 * 7 * 2), colorChunks: [])
+        let bytes = try png.encoded()
+        XCTAssertThrowsError(try NativePNG.crop(bytes.dropLast(), rectangle: [1, 1, 5, 4]))
+        var corrupt = bytes; corrupt[corrupt.count - 5] ^= 1
+        XCTAssertThrowsError(try NativePNG.crop(corrupt, rectangle: [1, 1, 5, 4]))
+        XCTAssertThrowsError(try NativePNG.crop(bytes, rectangle: [8, 1, 5, 4]))
+    }
+
     func testCroppedNormalComplementsOnlyGreenAtBothPrecisions() throws {
         for bits in [8, 16] { for (color, channels) in [(UInt8(2), 3), (6, 4)] {
             let header = NativePNG.Header(width: 9, height: 7, bits: bits, channels: channels, color: color, interlace: 0)
@@ -74,6 +102,7 @@ final class NativePNGTests: XCTestCase {
             for operation in [
                 { _ = try NativePNG.decode(encoded) },
                 { _ = try NativePNG.sourceMetadata(encoded) },
+                { _ = try NativePNG.crop(encoded, rectangle: [1, 1, 5, 4]) },
                 { _ = try png.crop([1, 1, 5, 4]) },
                 { _ = try png.encoded() },
                 { _ = try png.modelFloatSamples(role: "height") }
@@ -83,12 +112,12 @@ final class NativePNGTests: XCTestCase {
             return cancelled
         }
         let cancelled = try await task.value
-        XCTAssertEqual(cancelled, 5)
+        XCTAssertEqual(cancelled, 6)
     }
 
     // Deliberately independent Array implementation produces filtered/Adam7
     // fixtures, so native buffer restoration is checked against raw codes.
-    private func independentPNG(header: NativePNG.Header, codes: Data, filter: UInt8, interlace: UInt8) throws -> Data {
+    private func independentPNG(header: NativePNG.Header, codes: Data, filter: UInt8, interlace: UInt8, idatChunkBytes: Int = Int.max) throws -> Data {
         let passes = interlace == 0 ? [(0, 0, 1, 1)] : [(0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)]
         var filtered = Data()
         for (x, y, dx, dy) in passes {
@@ -132,6 +161,14 @@ final class NativePNGTests: XCTestCase {
             return bigEndian(UInt32(payload.count)) + contents + bigEndian(UInt32(crc))
         }
         let ihdr = bigEndian(UInt32(header.width)) + bigEndian(UInt32(header.height)) + Data([UInt8(header.bits), header.color, 0, 0, interlace])
-        return Data([137, 80, 78, 71, 13, 10, 26, 10]) + chunk("IHDR", ihdr) + chunk("IDAT", compressed) + chunk("IEND", Data())
+        var output = Data([137, 80, 78, 71, 13, 10, 26, 10]) + chunk("IHDR", ihdr)
+        var position = 0
+        while position < compressed.count {
+            let count = min(idatChunkBytes, compressed.count - position)
+            output.append(chunk("IDAT", compressed.subdata(in: position..<position + count)))
+            position += count
+        }
+        output.append(chunk("IEND", Data()))
+        return output
     }
 }

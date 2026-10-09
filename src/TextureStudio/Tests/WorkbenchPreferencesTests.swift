@@ -4,6 +4,36 @@ import XCTest
 
 @MainActor
 final class WorkbenchPreferencesTests: XCTestCase {
+    func testPreparationWorkersDefaultToAvailableCoresAndSaveImmediately() throws {
+        let fixture = try PreferencesFixture()
+        defer { fixture.remove() }
+        let resources = MachineResources(physicalBytes: 32 * MachineResources.gibibyte, availableProcessorCount: 12)
+        let first = WorkbenchStore(preferences: fixture.defaults, resources: resources)
+        XCTAssertEqual(first.preparationWorkers, 12)
+        first.preparationWorkers = 3
+        let reopened = WorkbenchStore(preferences: fixture.defaults, resources: resources)
+        XCTAssertEqual(reopened.preparationWorkers, 3)
+        for value in [0, -1, Int.min] {
+            reopened.preparationWorkers = value
+            XCTAssertEqual(reopened.preparationWorkers, 1)
+            XCTAssertEqual(WorkbenchStore(preferences: fixture.defaults, resources: resources).preparationWorkers, 1)
+        }
+    }
+
+    func testPreparationWorkersAdaptToFewerAvailableCores() throws {
+        let fixture = try PreferencesFixture()
+        defer { fixture.remove() }
+        fixture.defaults.set(24, forKey: "preparationWorkers")
+        let resources = MachineResources(physicalBytes: 16 * MachineResources.gibibyte, availableProcessorCount: 6)
+        let store = WorkbenchStore(preferences: fixture.defaults, resources: resources)
+        XCTAssertEqual(store.preparationWorkers, 6)
+        for value in [100, Int.max] {
+            store.preparationWorkers = value
+            XCTAssertEqual(store.preparationWorkers, 6)
+            XCTAssertEqual(WorkbenchStore(preferences: fixture.defaults, resources: resources).preparationWorkers, 6)
+        }
+    }
+
     func testFormAndComparisonChoicesSaveWithoutStartingWorkerOrClosingWindow() throws {
         let fixture = try PreferencesFixture()
         defer { fixture.remove() }

@@ -29,8 +29,11 @@ struct TextureStudioApp: App {
                 WorkbenchRuntimeView(store: workbench).frame(width: 710, height: 500)
             } else {
                 VStack(alignment: .leading, spacing: 0) {
-                    Toggle("Developer mode", isOn: $developerMode).padding(20)
-                        .help("Expose advanced model controls. Export fused full checkpoints alongside the separate LoRA, with Hugging Face publishing controls.")
+                    VStack(alignment: .leading, spacing: 14) {
+                        PreparationSettingsView(store: workbench)
+                        Toggle("Developer mode", isOn: $developerMode)
+                            .help("Expose advanced model controls. Export fused full checkpoints alongside the separate LoRA, with Hugging Face publishing controls.")
+                    }.padding(20)
                     Divider()
                     ModelLibraryView(models: models, adviser: adviser)
                         .frame(width: 640, height: 540)

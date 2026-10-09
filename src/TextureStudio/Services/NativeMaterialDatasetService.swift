@@ -15,7 +15,11 @@ enum NativeMaterialDatasetService {
         init(resources: MachineResources, processorCount: Int) {
             self.init(memoryBudgetBytes: min(resources.practicalBytes / 4, 16 * MachineResources.gibibyte), maximumWorkers: processorCount)
         }
-        static var current: Self { .init(resources: .current, processorCount: ProcessInfo.processInfo.activeProcessorCount) }
+        static var current: Self { .init(resources: .current, processorCount: MachineResources.current.availableProcessorCount) }
+        func limitingWorkers(to requested: Int) throws -> Self {
+            guard requested > 0 else { throw StudioError("Preparation workers must be a positive whole number.") }
+            return .init(memoryBudgetBytes: memoryBudgetBytes, maximumWorkers: min(maximumWorkers, requested))
+        }
         func workerCount(jobCount: Int, estimatedPeakBytes: UInt64) throws -> Int {
             guard jobCount > 0, estimatedPeakBytes > 0, estimatedPeakBytes <= memoryBudgetBytes else {
                 throw StudioError("The original map needs more working memory than is available for safe native crop preparation.")
@@ -94,10 +98,18 @@ enum NativeMaterialDatasetService {
         let root = canonical(URL(fileURLWithPath: requested))
         if command == "create-dataset" { try create(root, options: options) }
         if command == "cleanup-size" { return try jsonString(cleanup(root)) }
-        if command == "prepare-size" { return try jsonString(prepare(root, options: options, policy: preparationPolicy ?? .current, onEvent: onEvent)) }
+        if command == "prepare-size" {
+            var policy = preparationPolicy ?? .current
+            if let value = options["--preparation-workers"] {
+                guard let requested = Int(value) else { throw StudioError("Preparation workers must be a positive whole number.") }
+                policy = try policy.limitingWorkers(to: requested)
+            }
+            return try jsonString(prepare(root, options: options, policy: policy, onEvent: onEvent))
+        }
         return try locked(root) {
             try Task.checkCancellation()
             var index = try object(root.appendingPathComponent("dataset.json"))
+            try compactStoredRecords(root, index: index)
             if try sourceInventoryNeedsRefresh(root, index: index) { index = try refreshSourceIndex(root, index: index) }
             let records = try readRecords(root, index: index)
             if ["curate", "remove-missing"].contains(command), let lineage = index["native_size_preparation"] as? Object {
@@ -406,8 +418,14 @@ enum NativeMaterialDatasetService {
     }
     private static func subjectID(_ sample: Object) -> String { (sample["source_directory"] as? String).map { canonical(URL(fileURLWithPath: $0)).path } ?? sample["source_family_id"] as? String ?? sample["asset_family_id"] as? String ?? sample["material_id"] as? String ?? "" }
     private static func familyID(_ sample: Object) -> String { sample["asset_family_id"] as? String ?? sample["source_family_id"] as? String ?? sample["material_id"] as? String ?? "" }
-    private static func sources(_ sample: Object) -> [Object] { Array((sample["map_metadata"] as? [String: Object] ?? [:]).values).map { $0["source"] as? Object ?? [:] } + (sample["input_variants"] as? [Object] ?? []).map { $0["source"] as? Object ?? [:] } }
+    private static func sources(_ sample: Object, target: String? = nil) -> [Object] {
+        let maps = (sample["map_metadata"] as? [String: Object] ?? [:]).filter { target == nil || $0.key == "input" || $0.key == target }
+        let candidates = Array(maps.values).map { $0["source"] as? Object ?? [:] } + (sample["input_variants"] as? [Object] ?? []).map { $0["source"] as? Object ?? [:] }
+        var seen = Set<String>()
+        return candidates.filter { seen.insert(($0["path"] as? String ?? "") + "|" + ($0["file_sha256"] as? String ?? "")).inserted }
+    }
     private static func sourceBinding(_ sample: Object) -> String {
+        if sample["native_size_preparation"] != nil, let binding = sample["source_binding_sha256"] as? String { return binding }
         var maps: Object = [:]
         for (role, details) in sample["map_metadata"] as? [String: Object] ?? [:] { maps[role] = (details["source"] as? Object)?["file_sha256"] ?? NSNull() }
         let colors = Set((sample["input_variants"] as? [Object] ?? []).map { ($0["source"] as? Object)?["file_sha256"] as? String ?? "" }).sorted()
@@ -561,14 +579,21 @@ enum NativeMaterialDatasetService {
     private static func sourceSummary(_ requested: URL, cached: Object? = nil) throws -> Object {
         try Task.checkCancellation()
         let path = requested.resolvingSymlinksInPath().standardizedFileURL, before = try fileState(path)
-        if let cached, let state = cached["source_stat"] as? Object, NSDictionary(dictionary: state).isEqual(to: before) { return cached }
+        if let cached, let state = cached["source_stat"] as? Object, NSDictionary(dictionary: state).isEqual(to: before) { return compactMetadata(cached) as! Object }
         let data = try Data(contentsOf: path, options: .mappedIfSafe)
         var result = try NativePNG.sourceMetadata(data)
         let after = try fileState(path)
         guard NSDictionary(dictionary: before).isEqual(to: after) else { throw StudioError("Original map changed while inspecting: \(path.path)") }
-        result["file_sha256"] = hash(data); result["file_md5"] = Insecure.MD5.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        result["file_sha256"] = hash(data)
         result["filename"] = path.lastPathComponent; result["file_bytes"] = after["size"]; result["source_stat"] = after
         return result
+    }
+    private static func matchesPublishedMD5(_ url: URL, expected: String?) throws -> Bool {
+        guard let expected else { return false }
+        // Provider download audits sometimes require MD5. Compute it only for
+        // that audit, without persisting a second checksum on every map.
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        return Insecure.MD5.hash(data: data).map { String(format: "%02x", $0) }.joined() == expected.lowercased()
     }
     private static func identifier(_ value: String) -> String {
         let ascii = value.decomposedStringWithCompatibilityMapping.unicodeScalars.filter { $0.value < 128 }.map(String.init).joined().lowercased()
@@ -612,9 +637,9 @@ enum NativeMaterialDatasetService {
         }
         let inputVariants: [Object] = try variants.map { source in
             guard let path = source["path"] as? String else { throw StudioError("Missing original color path.") }
-            return ["source": source, "storage": "source_reference", "filename": path, "path": path, "sample_sha256": source["file_sha256"] ?? NSNull(), "sample_bits": source["sample_bits"] ?? NSNull(), "channels": source["channels"] ?? NSNull(), "encoding": encoding("input", source: source), "transforms": [Object](), "exact_source_crop": true, "variant_id": source["variant_id"] ?? "color_default", "source_pixel_dimensions": dimensions, "crop_rectangle_top_left_xywh": [0, 0] + dimensions]
+            return ["source": source, "storage": "source_reference", "filename": path, "path": path, "sample_sha256": source["file_sha256"] ?? NSNull(), "sample_bits": source["sample_bits"] ?? NSNull(), "channels": source["channels"] ?? NSNull(), "encoding": encoding("input", source: source), "transforms": [Object](), "exact_source_crop": true, "variant_id": source["variant_id"] ?? "color_default"]
         }
-        return ["schema_version": 2, "generator": "ipde-material-dataset-v2", "sample_id": materialID + "_full", "name": material["name"] ?? material["source_family_id"] ?? materialID, "material_id": materialID, "asset_family_id": material["source_family_id"] ?? materialID, "source_family_id": material["source_family_id"] ?? materialID, "source_set_id": material["source_set_id"] ?? materialID, "source_directory": material["source_directory"] ?? NSNull(), "source_resolution_label": material["resolution_label"] ?? "native", "sample_pixel_dimensions": dimensions, "source_pixel_dimensions": dimensions, "crop_rectangle_top_left_xywh": [0, 0] + dimensions, "status": "unreviewed", "split": "train", "review_status": "unreviewed", "maps": filenames, "map_metadata": metadata, "input_variants": inputVariants, "source_precision_verified": true, "crop_values_verified": true, "source_files": material["source_files"] ?? Array(maps.values), "source_discovery_warnings": material["warnings"] ?? [], "ignored_source_files": material["ignored_files"] ?? [], "available_targets": ["height", "roughness", "normal"].filter { maps[$0] != nil && ($0 != "height" || (maps[$0]?["sample_bits"] as? Int ?? 0) >= 16) }]
+        return ["schema_version": 2, "generator": "ipde-material-dataset-v2", "sample_id": materialID + "_full", "name": material["name"] ?? material["source_family_id"] ?? materialID, "material_id": materialID, "asset_family_id": material["source_family_id"] ?? materialID, "source_family_id": material["source_family_id"] ?? materialID, "source_set_id": material["source_set_id"] ?? materialID, "source_directory": material["source_directory"] ?? NSNull(), "source_resolution_label": material["resolution_label"] ?? "native", "sample_pixel_dimensions": dimensions, "source_pixel_dimensions": dimensions, "crop_rectangle_top_left_xywh": [0, 0] + dimensions, "status": "unreviewed", "split": "train", "review_status": "unreviewed", "maps": filenames, "map_metadata": metadata, "input_variants": inputVariants, "source_precision_verified": true, "crop_values_verified": true, "source_discovery_warnings": material["warnings"] ?? [], "ignored_source_files": material["ignored_files"] ?? [], "available_targets": ["height", "roughness", "normal"].filter { maps[$0] != nil && ($0 != "height" || (maps[$0]?["sample_bits"] as? Int ?? 0) >= 16) }]
     }
     private static func sourceIdentity(_ sample: Object) -> String {
         let maps = sample["map_metadata"] as? [String: Object] ?? [:]
@@ -763,8 +788,8 @@ enum NativeMaterialDatasetService {
                 source["path"] = resolved.path; source["suffix"] = suffix; source["resolution_label"] = label; source["source_family_id"] = family; source["asset_family_id"] = family
                 for (manifestPath, manifest) in manifests where manifest["material_id"] as? String == family && (manifest["resolution"] as? String)?.lowercased() == label {
                     for (downloadRole, downloaded) in manifest["downloaded_maps"] as? [String: Object] ?? [:] where URL(fileURLWithPath: downloaded["path"] as? String ?? "").lastPathComponent == path.lastPathComponent && downloaded["sha256"] as? String == source["file_sha256"] as? String && downloaded["bytes"] as? Int == source["file_bytes"] as? Int {
-                        if manifest["provider"] as? String == "Poly Haven", manifest["license"] as? String == "CC0-1.0", let api = manifest["api"] as? Object, api["api_url"] as? String == "https://api.polyhaven.com/files/" + family, let published = (manifest["maps"] as? [String: Object])?[downloadRole], published["published_bytes"] as? Int == source["file_bytes"] as? Int, (published["published_md5"] as? String)?.lowercased() == (source["file_md5"] as? String)?.lowercased(), (published["url"] as? String)?.hasPrefix("https://dl.polyhaven.org/file/ph-assets/Textures/png/") == true {
-                            source.merge(["provider": "Poly Haven", "asset_id": family, "asset_url": "https://polyhaven.com/a/" + family, "license": "CC0-1.0", "license_url": "https://polyhaven.com/license", "license_basis": "Current full source SHA256, MD5 and byte count match the verified official download manifest", "published_url": published["url"]!, "published_md5": published["published_md5"]!, "published_bytes": published["published_bytes"]!, "published_api_url": api["api_url"]!, "published_audit_timestamp_utc": manifest["completed_utc"] ?? NSNull(), "published_manifest_path": manifestPath.path]) { _, new in new }
+                        if manifest["provider"] as? String == "Poly Haven", manifest["license"] as? String == "CC0-1.0", let api = manifest["api"] as? Object, api["api_url"] as? String == "https://api.polyhaven.com/files/" + family, let published = (manifest["maps"] as? [String: Object])?[downloadRole], published["published_bytes"] as? Int == source["file_bytes"] as? Int, try matchesPublishedMD5(resolved, expected: published["published_md5"] as? String), (published["url"] as? String)?.hasPrefix("https://dl.polyhaven.org/file/ph-assets/Textures/png/") == true {
+                            source.merge(["provider": "Poly Haven", "asset_id": family, "asset_url": "https://polyhaven.com/a/" + family, "license": "CC0-1.0", "license_url": "https://polyhaven.com/license", "license_basis": "Current full source SHA256 and byte count match the verified official download manifest", "published_url": published["url"]!, "published_md5": published["published_md5"]!, "published_bytes": published["published_bytes"]!, "published_api_url": api["api_url"]!, "published_audit_timestamp_utc": manifest["completed_utc"] ?? NSNull(), "published_manifest_path": manifestPath.path]) { _, new in new }
                         }
                         if manifest["provider"] as? String == "ambientCG", let auditPath = manifest["package_audit_path"] as? String,
                            let values = try? URL(fileURLWithPath: auditPath).resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey]),
@@ -936,7 +961,13 @@ enum NativeMaterialDatasetService {
             let selectedID = options["--material"]
             let selected = allRecords.filter { selectedID == nil || $0.sample["material_id"] as? String == selectedID }
             guard !selected.isEmpty else { throw StudioError("Dataset has no selected original material maps.") }
-            let records = selected.filter { !sources($0.sample).isEmpty && sources($0.sample).allSatisfy { min($0["width"] as? Int ?? 0, $0["height"] as? Int ?? 0) >= size } }
+            let records = selected.filter {
+                let sample = $0.sample, selectedSources = sources(sample, target: target)
+                return !["excluded", "rejected"].contains(sample["status"] as? String ?? "") &&
+                    (sample["map_metadata"] as? [String: Object])?[target] != nil &&
+                    (sample["available_targets"] as? [String] ?? [target]).contains(target) &&
+                    !selectedSources.isEmpty && selectedSources.allSatisfy { min($0["width"] as? Int ?? 0, $0["height"] as? Int ?? 0) >= size }
+            }
             guard !records.isEmpty else { throw StudioError("No original source set supplies the selected native training size.") }
             var reviews = try optionalObject(reviewPath)
             if supplied != original {
@@ -948,12 +979,15 @@ enum NativeMaterialDatasetService {
             }
             var settings = try validation(sourceIndex["validation"] as? Object)
             if options["--automatic-validation"] != "true" { settings["enabled"] = false }
-            let plan = try regionPlan(records, size: size, reviews: reviews, target: target, settings: settings)
-            let assignments = plan["assignments"] as? [String: Object] ?? [:]
+            // Folder percentages and geometry remain common to all targets;
+            // only target-eligible assignments become preparation jobs.
+            let plan = try regionPlan(selected, size: size, reviews: reviews, target: target, settings: settings)
+            let assignments = (plan["assignments"] as? [String: Object] ?? [:]).filter { $0.value["eligible"] as? Bool == true }
+            guard !assignments.isEmpty else { throw StudioError("No included crops supply the selected training target.") }
             var metadataProof: [String: String] = [:]
             for record in allRecords { metadataProof[String(record.path.path.dropFirst(original.path.count + 1))] = try digest(record.path) }
             let proof: Object = ["dataset_path": original.path, "index_sha256": try digest(original.appendingPathComponent("dataset.json")), "sample_metadata_sha256": metadataProof]
-            let signature: Object = ["schema": preparationSchema, "size": size, "target": target, "snapshot": proof, "reviews": reviews, "validation": settings, "material": selectedID as Any? ?? NSNull()]
+            let signature: Object = ["schema": preparationSchema, "map_scope": "selected-target-v2", "size": size, "target": target, "snapshot": proof, "reviews": reviews, "validation": settings, "material": selectedID as Any? ?? NSNull()]
             let identity = hash(try jsonData(signature)), stagingRoot = original.appendingPathComponent(".training-data")
             guard (try? stagingRoot.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { throw StudioError("Native training data cannot be a symbolic link.") }
             if !FileManager.default.fileExists(atPath: stagingRoot.path) { try FileManager.default.createDirectory(at: stagingRoot, withIntermediateDirectories: false) }
@@ -974,15 +1008,19 @@ enum NativeMaterialDatasetService {
                 let dimensions = record.sample["source_pixel_dimensions"] as? [Int] ?? []
                 guard dimensions.count == 2 else { throw StudioError("Invalid native source dimensions.") }
                 let regionCount = assignments.values.filter { $0["material_id"] as? String == record.sample["material_id"] as? String && $0["crop_rectangle"] as? [Int] != [0, 0] + dimensions }.count
-                for source in sources(record.sample) {
+                for source in sources(record.sample, target: target) {
                     try Task.checkCancellation()
                     guard let path = source["path"] as? String, let expected = source["file_sha256"] as? String else { throw StudioError("Original source is not checksum bound.") }
                     if verified[path] == nil {
                         let currentPath = FileManager.default.fileExists(atPath: path) ? URL(fileURLWithPath: path) : try recoverSource(source, root: original)
-                        guard let currentPath, try digest(currentPath) == expected else { throw StudioError("Original source is missing or changed: \(path). Restore its recorded original map.") }
+                        guard let currentPath else { throw StudioError("Original source is missing: \(path). Restore its recorded original map.") }
+                        let state = try fileState(currentPath)
+                        let recordedState = source["source_stat"] as? Object
+                        let unchanged = recordedState.map { NSDictionary(dictionary: $0).isEqual(to: state) } ?? false
+                        guard try unchanged || digest(currentPath) == expected else { throw StudioError("Original source changed: \(path). Restore its recorded original map.") }
                         let header = try NativePNG.inspect(currentPath)
                         guard header.width == source["width"] as? Int, header.height == source["height"] as? Int, header.bits == source["sample_bits"] as? Int, header.channels == source["channels"] as? Int else { throw StudioError("Original source dimensions or precision disagree with its evidence.") }
-                        var bound = source; bound["path"] = currentPath.path; verified[path] = bound
+                        var bound = source; bound["path"] = currentPath.path; bound["source_stat"] = state; verified[path] = bound
                     }
                     bytesRequired += Int64(size * size * (source["channels"] as? Int ?? 1) * (source["sample_bits"] as? Int ?? 8) / 8 * regionCount)
                 }
@@ -993,15 +1031,16 @@ enum NativeMaterialDatasetService {
             try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false)
             defer { try? FileManager.default.removeItem(at: stage) }
             try atomic(stage.appendingPathComponent(".native-crop-preparation.json"), data: jsonData(["schema": preparationSchema, "source_dataset_path": original.path, "pid": Int(getpid())]))
-            let work = try records.sorted(by: { ($0.sample["material_id"] as? String ?? "") < ($1.sample["material_id"] as? String ?? "") }).map { record -> PreparationJob in
+            let activeMaterials = Set(assignments.values.compactMap { $0["material_id"] as? String })
+            let work = try records.filter { activeMaterials.contains($0.sample["material_id"] as? String ?? "") }.sorted(by: { ($0.sample["material_id"] as? String ?? "") < ($1.sample["material_id"] as? String ?? "") }).map { record -> PreparationJob in
                 try Task.checkCancellation()
                 let material = record.sample["material_id"] as? String ?? ""
                 let selectedAssignments = assignments.filter { $0.value["material_id"] as? String == material }
-                let sourcePaths = Set(sources(record.sample).compactMap { $0["path"] as? String })
+                let sourcePaths = Set(sources(record.sample, target: target).compactMap { $0["path"] as? String })
                 return PreparationJob(sample: try jsonData(record.sample), assignments: try jsonData(selectedAssignments),
-                    reviews: try jsonData(reviews), verified: try jsonData(verified.filter { sourcePaths.contains($0.key) }),
-                    stage: stage, original: original, size: size,
-                    estimatedPeakBytes: try preparationPeakBytes(sources: sources(record.sample), size: size))
+                    reviews: try jsonData(reviews.filter { $0.key.hasPrefix("\(size):\(material)_") }), verified: try jsonData(verified.filter { sourcePaths.contains($0.key) }),
+                    stage: stage, original: original, size: size, target: target,
+                    estimatedPeakBytes: try preparationPeakBytes(sources: sources(record.sample, target: target), size: size, cropCount: selectedAssignments.count))
             }
             let peakBytes = work.map(\.estimatedPeakBytes).max() ?? 0
             let workerCount = try policy.workerCount(jobCount: work.count, estimatedPeakBytes: peakBytes)
@@ -1014,7 +1053,7 @@ enum NativeMaterialDatasetService {
             let cropped = completed.contains { $0.cropped }
             let checkFamilies = Set(prepared.filter { $0["split"] as? String == "validation" && !["excluded", "rejected"].contains($0["status"] as? String ?? "") }.map(familyID))
             let automatic: Object = ["policy": "subject-extra-crops-v2", "fraction": (settings["percent"] as? Double ?? 5) / 100, "source_family_ids": checkFamilies.sorted(), "material_ids": records.filter { checkFamilies.contains(familyID($0.sample)) }.compactMap { $0.sample["material_id"] as? String }.sorted(), "quick_fit_material_id": selectedID as Any? ?? NSNull(), "target": target]
-            let binding: Object = ["schema": preparationSchema, "ephemeral": true, "source_dataset_path": original.path, "source_snapshot": proof, "target_resized": false, "target_cropped": cropped, "estimated_staging_bytes": bytesRequired, "preparation_workers": workerCount, "estimated_worker_peak_bytes": peakBytes, "preparation_memory_budget_bytes": policy.memoryBudgetBytes, "automatic_validation": automatic]
+            let binding: Object = ["schema": preparationSchema, "ephemeral": true, "source_dataset_path": original.path, "source_snapshot": proof, "target": target, "map_scope": "selected-target-v2", "target_resized": false, "target_cropped": cropped, "estimated_staging_bytes": bytesRequired, "preparation_workers": workerCount, "estimated_worker_peak_bytes": peakBytes, "preparation_memory_budget_bytes": policy.memoryBudgetBytes, "automatic_validation": automatic]
             let derived: Object = ["schema_version": 2, "generator": "ipde-material-dataset-v2", "crop_size": size, "training_pixel_dimensions": [size, size], "split_strategy": "subject-extra-crops-v2", "validation": settings, "validation_scope": "known_subject_diagnostic", "original_sources_required_for_training": true, "source_images_modified": false, "native_size_preparation": binding, "automatic_validation": automatic, "samples": prepared.map { ["sample_id": $0["sample_id"]!, "material_id": $0["material_id"]!, "status": $0["status"]!, "split": $0["split"]!, "asset_family_id": familyID($0), "source_set_id": $0["source_set_id"] ?? NSNull(), "path": "samples/" + ($0["sample_id"] as! String)] }]
             try atomic(stage.appendingPathComponent("dataset.json"), data: jsonData(derived))
             guard try validatePrepared(stage, size: size, proof: proof) else { throw StudioError("Native training grids failed validation.") }
@@ -1039,7 +1078,7 @@ enum NativeMaterialDatasetService {
     private struct PreparationJob: Sendable {
         let sample: Data, assignments: Data, reviews: Data, verified: Data
         let stage: URL, original: URL
-        let size: Int
+        let size: Int, target: String
         let estimatedPeakBytes: UInt64
     }
     private struct PreparationResult: Sendable { let samples: Data; let cropped: Bool }
@@ -1095,7 +1134,7 @@ enum NativeMaterialDatasetService {
         if result.count != reported { onProgress(result.count) }
         return result
     }
-    private static func preparationPeakBytes(sources: [Object], size: Int) throws -> UInt64 {
+    static func preparationPeakBytes(sources: [[String: Any]], size: Int, cropCount: Int) throws -> UInt64 {
         func product(_ values: [UInt64]) throws -> UInt64 {
             try values.reduce(1) { value, factor in
                 let result = value.multipliedReportingOverflow(by: factor)
@@ -1110,12 +1149,12 @@ enum NativeMaterialDatasetService {
                   width > 0, height > 0, [8, 16].contains(bits), (1...4).contains(channels) else {
                 throw StudioError("Original source working dimensions or precision are invalid.")
             }
-            let original = try product([UInt64(width), UInt64(height), UInt64(channels), UInt64(bits / 8)])
+            let row = try product([UInt64(width), UInt64(channels), UInt64(bits / 8)])
             let crop = try product([UInt64(size), UInt64(size), UInt64(channels), UInt64(bits / 8)])
-            let fileBytes = (source["file_bytes"] as? NSNumber)?.uint64Value ?? original
-            // Include original/read/inflate/pixel buffers, encoded verification
-            // copies and allocator overhead. Sources process one at a time.
-            let terms = try [product([original, 4]), product([fileBytes, 3]), product([crop, 6]), UInt64(64 * 1024 * 1024)]
+            // The source is memory mapped and inflated scanline by scanline.
+            // Only selected crops, row buffers and one encoded export are live.
+            let fileBytes = (source["file_bytes"] as? NSNumber)?.uint64Value ?? 0
+            let terms = try [fileBytes, product([row, 4]), product([crop, UInt64(max(1, cropCount) + 6)]), UInt64(64 * 1024 * 1024)]
             let total = try terms.reduce(UInt64(0)) { value, term in
                 let result = value.addingReportingOverflow(term)
                 guard !result.overflow else { throw StudioError("Native crop working memory exceeds its format budget.") }
@@ -1146,7 +1185,7 @@ enum NativeMaterialDatasetService {
             // recorded canonical path receives the canonical output filename.
             return ("input", details, offset == canonicalOffset ? "diffuse.png" : "input-variant-\(offset + 1).png")
         }
-        for role in ["height", "roughness", "normal"] { if let details = originalMaps[role] { maps.append((role, details, ["height": "displacement.png", "roughness": "roughness.png", "normal": "normal.png"][role]!)) } }
+        for role in [job.target] { if let details = originalMaps[role] { maps.append((role, details, ["height": "displacement.png", "roughness": "roughness.png", "normal": "normal.png"][role]!)) } }
         var active: [(Object, URL, [Int])] = [], cropped = false
         let binding = sourceBinding(originalSample)
         for id in assignments.keys.sorted() {
@@ -1157,8 +1196,11 @@ enum NativeMaterialDatasetService {
             sample.merge(review) { _, new in new }
             sample["sample_id"] = id; sample["sample_pixel_dimensions"] = [size, size]; sample["crop_rectangle_top_left_xywh"] = rectangle
             sample["maps"] = [String: String](); sample["map_metadata"] = [String: Object](); sample["input_variants"] = [Object]()
+            sample["available_targets"] = [job.target]
+            sample.removeValue(forKey: "source_files")
+            sample.removeValue(forKey: "source_normalized_rectangle_xywh")
             sample["split"] = assignment["split"]; sample["split_assignment"] = "automatic"; sample["source_region_role"] = assignment["split"]; sample["source_region_id"] = region
-            sample["source_normalized_rectangle_xywh"] = normalize(rectangle, dimensions); sample["source_review_snapshot"] = review; sample["source_binding_sha256"] = binding
+            sample["source_review_snapshot"] = review; sample["source_binding_sha256"] = binding
             sample["split_strategy"] = "subject-extra-crops-v2"; sample["validation_scope"] = "known_subject_diagnostic"; sample["source_precision_verified"] = true; sample["crop_values_verified"] = true
             let changed = rectangle != [0, 0] + dimensions; cropped = cropped || changed
             sample["native_size_preparation"] = ["schema": preparationSchema, "source_dataset_path": job.original.path, "target_resized": false, "target_cropped": changed]
@@ -1168,28 +1210,30 @@ enum NativeMaterialDatasetService {
         for (role, originalDetails, filename) in maps {
             try Task.checkCancellation()
             guard let source = originalDetails["source"] as? Object, let sourcePath = source["path"] as? String, let verifiedSource = verified[sourcePath], let resolved = verifiedSource["path"] as? String else { throw StudioError("Source identity could not be verified.") }
-            let changed = active.contains { $0.2 != [0, 0] + dimensions }
-            let bytes = changed ? try Data(contentsOf: URL(fileURLWithPath: resolved)) : nil
-            if let bytes { guard hash(bytes) == source["file_sha256"] as? String else { throw StudioError("Original source changed during preparation.") } }
-            let decoded = try bytes.map(NativePNG.decode)
+            let sourceURL = URL(fileURLWithPath: resolved)
+            let before = try fileState(sourceURL)
+            guard let verifiedState = verifiedSource["source_stat"] as? Object, NSDictionary(dictionary: verifiedState).isEqual(to: before) else { throw StudioError("Original source changed during preparation.") }
+            let flip = role == "normal" && ["nor_dx", "normal_dx"].contains(source["suffix"] as? String ?? "")
+            let cropOffsets = active.indices.filter { active[$0].2 != [0, 0] + dimensions }
+            let crops = cropOffsets.isEmpty ? [] : try NativePNG.crops(sourceURL, rectangles: cropOffsets.map { active[$0].2 }, flipGreen: flip)
+            let selectedCrops = Dictionary(uniqueKeysWithValues: zip(cropOffsets, crops))
+            guard NSDictionary(dictionary: before).isEqual(to: try fileState(sourceURL)) else { throw StudioError("Original source changed during preparation.") }
             for offset in active.indices {
                 try Task.checkCancellation()
                 let rectangle = active[offset].2, output = active[offset].1.appendingPathComponent(filename)
-                let flip = role == "normal" && ["nor_dx", "normal_dx"].contains(source["suffix"] as? String ?? "")
                 let isCrop = rectangle != [0, 0] + dimensions
                 var details = originalDetails, transforms: [Object] = [], path = resolved
                 if isCrop {
-                    guard let decoded else { throw StudioError("Native crop decode is absent.") }
-                    let selected = try decoded.crop(rectangle, flipGreen: flip), encoded = try selected.encoded()
-                    guard try NativePNG.decode(encoded).pixels == selected.pixels else { throw StudioError("Lossless crop export changed its native codes.") }
+                    guard let selected = selectedCrops[offset] else { throw StudioError("Native crop decode is absent.") }
+                    let encoded = try selected.encoded()
                     try Task.checkCancellation()
                     try encoded.write(to: output, options: .withoutOverwriting); path = filename
-                    details["storage"] = "prepared_crop"; details["sample_sha256"] = hash(encoded)
-                    transforms.append(["type": "native_crop", "rectangle_top_left_xywh": rectangle, "algorithm": "exact_native_integer_codes", "range_normalization": false, "gamma_applied": false])
+                    details["storage"] = "prepared_crop"; details["sample_sha256"] = hash(encoded); details["prepared_stat"] = try fileState(output)
+                    transforms.append(["type": "native_crop", "algorithm": "exact_native_integer_codes", "range_normalization": false, "gamma_applied": false])
                 } else { details["storage"] = "source_reference"; details["sample_sha256"] = source["file_sha256"] }
                 if flip { transforms.append(["type": "directx_to_opengl", "component": "G", "applied_in_memory": !isCrop]) }
                 details["source"] = verifiedSource; details["path"] = path; details["filename"] = path; details["sample_bits"] = source["sample_bits"]; details["channels"] = source["channels"]; details["transforms"] = transforms
-                details["source_pixel_dimensions"] = dimensions; details["crop_rectangle_top_left_xywh"] = rectangle; details["exact_source_crop"] = true
+                details.removeValue(forKey: "source_pixel_dimensions"); details.removeValue(forKey: "crop_rectangle_top_left_xywh"); details["exact_source_crop"] = true
                 var sample = active[offset].0
                 if role == "input" { var colors = sample["input_variants"] as? [Object] ?? []; colors.append(details); sample["input_variants"] = colors }
                 if role != "input" || filename == "diffuse.png" {
@@ -1207,21 +1251,56 @@ enum NativeMaterialDatasetService {
         }
         return PreparationResult(samples: try JSONSerialization.data(withJSONObject: prepared, options: [.sortedKeys, .withoutEscapingSlashes]), cropped: cropped)
     }
-    private static func validatePrepared(_ root: URL, size: Int, proof: Object) throws -> Bool {
+    static func validatePrepared(_ root: URL, size: Int, proof: [String: Any], checksumFile: ((URL) throws -> String)? = nil) throws -> Bool {
         let index = try object(root.appendingPathComponent("dataset.json"))
         guard index["crop_size"] as? Int == size, let binding = index["native_size_preparation"] as? Object, binding["schema"] as? String == preparationSchema, let snapshot = binding["source_snapshot"] as? Object, NSDictionary(dictionary: snapshot).isEqual(to: proof) else { return false }
-        var verified = Set<String>()
+        let verifyFile = checksumFile ?? digest
+        var verified: [String: (String, Object)] = [:]
         for record in try readRecords(root, index: index) {
             try Task.checkCancellation()
             guard record.sample["sample_pixel_dimensions"] as? [Int] == [size, size] else { return false }
-            let details = Array((record.sample["map_metadata"] as? [String: Object] ?? [:]).values) + (record.sample["input_variants"] as? [Object] ?? [])
-            for map in details {
+            var changed = false
+            func validateMap(_ map: inout Object) throws -> Bool {
                 try Task.checkCancellation()
-                guard let name = map["filename"] as? String else { return false }
+                guard let name = map["filename"] as? String, let expected = map["sample_sha256"] as? String else { return false }
                 let path = name.hasPrefix("/") ? URL(fileURLWithPath: name) : try contained(record.path.deletingLastPathComponent(), name)
                 let header = try NativePNG.inspect(path)
                 guard header.width == size, header.height == size else { return false }
-                if verified.insert(path.path).inserted, try digest(path) != map["sample_sha256"] as? String { return false }
+                let state = try fileState(path), reference = map["storage"] as? String == "source_reference"
+                var source = map["source"] as? Object ?? [:]
+                if reference, source["file_sha256"] as? String != expected { return false }
+                let recorded = reference ? source["source_stat"] as? Object : map["prepared_stat"] as? Object
+                let unchanged = recorded.map { NSDictionary(dictionary: $0).isEqual(to: state) } ?? false
+                if let prior = verified[path.path] {
+                    guard prior.0 == expected, NSDictionary(dictionary: prior.1).isEqual(to: state) else { return false }
+                } else {
+                    guard try unchanged || verifyFile(path) == expected else { return false }
+                    guard NSDictionary(dictionary: state).isEqual(to: try fileState(path)) else { return false }
+                    verified[path.path] = (expected, state)
+                }
+                if !unchanged {
+                    if reference { source["source_stat"] = state; map["source"] = source }
+                    else { map["prepared_stat"] = state }
+                    changed = true
+                }
+                return true
+            }
+            var maps = record.sample["map_metadata"] as? [String: Object] ?? [:]
+            for role in maps.keys.sorted() {
+                var map = maps[role]!
+                guard try validateMap(&map) else { return false }
+                maps[role] = map
+            }
+            var variants = record.sample["input_variants"] as? [Object] ?? []
+            for offset in variants.indices {
+                var map = variants[offset]
+                guard try validateMap(&map) else { return false }
+                variants[offset] = map
+            }
+            if changed {
+                var sample = record.sample
+                sample["map_metadata"] = maps; sample["input_variants"] = variants
+                try atomic(record.path, data: jsonData(sample))
             }
         }
         return true
@@ -1339,13 +1418,31 @@ enum NativeMaterialDatasetService {
         let ascii = String(decoding: compact, as: UTF8.self).utf16.map { $0 > 127 ? String(format: "\\u%04x", $0) : String(UnicodeScalar($0)!) }.joined()
         return hash(Data(ascii.utf8))
     }
+    private static func compactMetadata(_ value: Any) -> Any {
+        if let object = value as? Object {
+            return object.filter { !["data_base64", "color_chunks", "file_md5", "source_files"].contains($0.key) }.mapValues(compactMetadata)
+        }
+        if let array = value as? [Any] { return array.map(compactMetadata) }
+        return value
+    }
+    private static func compactStoredRecords(_ root: URL, index: Object) throws {
+        for entry in index["samples"] as? [Object] ?? [] {
+            try Task.checkCancellation()
+            guard let directory = entry["path"] as? String else { continue }
+            try autoreleasepool {
+                let path = try contained(root, directory).appendingPathComponent("sample.json")
+                let prior = try object(path), compact = compactMetadata(prior) as! Object
+                if !NSDictionary(dictionary: prior).isEqual(to: compact) { try commit(root, updates: [(path, compact)]) }
+            }
+        }
+    }
     private static func readRecords(_ root: URL, index: Object) throws -> [Record] {
         guard index["schema_version"] as? Int == 2, let entries = index["samples"] as? [Object] else { throw StudioError("Expected a schema-2 material dataset.") }
         var seen = Set<String>()
         return try entries.map { entry in
             guard let directory = entry["path"] as? String else { throw StudioError("Dataset sample path is missing.") }
             let path = try contained(root, directory).appendingPathComponent("sample.json")
-            let sample = try object(path)
+            let sample = compactMetadata(try object(path)) as! Object
             for key in ["sample_id", "material_id", "status", "split"] {
                 guard let expected = entry[key] as? String, sample[key] as? String == expected else { throw StudioError("Dataset and sample identity disagree: \(path.path)") }
             }
@@ -1442,26 +1539,52 @@ enum NativeMaterialDatasetService {
     }
     private static func commit(_ root: URL, updates: [(URL, Object)]) throws {
         try Task.checkCancellation()
-        let changes: [Object] = try updates.map { path, value in
-            let data = try jsonData(value)
-            return ["path": String(path.path.dropFirst(root.path.count + 1)), "old_sha256": try optionalDigest(path) as Any? ?? NSNull(), "new_sha256": hash(data), "new_base64": data.base64EncodedString()]
+        let stage = root.appendingPathComponent(".material-workbench-transaction-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false)
+        defer { if !FileManager.default.fileExists(atPath: root.appendingPathComponent(journal).path) { try? FileManager.default.removeItem(at: stage) } }
+        var changes: [Object] = []
+        for (offset, update) in updates.enumerated() {
+            try Task.checkCancellation()
+            let (path, value) = update, data = try jsonData(value)
+            let staged = stage.appendingPathComponent("\(offset).json")
+            try atomic(staged, data: data)
+            changes.append(["path": String(path.path.dropFirst(root.path.count + 1)),
+                            "old_sha256": try optionalDigest(path) as Any? ?? NSNull(),
+                            "new_sha256": hash(data), "staged_path": String(staged.path.dropFirst(root.path.count + 1))])
         }
-        try atomic(root.appendingPathComponent(journal), data: jsonData(["schema": schema, "changes": changes])); try recover(root)
+        try atomic(root.appendingPathComponent(journal), data: jsonData(["schema": schema, "changes": changes]))
+        try recover(root)
     }
     private static func recover(_ root: URL) throws {
         let path = root.appendingPathComponent(journal)
         guard FileManager.default.fileExists(atPath: path.path) else { return }
         let document = try object(path)
         guard Set(document.keys) == ["schema", "changes"], document["schema"] as? String == schema, let changes = document["changes"] as? [Object] else { throw StudioError("Unrecognized dataset recovery journal.") }
-        let pending: [(URL, Data)] = try changes.map { change in
-            guard let relative = change["path"] as? String, let base64 = change["new_base64"] as? String, let data = Data(base64Encoded: base64), let expected = change["new_sha256"] as? String else { throw StudioError("Invalid dataset recovery identity.") }
-            let file = try contained(root, relative)
-            let current = try optionalDigest(file)
-            guard ["sample.json", "dataset.json", ".material-size-reviews.json"].contains(file.lastPathComponent), hash(data) == expected, current == change["old_sha256"] as? String || current == expected else { throw StudioError("Dataset recovery identity changed; original data remains untouched.") }
-            return (file, data)
+        var stages = Set<URL>()
+        func bytes(_ change: Object) throws -> Data {
+            if let relative = change["staged_path"] as? String {
+                let staged = try contained(root, relative), directory = staged.deletingLastPathComponent()
+                guard directory.deletingLastPathComponent() == root, directory.lastPathComponent.hasPrefix(".material-workbench-transaction-"), staged.pathExtension == "json" else { throw StudioError("Invalid dataset recovery staging path.") }
+                stages.insert(directory)
+                return try Data(contentsOf: staged)
+            }
+            // Finish recovery journals written by earlier app versions.
+            guard let encoded = change["new_base64"] as? String, let data = Data(base64Encoded: encoded) else { throw StudioError("Invalid dataset recovery identity.") }
+            return data
         }
-        for (file, data) in pending { try atomic(file, data: data) }
-        try FileManager.default.removeItem(at: path); try sync(root)
+        // Validate every change before publishing any of them. Keep only one
+        // small metadata file in memory; the journal contains paths, not bytes.
+        for change in changes {
+            guard let relative = change["path"] as? String, let expected = change["new_sha256"] as? String else { throw StudioError("Invalid dataset recovery identity.") }
+            let file = try contained(root, relative), current = try optionalDigest(file)
+            guard ["sample.json", "dataset.json", ".material-size-reviews.json"].contains(file.lastPathComponent),
+                  hash(try bytes(change)) == expected,
+                  current == change["old_sha256"] as? String || current == expected else { throw StudioError("Dataset recovery identity changed; original data remains untouched.") }
+        }
+        for change in changes { try atomic(contained(root, change["path"] as! String), data: bytes(change)) }
+        try FileManager.default.removeItem(at: path)
+        for stage in stages { try FileManager.default.removeItem(at: stage) }
+        try sync(root)
     }
     private static func atomic(_ path: URL, data: Data) throws {
         let temporary = path.deletingLastPathComponent().appendingPathComponent(".\(path.lastPathComponent)-\(UUID().uuidString)")
@@ -1494,7 +1617,7 @@ enum NativeMaterialDatasetService {
     private static func isInside(_ path: URL, _ root: URL) -> Bool { path.path == root.path || path.path.hasPrefix(root.path + "/") }
     private static func object(_ url: URL) throws -> Object { guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? Object else { throw StudioError("Invalid dataset metadata: \(url.path)") }; return value }
     private static func optionalObject(_ url: URL) throws -> Object { FileManager.default.fileExists(atPath: url.path) ? try object(url) : [:] }
-    private static func jsonData(_ value: Object) throws -> Data { try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) + Data([10]) }
+    private static func jsonData(_ value: Object) throws -> Data { try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) + Data([10]) }
     private static func jsonString(_ value: Object) throws -> String { String(decoding: try jsonData(value), as: UTF8.self) }
     private static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
     private static func digest(_ url: URL) throws -> String { try hash(Data(contentsOf: url, options: .mappedIfSafe)) }

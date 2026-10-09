@@ -113,7 +113,7 @@ struct NativePNG: Sendable {
     static func sourceMetadata(_ data: Data) throws -> [String: Any] {
         let header = try parseHeader(data)
         var metadata: [String: Any] = ["width": header.width, "height": header.height, "sample_bits": header.bits, "channels": header.channels, "png_color_type": Int(header.color), "interlace": Int(header.interlace)]
-        var cursor = 8, colors: [[String: String]] = [], ended = false
+        var cursor = 8, ended = false
         try data.withUnsafeBytes { storage in
             let bytes = storage.bindMemory(to: UInt8.self)
             while cursor + 12 <= bytes.count {
@@ -125,8 +125,6 @@ struct NativePNG: Sendable {
                 if kind == "IHDR", cursor != 8 { throw invalid("PNG contains more than one image header.") }
                 if kind == "tRNS" { throw invalid("PNG transparency tables need an explicit native channel conversion before training.") }
                 if retainedChunks.contains(kind) {
-                    let payload = Data(bytes: bytes.baseAddress! + cursor + 8, count: length)
-                    colors.append(["type": kind, "data_base64": payload.base64EncodedString()])
                     if kind == "gAMA", length == 4 { metadata["png_gamma"] = Double(integer(bytes, cursor + 8)) / 100000 }
                     if kind == "sRGB", length == 1 { metadata["srgb_rendering_intent"] = Int(bytes[cursor + 8]) }
                 }
@@ -135,7 +133,137 @@ struct NativePNG: Sendable {
             }
         }
         guard ended, cursor == data.count else { throw invalid("PNG image is incomplete.") }
-        metadata["color_chunks"] = colors; return metadata
+        // Profile bytes stay in their PNG. They are read only when exporting a
+        // crop, never expanded into text and repeated in dataset manifests.
+        return metadata
+    }
+    /// Read a source once while retaining only two scanlines and the selected
+    /// crop pixels. Original resolution never determines a full-image buffer.
+    static func crop(_ url: URL, rectangle: [Int], flipGreen: Bool = false) throws -> NativePNG {
+        try crops(url, rectangles: [rectangle], flipGreen: flipGreen)[0]
+    }
+    static func crop(_ data: Data, rectangle: [Int], flipGreen: Bool = false) throws -> NativePNG {
+        try crops(data, rectangles: [rectangle], flipGreen: flipGreen)[0]
+    }
+    static func crops(_ url: URL, rectangles: [[Int]], flipGreen: Bool = false) throws -> [NativePNG] {
+        try crops(Data(contentsOf: url, options: .mappedIfSafe), rectangles: rectangles, flipGreen: flipGreen)
+    }
+    static func crops(_ data: Data, rectangles: [[Int]], flipGreen: Bool = false) throws -> [NativePNG] {
+        let header = try parseHeader(data), bpp = header.bytesPerPixel
+        guard !rectangles.isEmpty, !flipGreen || [3, 4].contains(header.channels) else { throw invalid("Native PNG crop channels are invalid.") }
+        for r in rectangles {
+            guard r.count == 4, r[0] >= 0, r[1] >= 0, r[2] > 0, r[3] > 0,
+                  r[2] <= header.width, r[3] <= header.height,
+                  r[0] <= header.width - r[2], r[1] <= header.height - r[3] else { throw invalid("Crop is outside the original PNG grid.") }
+        }
+        var selected = rectangles.map { Data(count: $0[2] * $0[3] * bpp) }
+        let passes = header.interlace == 0 ? [(0, 0, 1, 1)] : [(0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)]
+        let layouts = passes.map { x, y, dx, dy in
+            (x, y, dx, dy, max(0, (header.width - x + dx - 1) / dx), max(0, (header.height - y + dy - 1) / dy))
+        }.filter { $0.4 > 0 && $0.5 > 0 }
+        var pass = 0, rowIndex = 0, filled = 0
+        var row = [UInt8](repeating: 0, count: header.width * bpp + 1)
+        var previous = [UInt8](repeating: 0, count: header.width * bpp)
+        func finishRow() throws {
+            let (x, y, dx, dy, width, height) = layouts[pass], rowBytes = width * bpp
+            guard row[0] <= 4 else { throw invalid("Unknown PNG row filter.") }
+            for column in 0..<rowBytes {
+                let left = column >= bpp ? row[column + 1 - bpp] : 0
+                let up = previous[column], upperLeft = column >= bpp ? previous[column - bpp] : 0
+                switch row[0] {
+                case 0: break
+                case 1: row[column + 1] &+= left
+                case 2: row[column + 1] &+= up
+                case 3: row[column + 1] &+= UInt8((Int(left) + Int(up)) / 2)
+                default: row[column + 1] &+= paeth(left, up, upperLeft)
+                }
+            }
+            let sourceY = y + rowIndex * dy
+            row.withUnsafeBufferPointer { bytes in
+                for index in rectangles.indices {
+                    let r = rectangles[index]
+                    guard sourceY >= r[1], sourceY < r[1] + r[3] else { continue }
+                    selected[index].withUnsafeMutableBytes { output in
+                        let destination = output.bindMemory(to: UInt8.self).baseAddress! + (sourceY - r[1]) * r[2] * bpp
+                        if dx == 1 {
+                            destination.update(from: bytes.baseAddress! + 1 + r[0] * bpp, count: r[2] * bpp)
+                        } else {
+                            for column in 0..<width {
+                                let sourceX = x + column * dx
+                                if sourceX >= r[0], sourceX < r[0] + r[2] {
+                                    (destination + (sourceX - r[0]) * bpp).update(from: bytes.baseAddress! + 1 + column * bpp, count: bpp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            previous.replaceSubrange(0..<rowBytes, with: row[1...rowBytes])
+            rowIndex += 1; filled = 0
+            if rowIndex == height {
+                pass += 1; rowIndex = 0
+                previous.withUnsafeMutableBufferPointer { $0.initialize(repeating: 0) }
+            }
+        }
+        var stream = z_stream()
+        guard inflateInit_(&stream, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else { throw invalid("PNG decompression could not start.") }
+        defer { inflateEnd(&stream) }
+        var cursor = 8, colors: [(String, Data)] = [], ended = false, streamEnded = false, compressedSeen = false, profileBytes = 0
+        try data.withUnsafeBytes { storage in
+            let bytes = storage.bindMemory(to: UInt8.self)
+            while cursor + 12 <= bytes.count {
+                try Task.checkCancellation()
+                let length = Int(integer(bytes, cursor))
+                guard length <= bytes.count - cursor - 12 else { throw invalid("Truncated PNG chunk.") }
+                let kind = String(decoding: UnsafeBufferPointer(start: bytes.baseAddress! + cursor + 4, count: 4), as: UTF8.self)
+                guard checksum(bytes, offset: cursor + 4, count: length + 4) == integer(bytes, cursor + 8 + length) else { throw invalid("PNG chunk checksum changed.") }
+                if kind == "IHDR", cursor != 8 { throw invalid("PNG contains more than one image header.") }
+                if kind == "tRNS" { throw invalid("PNG transparency tables need an explicit native channel conversion before training.") }
+                if retainedChunks.contains(kind) {
+                    profileBytes += length
+                    guard profileBytes <= 16 * 1024 * 1024 else { throw invalid("PNG color metadata exceeds the native crop budget.") }
+                    colors.append((kind, Data(bytes: bytes.baseAddress! + cursor + 8, count: length)))
+                } else if kind == "IDAT" {
+                    guard !streamEnded || length == 0 else { throw invalid("PNG contains trailing compressed pixels.") }
+                    compressedSeen = true
+                    stream.next_in = UnsafeMutablePointer(mutating: bytes.baseAddress! + cursor + 8)
+                    stream.avail_in = uInt(length)
+                    while stream.avail_in > 0 {
+                        try Task.checkCancellation()
+                        let expected = pass < layouts.count ? layouts[pass].4 * bpp + 1 : 1
+                        let availableBefore = stream.avail_in
+                        let status = row.withUnsafeMutableBufferPointer { buffer -> Int32 in
+                            stream.next_out = buffer.baseAddress! + filled
+                            stream.avail_out = uInt(expected - filled)
+                            return inflate(&stream, Z_NO_FLUSH)
+                        }
+                        let produced = expected - filled - Int(stream.avail_out)
+                        if pass >= layouts.count, produced > 0 { throw invalid("PNG pixel stream has an invalid size.") }
+                        filled += produced
+                        if pass < layouts.count, filled == expected { try finishRow() }
+                        guard status == Z_OK || status == Z_STREAM_END else { throw invalid("PNG pixel stream has an invalid size.") }
+                        if status == Z_STREAM_END {
+                            streamEnded = true
+                            guard stream.avail_in == 0, pass == layouts.count, filled == 0 else { throw invalid("PNG pixel stream has an invalid size.") }
+                            break
+                        }
+                        guard produced > 0 || stream.avail_in < availableBefore else { throw invalid("PNG decompression stopped before its pixels were complete.") }
+                    }
+                } else if kind == "IEND" { ended = true; cursor += length + 12; break }
+                else if kind != "IHDR", bytes[cursor + 4] & 32 == 0 { throw invalid("Unsupported critical PNG chunk.") }
+                cursor += length + 12
+            }
+        }
+        guard ended, cursor == data.count, compressedSeen, streamEnded, pass == layouts.count else { throw invalid("PNG image is incomplete.") }
+        return rectangles.enumerated().map { index, r in
+            if flipGreen {
+                selected[index].withUnsafeMutableBytes { storage in
+                    let bytes = storage.bindMemory(to: UInt8.self)
+                    for pixel in 0..<r[2] * r[3] { for byte in 0..<header.bits / 8 { bytes[pixel * bpp + header.bits / 8 + byte] ^= 255 } }
+                }
+            }
+            return NativePNG(header: Header(width: r[2], height: r[3], bits: header.bits, channels: header.channels, color: header.color, interlace: 0), pixels: selected[index], colorChunks: colors)
+        }
     }
     func crop(_ rectangle: [Int], flipGreen: Bool = false) throws -> NativePNG {
         try validateStorage()

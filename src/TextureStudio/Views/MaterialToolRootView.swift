@@ -267,6 +267,7 @@ struct WorkbenchRuntimeView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Settings") {
+                    PreparationSettingsView(store: store)
                     Toggle("Developer mode", isOn: $developerMode)
                     Text("Expose adapter controls and export a full fused checkpoint alongside the separate LoRA.")
                         .font(.caption).foregroundStyle(.secondary)

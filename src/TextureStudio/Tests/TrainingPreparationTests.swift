@@ -8,6 +8,7 @@ final class TrainingPreparationTests: XCTestCase {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let store = fixture.store()
+        store.preparationWorkers = 1
         try await store.loadTrainingCapabilities()
         try await store.loadDataset(fixture.original)
         XCTAssertEqual(store.supportedTrainingSizes, [512, 1024])
@@ -20,6 +21,7 @@ final class TrainingPreparationTests: XCTestCase {
         XCTAssertTrue(store.dataset?.hasNativeSize(1024) == true)
         XCTAssertEqual(fixture.calls.last?.first, "prepare-size")
         XCTAssertEqual(value("--size", in: fixture.calls.last!), "1024")
+        XCTAssertEqual(value("--preparation-workers", in: fixture.calls.last!), "1")
         XCTAssertEqual(value("--expected-index-sha256", in: fixture.calls.last!), "source-sha")
         XCTAssertEqual(try Data(contentsOf: fixture.original.appendingPathComponent("dataset.json")), Data("original".utf8))
         let count = fixture.calls.count
@@ -40,8 +42,22 @@ final class TrainingPreparationTests: XCTestCase {
         let dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: document)
         XCTAssertTrue(dataset.readyForTraining(size: 2048, material: "soil_4k", target: "height"))
         XCTAssertFalse(dataset.readyForTraining(size: 2048, material: nil, target: "height"))
-        XCTAssertTrue(dataset.readyForTraining(size: 2048, material: "soil_4k", target: "normal"), "Prepared crops are shared across targets")
+        XCTAssertFalse(dataset.readyForTraining(size: 2048, material: "soil_4k", target: "normal"), "A height-only preparation cannot train a normal model")
         XCTAssertFalse(dataset.readyForTraining(size: 2048, material: "other", target: "height"))
+    }
+
+    func testLegacyPreparationWithUnusedMapsMustBeRegeneratedForSelectedTarget() throws {
+        let document = """
+        {"dataset_path":"/stage","index_sha256":"bound","materials":[{"material_id":"soil",
+        "samples":[{"sample_id":"soil-center","status":"approved","split":"train","width":256,"height":256,
+        "maps":{"input":{"path":"/crop/diffuse.png","width":256,"height":256},
+        "height":{"path":"/crop/height.png","width":256,"height":256},
+        "normal":{"path":"/crop/normal.png","width":256,"height":256}}}]}],
+        "automatic_validation":{"policy":"subject-extra-crops-v2","material_ids":[],"quick_fit_material_id":"soil"}}
+        """
+        let dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: document)
+        XCTAssertFalse(dataset.readyForTraining(size: 256, material: "soil", target: "height"))
+        XCTAssertFalse(dataset.readyForTraining(size: 256, material: "soil", target: "normal"))
     }
 
     func testMismatchedMapGridCannotBecomeTrainingInput() async throws {
@@ -74,6 +90,8 @@ final class TrainingPreparationTests: XCTestCase {
         try await settled(store)
         XCTAssertNil(store.error)
         let train = try XCTUnwrap(fixture.calls.first { $0.first == "train" })
+        let preparation = try XCTUnwrap(fixture.calls.first { $0.first == "prepare-size" })
+        XCTAssertEqual(value("--preparation-workers", in: preparation), String(store.preparationWorkers))
         XCTAssertTrue(train.contains("--whole-maps"))
         XCTAssertEqual(value("--size", in: train), "1024")
         XCTAssertEqual(value("--dataset", in: train), fixture.prepared.path)
