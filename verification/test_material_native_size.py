@@ -232,12 +232,12 @@ def test_native_crop_policy_uses_one_center_for_4k_and_three_corners_for_8k():
                    for _other, second in corners[i + 1:])
 
 
-def test_selected_grid_filters_small_sources_and_offers_union_of_supported_sizes(tmp_path):
+def test_selected_grid_keeps_small_sources_manageable_and_prepares_only_eligible_sources(tmp_path):
     root = sources(tmp_path, size=1024, names=('small',))
     sources(root, size=2048, names=('large',))
     reported = workbench.dataset_info(SimpleNamespace(dataset=root, review_size=2048))
     assert reported['supported_training_sizes'] == [256, 512, 1024, 2048]
-    assert [m['material_id'] for m in reported['materials']] == ['large_2k']
+    assert [m['material_id'] for m in reported['materials']] == ['large_2k', 'small_1k']
     prepared = prepare(root, size=2048)
     assert [m['material_id'] for m in prepared['materials']] == ['large_2k']
     assert not list(Path(prepared['dataset_path']).rglob('*.png'))

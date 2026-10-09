@@ -104,7 +104,7 @@ final class WorkbenchProcess: @unchecked Sendable {
         let data = try Data(contentsOf: log)
         let output = String(decoding: data, as: UTF8.self)
         if lock.withLock({ aborting }) { throw CancellationError() }
-        guard status == 0 else { throw StudioError(String(output.suffix(4000))) }
+        guard status == 0 else { throw StudioError(Self.failureMessage(output) ?? String(output.suffix(4000))) }
         return output
     }
 
@@ -114,7 +114,16 @@ final class WorkbenchProcess: @unchecked Sendable {
         for line in output.split(separator: "\n").reversed() {
             if let decoded = try? decoder.decode(type, from: Data(line.utf8)) { return decoded }
         }
-        throw StudioError("The material worker did not return a valid result. See the operation log.")
+        throw StudioError(failureMessage(output) ?? "The material worker did not return a valid result. See the operation log.")
+    }
+
+    private static func failureMessage(_ output: String) -> String? {
+        for line in output.split(separator: "\n").reversed() {
+            guard let document = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let error = document["error"] as? [String: Any], let message = error["message"] as? String else { continue }
+            if !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return message }
+        }
+        return nil
     }
 }
 

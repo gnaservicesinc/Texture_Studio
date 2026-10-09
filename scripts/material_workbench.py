@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
@@ -15,9 +16,16 @@ import subprocess
 import sys
 import tempfile
 from typing import Any
+import uuid
 
 
-from material_pbrnxt import sha256 as digest
+def digest(path: Path) -> str:
+    """Metadata management must not require an installed training framework."""
+    value = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            value.update(block)
+    return value.hexdigest()
 
 
 def checked_relative(root: Path, name: str) -> Path:
@@ -31,6 +39,21 @@ def checked_relative(root: Path, name: str) -> Path:
 SCHEMA = "texture-studio-material-workbench-v1"
 ROOT = Path(__file__).resolve().parents[1]
 JOURNAL = ".material-workbench-journal.json"
+MANAGEMENT_SCHEMA = "texture-studio-dataset-management-v1"
+
+
+def timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def metadata_digest(path: Path) -> str | None:
+    return digest(path) if path.is_file() else None
+
+
+def review_digest(dataset: Path) -> str:
+    # A concrete absence fingerprint lets the first review reject a stale
+    # selection from another window which created the file in the meantime.
+    return metadata_digest(dataset / ".material-size-reviews.json") or hashlib.sha256(b"").hexdigest()
 
 
 def sync_directory(path: Path) -> None:
@@ -63,7 +86,7 @@ def commit_metadata(dataset: Path, updates: list[tuple[Path, dict]]) -> None:
     changes = []
     for path, value in updates:
         content = json_bytes(value)
-        changes.append({"path": str(path.resolve().relative_to(dataset.resolve())), "old_sha256": digest(path),
+        changes.append({"path": str(path.resolve().relative_to(dataset.resolve())), "old_sha256": metadata_digest(path),
                         "new_sha256": hashlib.sha256(content).hexdigest(), "new_base64": base64.b64encode(content).decode()})
     atomic_bytes(dataset / JOURNAL, json_bytes({"schema": SCHEMA, "changes": changes}))
     recover_journal(dataset)
@@ -74,12 +97,27 @@ def canonical_dataset(path: Path) -> Path:
         path = path.parent
     if path.name == "sources" and (path.parent / "dataset.json").is_file():
         path = path.parent
+    if path.is_file():
+        raise ValueError("Select a dataset folder or its dataset.json file")
     return path.resolve()
+
+
+def review_records_with_fallback(records, size):
+    """Keep originals that cannot produce the selected grid in the inspector."""
+    from material_native_size import source_review_records
+    reviewed = source_review_records(records, size)
+    represented = {sample.get("source_record_sample_id", sample["sample_id"])
+                   for _entry, _path, sample in reviewed}
+    return reviewed + [record for record in records if record[2]["sample_id"] not in represented]
 
 
 def read_dataset(dataset: Path) -> tuple[dict, list[tuple[dict, Path, dict]]]:
     dataset = dataset.resolve()
+    if not (dataset / "dataset.json").is_file():
+        raise ValueError("This folder does not contain a material dataset. Create a dataset or import material maps into one.")
     index = json.loads((dataset / "dataset.json").read_text())
+    if index.get("schema_version") != 2 or not isinstance(index.get("samples"), list):
+        raise ValueError("Expected a prepared schema-2 material dataset")
     from material_native_size import ensure_source_index
     index = ensure_source_index(dataset, index)
     if index.get("schema_version") != 2 or not isinstance(index.get("samples"), list):
@@ -107,10 +145,10 @@ def recover_journal(dataset: Path) -> None:
     pending = []
     for change in changes["changes"]:
         path = checked_relative(dataset, change["path"])
-        if path.name not in ("sample.json", "dataset.json"):
+        if path.name not in ("sample.json", "dataset.json", ".material-size-reviews.json"):
             raise ValueError("Curation recovery may only edit dataset/sample JSON")
         content = base64.b64decode(change["new_base64"], validate=True)
-        if hashlib.sha256(content).hexdigest() != change["new_sha256"] or digest(path) not in (change["old_sha256"], change["new_sha256"]):
+        if hashlib.sha256(content).hexdigest() != change["new_sha256"] or metadata_digest(path) not in (change["old_sha256"], change["new_sha256"]):
             raise ValueError("Curation recovery identity changed; original data remains untouched")
         pending.append((path, content))
     for path, content in pending:
@@ -122,6 +160,8 @@ def recover_journal(dataset: Path) -> None:
 @contextlib.contextmanager
 def dataset_lock(dataset: Path):
     dataset = dataset.resolve()
+    if not dataset.is_dir():
+        raise ValueError("The dataset folder is missing. Create a dataset or choose an existing dataset folder.")
     with (dataset / ".material-workbench.lock").open("a+b") as stream:
         fcntl.flock(stream, fcntl.LOCK_EX)
         recover_journal(dataset)
@@ -137,16 +177,18 @@ def training_active(dataset: Path) -> bool:
         if len(fields) != 2 or int(fields[0]) == os.getpid():
             continue
         command = fields[1]
-        if not any(name in command for name in ("material_model_workbench.py", "train_material_pbrnxt.py")):
+        if not any(name in command for name in ("material_model_workbench.py", "train_material_pbrnxt.py", "material_workbench.py")):
             continue
         try:
             tokens = shlex.split(command)
         except ValueError:
             return True
+        if "material_workbench.py" in command and "prepare-size" not in tokens:
+            continue
         for i, token in enumerate(tokens):
             selected = tokens[i + 1] if token == "--dataset" and i + 1 < len(tokens) else token.partition("=")[2] if token.startswith("--dataset=") else None
             if selected:
-                selected_path = Path(selected).resolve()
+                selected_path = canonical_dataset(Path(selected))
                 if selected_path == dataset.resolve() or (selected_path.parent.name == ".training-data" and selected_path.parent.parent == dataset.resolve()):
                     return True
     return False
@@ -154,22 +196,25 @@ def training_active(dataset: Path) -> bool:
 
 def dataset_info(args) -> dict:
     from material_dataset import png_image_header, resolve_map_path
-    from material_native_size import SUPPORTED_SIZES, recover_original, source_review_records
+    from material_native_size import SUPPORTED_SIZES, current_review, recover_original
     args.dataset = canonical_dataset(args.dataset)
     with dataset_lock(args.dataset):
         index, records = read_dataset(args.dataset)
         original_dataset = Path(index.get("native_size_preparation", {}).get("source_dataset_path", str(args.dataset)))
+        metadata = index
+        if index.get("native_size_preparation") and (original_dataset / "dataset.json").is_file():
+            metadata = json.loads((original_dataset / "dataset.json").read_text())
         review_size = getattr(args, "review_size", None)
         reviews_path = args.dataset / ".material-size-reviews.json"
         reviews = json.loads(reviews_path.read_text()) if review_size and reviews_path.is_file() else {}
         original_records = records
         if review_size and not index.get("native_size_preparation"):
-            records = source_review_records(records, review_size)
+            records = review_records_with_fallback(records, review_size)
         materials = {}
         for _item, path, sample in records:
             if review_size and not index.get("native_size_preparation"):
                 sample = dict(sample)
-                sample.update(reviews.get(f"{review_size}:{sample['sample_id']}", {}))
+                sample.update(current_review(reviews, f"{review_size}:{sample['sample_id']}", sample))
             maps = {}
             for role, filename in sample.get("maps", {}).items():
                 details = sample.get("map_metadata", {}).get(role, {})
@@ -232,9 +277,10 @@ def dataset_info(args) -> dict:
                     **actual})
             width, height = sample.get("sample_pixel_dimensions", [None, None])
             material = materials.setdefault(sample["material_id"], {"material_id": sample["material_id"],
+                "name": sample.get("name", sample["material_id"].replace("_", " ")),
                 "asset_family_id": sample.get("asset_family_id", sample.get("source_family_id", sample["material_id"])),
                 "source_set_id": sample.get("source_set_id"), "samples": []})
-            material["samples"].append({"sample_id": sample["sample_id"], "status": sample["status"], "split": sample["split"], "width": width, "height": height, "maps": maps, "crop_rectangle": sample.get("crop_rectangle_top_left_xywh"), "note": sample.get("curation_note"), "metadata_path": str(path), "input_variant_count": len(input_variants) or 1, "input_variants": input_variants,
+            material["samples"].append({"sample_id": sample["sample_id"], "status": sample["status"], "split": sample["split"], "split_assignment": sample.get("split_assignment"), "width": width, "height": height, "maps": maps, "crop_rectangle": sample.get("crop_rectangle_top_left_xywh"), "note": sample.get("curation_note"), "metadata_path": str(path), "input_variant_count": len(input_variants) or 1, "input_variants": input_variants,
                 "asset_family_id": sample.get("asset_family_id", sample.get("source_family_id", sample["material_id"])),
                 "source_family_id": sample.get("source_family_id", sample.get("asset_family_id", sample["material_id"])),
                 "source_set_id": sample.get("source_set_id"), "source_region_id": sample.get("source_region_id"),
@@ -250,6 +296,11 @@ def dataset_info(args) -> dict:
                     eligible_sizes.append(size)
                     break
         return {"dataset_path": str(args.dataset.resolve()), "index_sha256": digest(args.dataset / "dataset.json"),
+            "name": metadata.get("name", original_dataset.name), "description": metadata.get("description", ""),
+            "dataset_id": metadata.get("dataset_id"), "created_utc": metadata.get("created_utc"),
+            "updated_utc": metadata.get("updated_utc"), "dataset_management": metadata.get("dataset_management"),
+            "original_dataset_path": str(original_dataset.resolve()), "review_sha256": review_digest(original_dataset),
+            "material_count": len(materials), "sample_count": len(records),
             "supported_training_sizes": eligible_sizes,
             "split_strategy": index.get("split_strategy"), "validation_scope": index.get("validation_scope"),
             "cross_size_validation_notice": index.get("native_size_preparation", {}).get("cross_size_validation_notice"),
@@ -274,8 +325,7 @@ def remove_missing(args) -> dict:
         if args.expected_index_sha256 and digest(dataset / "dataset.json") != args.expected_index_sha256:
             raise ValueError("Dataset changed since selection; reload it before removing a missing source")
         if getattr(args, "review_size", None) and not index.get("native_size_preparation"):
-            from material_native_size import source_review_records
-            records = source_review_records(records, args.review_size)
+            records = review_records_with_fallback(records, args.review_size)
         selected = next(((entry, path, record) for entry, path, record in records if record["sample_id"] == args.sample), None)
         if selected is None:
             return {"dataset_path": str(dataset), "sample_id": args.sample, "removed": False}
@@ -368,6 +418,9 @@ def prepare_size(args) -> dict:
         current_lineage = supplied_index.get("native_size_preparation", {})
         if current_lineage != lineage:
             raise ValueError("Native dataset lineage changed; reload it before preparing crops")
+        expected_review = getattr(args, "expected_review_sha256", None)
+        if expected_review and review_digest(original) != expected_review:
+            raise ValueError("Dataset reviews changed since selection; reload it before preparing crops")
         options = dict(automatic_validation=getattr(args, "automatic_validation", False),
                        validation_material=getattr(args, "material", None), target=getattr(args, "target", "height"))
         if original == supplied:
@@ -386,33 +439,73 @@ def curate(args) -> dict:
         raise ValueError("Stop active material training before editing its dataset")
     with dataset_lock(args.dataset):
         index, records = read_dataset(args.dataset)
+        original_records = records
         index_path = args.dataset / "dataset.json"
         previous = digest(index_path)
         if args.expected_index_sha256 and previous != args.expected_index_sha256:
             raise ValueError("Dataset changed since selection; reload it before curation")
+        expected_review = getattr(args, "expected_review_sha256", None)
+        review_dataset = Path(index.get("native_size_preparation", {}).get("source_dataset_path", str(args.dataset)))
+        if expected_review and review_digest(review_dataset) != expected_review:
+            raise ValueError("Dataset reviews changed since selection; reload it before curation")
         review_size = getattr(args, "review_size", None)
         if review_size and not index.get("native_size_preparation"):
-            from material_native_size import source_review_records
-            records = source_review_records(records, review_size)
+            records = review_records_with_fallback(records, review_size)
         matches = [(item, path, sample) for item, path, sample in records if sample["sample_id"] == args.sample]
         if len(matches) != 1:
             raise ValueError("Select one exact indexed sample ID")
         item, path, sample = matches[0]
+        if index.get("native_size_preparation"):
+            from material_native_size import current_review
+            original_reviews_path = review_dataset / ".material-size-reviews.json"
+            original_reviews = json.loads(original_reviews_path.read_text()) if original_reviews_path.is_file() else {}
+            for _entry, _path, record in records:
+                record.setdefault("source_review_snapshot", current_review(original_reviews, f"{index['crop_size']}:{record['sample_id']}", record))
         review_size = getattr(args, "review_size", None)
+        fallback_review_key = None
+        if review_size and not index.get("native_size_preparation") and "source_record_sample_id" not in sample:
+            # A map below the current grid is shown as its complete original.
+            # Editing it applies to the source, so a later eligible grid keeps
+            # the assignment instead of losing it in an unusable-size sidecar.
+            fallback_review_key = f"{review_size}:{sample['sample_id']}"
+            records = original_records
+            item, path, sample = next(record for record in records if record[2]["sample_id"] == sample["sample_id"])
+            review_size = None
         if review_size and not index.get("native_size_preparation"):
+            from material_native_size import current_review, source_binding
             reviews_path = args.dataset / ".material-size-reviews.json"
             reviews = json.loads(reviews_path.read_text()) if reviews_path.is_file() else {}
             key = f"{review_size}:{sample['sample_id']}"
-            review = dict(reviews.get(key, {}))
+            review = dict(current_review(reviews, key, sample))
             review.update(status=args.status, review_status={"approved": "user_approved", "excluded": "user_excluded", "unreviewed": "unreviewed"}[args.status],
                           split=args.split or review.get("split", sample["split"]))
+            review["source_binding_sha256"] = source_binding(sample)
+            if args.split:
+                review["split_assignment"] = "manual"
             if args.note is not None:
                 review["curation_note"] = args.note
             reviews[key] = review
+            if args.split:
+                family = sample.get("asset_family_id", sample.get("source_family_id", sample["material_id"]))
+                siblings = [record for _entry, _path, record in records
+                    if record.get("asset_family_id", record.get("source_family_id", record["material_id"])) == family]
+                source_sets = {record.get("source_set_id", record["material_id"]) for record in siblings}
+                if len(source_sets) > 1:
+                    for sibling in siblings:
+                        sibling_key = f"{review_size}:{sibling['sample_id']}"
+                        sibling_review = dict(current_review(reviews, sibling_key, sibling))
+                        sibling_review.update(split=args.split, split_assignment="manual", source_binding_sha256=source_binding(sibling))
+                        reviews[sibling_key] = sibling_review
+                from material_dataset import rectangles_overlap
+                training = [record for record in siblings if current_review(reviews, f"{review_size}:{record['sample_id']}", record).get("split", record["split"]) == "train"]
+                checks = [record for record in siblings if current_review(reviews, f"{review_size}:{record['sample_id']}", record).get("split", record["split"]) == "validation"]
+                if any(rectangles_overlap(check["crop_rectangle_top_left_xywh"], train["crop_rectangle_top_left_xywh"])
+                       for check in checks for train in training):
+                    raise ValueError("Validation cannot overlap training pixels from the same source family")
             atomic_bytes(reviews_path, json_bytes(reviews))
             return {"dataset_path": str(args.dataset), "sample_id": args.sample, "status": args.status,
                     "split": review["split"], "review_size": review_size, "index_sha256": previous,
-                    "metadata_sha256": digest(reviews_path), "source_bytes_modified": False}
+                    "metadata_sha256": digest(reviews_path), "review_sha256": review_digest(args.dataset), "source_bytes_modified": False}
         sample["status"] = item["status"] = args.status
         changed_records = [(item, path, sample)]
         if args.split:
@@ -425,7 +518,8 @@ def curate(args) -> dict:
             changed_records = siblings if len(source_sets) > 1 or not index.get("native_size_preparation") else [(item, path, sample)]
             for sibling_entry, _sibling_path, sibling in changed_records:
                 sibling["split"] = sibling_entry["split"] = args.split
-            from material_pbrnxt_data import rectangles_overlap
+                sibling["split_assignment"] = "manual"
+            from material_dataset import rectangles_overlap
             training = [record for _entry, _path, record in siblings if record["split"] == "train"]
             checks = [record for _entry, _path, record in siblings if record["split"] == "validation"]
             if any(rectangles_overlap(check["crop_rectangle_top_left_xywh"], train["crop_rectangle_top_left_xywh"])
@@ -435,18 +529,406 @@ def curate(args) -> dict:
             sample["curation_note"] = args.note
         sample["review_status"] = {"approved": "user_approved", "excluded": "user_excluded", "unreviewed": "unreviewed"}[args.status]
         metadata_changes = [(changed_path, changed_sample) for _entry, changed_path, changed_sample in changed_records]
+        reviews_path = args.dataset / ".material-size-reviews.json"
+        if fallback_review_key and reviews_path.is_file():
+            reviews = json.loads(reviews_path.read_text())
+            if fallback_review_key in reviews:
+                reviews.pop(fallback_review_key)
+                metadata_changes.append((reviews_path, reviews))
         commit_metadata(args.dataset, [*metadata_changes, (index_path, index)])
         return {"dataset_path": str(args.dataset.resolve()), "sample_id": args.sample, "status": args.status, "split": sample["split"], "index_sha256": digest(index_path), "previous_index_sha256": previous, "metadata_sha256": digest(path), "source_bytes_modified": False}
+
+
+def checked_name(value: str) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value.strip()) > 200 or any(ord(c) < 32 for c in value):
+        raise ValueError("Enter a name with 1–200 characters and no control characters")
+    return value.strip()
+
+
+def checked_description(value: str | None) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str) or "\0" in value or len(value) > 100000:
+        raise ValueError("Dataset description must be text without null characters")
+    return value
+
+
+def check_index(dataset: Path, args) -> None:
+    expected = getattr(args, "expected_index_sha256", None)
+    if expected and metadata_digest(dataset / "dataset.json") != expected:
+        raise ValueError("Dataset changed since selection; reload it before editing")
+
+
+def editable_index(dataset: Path, args) -> tuple[dict, list]:
+    check_index(dataset, args)
+    index, records = read_dataset(dataset)
+    check_index(dataset, args)
+    if index.get("native_size_preparation"):
+        raise ValueError("Open the original dataset to manage its information and materials")
+    return index, records
+
+
+def check_idle(dataset: Path) -> None:
+    if training_active(dataset):
+        raise ValueError("Stop active material training or preparation before editing its dataset")
+
+
+def refreshed(dataset: Path, *, review_size=None, **details) -> dict:
+    return dict(dataset_info(argparse.Namespace(dataset=dataset, review_size=review_size)), source_bytes_modified=False,
+                source_images_modified=False, **details)
+
+
+def create_dataset(args) -> dict:
+    """Create a small owned metadata directory without creating image copies."""
+    name = checked_name(args.name)
+    description = checked_description(getattr(args, "description", ""))
+    dataset = args.dataset.expanduser().absolute()
+    if dataset.is_symlink() or dataset.name in ("dataset.json", "sources", ".training-data"):
+        raise ValueError("Choose a new dataset folder, not an existing metadata or source folder")
+    dataset.parent.mkdir(parents=True, exist_ok=True)
+    created = False
+    try:
+        dataset.mkdir()
+        created = True
+    except FileExistsError:
+        if not dataset.is_dir() or any(dataset.iterdir()):
+            raise ValueError("That folder already contains files. Choose a new or empty dataset folder.")
+    try:
+        with dataset_lock(dataset):
+            # Another creator may have acquired the same directory lock first.
+            if any(path.name != ".material-workbench.lock" for path in dataset.iterdir()):
+                raise ValueError("That folder already contains files. Choose a new or empty dataset folder.")
+            now = timestamp()
+            from material_dataset import GENERATOR
+            from material_native_size import SOURCE_STORAGE
+            index = {"schema_version": 2, "generator": GENERATOR, "dataset_id": str(uuid.uuid4()),
+                "name": name, "description": description, "created_utc": now, "updated_utc": now,
+                "dataset_management": {"schema": MANAGEMENT_SCHEMA, "owns_directory": True},
+                "storage_policy": SOURCE_STORAGE, "source_images_modified": False,
+                "original_sources_required_for_training": True, "split_strategy": "whole-material-v1",
+                "validation_scope": "held_out_materials", "samples": []}
+            atomic_bytes(dataset / "dataset.json", json_bytes(index))
+    except BaseException:
+        if created and not (dataset / "dataset.json").exists():
+            # Only our empty scaffolding can be removed after a creation failure.
+            remaining = list(dataset.iterdir())
+            if all(path.name == ".material-workbench.lock" for path in remaining):
+                for path in remaining:
+                    path.unlink()
+                dataset.rmdir()
+        raise
+    return refreshed(dataset, created=True)
+
+
+def edit_dataset(args) -> dict:
+    dataset = canonical_dataset(args.dataset)
+    check_idle(dataset)
+    with dataset_lock(dataset):
+        index, _records = editable_index(dataset, args)
+        if getattr(args, "name", None) is not None:
+            index["name"] = checked_name(args.name)
+        if getattr(args, "description", None) is not None:
+            index["description"] = checked_description(args.description)
+        index["updated_utc"] = timestamp()
+        commit_metadata(dataset, [(dataset / "dataset.json", index)])
+    return refreshed(dataset, review_size=getattr(args, "review_size", None))
+
+
+def material_identifier(name: str) -> str:
+    from material_dataset import slugify
+    try:
+        return slugify(name)
+    except ValueError:
+        # Keep Unicode display names usable while retaining canonical path IDs.
+        return "material_" + hashlib.sha256(name.encode()).hexdigest()[:16]
+
+
+def source_material(name: str, paths: dict[str, Path], normal_convention="opengl") -> dict:
+    from material_dataset import source_summary
+    name = checked_name(name)
+    if "input" not in paths or not any(role in paths for role in ("height", "normal", "roughness")):
+        raise ValueError("Choose a color/input map and at least one height, normal, or roughness map")
+    family = material_identifier(name)
+    maps = {}
+    for role, path in paths.items():
+        path = path.expanduser().resolve()
+        if not path.is_file():
+            raise ValueError(f"The {role} source map is missing: {path}")
+        source = source_summary(path)
+        if role == "input" and source["channels"] not in (3, 4):
+            raise ValueError("Color/input maps must contain native RGB or RGBA channels")
+        if role == "normal" and source["channels"] not in (3, 4):
+            raise ValueError("Normal maps must contain native RGB or RGBA channels")
+        suffix = {"input": "diff", "height": "disp", "roughness": "rough", "normal": "nor_dx" if normal_convention == "directx" else "nor_gl"}[role]
+        maps[role] = dict(source, path=str(path), suffix=suffix, source_family_id=family, asset_family_id=family)
+    dimensions = {(source["width"], source["height"]) for source in maps.values()}
+    if len(dimensions) != 1:
+        raise ValueError("All maps in a material must have exactly the same native dimensions; no resizing is applied")
+    width, height = next(iter(dimensions))
+    resolution = f"{width // 1024}k" if width == height and width >= 1024 and width % 1024 == 0 else f"{width}x{height}"
+    for source in maps.values():
+        source["resolution_label"] = resolution
+    maps["input"]["variant_id"] = "color_default"
+    return {"name": name, "material_id": f"{family}_{resolution}", "source_family_id": family,
+        "source_set_id": f"{family}_{width}x{height}", "source_directory": str(Path(maps["input"]["path"]).parent),
+        "common_pixel_dimensions": [width, height], "resolution_label": resolution, "maps": maps,
+        "input_variants": [maps["input"]], "source_files": list(maps.values()), "warnings": [], "ignored_files": [], "problems": []}
+
+
+def source_record(material: dict) -> dict:
+    from material_dataset import GENERATOR, describe_encoding
+    width, height = material["common_pixel_dimensions"]
+    sources = [*material["maps"].values(), *material["input_variants"]]
+    if any((source.get("width"), source.get("height")) != (width, height) for source in sources):
+        raise ValueError("All maps and color variants must have exactly the same native dimensions; no resizing is applied")
+    sample = {"schema_version": 2, "generator": GENERATOR, "sample_id": material["material_id"] + "_full",
+        "name": material.get("name", material["source_family_id"]), "material_id": material["material_id"],
+        "asset_family_id": material["source_family_id"], "source_family_id": material["source_family_id"],
+        "source_set_id": material["source_set_id"], "source_directory": material["source_directory"],
+        "source_resolution_label": material["resolution_label"], "sample_pixel_dimensions": [width, height],
+        "source_pixel_dimensions": [width, height], "crop_rectangle_top_left_xywh": [0, 0, width, height],
+        "status": "unreviewed", "split": "train", "review_status": "unreviewed", "maps": {},
+        "map_metadata": {}, "input_variants": [], "source_precision_verified": True, "crop_values_verified": True,
+        "source_files": material.get("source_files", list(material["maps"].values())),
+        "source_discovery_warnings": material.get("warnings", []), "ignored_source_files": material.get("ignored_files", [])}
+    for role, source in material["maps"].items():
+        sample["maps"][role] = source["path"]
+        sample["map_metadata"][role] = {"source": source, "storage": "source_reference", "filename": source["path"],
+            "sample_sha256": source["file_sha256"], "sample_bits": source["sample_bits"], "channels": source["channels"],
+            "encoding": describe_encoding(role, source), "transforms": [], "exact_source_crop": True}
+    for source in material["input_variants"]:
+        sample["input_variants"].append(dict(sample["map_metadata"]["input"], source=source,
+            filename=source["path"], path=source["path"], sample_sha256=source["file_sha256"],
+            sample_bits=source["sample_bits"], channels=source["channels"], variant_id=source["variant_id"],
+            source_pixel_dimensions=[width, height], crop_rectangle_top_left_xywh=[0, 0, width, height]))
+    sample["available_targets"] = [role for role in ("height", "roughness", "normal") if role in sample["maps"]
+                                  and (role != "height" or sample["map_metadata"][role]["sample_bits"] >= 16)]
+    return sample
+
+
+def source_set_identity(record: dict) -> tuple:
+    """Use file bindings, so aliases cannot register originals twice by name."""
+    def binding(source):
+        return str(Path(source.get("path", "")).resolve()), source.get("file_sha256")
+    colors = {binding(record["map_metadata"]["input"].get("source", {}))} if "input" in record["map_metadata"] else set()
+    colors.update(binding(variant.get("source", {})) for variant in record.get("input_variants", []))
+    return (tuple(sorted((role, *binding(details.get("source", {})))
+                         for role, details in record["map_metadata"].items())),
+            tuple(sorted(colors)))
+
+
+def register_materials(dataset: Path, args, materials: list[dict]) -> dict:
+    """Publish references to originals as one recoverable metadata transaction."""
+    if not materials:
+        raise ValueError("No material maps found. Choose a folder containing paired color and height, normal, or roughness PNG maps.")
+    check_idle(dataset)
+    with dataset_lock(dataset):
+        index, records = editable_index(dataset, args)
+        current = {sample["material_id"]: sample for _item, _path, sample in records}
+        existing_sources = {source_set_identity(sample) for sample in current.values()}
+        pending, duplicates = {}, 0
+        for material in materials:
+            if material.get("problems"):
+                raise ValueError(f"Choose one source map per role for {material['material_id']}: {'; '.join(material['problems'])}")
+            sample = source_record(material)
+            source_identity = source_set_identity(sample)
+            if source_identity in existing_sources:
+                duplicates += 1
+                continue
+            prior = current.get(sample["material_id"]) or pending.get(sample["material_id"])
+            if prior:
+                raise ValueError(f"A different material named {sample['name']} already exists at this size. Choose another material name.")
+            pending[sample["material_id"]] = sample
+            existing_sources.add(source_identity)
+        updates = []
+        from material_native_size import CURATION_FIELDS, source_binding
+        reviews_path = dataset / ".material-size-reviews.json"
+        reviews = json.loads(reviews_path.read_text()) if reviews_path.is_file() else {}
+        previous_reviews = dict(reviews)
+        for sample in pending.values():
+            folder = checked_relative(dataset, "samples/" + sample["sample_id"])
+            prior_path = folder / "sample.json"
+            previous_sample = json.loads(prior_path.read_text()) if prior_path.is_file() else None
+            if previous_sample and source_binding(previous_sample) == source_binding(sample):
+                # Restoring exact originals can restore their scientific review.
+                sample.update({key: previous_sample[key] for key in CURATION_FIELDS if key in previous_sample})
+            else:
+                # A reused name is not proof that the pixels were reviewed.
+                prefix = sample["material_id"] + "_"
+                reviews = {key: value for key, value in reviews.items() if not key.partition(":")[2].startswith(prefix)}
+            folder.mkdir(parents=True, exist_ok=True)
+            updates.append((folder / "sample.json", sample))
+            index["samples"].append({key: sample[key] for key in ("sample_id", "material_id", "status", "split")} | {"path": "samples/" + sample["sample_id"]})
+        if pending:
+            # Explicitly importing a removed set restores its membership.
+            index["removed_materials"] = [item for item in index.get("removed_materials", [])
+                                         if item.get("material_id") not in pending]
+            index["updated_utc"] = timestamp()
+            if reviews != previous_reviews:
+                updates.append((reviews_path, reviews))
+            commit_metadata(dataset, [*updates, (dataset / "dataset.json", index)])
+    return refreshed(dataset, review_size=getattr(args, "review_size", None), added_material_count=len(pending), duplicate_material_count=duplicates)
+
+
+def add_material(args) -> dict:
+    dataset = canonical_dataset(args.dataset)
+    paths = {role: getattr(args, role) for role in ("input", "height", "roughness", "normal") if getattr(args, role, None) is not None}
+    return register_materials(dataset, args, [source_material(args.name, paths, getattr(args, "normal_convention", "opengl"))])
+
+
+def import_folder(args) -> dict:
+    from material_dataset import discover_source_sets, parse_source_filename, source_summary
+    folder = args.folder.expanduser().resolve()
+    if not folder.is_dir():
+        raise ValueError("Choose an existing folder of material maps")
+    dataset = canonical_dataset(args.dataset)
+    check_idle(dataset)
+    materials = []
+    if (folder / "dataset.json").is_file():
+        if folder == dataset:
+            raise ValueError("This dataset is already open. Choose a different folder to import.")
+        with dataset_lock(folder):
+            _index, records = read_dataset(folder)
+            for _entry, _path, sample in records:
+                maps = {}
+                for role, details in sample["map_metadata"].items():
+                    if role not in ("input", "height", "normal", "roughness"):
+                        continue
+                    source = dict(details["source"])
+                    path = Path(source["path"])
+                    actual = source_summary(path)
+                    if actual["file_sha256"] != source["file_sha256"]:
+                        raise ValueError("An imported original source changed since it was registered")
+                    maps[role] = {**source, **actual}
+                variants = []
+                for details in sample.get("input_variants", []):
+                    source = dict(details["source"])
+                    actual = source_summary(Path(source["path"]))
+                    if actual["file_sha256"] != source["file_sha256"]:
+                        raise ValueError("An imported color source changed since it was registered")
+                    variants.append({**source, **actual, "variant_id": details["variant_id"]})
+                if not variants:
+                    variants = [dict(maps["input"], variant_id="color_default")]
+                materials.append({"name": sample.get("name", sample["material_id"]), "material_id": sample["material_id"],
+                    "source_family_id": sample.get("source_family_id", sample["material_id"]),
+                    "source_set_id": sample.get("source_set_id", sample["material_id"]),
+                    "source_directory": str(Path(maps["input"]["path"]).parent),
+                    "common_pixel_dimensions": [maps["input"]["width"], maps["input"]["height"]],
+                    "resolution_label": sample.get("source_resolution_label", "native"), "maps": maps, "input_variants": variants})
+    else:
+        # Accept the asset folder itself, a provider's sources root, or an
+        # enclosing download folder. Only recognized paired map sets register.
+        directories = sorted({path.parent for path in folder.rglob("*") if path.is_file() and path.suffix.casefold() == ".png"}, key=str)
+        provider_directories = [path for path in directories if any(parse_source_filename(item.name) for item in path.iterdir() if item.is_file())]
+        materials.extend(material for material in discover_source_sets(folder, source_directories=provider_directories)
+                         if "input" in material["maps"] and any(role in material["maps"] for role in ("height", "normal", "roughness")))
+        aliases = {"input": ("input", "color", "colour", "albedo", "basecolor", "base_color", "diffuse"),
+                   "height": ("height", "displacement", "disp"), "roughness": ("roughness", "rough"),
+                   "normal": ("normal", "normalgl", "normal_gl", "normaldx", "normal_dx")}
+        for directory in directories:
+            if directory in provider_directories:
+                continue
+            maps, convention = {}, "opengl"
+            for path in directory.iterdir():
+                if not path.is_file() or path.suffix.casefold() != ".png":
+                    continue
+                role = next((role for role, names in aliases.items() if path.stem.casefold() in names), None)
+                if role:
+                    if role in maps:
+                        raise ValueError(f"Multiple {role} maps in {directory}; add this material and choose its maps explicitly")
+                    maps[role] = path
+                    if role == "normal" and path.stem.casefold() in ("normaldx", "normal_dx"):
+                        convention = "directx"
+            if "input" in maps and any(role in maps for role in ("height", "roughness", "normal")):
+                materials.append(source_material(directory.name, maps, convention))
+    return register_materials(dataset, args, materials)
+
+
+def remove_material(args) -> dict:
+    dataset = canonical_dataset(args.dataset)
+    check_idle(dataset)
+    with dataset_lock(dataset):
+        index, records = editable_index(dataset, args)
+        selected = [sample for _entry, _path, sample in records if sample["material_id"] == args.material]
+        if not selected:
+            raise ValueError("Select a material in the open dataset before removing it")
+        index["samples"] = [item for item in index["samples"] if item["material_id"] != args.material]
+        tombstones = index.setdefault("removed_materials", [])
+        for sample in selected:
+            removed = {"material_id": sample["material_id"], "source_set_id": sample.get("source_set_id")}
+            if removed not in tombstones:
+                tombstones.append(removed)
+        index["updated_utc"] = timestamp()
+        commit_metadata(dataset, [(dataset / "dataset.json", index)])
+    return refreshed(dataset, review_size=getattr(args, "review_size", None), removed_material_id=args.material, removed_sample_count=len(selected))
+
+
+def validate_delete(args) -> dict:
+    """Give the UI a conservative, original-preserving macOS Trash scope."""
+    dataset = canonical_dataset(args.dataset)
+    protected = {Path("/").resolve(), Path.home().resolve(), ROOT.resolve(), ROOT.parent.resolve()}
+    if dataset in protected or dataset.is_relative_to(ROOT / "scripts") or dataset.is_relative_to(ROOT / "src"):
+        raise ValueError("This is a protected workspace folder, not a removable dataset")
+    check_idle(dataset)
+    with dataset_lock(dataset):
+        index, records = editable_index(dataset, args)
+        for stage in (dataset / ".training-data").glob(".preparing-*"):
+            marker = stage / ".native-crop-preparation.json"
+            if not marker.is_file():
+                continue
+            try:
+                ownership = json.loads(marker.read_text())
+                if ownership.get("source_dataset_path") != str(dataset) or type(ownership.get("pid")) is not int:
+                    continue
+                os.kill(ownership["pid"], 0)
+            except (OSError, ValueError):
+                continue
+            raise ValueError("Finish or cancel active dataset preparation before deleting the dataset")
+        owned = index.get("dataset_management", {})
+        safe = owned.get("schema") == MANAGEMENT_SCHEMA and owned.get("owns_directory") is True
+        for _entry, _metadata, sample in records:
+            for details in [*sample.get("map_metadata", {}).values(), *sample.get("input_variants", [])]:
+                source = details.get("source", {})
+                if not source.get("path") or Path(source["path"]).resolve().is_relative_to(dataset):
+                    safe = False
+        # Ownership markers alone cannot authorize moving unrelated/new files.
+        permitted = {"dataset.json", ".material-workbench.lock", ".material-size-reviews.json", ".DS_Store"}
+        for path in dataset.rglob("*"):
+            relative = path.relative_to(dataset)
+            if path.is_symlink():
+                safe = False
+            if path.is_file() and not (str(relative) in permitted or (len(relative.parts) == 3 and relative.parts[0] == "samples" and relative.parts[-1] == "sample.json")):
+                safe = False
+        return {"dataset_path": str(dataset), "index_sha256": digest(dataset / "dataset.json"),
+            "name": index.get("name", dataset.name), "safe_to_trash_folder": safe,
+            "trash_paths": [str(dataset if safe else dataset / "dataset.json")],
+            "original_sources_preserved": True, "source_bytes_modified": False,
+            "deletion_scope": "owned_dataset_folder" if safe else "dataset_membership_only"}
 
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     commands = p.add_subparsers(dest="command", required=True)
-    for name in ("dataset", "prepare-size", "cleanup-size", "remove-missing", "curate"):
+    for name in ("dataset", "prepare-size", "cleanup-size", "remove-missing", "curate", "create-dataset", "edit-dataset", "add-material", "import-folder", "remove-material", "validate-delete"):
         sub = commands.add_parser(name)
         sub.add_argument("--dataset", type=Path, required=True)
-        if name in ("dataset", "curate", "remove-missing"):
+        if name in ("dataset", "curate", "remove-missing", "create-dataset", "edit-dataset", "add-material", "import-folder", "remove-material"):
             sub.add_argument("--review-size", type=int, choices=(256, 512, 1024, 2048))
+        if name in ("create-dataset", "edit-dataset"):
+            sub.add_argument("--name", required=name == "create-dataset")
+            sub.add_argument("--description", default="" if name == "create-dataset" else None)
+        if name in ("edit-dataset", "add-material", "import-folder", "remove-material", "validate-delete"):
+            sub.add_argument("--expected-index-sha256")
+        if name == "add-material":
+            sub.add_argument("--name", required=True)
+            sub.add_argument("--input", type=Path, required=True)
+            for role in ("height", "normal", "roughness"):
+                sub.add_argument("--" + role, type=Path)
+            sub.add_argument("--normal-convention", choices=("opengl", "directx"), default="opengl")
+        if name == "import-folder":
+            sub.add_argument("--folder", type=Path, required=True)
+        if name == "remove-material":
+            sub.add_argument("--material", required=True)
         if name == "remove-missing":
             sub.add_argument("--sample", required=True)
             sub.add_argument("--path", type=Path, required=True)
@@ -454,6 +936,7 @@ def parser() -> argparse.ArgumentParser:
         if name == "prepare-size":
             sub.add_argument("--size", type=int, choices=(256, 512, 1024, 2048), required=True)
             sub.add_argument("--expected-index-sha256")
+            sub.add_argument("--expected-review-sha256")
             sub.add_argument("--automatic-validation", action="store_true")
             sub.add_argument("--target", choices=("height", "roughness", "normal"), default="height")
             sub.add_argument("--material")
@@ -463,6 +946,7 @@ def parser() -> argparse.ArgumentParser:
             sub.add_argument("--split", choices=("train", "validation"))
             sub.add_argument("--note")
             sub.add_argument("--expected-index-sha256")
+            sub.add_argument("--expected-review-sha256")
     return p
 
 
@@ -471,7 +955,10 @@ def main() -> int:
     try:
         with contextlib.redirect_stdout(sys.stderr):
             result = {"dataset": dataset_info, "prepare-size": prepare_size, "cleanup-size": cleanup_size,
-                      "remove-missing": remove_missing, "curate": curate}[args.command](args)
+                      "remove-missing": remove_missing, "curate": curate,
+                      "create-dataset": create_dataset, "edit-dataset": edit_dataset,
+                      "add-material": add_material, "import-folder": import_folder,
+                      "remove-material": remove_material, "validate-delete": validate_delete}[args.command](args)
         print(json.dumps(dict(result, schema=SCHEMA, protocol_schema=SCHEMA, command=args.command, ok=True), allow_nan=False))
         return 0
     except (OSError, ValueError, TypeError, KeyError, RuntimeError, subprocess.SubprocessError) as error:

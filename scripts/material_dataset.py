@@ -453,7 +453,8 @@ def source_summary(path: Path) -> dict:
     return metadata
 
 
-def discover_source_sets(sources: Path, source_cache: dict[str, dict] | None = None) -> list[dict]:
+def discover_source_sets(sources: Path, source_cache: dict[str, dict] | None = None,
+                         *, source_directories: list[Path] | None = None) -> list[dict]:
     """Discover registered original sets without mixing resolution or color.
 
     Pixel dimensions establish registration; filenames establish the original
@@ -463,7 +464,8 @@ def discover_source_sets(sources: Path, source_cache: dict[str, dict] | None = N
     """
     groups: dict[tuple[Path, str, int, int], dict] = {}
     source_cache = source_cache or {}
-    for folder in sorted((item for item in sources.iterdir() if item.is_dir()), key=lambda p: p.name.casefold()):
+    folders = source_directories if source_directories is not None else [item for item in sources.iterdir() if item.is_dir()]
+    for folder in sorted(folders, key=lambda p: str(p).casefold()):
         manifests = []
         for manifest_path in sorted(folder.glob("material-source*.json")):
             if manifest_path.is_file() and not manifest_path.is_symlink() and manifest_path.stat().st_size <= 16 * 1024**2:

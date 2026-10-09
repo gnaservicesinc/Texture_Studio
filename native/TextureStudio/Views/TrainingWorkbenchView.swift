@@ -10,10 +10,18 @@ struct TrainingWorkbenchView: View {
         HSplitView {
             Form {
                 Section("Training data") {
-                    Button("Open Dataset…") { store.chooseDataset() }.disabled(store.isBusy)
+                    HStack {
+                        Button("Open Dataset…") { store.chooseDataset() }
+                            .help("Choose an existing dataset folder containing your material maps.")
+                        Button("Manage Datasets…") { MaterialToolLauncher.open(.dataset) }
+                            .help("Open Material Dataset to create or rename datasets, edit their info, and add or remove materials.")
+                    }.disabled(store.isBusy)
                     if let dataset = store.dataset {
-                        Text("\(dataset.materials.count) materials · \(dataset.samples.count) maps")
+                        Text("\(dataset.materials.count) materials · \(dataset.samples.count) material sets")
                         Text(store.datasetNativeSizeLabel).font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("Create a dataset in Manage Datasets, add paired material maps, then open its folder here.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     // Avoid Swift 6.3 IRGen's actor-isolated bound-method conversion.
                     Picker("Training dimensions", selection: Binding(get: { store.training.size }, set: { store.selectTrainingSize($0) })) {

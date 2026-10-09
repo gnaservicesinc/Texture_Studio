@@ -29,6 +29,7 @@ struct MaterialToolRootView: View {
             }
         }
         .navigationTitle(role.title)
+        .focusedSceneValue(\.materialDatasetStore, role == .dataset ? store : nil)
         .frame(minWidth: 1050, minHeight: 700)
         .toolbar {
             ToolbarItemGroup {
@@ -54,7 +55,11 @@ struct MaterialToolRootView: View {
             if role == .review && review.groups.isEmpty { review.restore(workspace: store.workspacePath) }
         }
         .onOpenURL { url in
-            if url.lastPathComponent == "dataset.json" { store.openDataset(url) }
+            var isDirectory: ObjCBool = false
+            let directoryExists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
+            let containsDataset = directoryExists && (FileManager.default.fileExists(atPath: url.appendingPathComponent("dataset.json").path)
+                || (url.lastPathComponent == "sources" && FileManager.default.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("dataset.json").path)))
+            if url.lastPathComponent == "dataset.json" || containsDataset || (role == .dataset && directoryExists) { store.openDataset(url) }
             else if url.pathExtension == "json" { review.load(url) }
             else if url.pathExtension == "safetensors" { store.openCheckpoint(url) }
             else { review.groups = [MaterialReviewGroup(id: url.lastPathComponent, candidates: [MapReviewCandidate(id: url.path, label: url.lastPathComponent, mapURL: url, numeric: true)])]; review.selectedGroupId = url.lastPathComponent }

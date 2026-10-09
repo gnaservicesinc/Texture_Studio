@@ -24,9 +24,27 @@ PREPARATION_SCHEMA = "texture-studio-native-crops-v1"
 SOURCE_STORAGE = "original-source-references-v1"
 STAGING_ROOT = ".training-data"
 PREPARING_MARKER = ".native-crop-preparation.json"
-CURATION_FIELDS = ("status", "split", "review_status", "curation_note")
+CURATION_FIELDS = ("status", "split", "split_assignment", "review_status", "curation_note", "source_binding_sha256")
 NOTICE = "Checks group source families; disjoint 8K regions measure known-material quality, not unseen-material generalization."
 SUPPORTED_SIZES = (256, 512, 1024, 2048)
+
+
+def source_binding(sample: dict) -> str:
+    """Bind reviews to original map bytes, independently of crop size/path."""
+    identities = {"maps": {role: details.get("source", {}).get("file_sha256")
+                           for role, details in sample.get("map_metadata", {}).items()},
+                  "colors": sorted({details.get("source", {}).get("file_sha256", "")
+                                    for details in sample.get("input_variants", [])})}
+    return hashlib.sha256(json.dumps(identities, sort_keys=True).encode()).hexdigest()
+
+
+def current_review(reviews: dict, key: str, sample: dict) -> dict:
+    review = reviews.get(key, {})
+    return review if not review.get("source_binding_sha256") or review["source_binding_sha256"] == source_binding(sample) else {}
+
+
+def saved_review(sample: dict) -> dict:
+    return {key: sample.get(key) for key in CURATION_FIELDS} | {"source_binding_sha256": source_binding(sample)}
 
 
 class NativePreparationError(ValueError):
@@ -120,6 +138,10 @@ def ensure_source_index(dataset: Path, index: dict) -> dict:
     originals = [material for material in originals if not any(
         set_id == material["source_set_id"] or material_id == material["material_id"]
         for set_id, material_id in suppressed)]
+    removed_materials = index.get("removed_materials", [])
+    originals = [material for material in originals if not any(
+        item.get("material_id") == material["material_id"] or (item.get("source_set_id")
+            and item["source_set_id"] == material["source_set_id"]) for item in removed_materials)]
     color_tombstones = index.get("removed_missing_color_variants", [])
     for material in originals:
         material["input_variants"] = [variant for variant in material["input_variants"]
@@ -229,12 +251,12 @@ def ensure_source_index(dataset: Path, index: dict) -> dict:
                 # explicit missing-source action removes their bound entry.
                 records.append(record)
     if not records:
-        if tombstones:
+        if tombstones or removed_materials or not index.get("samples"):
             return index
         raise ValueError("No original registered material maps remain in the source folder")
     prior_order = {entry["sample_id"]: number for number, entry in enumerate(index.get("samples", []))}
     records.sort(key=lambda record: (prior_order.get(record["sample_id"], len(prior_order)), record["sample_id"]))
-    rebuilt = {"schema_version": 2, "generator": GENERATOR, "storage_policy": SOURCE_STORAGE,
+    rebuilt = {**index, "schema_version": 2, "generator": GENERATOR, "storage_policy": SOURCE_STORAGE,
                "source_discovery": "registered-resolution-and-color-sets-v2", "source_inventory_sha256": inventory,
                "source_directory": str(sources.resolve()), "source_images_modified": False,
                "original_sources_required_for_training": True, "split_strategy": "whole-material-v1",
@@ -444,13 +466,17 @@ def prepare_from_records(dataset: Path, records: list[tuple[dict, Path, dict]], 
     reviews = json.loads(review_path.read_text()) if review_path.is_file() else {}
     for _entry, _path, sample in review_records or []:
         previous_size = sample.get("sample_pixel_dimensions", [size])[0]
-        reviews[_review_key(previous_size, sample)] = {k: sample.get(k) for k in CURATION_FIELDS}
+        key = _review_key(previous_size, sample)
+        current = current_review(reviews, key, sample)
+        if (("source_review_snapshot" not in sample and not current)
+                or ("source_review_snapshot" in sample and current == sample["source_review_snapshot"])):
+            reviews[key] = saved_review(sample)
     if validation_material and validation_material not in materials:
         raise ValueError("Selected training material is absent from the source dataset")
     eligible_regions = {}
     for material_id, material in materials.items():
         eligible_regions[material_id] = [region for region, _rectangle in crop_layout(*material["dimensions"], size)
-            if reviews.get(f"{size}:{material_id}_{region}", {}).get("status", material["sample"]["status"])
+            if current_review(reviews, f"{size}:{material_id}_{region}", material["sample"]).get("status", material["sample"]["status"])
             not in ("excluded", "rejected")]
     target_eligible = {material_id for material_id, material in materials.items()
         if target in material["maps"] and (target != "height" or material["maps"][target]["source"]["sample_bits"] == 16)
@@ -461,6 +487,26 @@ def prepare_from_records(dataset: Path, records: list[tuple[dict, Path, dict]], 
     families = {}
     for material_id in included:
         families.setdefault(materials[material_id]["family"], []).append(material_id)
+    source_sets_by_family = {}
+    for _entry, _path, record in records:
+        family = record.get("asset_family_id", record.get("source_family_id", record["material_id"]))
+        source_sets_by_family.setdefault(family, set()).add(record.get("source_set_id", record["material_id"]))
+    manual_family_splits = {}
+    for material_id, material in materials.items():
+        family = material["family"]
+        if len(source_sets_by_family.get(family, [])) < 2:
+            continue
+        decisions = [current_review(reviews, f"{size}:{material_id}_{region}", material["sample"])
+                     for region, _rectangle in crop_layout(*material["dimensions"], size)]
+        decisions.append(material["sample"])
+        explicit = {review["split"] for review in decisions if review.get("split_assignment") == "manual"}
+        if len(explicit) > 1:
+            raise ValueError("Resolution/color siblings in a source family must share one manual training/validation assignment")
+        if explicit:
+            chosen = explicit.pop()
+            if family in manual_family_splits and manual_family_splits[family] != chosen:
+                raise ValueError("Resolution/color siblings in a source family must share one manual training/validation assignment")
+            manual_family_splits[family] = chosen
     check_families = set()
     if automatic_validation:
         if validation_material:
@@ -550,8 +596,15 @@ def prepare_from_records(dataset: Path, records: list[tuple[dict, Path, dict]], 
                 sample = copy.deepcopy(material["sample"])
                 identity = material_id + "_" + region
                 family = material["family"]
-                split = reviews.get(f"{size}:{identity}", {}).get("split", sample.get("split", "train"))
-                if automatic_validation:
+                review = current_review(reviews, f"{size}:{identity}", sample)
+                split = review.get("split", sample.get("split", "train"))
+                manual = review.get("split_assignment") == "manual" or sample.get("split_assignment") == "manual"
+                if family in manual_family_splits:
+                    split = manual_family_splits[family]
+                    manual = True
+                elif review.get("split_assignment") != "manual" and sample.get("split_assignment") == "manual":
+                    split = sample["split"]
+                if automatic_validation and not manual:
                     split = ("validation" if family in check_families and
                              (family not in regional_families or region == regional_check_regions[family]) else "train")
                 sample.update(sample_id=identity, maps={}, map_metadata={}, input_variants=[], extra_maps={}, source_notes=[],
@@ -566,8 +619,12 @@ def prepare_from_records(dataset: Path, records: list[tuple[dict, Path, dict]], 
                     native_size_preparation={"schema": PREPARATION_SCHEMA, "source_dataset_path": str(dataset),
                         "target_resized": False, "target_cropped": rectangle != [0, 0, width, height]},
                     source_precision_verified=True, crop_values_verified=True)
-                sample.update(reviews.get(_review_key(size, sample), {}))
+                sample.update(review)
+                sample["source_review_snapshot"] = copy.deepcopy(review)
                 sample["split"] = split
+                if manual:
+                    sample["split_assignment"] = "manual"
+                sample["source_binding_sha256"] = source_binding(material["sample"])
                 folder = stage / "samples" / identity
                 folder.mkdir(parents=True)
                 material_samples.append((sample, folder, rectangle))
@@ -596,6 +653,27 @@ def prepare_from_records(dataset: Path, records: list[tuple[dict, Path, dict]], 
                     raise ValueError("Canonical color input is absent from the color variant set")
                 write_json(folder / "sample.json", sample)
                 prepared.append(sample)
+        # Report the split actually applied after explicit user assignments.
+        check_families = {sample["asset_family_id"] for sample in prepared
+                          if sample["split"] == "validation" and sample["status"] not in ("excluded", "rejected")}
+        train_families = {sample["asset_family_id"] for sample in prepared
+                          if sample["split"] == "train" and sample["status"] not in ("excluded", "rejected")}
+        regional_families = check_families & train_families
+        from material_dataset import rectangles_overlap
+        for family in regional_families:
+            training = [sample for sample in prepared if sample["asset_family_id"] == family and sample["split"] == "train"]
+            validation = [sample for sample in prepared if sample["asset_family_id"] == family and sample["split"] == "validation"]
+            if any(rectangles_overlap(check["crop_rectangle_top_left_xywh"], train["crop_rectangle_top_left_xywh"])
+                   for check in validation for train in training):
+                raise ValueError("Validation cannot overlap training pixels from the same source family")
+        regional_check_regions = {family: next(sample["source_region_id"] for sample in prepared
+                                              if sample["asset_family_id"] == family and sample["split"] == "validation")
+                                  for family in regional_families}
+        for sample in prepared:
+            sample["validation_scope"] = "known_disjoint_regions" if sample["asset_family_id"] in regional_families else "held_out_source_families"
+            # Final scope depends on actual user-selected splits, so publish it
+            # after reviewing the complete family rather than before it.
+            write_json(stage / "samples" / sample["sample_id"] / "sample.json", sample)
         automatic = {"policy": "source-family-native-regions-v1", "fraction": .05, "target": target,
                      "source_family_ids": sorted(check_families), "regional_family_ids": sorted(regional_families),
                      "regional_check_regions": regional_check_regions,
@@ -688,7 +766,15 @@ def cleanup_prepared_dataset(dataset: Path) -> dict:
         if folder.is_symlink() or not folder.resolve().is_relative_to(dataset.resolve()):
             raise ValueError("Temporary sample path escapes owned training data")
         sample = json.loads((folder / "sample.json").read_text())
-        reviews[_review_key(index["crop_size"], sample)] = {k: sample.get(k) for k in CURATION_FIELDS}
+        key = _review_key(index["crop_size"], sample)
+        current = current_review(reviews, key, sample)
+        if (("source_review_snapshot" in sample and current != sample["source_review_snapshot"])
+                or ("source_review_snapshot" not in sample and current)):
+            # Source editing is authoritative when it changed after this cache
+            # was prepared. Cleanup must not replace a newer user decision with
+            # its old cached approval/note or automatic split assignment.
+            continue
+        reviews[key] = saved_review(sample)
     write_json(reviews_path, reviews)
     shutil.rmtree(dataset)
     try:

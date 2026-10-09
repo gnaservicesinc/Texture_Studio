@@ -5,6 +5,11 @@ import UniformTypeIdentifiers
 @MainActor @Observable
 final class WorkbenchStore {
     var dataset: WorkbenchDataset?
+    var showNewDatasetSheet = false
+    var showAddMaterialSheet = false
+    var showDatasetInfoSheet = false
+    var showTrashDatasetConfirmation = false
+    var recentDatasets: [WorkbenchDatasetLocation] = []
     var selectedSampleId: String? { didSet { saveUserSettings() } }
     var selectedRole = "height" { didSet { saveUserSettings() } }
     var selectedInputVariantId: String? { didSet { saveUserSettings() } }
@@ -34,7 +39,7 @@ final class WorkbenchStore {
     private(set) var isSavingTraining = false
     @ObservationIgnored private var trainingEventBuffer = ""
     private(set) var isPreparingDataset = false
-    private(set) var datasetPreparationSummary = ""
+    var datasetPreparationSummary = ""
     private(set) var trainingPreferenceNotice: String?
     var lastOutputURL: URL? { didSet { saveUserSettings() } }
     var lastLogURL: URL? { didSet { saveUserSettings() } }
@@ -57,7 +62,8 @@ final class WorkbenchStore {
     @ObservationIgnored private var runner: WorkbenchProcess?
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var activeWorkerId: UUID?
-    @ObservationIgnored private let preferences: UserDefaults
+    @ObservationIgnored let preferences: UserDefaults
+    @ObservationIgnored let trashHandler: (URL) throws -> Void
     @ObservationIgnored private let workerOverride: (@MainActor ([String], String) async throws -> String)?
     @ObservationIgnored private let managedWorkspaceURL: URL
     @ObservationIgnored private let selectedCheckpointRegistryURL: URL
@@ -68,6 +74,9 @@ final class WorkbenchStore {
     var canStopAndSave: Bool { isTraining && hasTrainingStarted && !isStopping }
     var selectedSample: WorkbenchSample? { samples.first { $0.id == selectedSampleId } }
     var selectedMaterialId: String? { dataset?.materials.first { $0.samples.contains { $0.id == selectedSampleId } }?.materialId }
+    var selectedMaterialName: String? {
+        dataset?.materials.first { $0.samples.contains { $0.id == selectedSampleId } }.map { $0.name ?? $0.materialId.replacingOccurrences(of: "_", with: " ") }
+    }
     var selectedCheckpoint: WorkbenchCheckpoint? { checkpoints.first { $0.id == selectedCheckpointId } }
     var selectedDiffuseMap: WorkbenchMap? {
         selectedSample?.inputVariants?.first { $0.variantId == selectedInputVariantId } ?? selectedSample?.inputVariants?.first ?? selectedSample?.maps["input"]
@@ -80,6 +89,9 @@ final class WorkbenchStore {
     func datasetDisplayTransform(_ map: WorkbenchMap, role: String) -> MapReviewDisplayTransform? {
         let width = map.originalSourceWidth ?? map.width
         let height = map.originalSourceHeight ?? map.height
+        // Sources too small for the chosen training grid remain manageable and
+        // display at their original size instead of requesting an invalid crop.
+        if let width, let height, min(width, height) < training.size { return nil }
         let convention = map.originalNormalConvention ?? map.sourceNormalConvention ?? "opengl"
         guard let hash = datasetReviewSHA256(map),
               map.cropRectangle != nil || width != training.size || height != training.size || convention == "directx" else { return nil }
@@ -113,8 +125,14 @@ final class WorkbenchStore {
          managedWorkspaceURL: URL? = nil,
          resources: MachineResources = .current,
          selectedCheckpointRegistryURL: URL = SelectedMaterialCheckpoint.registryURL,
+         trashHandler: @escaping (URL) throws -> Void = { url in try FileManager.default.trashItem(at: url, resultingItemURL: nil) },
          workerOverride: (@MainActor ([String], String) async throws -> String)? = nil) {
         preferences = defaults
+        self.trashHandler = trashHandler
+        if let data = defaults.data(forKey: "recentDatasets.v1"),
+           let locations = try? JSONDecoder().decode([WorkbenchDatasetLocation].self, from: data) {
+            recentDatasets = locations
+        }
         uploadRepo = defaults.string(forKey: "uploadRepository") ?? ""
         uploadPublic = defaults.object(forKey: "uploadPublic") == nil ? StudioPreferences.defaults.bool(forKey: StudioPreferences.developerModeKey) : defaults.bool(forKey: "uploadPublic")
         uploadAfterTraining = defaults.object(forKey: "uploadAfterTraining") == nil ? true : defaults.bool(forKey: "uploadAfterTraining")
@@ -178,7 +196,8 @@ final class WorkbenchStore {
         let paths = preferences.stringArray(forKey: "checkpoints") ?? []
         let saved = WorkbenchPreferences.load(from: preferences)
         operation("Opening workspace…") {
-            try await self.loadTrainingCapabilities()
+            do { try await self.loadTrainingCapabilities() }
+            catch { self.logText += "Training setup is unavailable: \(error.localizedDescription)\n" }
             self.isRestoringPreferences = true
             defer { self.isRestoringPreferences = false; self.saveUserSettings() }
             if let datasetPath, FileManager.default.fileExists(atPath: datasetPath) {
@@ -216,15 +235,24 @@ final class WorkbenchStore {
     }
 
     func chooseDataset() {
-        chooseFile(types: [.json], title: "Open material dataset.json") { url in
-            self.openDataset(url)
+        guard !isBusy else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Open Dataset"
+        panel.message = "Choose a dataset folder. You can also select an existing dataset.json file."
+        panel.prompt = "Open Dataset"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.folder, .json]
+        panel.directoryURL = datasetFolderURL?.deletingLastPathComponent()
+        panel.begin { response in
+            if response == .OK, let url = panel.url { self.openDataset(url) }
         }
     }
     func openDataset(_ url: URL) {
         guard !isBusy else { error = "Stop the current operation before changing datasets."; return }
         operation("Reading dataset…") {
-            try await self.loadTrainingCapabilities()
             try await self.loadDataset(url)
+            self.activity = "Opened \(self.datasetName)."
         }
     }
     func openCheckpoint(_ url: URL) {
@@ -267,16 +295,17 @@ final class WorkbenchStore {
         saveDatasetLocation(result, requested: url)
     }
 
-    private func saveDatasetLocation(_ result: WorkbenchDataset, requested: URL? = nil) {
+    func saveDatasetLocation(_ result: WorkbenchDataset, requested: URL? = nil) {
         let canonical = URL(fileURLWithPath: result.datasetPath)
         let located = requested ?? preferences.string(forKey: "dataset").map { URL(fileURLWithPath: $0) }
         let selected = located.flatMap {
             $0.resolvingSymlinksInPath().standardizedFileURL == canonical.resolvingSymlinksInPath().standardizedFileURL ? $0 : nil
         } ?? canonical
         preferences.set(selected.path, forKey: "dataset")
+        rememberDataset(result)
     }
 
-    private func adoptDataset(_ result: WorkbenchDataset, preferredMaterial: String? = nil) {
+    func adoptDataset(_ result: WorkbenchDataset, preferredMaterial: String? = nil) {
         let material = preferredMaterial ?? selectedMaterialId
         dataset = result
         supportedTrainingSizes = backendTrainingSizes.filter { result.supportedTrainingSizes?.contains($0) ?? true }
@@ -317,6 +346,7 @@ final class WorkbenchStore {
         var arguments = [
             "prepare-size", "--dataset", current.datasetPath, "--size", String(size), "--target", training.target,
             "--automatic-validation", "--expected-index-sha256", current.indexSha256]
+        if let reviewHash = current.reviewSha256 { arguments += ["--expected-review-sha256", reviewHash] }
         if let checkMaterial { arguments += ["--material", checkMaterial] }
         let result: WorkbenchDataset = try WorkbenchProcess.decode(WorkbenchDataset.self, output: await worker(arguments))
         guard result.readyForTraining(size: size, material: checkMaterial, target: training.target), let preparation = result.preparation,
@@ -350,6 +380,7 @@ final class WorkbenchStore {
         operation("Saving material review…") {
             var args = ["curate", "--dataset", dataset.datasetPath, "--sample", sample.id,
                         "--status", status, "--expected-index-sha256", dataset.indexSha256, "--review-size", String(self.training.size)]
+            if let reviewHash = dataset.reviewSha256 { args += ["--expected-review-sha256", reviewHash] }
             if let split { args += ["--split", split] }
             if let note { args += ["--note", note] }
             _ = try await self.worker(args)
@@ -524,13 +555,21 @@ final class WorkbenchStore {
     var trainingConfigurationIssue: String? {
         if dataset == nil { return "Open your source dataset first." }
         if let issue = resources.trainingMemoryIssue(training.memoryGB) { return issue }
-        if !supportedTrainingSizes.contains(training.size) { return "No selected training size fits the current memory budget." }
+        if !supportedTrainingSizes.contains(training.size) {
+            if dataset?.supportedTrainingSizes?.contains(training.size) == false { return "Choose a training size supplied by the original source maps." }
+            return "No selected training size fits the current memory budget."
+        }
         if training.useSelectedMaterialOnly && selectedMaterialId == nil { return "Select a material first." }
         let selected = training.useSelectedMaterialOnly ? dataset?.materials.first { $0.id == selectedMaterialId }?.samples ?? [] : samples
-        if !selected.contains(where: { sample in
+        let eligible = selected.filter { sample in
             !["excluded", "rejected"].contains(sample.status) &&
+                min(sample.width, sample.height) >= training.size &&
                 (sample.availableTargets?.contains(training.target) ?? (sample.maps[training.target] != nil))
-        }) { return "No included material provides a registered \(training.target == "height" ? "16-bit displacement" : training.target) target at this size." }
+        }
+        if eligible.isEmpty { return "No included material provides a registered \(training.target == "height" ? "16-bit displacement" : training.target) target at this size." }
+        if eligible.allSatisfy({ $0.split == "validation" && $0.splitAssignment == "manual" }) {
+            return "Assign at least one included material to Training in Dataset. All available materials are assigned to Validation."
+        }
         if training.useWarmStart && selectedCheckpoint?.supportsTrainingWarmStart != true { return "Select a material checkpoint to refine." }
         return nil
     }
@@ -788,7 +827,7 @@ final class WorkbenchStore {
     }
 
     func worker(_ args: [String], script requestedScript: String? = nil) async throws -> String {
-        let datasetCommands: Set<String> = ["dataset", "prepare-size", "cleanup-size", "curate", "remove-missing"]
+        let datasetCommands: Set<String> = ["dataset", "prepare-size", "cleanup-size", "curate", "remove-missing", "create-dataset", "edit-dataset", "add-material", "import-folder", "remove-material", "validate-delete"]
         let script = requestedScript ?? (datasetCommands.contains(args.first ?? "") ? "material_workbench.py" : "material_model_workbench.py")
         try Task.checkCancellation()
         guard !WorkbenchLifecycle.shared.isTerminating else { throw CancellationError() }
@@ -829,7 +868,7 @@ final class WorkbenchStore {
         try Task.checkCancellation()
         return output
     }
-    private func operation(_ label: String, training: Bool = false, body: @escaping @MainActor () async throws -> Void) {
+    func operation(_ label: String, training: Bool = false, body: @escaping @MainActor () async throws -> Void) {
         guard !isBusy else { return }
         isBusy = true; isTraining = training; isStopping = false; hasTrainingStarted = false; isSavingTraining = false
         error = nil; activity = label; logText = ""; trainingEventBuffer = ""
@@ -838,7 +877,10 @@ final class WorkbenchStore {
                 isBusy = false; isTraining = false; isResumingTraining = false; isStopping = false
                 hasTrainingStarted = false; isSavingTraining = false; isPreparingDataset = false; task = nil
             }
-            do { try await body() }
+            do {
+                try await body()
+                if activity == label { activity = "Ready." }
+            }
             catch {
                 if Task.isCancelled || error is CancellationError {
                     activity = "Operation stopped. See the log and output folder."

@@ -54,12 +54,14 @@ struct WorkbenchSample: Decodable, Identifiable, Sendable {
     var sourceSetId: String? = nil
     var inputVariants: [WorkbenchMap]? = nil
     var availableTargets: [String]? = nil
+    var splitAssignment: String? = nil
     var id: String { sampleId }
 }
 
 struct WorkbenchMaterial: Decodable, Identifiable, Sendable {
     let materialId: String
     let samples: [WorkbenchSample]
+    var name: String? = nil
     var id: String { materialId }
 }
 
@@ -72,6 +74,13 @@ struct WorkbenchDataset: Decodable, Sendable {
     let preparation: WorkbenchDatasetPreparation?
     let automaticValidation: WorkbenchAutomaticValidation?
     var supportedTrainingSizes: [Int]? = nil
+    var name: String? = nil
+    var description: String? = nil
+    var materialCount: Int? = nil
+    var sampleCount: Int? = nil
+    var reviewSha256: String? = nil
+    var addedMaterialCount: Int? = nil
+    var duplicateMaterialCount: Int? = nil
     var samples: [WorkbenchSample] { materials.flatMap(\.samples) }
     func readyForTraining(size: Int, material: String?, target: String? = nil) -> Bool {
         guard hasNativeSize(size), let policy = automaticValidation,
@@ -86,6 +95,20 @@ struct WorkbenchDataset: Decodable, Sendable {
                 sample.maps.values.allSatisfy { $0.width == size && $0.height == size }
         }
     }
+}
+
+struct WorkbenchDatasetLocation: Codable, Identifiable, Equatable, Sendable {
+    var name: String
+    var path: String
+    var id: String { path }
+    var url: URL { URL(fileURLWithPath: path) }
+}
+
+struct WorkbenchDatasetDeletion: Decodable, Sendable {
+    let datasetPath: String
+    let indexSha256: String
+    let safeToTrashFolder: Bool
+    let trashPaths: [String]
 }
 
 struct WorkbenchAutomaticValidation: Decodable, Sendable {

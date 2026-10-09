@@ -2,6 +2,14 @@
 
 The material model learns from registered diffuse, height, roughness and normal maps. Diffuse is the model input. Numeric targets retain their declared source precision and encoding; height requires UInt16 linear codes. PNG headers, complete checksums, decoded arrays and lossless export round trips establish what the model receives.
 
+## Dataset workflow
+
+In **Material Dataset**, choose **New Dataset…** to create an empty named dataset or **Open Folder…** to open an existing dataset folder. **Dataset Info…** edits the name and description. **Add Materials…** registers a diffuse PNG with at least one matching displacement, roughness or normal PNG; **Import Folder…** registers matching material maps from a folder. Registration saves paths, checksums and source metadata without copying or rescaling the original maps.
+
+The material list includes training and validation sets. Select a material to edit its note, approve or exclude it, and choose its **Split**. Explicit split assignments survive native-size preparation. Related resolution sets and diffuse variants must stay on the same side of the training/validation boundary; a conflicting assignment is rejected before it is saved.
+
+**Remove Material…** removes entries from the dataset, leaving map files untouched. **Delete Dataset…** moves dataset metadata to Trash after confirmation and keeps original source maps. Restore the metadata from Trash when you need to reopen that dataset. Renaming a dataset changes its display name without moving its source files.
+
 ## Native pixels at one grid
 
 Each original resolution is a separate registered set. A selected training size applies to every diffuse variant, target and validation sample. For a 2048 grid, input, target and review are all 2048×2048; every pixel participates in the loss. All 1K files are ignored for that run, without upscaling.

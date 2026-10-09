@@ -11,6 +11,16 @@ Texture Studio's **Model Training** workspace prepares paired material maps, tra
 
 Builds use Release unless `--debug` is selected. `make package` includes the tool suite. Datasets, model weights, generated maps and app bundles stay outside Git.
 
+## Create and manage datasets
+
+Open **Material Dataset** from Model Training. **New Dataset…** creates a named dataset; choose a save location or use the displayed default. **Open Folder…** opens a dataset folder directly. Recently opened datasets appear under **Switch Dataset**. Use **Dataset Info…** to rename the dataset or edit its description.
+
+**Add Materials…** registers a named material with a diffuse PNG and at least one displacement, roughness or normal PNG. Choose matching source dimensions and the correct normal convention. **Import Folder…** discovers matching material maps together. Both actions reference the original full-quality files without copying or changing their pixels. An empty dataset can be created before any materials are added.
+
+Select a material to edit its review note, approval status or **Split**. The list shows training and validation materials; the **Show** filter can narrow it. Manual split assignments are retained when training maps are prepared. The source-family guard rejects assignments that would put related resolution sets or diffuse variants in both training and validation.
+
+**Remove Material…** removes that material's dataset entries while keeping its original map files. **Delete Dataset…** asks for confirmation, moves the dataset metadata to Trash and removes it from the recent library. Original source maps remain in place. Restore the metadata from Trash to reopen a deleted dataset. Creation and edits keep their form values if a save fails, so you can correct the problem and retry.
+
 ## Dataset pixels and storage
 
 The source folder is authoritative. The local collection is `/opt/ipde/material-dataset/sources/`; its dataset index refreshes registered resolution sets and diffuse color variants. `samples/<material>_full/sample.json` contains small manifests, not copies of the source images.

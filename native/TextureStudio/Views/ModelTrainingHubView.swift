@@ -35,7 +35,7 @@ private enum TrainingDestination: String, CaseIterable, Identifiable {
     var guidance: String {
         switch self {
         case .overview: "A practical path from photographed surfaces to a reusable material model."
-        case .dataset: "Inspect the exact diffuse and target maps used for training."
+        case .dataset: "Create, rename and manage datasets, then inspect their original material maps."
         case .train: "Refine displacement, roughness or normals at a supported pixel grid."
         case .compare: "Prepare diffuse once, then compare matching model outputs."
         case .review: "Inspect original pixels, pan together and pop maps out for a closer look."
@@ -119,8 +119,9 @@ struct ModelTrainingHubView: View {
                         .font(.title3).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 HStack(alignment: .top, spacing: 18) {
-                    startCard("Prepare source maps", symbol: "square.stack.3d.up", description: "Review paired diffuse, displacement, roughness and normal maps on the exact training grid.", button: "Open Dataset") {
+                    startCard("Create and manage datasets", symbol: "square.stack.3d.up", description: "Give your dataset a name, add paired material maps, and edit or remove datasets from your library.", button: "New Dataset…") {
                         destination = .dataset
+                        store.showNewDatasetSheet = true
                     }
                     startCard("Train your material model", symbol: "shippingbox", description: "Refine the selected material base and save a separate LoRA. Developer mode also saves a full fused checkpoint.", button: "Open Trainer") {
                         destination = .train
@@ -129,10 +130,15 @@ struct ModelTrainingHubView: View {
                 GroupBox("Your workspace") {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
-                            Label(store.dataset.map { "\($0.materials.count) materials · \($0.samples.count) crops" } ?? "Choose a prepared dataset", systemImage: "square.stack.3d.up")
+                            Label(store.dataset.map { "\($0.materials.count) materials · \($0.samples.count) material sets" } ?? "Create or open a dataset", systemImage: "square.stack.3d.up")
                             Spacer()
+                            Button("Manage Datasets") { destination = .dataset }.disabled(store.isBusy)
+                            Button("New Dataset…") {
+                                destination = .dataset
+                                store.showNewDatasetSheet = true
+                            }.disabled(store.isBusy)
                             Button("Open Dataset…") { store.chooseDataset() }.disabled(store.isBusy)
-                                .help("Choose dataset.json from your source materials. Only training allocates rescaled maps; inspection uses temporary previews.")
+                                .help("Choose an existing dataset folder. Open it in Dataset to rename it, edit its info, add materials or move it to Trash.")
                         }
                         if let dataset = store.dataset {
                             Text(dataset.datasetPath).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
@@ -144,7 +150,7 @@ struct ModelTrainingHubView: View {
                 }
                 VStack(alignment: .leading, spacing: 14) {
                     Text("A workflow you can return to").font(.title2.bold())
-                    workflowRow("1", .dataset, "Check your source maps", "Review matching diffuse, displacement, roughness and OpenGL normal crops. Keep original high-bit-depth data.")
+                    workflowRow("1", .dataset, "Create or open your dataset", "Name your dataset, add paired material maps, and review the original high-bit-depth data.")
                     workflowRow("2", .train, "Train material detail", "Choose a size that fits your Mac. Complete registered maps share the exact grid shown in Dataset.")
                     workflowRow("3", .compare, "Compare what changed", "Use the same prepared diffuse for each checkpoint. Inspect detail, noise, inversion and relief.")
                     workflowRow("4", .review, "Inspect at full quality", "Use 100% zoom, linked dragging and pop-out windows. Export the untouched map or open an editable copy in GIMP.")

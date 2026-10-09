@@ -87,6 +87,7 @@ final class StudioAppDelegate: NSObject, NSApplicationDelegate {
 
 private struct WorkspaceFocusKey: FocusedValueKey { typealias Value = TextureWorkspace }
 private struct StudioModelsFocusKey: FocusedValueKey { typealias Value = ModelManager }
+private struct MaterialDatasetFocusKey: FocusedValueKey { typealias Value = WorkbenchStore }
 extension FocusedValues {
     var textureWorkspace: TextureWorkspace? {
         get { self[WorkspaceFocusKey.self] }
@@ -96,29 +97,63 @@ extension FocusedValues {
         get { self[StudioModelsFocusKey.self] }
         set { self[StudioModelsFocusKey.self] = newValue }
     }
+    var materialDatasetStore: WorkbenchStore? {
+        get { self[MaterialDatasetFocusKey.self] }
+        set { self[MaterialDatasetFocusKey.self] = newValue }
+    }
 }
 
 struct StudioCommands: Commands {
     @FocusedValue(\.textureWorkspace) private var workspace
     @FocusedValue(\.textureModels) private var models
+    @FocusedValue(\.materialDatasetStore) private var datasetStore
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("Import Photo…") { workspace?.choosePhoto() }
-                .keyboardShortcut("o")
-                .disabled(workspace?.isBusy ?? true)
-            Button("Open Texture Recipe…") { workspace?.chooseRecipe() }
-                .keyboardShortcut("o", modifiers: [.command, .shift])
-                .disabled(workspace?.isBusy ?? true)
+            if let datasetStore {
+                Button("New Dataset…") { datasetStore.showNewDatasetSheet = true }
+                    .keyboardShortcut("n")
+                    .disabled(datasetStore.isBusy)
+                Button("Open Dataset…") { datasetStore.chooseDataset() }
+                    .keyboardShortcut("o")
+                    .disabled(datasetStore.isBusy)
+            } else {
+                Button("Import Photo…") { workspace?.choosePhoto() }
+                    .keyboardShortcut("o")
+                    .disabled(workspace?.isBusy ?? true)
+                Button("Open Texture Recipe…") { workspace?.chooseRecipe() }
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
+                    .disabled(workspace?.isBusy ?? true)
+            }
         }
         CommandGroup(replacing: .saveItem) {
-            Button("Save Texture Recipe…") { workspace?.saveRecipe() }
-                .keyboardShortcut("s")
-                .disabled(workspace?.source == nil || workspace?.isBusy == true)
-            Button("Export Material…") {
-                if let workspace, let models { workspace.chooseExport(models: models) }
+            if datasetStore == nil {
+                Button("Save Texture Recipe…") { workspace?.saveRecipe() }
+                    .keyboardShortcut("s")
+                    .disabled(workspace?.source == nil || workspace?.isBusy == true)
+                Button("Export Material…") {
+                    if let workspace, let models { workspace.chooseExport(models: models) }
+                }
+                    .keyboardShortcut("e")
+                    .disabled(workspace?.source == nil || workspace?.isBusy == true || models == nil)
             }
-                .keyboardShortcut("e")
-                .disabled(workspace?.source == nil || workspace?.isBusy == true || models == nil)
+        }
+        CommandMenu("Dataset") {
+            Button("Add Material…") { datasetStore?.showAddMaterialSheet = true }
+                .keyboardShortcut("a", modifiers: [.command, .shift])
+                .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
+            Button("Import Material Folder…") { datasetStore?.importMaterialFolder() }
+                .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
+            Divider()
+            Button("Rename / Edit Dataset Info…") { datasetStore?.showDatasetInfoSheet = true }
+                .keyboardShortcut("i")
+                .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
+            Button("Show Dataset in Finder") { datasetStore?.revealDataset() }
+                .disabled(datasetStore?.dataset == nil)
+            Button("Close Dataset") { datasetStore?.closeDataset() }
+                .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
+            Divider()
+            Button("Move Dataset to Trash…", role: .destructive) { datasetStore?.showTrashDatasetConfirmation = true }
+                .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
         }
         CommandMenu("Material") {
             Button("Generate / Update Material") {
