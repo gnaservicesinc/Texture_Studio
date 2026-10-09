@@ -1,4 +1,4 @@
-"""Fixed adapted-encoder features, real CPU head updates, resume and packages."""
+"""Research-only fixed encoder features and real CPU head updates."""
 from __future__ import annotations
 import copy
 import json
@@ -12,7 +12,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'scripts'))
 sys.path.insert(0, str(ROOT/'verification'))
 import material_training_cycle as cycle
-import material_workbench as workbench
 from material_fixed_adapters import POLICY, adapter_sha256, apply_fixed_adapters
 from frozen_dino_height import MODEL_SHA256, CODE_REVISION, state_sha256
 from train_material_height import digest
@@ -73,7 +72,7 @@ def test_actual_fixed_adapters_change_features_but_not_base_or_adapter_tensors(t
     assert adapter_sha256(actual)==adapter_sha256(state)
 
 
-def test_real_head_refinement_retains_adapters_through_resume_and_package(tmp_path):
+def test_research_head_refinement_retains_adapters_through_resume(tmp_path):
     path,state=adapted_checkpoint(tmp_path)
     expected=digest(path)
     encoders=[]
@@ -97,12 +96,8 @@ def test_real_head_refinement_retains_adapters_through_resume_and_package(tmp_pa
     extended=arguments(tmp_path,output=tmp_path/'resumed',resume_checkpoint=settings.output/'checkpoint.latest.pt',updates_per_crop=3,prediction_limit=0)
     resumed=cycle.run_train(extended,encoder_loader=loader,feature_extractor=features)
     assert resumed['started_from_step']==4 and resumed['completed_steps']==6
-    package=workbench.package(SimpleNamespace(checkpoint=extended.output/'checkpoint.final.pt',expected_sha256=None,output=tmp_path/'package'))
-    packed,_=workbench.checkpoint_snapshot(Path(package['checkpoint_path']))
+    packed=torch.load(extended.output/'checkpoint.final.pt',weights_only=True)
     assert packed['variant']=='lora' and adapter_sha256(packed['adapter_state'])==adapter_sha256(state)
-    info=workbench.checkpoint_info(SimpleNamespace(checkpoint=Path(package['checkpoint_path']),expected_sha256=package['checkpoint_sha256']))
-    assert not info['supports_training_warm_start'] and info['refinement_policy']==POLICY
-    assert info['retired'] and not info['production_eligible']
     assert digest(path)==expected
 
 

@@ -47,7 +47,7 @@ struct MaterialDecision: Codable, Identifiable, Sendable, Equatable {
         let relief = Relief(rawValue: response.answers["relief"]!.choice)!
         let roughness = Roughness(rawValue: response.answers["roughness"]!.choice)!
         let confidence = Confidence(rawValue: response.answers["confidence"]!.choice)!
-        let rationale = "The local model suggests \(lighting.rawValue) lighting correction, \(noise.rawValue) noise reduction, \(relief.rawValue) relief, and \(roughness.rawValue) roughness. Image suitability: \(confidence.rawValue). Review these starting points against the photo; a single image cannot determine physical roughness or relief. No angle, crop, or texture content is generated."
+        let rationale = "The local model suggests \(lighting.rawValue) lighting correction, identifies \(noise.rawValue) capture noise, and proposes \(relief.rawValue) relief and \(roughness.rawValue) roughness. Image suitability: \(confidence.rawValue). Preserve fine texture; capture noise is a review flag, not permission to blur the image. A single image cannot determine physical roughness or relief."
         guard rationale.count <= 2000 else { throw OllamaDecisionError.invalidResponse("rationale exceeds its limit") }
         return MaterialDecision(id: UUID(), model: exactModel, lighting: lighting, noise: noise,
             relief: relief, roughness: roughness, confidence: confidence, rationale: rationale)
@@ -100,7 +100,7 @@ enum OllamaDecisionStatus: Equatable {
         case .missing: "Exact MLX NVFP4 model missing. Optional download: about 18 GB."
         case .ready: "MLX NVFP4 vision decision model ready locally"
         case .checking: "Checking local Ollama and model format…"
-        case .analysing: "Reviewing the bounded photo locally…"
+        case .analysing: "Reviewing the supplied image evidence locally…"
         case .pulling(let value): "Downloading \(Int(value * 100))%"
         case .unsupported(let value), .failed(let value): value
         }

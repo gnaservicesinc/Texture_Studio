@@ -7,7 +7,7 @@ private enum TrainingDestination: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "Getting Started"
         case .dataset: "Dataset"
-        case .train: "Training Status"
+        case .train: "Train Material"
         case .compare: "Compare Checkpoints"
         case .review: "Review Details"
         case .checkpoints: "Saved Models & Export"
@@ -35,11 +35,11 @@ private enum TrainingDestination: String, CaseIterable, Identifiable {
     var guidance: String {
         switch self {
         case .overview: "A practical path from photographed surfaces to a reusable material model."
-        case .dataset: "Inspect paired photos and maps. Exclude problem crops without deleting originals."
-        case .train: "See the current training backend and prepare native source crops."
-        case .compare: "Run the same photo through two or more checkpoints and compare matching details."
+        case .dataset: "Inspect the exact diffuse and target maps used for training."
+        case .train: "Refine displacement, roughness or normals at a supported pixel grid."
+        case .compare: "Prepare diffuse once, then compare matching model outputs."
         case .review: "Inspect original pixels, pan together and pop maps out for a closer look."
-        case .checkpoints: "Inspect and export saved experimental checkpoints. Retired models cannot run in Studio."
+        case .checkpoints: "Use, export and recover your material models."
         }
     }
 }
@@ -115,15 +115,15 @@ struct ModelTrainingHubView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Label("Material models and source maps", systemImage: "graduationcap")
                         .font(.largeTitle.bold())
-                    Text("Material training requires a supported texture-height backend. Prepare source maps and inspect saved experiments here while the replacement is connected.")
+                    Text("Refine small material models with your paired diffuse and surface maps, then inspect the exact inputs and outputs.")
                         .font(.title3).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 HStack(alignment: .top, spacing: 18) {
-                    startCard("Prepare source maps", symbol: "square.stack.3d.up", description: "Keep native photo, displacement, roughness and normal pairs ready for a future texture-height model.", button: "Open Dataset") {
+                    startCard("Prepare source maps", symbol: "square.stack.3d.up", description: "Review paired diffuse, displacement, roughness and normal maps on the exact training grid.", button: "Open Dataset") {
                         destination = .dataset
                     }
-                    startCard("Review saved experiments", symbol: "shippingbox", description: "Archived experimental checkpoints remain available for comparison and export. Their files and original model identities stay intact.", button: "Saved Models") {
-                        destination = .checkpoints
+                    startCard("Train your material model", symbol: "shippingbox", description: "Refine the selected material base and save a separate LoRA. Developer mode also saves a full fused checkpoint.", button: "Open Trainer") {
+                        destination = .train
                     }
                 }
                 GroupBox("Your workspace") {
@@ -132,7 +132,7 @@ struct ModelTrainingHubView: View {
                             Label(store.dataset.map { "\($0.materials.count) materials · \($0.samples.count) crops" } ?? "Choose a prepared dataset", systemImage: "square.stack.3d.up")
                             Spacer()
                             Button("Open Dataset…") { store.chooseDataset() }.disabled(store.isBusy)
-                                .help("Choose dataset.json from your prepared materials. Original source maps allow automatic recropping at another native size.")
+                                .help("Choose dataset.json from your source materials. Only training allocates rescaled maps; inspection uses temporary previews.")
                         }
                         if let dataset = store.dataset {
                             Text(dataset.datasetPath).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
@@ -145,10 +145,10 @@ struct ModelTrainingHubView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("A workflow you can return to").font(.title2.bold())
                     workflowRow("1", .dataset, "Check your source maps", "Review matching diffuse, displacement, roughness and OpenGL normal crops. Keep original high-bit-depth data.")
-                    workflowRow("2", .train, "Prepare native crops", "Choose 1K or 2K. Matching crops are prepared automatically from original sources. Training is paused until a replacement backend is connected.")
-                    workflowRow("3", .compare, "Compare what changed", "Use the same photo for each checkpoint. Look for useful detail, noise, inversion and exaggerated relief.")
+                    workflowRow("2", .train, "Train material detail", "Choose a size that fits your Mac. Complete registered maps share the exact grid shown in Dataset.")
+                    workflowRow("3", .compare, "Compare what changed", "Use the same prepared diffuse for each checkpoint. Inspect detail, noise, inversion and relief.")
                     workflowRow("4", .review, "Inspect at full quality", "Use 100% zoom, linked dragging and pop-out windows. Export the untouched map or open an editable copy in GIMP.")
-                    workflowRow("5", .checkpoints, "Keep the experiment", "Inspect the exact saved checkpoint and export a package for archival or another workflow. Each checkpoint shows its current availability.")
+                    workflowRow("5", .checkpoints, "Keep the model", "Save the LoRA or full checkpoint, upload it to Hugging Face, and download it again when needed.")
                 }
             }.padding(30).frame(maxWidth: 1100, alignment: .leading).frame(maxWidth: .infinity)
         }

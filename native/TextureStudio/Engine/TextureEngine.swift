@@ -109,11 +109,21 @@ actor TextureEngine {
         return TextureDepth(image: image, sourceLabel: "Attached depth: \(url.lastPathComponent)")
     }
 
-    func process(source: TextureSource, settings: TextureSettings,
-                 attachedDepth: TextureDepth? = nil) async throws -> MaterialResult {
+    struct PreparedDiffuse: @unchecked Sendable {
+        let diffuse: CIImage
+        let numeric: CIImage
+        let extent: CGRect
+        let output: CGRect
+        let corners: [CGPoint]
+        let crop: CGRect
+        let usesHDR: Bool
+        let warnings: [String]
+    }
+
+    func prepareDiffuse(source: TextureSource, settings: TextureSettings) async throws -> PreparedDiffuse {
         guard let device else { throw TextureError.missingMetal }
         try Task.checkCancellation()
-        try validate(settings, source:source, attachedDepth:attachedDepth, device:device)
+        try validate(settings, source:source, attachedDepth:nil, device:device)
         let kernels = try loadKernels()
         let extent = source.orientedImage.extent
         let focal = settings.focalLengthPixels ?? source.camera.focalLength35mm.map {
@@ -159,37 +169,57 @@ actor TextureEngine {
             let gain = LinearColorFrame.exposureGain(reference: reference, hdr: warped, context: context)
             warped = warped.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: log2(gain)])
         }
-        let photo: CIImage
-        if settings.noiseReduction > 0 {
-            photo = warped.applyingFilter("CINoiseReduction", parameters: ["inputNoiseLevel":settings.noiseReduction,
-                                                                         "inputSharpness":0.4]).cropped(to:output)
-        } else { photo = warped }
+        // Keep the photographed high-frequency detail intact. Capture noise can
+        // be reduced with registered companion evidence, never a spatial denoiser.
+        let photo = warped
         let lighting = photo.clampedToExtent().applyingGaussianBlur(sigma: Double(settings.lightingRadius) * Double(settings.outputSize)).cropped(to:output)
         let target = try meanLuminance(photo)
         guard let diffuseGraph = kernels.delight.apply(extent:output, arguments:[photo,lighting,target,settings.lightingStrength,usesHDR ? Float(1) : Float(0)]) else {
             throw TextureError.processing("Metal lighting correction failed.")
         }
-        let detailRadius = max(2.0, Double(settings.outputSize) * 0.015)
         // First-write PNG evaluation of a lazy HDR graph can introduce a red
         // tile. Freeze the linear result before encoding or numeric-map work.
         let diffuseFrame = try LinearColorFrame(diffuseGraph, context: context)
-        let diffuse = diffuseFrame.color
-        let linearDiffuse = diffuseFrame.numeric
+        return PreparedDiffuse(diffuse: diffuseFrame.color, numeric: diffuseFrame.numeric,
+            extent: extent, output: output, corners: corners, crop: crop, usesHDR: usesHDR, warnings: evidence.warnings)
+    }
+
+    func writeDiffuse(_ image: CIImage, to url: URL) throws {
+        try context.writePNGRepresentation(of: image, to: url, format: .RGBA16, colorSpace: srgb)
+    }
+
+    func process(source: TextureSource, settings: TextureSettings,
+                 attachedDepth: TextureDepth? = nil, preparedDiffuse: PreparedDiffuse? = nil,
+                 modelMaps: [String: MaterialModelMap] = [:]) async throws -> MaterialResult {
+        guard let device else { throw TextureError.missingMetal }
+        try validate(settings, source: source, attachedDepth: attachedDepth, device: device)
+        let prepared: PreparedDiffuse
+        if let preparedDiffuse { prepared = preparedDiffuse }
+        else { prepared = try await prepareDiffuse(source: source, settings: settings) }
+        let kernels = try loadKernels()
+        let extent = prepared.extent, output = prepared.output, corners = prepared.corners, crop = prepared.crop
+        for (target, map) in modelMaps {
+            guard ["roughness", "normal"].contains(target), map.target == target, map.image.extent == output else {
+                throw TextureError.processing("The selected \(target) model must return the exact prepared diffuse grid.")
+            }
+        }
+        let usesHDR = prepared.usesHDR, diffuse = prepared.diffuse, linearDiffuse = prepared.numeric
+        let detailRadius = max(2.0, Double(settings.outputSize) * 0.015)
         let lowPhoto = linearDiffuse.clampedToExtent().applyingGaussianBlur(sigma:detailRadius).cropped(to:output)
         var depthOrigin = "Flat relief: no surface depth supplied"
         var warnings = ["Roughness is an editable contrast estimate; a single photograph does not determine physical roughness.",
                         "Broad illumination correction cannot recover clipped highlights or fully remove hard cast shadows.",
                         "Height is relative material relief, with neutral level 0.5; originals and source depth remain unchanged.",
                         "Maps are not automatically seamless. Inspect edges before using a repeating material."]
-        warnings.append(contentsOf:evidence.warnings)
-        if usesHDR { warnings.append("HDR detail is decoded at full precision before cropping, with midtone exposure matched to the base photo and a smooth highlight rolloff for 8-bit sRGB PNG. Source data stays untouched.") }
+        warnings.append(contentsOf:prepared.warnings)
+        if usesHDR { warnings.append("HDR detail is decoded before cropping, with midtone exposure matched to the base photo and a smooth highlight rolloff for 16-bit sRGB PNG. Source data stays untouched.") }
         var baseHeight = CIImage(color:CIColor(red:0.5,green:0.5,blue:0.5)).cropped(to:output)
         if let selected = attachedDepth {
-            let aligned = try lensCorrect(resize(selected.image,to:extent.size),amount:settings.lensDistortion,kernels:kernels)
+            let aligned = selected.alignedToOutput ? selected.image : try lensCorrect(resize(selected.image,to:extent.size),amount:settings.lensDistortion,kernels:kernels)
             if selected.interpretation == .surfaceHeight {
                 // Supplied surface height already carries its intended relief.
                 // Camera-distance normalization would destroy that amplitude.
-                let native = transform(aligned,corners:corners,crop:crop,size:settings.outputSize)
+                let native = selected.alignedToOutput ? resize(aligned, to: output.size) : transform(aligned,corners:corners,crop:crop,size:settings.outputSize)
                 let gain = settings.heightStrength * (settings.heightInvert ? -1 : 1)
                 let offset = Float(0.5) * (1 - gain)
                 baseHeight = native.applyingFilter("CIColorMatrix", parameters:[
@@ -244,14 +274,21 @@ actor TextureEngine {
         let heightCandidate = attachedDepth?.interpretation == .surfaceHeight && settings.heightDetail == 0
             ? baseHeight : kernels.height.apply(extent:output, arguments:[baseHeight,linearDiffuse,lowPhoto,settings.heightDetail])
         guard let height = heightCandidate,
-              let roughness = kernels.roughness.apply(extent:output,arguments:[linearDiffuse,lowPhoto,settings.roughnessBase,settings.roughnessDetail]) else {
+              let roughness = modelMaps["roughness"]?.image ?? kernels.roughness.apply(extent:output,arguments:[linearDiffuse,lowPhoto,settings.roughnessBase,settings.roughnessDetail]) else {
             throw TextureError.processing("Material map construction failed.")
         }
         // Central difference across two texels; physical width gives resolution-independent slopes.
         let slope = Float(settings.displacementScaleMeters / settings.materialWidthMeters) * Float(settings.outputSize) / 2
-        guard let normal = kernels.normal.apply(extent:output, roiCallback:{ _, rect in rect.insetBy(dx:-2,dy:-2) },
+        guard let normal = modelMaps["normal"]?.image ?? kernels.normal.apply(extent:output, roiCallback:{ _, rect in rect.insetBy(dx:-2,dy:-2) },
                                                arguments:[height.clampedToExtent(),slope]) else {
             throw TextureError.processing("Normal map construction failed.")
+        }
+        if let roughness = modelMaps["roughness"] {
+            warnings.removeAll { $0.hasPrefix("Roughness is an editable contrast estimate") }
+            warnings.append("\(roughness.sourceLabel). Predicted linear roughness values are preserved without heuristic contrast adjustment.")
+        }
+        if let normal = modelMaps["normal"] {
+            warnings.append("\(normal.sourceLabel). Predicted OpenGL normal values are preserved; inspect consistency with the displacement map.")
         }
         return MaterialResult(diffuse:diffuse,roughness:roughness,normal:normal,height:height,crop:crop,
             warnings:warnings,outputSize:settings.outputSize,depthOrigin:depthOrigin,settings:settings,
@@ -295,7 +332,7 @@ actor TextureEngine {
         let names = ["diffuse.png","roughness.exr","normal.exr","displacement.exr","material.json","Blender-setup.txt"]
         // A previous export stays intact unless the whole replacement can be staged successfully.
         let diffuseURL = staging.appendingPathComponent(names[0])
-        try context.writePNGRepresentation(of:result.diffuse,to:diffuseURL,format:.RGBA8,colorSpace:srgb)
+        try writeDiffuse(result.diffuse, to: diffuseURL)
         for (name,image,isColor) in [(names[1],result.roughness,false),(names[2],result.normal,true),(names[3],result.height,false)] {
             try Task.checkCancellation()
             let destination = staging.appendingPathComponent(name)
@@ -321,7 +358,7 @@ actor TextureEngine {
         let manifest = Manifest(schema:1,source:result.sourceURL.path,camera:result.camera,settings:result.settings,
             depthOrigin:result.depthOrigin,precision:precision,
             croppedSourceRectangle:[result.crop.minX,result.crop.minY,result.crop.width,result.crop.height],
-            maps:["diffuse":"8-bit sRGB PNG", "roughness":"linear grayscale EXR, relative contrast heuristic",
+            maps:["diffuse":"16-bit sRGB PNG", "roughness":"linear grayscale EXR",
                   "normal":"linear RGB EXR, tangent-space OpenGL +Y, encoded [0,1]",
                   "displacement":"linear grayscale EXR, relative height [0,1], neutral 0.5"],notes:result.warnings)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted,.sortedKeys]
@@ -363,7 +400,7 @@ actor TextureEngine {
     private func validate(_ settings: TextureSettings, source: TextureSource, attachedDepth: TextureDepth?, device: MTLDevice) throws {
         guard TextureSettings.outputSizes.contains(settings.outputSize),
               settings.lensDistortion.isFinite, abs(settings.lensDistortion) <= 0.15,
-              [settings.lightingStrength,settings.lightingRadius,settings.noiseReduction,settings.heightStrength,
+              [settings.lightingStrength,settings.lightingRadius,settings.heightStrength,
                settings.heightDetail,settings.surfacePlaneRemoval,settings.depthCleanup,settings.roughnessBase,settings.roughnessDetail].allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }),
               settings.materialWidthMeters.isFinite, settings.materialWidthMeters > 0,
               settings.displacementScaleMeters.isFinite, settings.displacementScaleMeters >= 0 else {

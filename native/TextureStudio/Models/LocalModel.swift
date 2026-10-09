@@ -7,7 +7,7 @@ struct ModelDownloadArtifact: Codable, Sendable, Equatable {
     let sha256: String
 }
 
-enum LocalModelBackend: String, Codable, Sendable { case coreML, pytorchDA3 }
+enum LocalModelBackend: String, Codable, Sendable { case coreML }
 
 struct LocalModelDescriptor: Identifiable, Sendable {
     let id: String
@@ -21,38 +21,16 @@ struct LocalModelDescriptor: Identifiable, Sendable {
     var downloadBytes: Int64 { artifacts.reduce(0) { $0 + $1.byteCount } }
     var downloadable: Bool { !artifacts.isEmpty }
 
-    static let depthAnythingSmallID = "depth-anything-v2-small"
     static let customDepthID = "custom-coreml-depth"
-
-    static let da3GiantID = "da3-giant-1.1"
-    static let da3Revision = "72ee9f89ce4e50d704e9d55ee9c646ec8dc25a19"
-    static let da3WeightsSHA256 = "1e47a08338ca73a6d6a21d37fd060b26b993b672bc6ddf6295fe474df2592001"
     var backend: LocalModelBackend = .coreML
+    static let catalog: [LocalModelDescriptor] = [
+        LocalModelDescriptor(id: customDepthID, name: "Your Core ML depth model",
+            summary: "Developer image-to-depth .mlpackage, .mlmodel, or .mlmodelc. Choose the output explicitly if needed. Your original file stays in place.",
+            license: "Your model's license", licenseURL: URL(string: "https://developer.apple.com/documentation/coreml")!,
+            sourceURL: URL(string: "https://developer.apple.com/documentation/coreml")!,
+            packageName: "Custom.mlpackage", artifacts: [])
+    ]
 
-    static let catalog: [LocalModelDescriptor] = {
-        let repository = "https://huggingface.co/depth-anything/DA3-GIANT-1.1"
-        func artifact(_ path: String, _ bytes: Int64, _ hash: String) -> ModelDownloadArtifact {
-            ModelDownloadArtifact(relativePath: path,
-                url: URL(string: "\(repository)/resolve/\(da3Revision)/\(path)")!,
-                byteCount: bytes, sha256: hash)
-        }
-        return [
-            LocalModelDescriptor(id: da3GiantID, name: "Depth Anything 3 GIANT 1.1",
-                summary: "The exact GIANT 1.1 checkpoint, 5.42 GB. Local PyTorch on Apple Metal. Relative camera-Z depth; default inference edge 1036 pixels. CC BY-NC 4.0 permits noncommercial use only.",
-                license: "CC BY-NC 4.0 — noncommercial", licenseURL: URL(string: "https://creativecommons.org/licenses/by-nc/4.0/")!,
-                sourceURL: URL(string: repository)!, packageName: "DA3-GIANT-1.1",
-                artifacts: [
-                    artifact("config.json", 1880, "74626a50d6dee2a11820291a4305c1a34aa5adc4f7260908bbdbc9a939ba8e93"),
-                    artifact("model.safetensors", 5422814644, da3WeightsSHA256),
-                    artifact("README.md", 4881, "b939f8754d5147d42e926f20073ed59912f751eeb7c727cd4697b0f771c1c487")
-                ], backend: .pytorchDA3),
-            LocalModelDescriptor(id: customDepthID, name: "Your Core ML depth model",
-                summary: "Optional image-to-depth .mlpackage, .mlmodel, or .mlmodelc. Choose the output explicitly if needed. Your original file stays in place.",
-                license: "Your model's license", licenseURL: URL(string: "https://developer.apple.com/documentation/coreml")!,
-                sourceURL: URL(string: "https://developer.apple.com/documentation/coreml")!,
-                packageName: "Custom.mlpackage", artifacts: [])
-        ]
-    }()
 }
 
 struct ModelOutputDescriptor: Codable, Identifiable, Sendable, Equatable {

@@ -12,10 +12,11 @@ import os
 from pathlib import Path
 import re
 import tempfile
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
+
+from material_dataset import PACKAGE_AUDIT_SCHEMA, package_download_evidence
 
 SCHEMA = "ipde-material-recreation-v1"
-PACKAGE_AUDIT_SCHEMA = "ipde-material-package-audit-v1"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -190,54 +191,6 @@ def download_evidence(source: dict, asset: str, audit: dict) -> dict | None:
                     "api_provenance": entry.get("api_provenance", {"api_url": entry.get("api_url")}),
                     "source_identity_basis": identity_basis,
                     "verification_basis": "Previous exact full-file MD5 and byte-count audit; SHA256 from preparation metadata, no rehash during recipe export"}
-    return None
-
-
-def package_download_evidence(source: dict, asset: str, package_audits: list[dict]) -> dict | None:
-    """Record an independently verified archive member, without inventing a file URL."""
-    if (not re.fullmatch(r"[a-f0-9]{64}", source.get("file_sha256", ""))
-            or not isinstance(source.get("file_bytes"), int) or source["file_bytes"] <= 0):
-        return None
-    for audit in package_audits:
-        if (audit.get("schema") != PACKAGE_AUDIT_SCHEMA or audit.get("provider") != "ambientCG"
-                or audit.get("material_id") != asset):
-            continue
-        package = audit.get("package", {})
-        parsed = urlparse(package.get("url", ""))
-        filename = package.get("filename", "")
-        asset_id = audit.get("asset_id", "")
-        license_info = audit.get("license", {})
-        if (not re.fullmatch(r"[A-Za-z0-9]+_[1248]K-PNG\.zip", filename)
-                or not filename.startswith(asset_id + "_") or asset_id.casefold() != asset.casefold()
-                or parsed.scheme != "https" or parsed.hostname != "ambientcg.com"
-                or parsed.path != "/get" or parse_qs(parsed.query) != {"file": [filename]}
-                or not re.fullmatch(r"[a-f0-9]{64}", package.get("sha256", ""))
-                or not isinstance(package.get("file_bytes"), int) or package["file_bytes"] <= 0
-                or license_info.get("spdx") != "CC0-1.0"
-                or license_info.get("url") != "https://docs.ambientcg.com/license/"
-                or not re.fullmatch(r"[a-f0-9]{64}", license_info.get("snapshot_sha256", ""))):
-            continue
-        for entry in audit.get("files", []):
-            member = entry.get("archive_member", "")
-            if (entry.get("source_filename") != source["filename"]
-                    or entry.get("exact_full_file_match") is not True
-                    or entry.get("source_stable") is False
-                    or entry.get("source_sha256") != source["file_sha256"]
-                    or entry.get("member_sha256") != source["file_sha256"]
-                    or entry.get("source_bytes") != source["file_bytes"]
-                    or entry.get("member_bytes") != source["file_bytes"]
-                    or not member or Path(member).is_absolute() or ".." in Path(member).parts
-                    or not member.startswith(filename[:-4] + "_") or not member.endswith(".png")):
-                continue
-            return {"url": package["url"], "download_kind": "zip_archive_member",
-                    "archive_filename": filename, "archive_sha256": package["sha256"],
-                    "archive_bytes": package["file_bytes"], "archive_member": member,
-                    "member_sha256": entry["member_sha256"], "member_bytes": entry["member_bytes"],
-                    "restore_filename": source["filename"], "provider": "ambientCG", "asset_id": asset_id,
-                    "asset_url": audit.get("asset_url"), "api_provenance": audit.get("api_provenance"),
-                    "creation_method": audit.get("creation_method"), "license": license_info,
-                    "audit_time_utc": audit.get("completed_utc"),
-                    "verification_basis": "Downloaded official package; archive SHA256/byte count and each full member/source SHA256/byte count matched; archive member and local restoration filenames are explicitly recorded"}
     return None
 
 

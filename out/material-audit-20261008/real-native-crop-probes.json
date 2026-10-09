@@ -1,0 +1,104 @@
+[
+  {
+    "material": "farm_furrows_2k",
+    "sample_count": 1,
+    "splits": [
+      "train"
+    ],
+    "saved_crop_images": 0,
+    "saved_bytes": 0,
+    "validation_scope": "held_out_source_families",
+    "preparation": {
+      "source_dataset_path": "/opt/ipde/material-dataset",
+      "prepared_dataset_path": "/opt/ipde/material-dataset/.training-data/2048-3b8becd34b0e2658d3db",
+      "source_index_sha256": "1c00fd6dc0d1fcfa753cbf0d4b0c2d54bc983c7cc25426c54ab79a12ef58b325",
+      "crop_size": 2048,
+      "reused": false,
+      "target_resized": false,
+      "target_cropped": false,
+      "estimated_staging_bytes": 0,
+      "original_dataset_modified": false,
+      "split_lineage_changed": true,
+      "cross_size_validation_notice": "Checks group source families; disjoint 8K regions measure known-material quality, not unseen-material generalization.",
+      "ephemeral": true,
+      "automatic_validation": {
+        "fraction": 0.05,
+        "material_ids": [],
+        "policy": "source-family-native-regions-v1",
+        "quick_fit_material_id": "farm_furrows_2k",
+        "regional_check_regions": {},
+        "regional_family_ids": [],
+        "source_family_ids": [],
+        "target": "height"
+      },
+      "original_parents_required": true
+    },
+    "cleanup": {
+      "dataset_path": "/opt/ipde/material-dataset/.training-data/2048-3b8becd34b0e2658d3db",
+      "source_dataset_path": "/opt/ipde/material-dataset",
+      "removed": true,
+      "source_images_modified": false,
+      "reviews_preserved": true,
+      "schema": "texture-studio-material-workbench-v1",
+      "protocol_schema": "texture-studio-material-workbench-v1",
+      "command": "cleanup-size",
+      "ok": true
+    }
+  },
+  {
+    "material": "farm_furrows_8k",
+    "sample_count": 3,
+    "splits": [
+      "train",
+      "train",
+      "validation"
+    ],
+    "saved_crop_images": 12,
+    "saved_bytes": 168914849,
+    "validation_scope": "held_out_source_families_and_disjoint_known_regions",
+    "preparation": {
+      "source_dataset_path": "/opt/ipde/material-dataset",
+      "prepared_dataset_path": "/opt/ipde/material-dataset/.training-data/2048-1b92dd350b2c64b5ef99",
+      "source_index_sha256": "1c00fd6dc0d1fcfa753cbf0d4b0c2d54bc983c7cc25426c54ab79a12ef58b325",
+      "crop_size": 2048,
+      "reused": false,
+      "target_resized": false,
+      "target_cropped": true,
+      "estimated_staging_bytes": 201326592,
+      "original_dataset_modified": false,
+      "split_lineage_changed": true,
+      "cross_size_validation_notice": "Checks group source families; disjoint 8K regions measure known-material quality, not unseen-material generalization.",
+      "ephemeral": true,
+      "automatic_validation": {
+        "fraction": 0.05,
+        "material_ids": [
+          "farm_furrows_8k"
+        ],
+        "policy": "source-family-native-regions-v1",
+        "quick_fit_material_id": "farm_furrows_8k",
+        "regional_check_regions": {
+          "farm_furrows": "bottom_right"
+        },
+        "regional_family_ids": [
+          "farm_furrows"
+        ],
+        "source_family_ids": [
+          "farm_furrows"
+        ],
+        "target": "height"
+      },
+      "original_parents_required": true
+    },
+    "cleanup": {
+      "dataset_path": "/opt/ipde/material-dataset/.training-data/2048-1b92dd350b2c64b5ef99",
+      "source_dataset_path": "/opt/ipde/material-dataset",
+      "removed": true,
+      "source_images_modified": false,
+      "reviews_preserved": true,
+      "schema": "texture-studio-material-workbench-v1",
+      "protocol_schema": "texture-studio-material-workbench-v1",
+      "command": "cleanup-size",
+      "ok": true
+    }
+  }
+]

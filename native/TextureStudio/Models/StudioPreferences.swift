@@ -12,6 +12,7 @@ struct StudioPreferences: Codable, Equatable {
     var exportDirectory: String?
 
     static let key = "studioSettings.v1"
+    static let developerModeKey = "developerMode"
     static var defaults: UserDefaults {
         // The main app already owns this domain. macOS rejects adding the
         // app's own bundle identifier as a separate suite.

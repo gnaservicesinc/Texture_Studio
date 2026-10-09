@@ -60,8 +60,8 @@ struct MaterialInspector: View {
             Section("Balance the photo") {
                 FloatControl(title: "Lighting balance", value: $workspace.settings.lightingStrength, range: 0...1)
                 FloatControl(title: "Lighting scale", value: $workspace.settings.lightingRadius, range: 0.01...0.5)
-                FloatControl(title: "Noise reduction", value: $workspace.settings.noiseReduction, range: 0...0.1)
-                    .help("Use the lowest value that removes visible sensor noise. Inspect at full quality to preserve small surface detail.")
+                Text("Registered companion views can reduce capture noise while retaining source detail. The photo is never passed through a smoothing denoiser.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Text("Broad illumination is reduced while retaining photo detail. Clipped highlights and hidden shadow detail need review.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -70,11 +70,6 @@ struct MaterialInspector: View {
                     ForEach(DepthChoice.studioChoices) { choice in
                         Text(choice.title).tag(choice)
                     }
-                }
-                if let notice = workspace.heightSourceNotice {
-                    Label("A previous material model was archived. The current height source is shown above.", systemImage: "info.circle")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .help(notice)
                 }
                 if workspace.depthChoice == .attached {
                     Button(workspace.depthURL == nil ? "Attach Depth Map…" : "Replace Depth Map…") { workspace.chooseDepth() }
@@ -92,16 +87,13 @@ struct MaterialInspector: View {
                     if workspace.modelID == LocalModelDescriptor.customDepthID {
                         Toggle("Higher values mean nearer", isOn: $workspace.customInverseDepth)
                     }
-                    if workspace.modelID == LocalModelDescriptor.da3GiantID {
-                        Picker("Inference edge", selection: $workspace.settings.modelProcessResolution) {
-                            Text("1036 px").tag(1036)
-                            Text("1540 px").tag(1540)
-                            Text("2044 px").tag(2044)
-                        }
-                        Text("DA3-GIANT-1.1 runs locally through PyTorch/MPS. Larger inference uses more memory and time; final map size is independent. Weights are non-commercial.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
                     Text("Camera-depth models estimate scene structure. Inspect their fine surface detail before using the result for material displacement.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if workspace.depthChoice == .materialCheckpoint {
+                    Text(workspace.selectedMaterialCheckpoint?.modelSummary ?? "Choose a trained material checkpoint in Model Training → Saved Models.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("The model receives the prepared diffuse map with this same crop and lighting balance.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if workspace.depthChoice == .photoDetail {
@@ -150,7 +142,7 @@ struct MaterialInspector: View {
                     Text("32-bit float").tag(EXRPrecision.float32)
                 }
                 .help("16-bit float uses less disk space; 32-bit float preserves the pipeline's numeric precision. Both store linear map data.")
-                Text("Diffuse: 8-bit sRGB PNG. Roughness, normal and displacement: linear EXR.")
+                Text("Diffuse: 16-bit sRGB PNG. Roughness, normal and displacement: linear EXR.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("Camera-depth model resolution is set separately. Larger output maps do not add detail absent from the height prediction.")
                     .font(.caption).foregroundStyle(.secondary)

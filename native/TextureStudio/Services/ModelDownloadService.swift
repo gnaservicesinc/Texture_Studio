@@ -82,18 +82,6 @@ enum ModelFileValidation {
 
 struct LocalModelValidationService: ModelValidating {
     func inspect(at url: URL) async throws -> ModelInterface {
-        if ["mlpackage", "mlmodel", "mlmodelc"].contains(url.pathExtension.lowercased()) {
-            return try await ModelDepthService().inspect(at: url)
-        }
-        return try await Task.detached {
-            let descriptor = LocalModelDescriptor.catalog.first { $0.id == LocalModelDescriptor.da3GiantID }!
-            // Config is pinned as well as weights: it cannot import arbitrary code.
-            for artifact in descriptor.artifacts where artifact.relativePath != "README.md" {
-                try ModelFileValidation.validate(url.appendingPathComponent(artifact.relativePath), artifact: artifact)
-            }
-            return ModelInterface(inputName: "RGB", inputWidth: 1036, inputHeight: 0,
-                outputs: [ModelOutputDescriptor(name: "depth", width: 0, height: 0, storage: "Float32, top-down, dynamic aspect")],
-                interpretation: "relative_camera_z_depth: larger values are farther; unitless, full source field of view")
-        }.value
+        try await ModelDepthService().inspect(at: url)
     }
 }

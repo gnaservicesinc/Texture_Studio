@@ -27,6 +27,18 @@ final class ReviewSessionStore {
     init(preferences: UserDefaults = UserDefaults(suiteName: "org.ipde.material-tools")!) { self.preferences = preferences }
     var selected: MaterialReviewGroup? { groups.first { $0.id == selectedGroupId } }
 
+    func removeMissingSource(_ url: URL) {
+        do { _ = try ReviewImageLoader.readSource(url); return }
+        catch ReviewImageError.missingSource { }
+        catch { return }
+        groups = groups.compactMap { group in
+            let kept = group.candidates.filter { $0.mapURL.standardizedFileURL != url.standardizedFileURL }
+            return kept.isEmpty ? nil : MaterialReviewGroup(id: group.id, candidates: kept)
+        }
+        if selected == nil { selectedGroupId = groups.first?.id }
+        if selected?.candidates.contains(where: { $0.id == selectedCandidateId }) != true { selectedCandidateId = nil }
+    }
+
     private var selectionKey: String? {
         manifestURL.map { "reviewSelection." + ReviewImageLoader.hash(Data($0.standardizedFileURL.path.utf8)) }
     }
@@ -48,9 +60,6 @@ final class ReviewSessionStore {
         if let path = preferences.string(forKey: "reviewManifest"), FileManager.default.fileExists(atPath: path) {
             load(URL(fileURLWithPath: path)); return
         }
-        let root = URL(fileURLWithPath: workspace)
-        let path = root.appendingPathComponent("out/material-training/visual-candidates-2k-20261008/review-manifest.json")
-        if FileManager.default.fileExists(atPath: path.path) { load(path) }
     }
     func chooseManifest() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]; panel.title = "Open material review manifest"
@@ -91,6 +100,9 @@ final class ReviewSessionStore {
                 if let identity = candidate.sourceIdentity {
                     fields.merge(identity.manifestFields) { _, recorded in recorded }
                 }
+                if let transform = candidate.displayTransform {
+                    fields.merge(transform.manifestFields) { _, recorded in recorded }
+                }
                 return fields
             }]
         }
@@ -116,29 +128,29 @@ final class ReviewSessionStore {
                     ?? Self.nonemptyString(material[target]) ?? (target == "height" ? Self.nonemptyString(material["reference_exr"]) : nil) {
                     variants.insert(["name": "target", "role": "target", target: path], at: 0)
                 }
-                var candidates = variants.compactMap { variant -> MapReviewCandidate? in
+                var candidates = try variants.compactMap { variant -> MapReviewCandidate? in
+                    let variantTarget = variant["map_type"] as? String ?? target
                     guard let name = variant["name"] as? String,
-                          let path = Self.mapPath(variant, target: target) else { return nil }
+                          let path = Self.mapPath(variant, target: variantTarget) else { return nil }
                     let map = path.hasPrefix("/") ? URL(fileURLWithPath: path) : url.deletingLastPathComponent().appendingPathComponent(path)
                     let candidateId = variant["candidate_id"] as? String ?? "\(id)/\(name)"
                     if let decision = variant["decision"] as? String { parsedDecisions[candidateId] = decision }
                     if let note = variant["note"] as? String { parsedNotes[candidateId] = note }
-                    let identity = Self.modelIdentity(variant, target: target, relativeTo: url)
-                    let deepBump = (identity.modelName ?? name).localizedCaseInsensitiveContains("deepbump")
+                    let identity = Self.modelIdentity(variant, target: variantTarget, relativeTo: url)
                     let recordedRole = variant["role"] as? String
-                    let role = recordedRole == "reference" ? "target" : recordedRole ?? (name == "target" ? "target" : name == "flat" ? "base" : identity.checkpointPath != nil ? "checkpoint" : deepBump ? "model" : "map")
-                    let title = Self.candidateTitle(name: name, role: role, identity: identity, deepBump: deepBump)
-                    let sourceIdentity = role == "target" ? Self.sourceIdentity(variant, material: material, relativeTo: url) : nil
+                    let role = recordedRole == "reference" ? "target" : recordedRole ?? "map"
+                    let title = Self.candidateTitle(name: name, role: role, identity: identity)
+                    let transform = ["target", "diffuse"].contains(role) ? try Self.displayTransform(variant, mapType: role == "diffuse" ? "input" : variantTarget) : nil
+                    let sourceIdentity = role == "target" ? Self.sourceIdentity(variant.merging(["source_path": variant["source_path"] ?? material["source_path"] ?? map.path]) { recorded, _ in recorded }, material: material, relativeTo: url) : nil
                     var details = identity.recordedDetails
                     if role == "checkpoint", identity.architecture == nil { details.append("Architecture not recorded") }
                     if role == "target" {
                         details.insert("Real source map · not a model output", at: 0)
                         details.append(contentsOf: sourceIdentity?.recordedDetails ?? [])
                     }
-                    if role == "base", name != "flat" { details.insert("Base model prediction · not the real source map", at: 0) }
+                    if role == "base" { details.insert("Base model prediction · not the real source map", at: 0) }
                     if role == "checkpoint" { details.insert("Trained model prediction · not the real source map", at: 0) }
-                    if name == "flat" { details.append("Constant height · no model inference") }
-                    if deepBump { details.append("DeepBump model output · not the dataset reference") }
+                    if let transform { details.append("Displayed on the \(transform.size) × \(transform.size) training grid; original-source exports retain original bytes") }
                     let savedDetail = Self.nonemptyString(variant["detail"])
                     // A saved freeform description cannot hide the structured
                     // role, source or checkpoint identity. Keep this merge
@@ -148,12 +160,20 @@ final class ReviewSessionStore {
                     let detail = combined.isEmpty ? nil : combined.joined(separator: " · ")
                     return MapReviewCandidate(id: candidateId, label: title, mapURL: map, numeric: variant["numeric"] as? Bool ?? true,
                         sampleLabel: variant["sample_label"] as? String ?? id, detail: detail, role: role, modelIdentity: identity,
-                        sourceIdentity: sourceIdentity)
+                        sourceIdentity: sourceIdentity, displayTransform: transform)
                 }
-                if !candidates.contains(where: { $0.role == "source" }), let source = material["diffuse"] as? String {
+                if !candidates.contains(where: { $0.role == "diffuse" }), let source = material["diffuse"] as? String {
                     let map = source.hasPrefix("/") ? URL(fileURLWithPath: source) : url.deletingLastPathComponent().appendingPathComponent(source)
-                    candidates.insert(MapReviewCandidate(id: "\(id)/source", label: "Source photo", mapURL: map, numeric: false,
-                        sampleLabel: id, detail: map.lastPathComponent, role: "source"), at: 0)
+                    var transform: MapReviewDisplayTransform?
+                    if let size = material["diffuse_native_size"] as? Int {
+                        transform = try Self.displayTransform(["native_dimensions": [size, size],
+                            "source_sha256": material["diffuse_source_sha256"] as Any,
+                            "source_resize_algorithm": material["diffuse_resize_algorithm"] as Any,
+                            "source_crop_rectangle": material["diffuse_source_crop_rectangle"] as Any], mapType: "input")
+                    }
+                    candidates.insert(MapReviewCandidate(id: "\(id)/diffuse", label: "Diffuse · model input", mapURL: map, numeric: false,
+                        sampleLabel: id, detail: transform.map { "Exact \($0.size) × \($0.size) training grid reconstructed from original source" } ?? map.lastPathComponent,
+                        role: "diffuse", displayTransform: transform), at: 0)
                 }
                 if !candidates.isEmpty { parsed.append(MaterialReviewGroup(id: id, candidates: candidates)) }
             }
@@ -167,12 +187,11 @@ final class ReviewSessionStore {
             selectedCandidateId = selected?.candidates.contains(where: { $0.id == requestedCandidate }) == true ? requestedCandidate : nil
             error = nil; decisions = parsedDecisions; notes = parsedNotes
             let nearby = url.deletingLastPathComponent().appendingPathComponent("material-quality-review.blend")
-            let legacy = url.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("quality-review-2k-20261008/material-quality-review.blend")
             let explicit = (manifest["blend_scene"] as? String).flatMap { path -> URL? in
                 guard !path.isEmpty else { return nil }
                 return path.hasPrefix("/") ? URL(fileURLWithPath: path) : url.deletingLastPathComponent().appendingPathComponent(path)
             }
-            blendURL = ([explicit].compactMap { $0 } + [nearby, legacy]).first { FileManager.default.fileExists(atPath: $0.path) }
+            blendURL = ([explicit].compactMap { $0 } + [nearby]).first { FileManager.default.fileExists(atPath: $0.path) }
             preferences.set(url.path, forKey: "reviewManifest")
         } catch { self.error = error.localizedDescription }
     }
@@ -181,10 +200,32 @@ final class ReviewSessionStore {
         guard let string = value as? String, !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return string
     }
+    private static func displayTransform(_ fields: [String: Any], mapType: String) throws -> MapReviewDisplayTransform? {
+        guard fields["source_resize_algorithm"] != nil || fields["native_dimensions"] != nil else { return nil }
+        guard let dimensions = fields["native_dimensions"] as? [Int], dimensions.count == 2,
+              dimensions[0] == dimensions[1], (1...16384).contains(dimensions[0]),
+              let hash = fields["source_sha256"] as? String, hash.count == 64, hash.allSatisfy(\.isHexDigit),
+              fields["source_resize_algorithm"] as? String == MapReviewDisplayTransform.exactCrop else {
+            throw StudioError("A training review needs its original source checksum and exact crop metadata. Regenerate this review with the material trainer.")
+        }
+        let convention = (fields["source_normal_convention"] as? String ?? "opengl").lowercased()
+        guard ["input", "height", "roughness", "normal"].contains(mapType), ["opengl", "directx"].contains(convention) else {
+            throw StudioError("The review's map type or normal convention is unsupported.")
+        }
+        let rectangle = fields["source_crop_rectangle"] as? [Int]
+        if let rectangle {
+            guard rectangle.count == 4, rectangle[0] >= 0, rectangle[1] >= 0,
+                  rectangle[2] == dimensions[0], rectangle[3] == dimensions[1] else {
+                throw StudioError("The review needs an exact native pixel crop matching its training grid.")
+            }
+        }
+        return MapReviewDisplayTransform(size: dimensions[0], sourceSHA256: hash.lowercased(),
+            algorithm: MapReviewDisplayTransform.exactCrop, mapType: mapType, normalConvention: convention, cropRectangle: rectangle)
+    }
 
     private static func isReferenceVariant(_ variant: [String: Any]) -> Bool {
         if let role = variant["role"] as? String { return role == "target" || role == "reference" }
-        return variant["name"] as? String == "target"
+        return false
     }
 
     private static func mapPath(_ variant: [String: Any], target: String) -> String? {
@@ -201,8 +242,7 @@ final class ReviewSessionStore {
         let checkpoint = nonemptyString(variant["checkpoint"]).map { path in
             path.hasPrefix("/") ? path : manifest.deletingLastPathComponent().appendingPathComponent(path).path
         }
-        // Architecture must be recorded explicitly. Filenames and old trial
-        // aliases do not establish whether the model is DINOv2, DA3 or another.
+        // A model architecture is recorded explicitly, never inferred from a filename.
         let architecture = nonemptyString(variant["model_architecture"]) ?? nonemptyString(variant["model_summary"])
             ?? nonemptyString(variant["base_encoder"])
         return MapReviewModelIdentity(checkpointPath: checkpoint,
@@ -227,22 +267,11 @@ final class ReviewSessionStore {
             cropRectangle: integers("source_crop_rectangle", count: 4), pixelDimensions: integers("source_pixel_dimensions", count: 2))
     }
 
-    private static func candidateTitle(name: String, role: String, identity: MapReviewModelIdentity, deepBump: Bool) -> String {
+    private static func candidateTitle(name: String, role: String, identity: MapReviewModelIdentity) -> String {
         let map = identity.mapType == "height" ? "displacement" : identity.mapType ?? "map"
         if role == "target" { return "Source \(map) · reference" }
-        if name == "flat" { return "Flat baseline · no model" }
-        if deepBump { return "DeepBump · \(map)" }
-        var title: String
-        switch name {
-        case "starting_head": title = "Starting trained \(map)"
-        case "trained_2k": title = "Trained 2K \(map)"
-        // Preserve native/saved descriptive labels exactly, including a run's
-        // underscores. Only the known legacy aliases above need translation.
-        default: title = name
-        }
-        if role == "checkpoint", let run = identity.runName, !title.contains(run) {
-            title += " · " + run
-        }
+        var title = name
+        if role == "checkpoint", let run = identity.runName, !title.contains(run) { title += " · " + run }
         return title
     }
 }

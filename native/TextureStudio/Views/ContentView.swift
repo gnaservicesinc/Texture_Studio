@@ -6,10 +6,10 @@ struct ContentView: View {
     let adviser: OllamaDecisionService
     @State private var workspace: TextureWorkspace
 
-    init(models: ModelManager, adviser: OllamaDecisionService, runtime: PythonDepthService) {
+    init(models: ModelManager, adviser: OllamaDecisionService) {
         self.models = models
         self.adviser = adviser
-        self._workspace = State(initialValue: TextureWorkspace(pythonDepthService: runtime, preferences: StudioPreferences.defaults))
+        self._workspace = State(initialValue: TextureWorkspace(preferences: StudioPreferences.defaults))
     }
 
     var body: some View {
@@ -61,7 +61,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $workspace.showModels) {
-            ModelLibraryView(models: models, adviser: adviser, runtime: workspace.pythonDepthService, workspace: workspace)
+            ModelLibraryView(models: models, adviser: adviser, workspace: workspace)
                 .frame(width: 660, height: 570)
         }
         .sheet(isPresented: $workspace.showModelRecovery) {

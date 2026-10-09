@@ -5,6 +5,7 @@ import Foundation
 final class MaterialSelectionObserver: NSObject {
     private let changed: @MainActor () -> Void
     private var lastSelectionID: String?
+    private(set) var changedTarget: String?
 
     init(changed: @escaping @MainActor () -> Void) {
         self.changed = changed
@@ -20,6 +21,7 @@ final class MaterialSelectionObserver: NSObject {
             guard identifier != lastSelectionID else { return }
             lastSelectionID = identifier
         }
+        changedTarget = notification.userInfo?["target"] as? String
         changed()
     }
 

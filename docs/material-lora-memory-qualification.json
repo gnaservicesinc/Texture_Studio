@@ -1,0 +1,73 @@
+{
+  "schema": "texture-studio-material-lora-memory-qualification-v1",
+  "hardware": "Apple M2 Max, 64 GiB unified memory",
+  "base_weights_sha256": "3f25b03e950c6199b53a3e1581296831e71555e1928ad209232b757f75153b7d",
+  "measurement_note": "Driver usage sampled every 50 ms, not an OS-wide physical memory peak. Metal private/cached allocations can slightly exceed the allocator cap. RSS and Metal allocations overlap and must not be added. Synthetic inputs establish execution and memory only; no material quality or extended-run qualification is implied.",
+  "reports": [
+    {
+      "schema": "texture-studio-native-lora-memory-probe-v1",
+      "size": 1024,
+      "target": "height",
+      "scope": "final-map",
+      "rank": 8,
+      "dtype": "float32",
+      "budget_gib": 22,
+      "cpu_cache_gib": 0.5,
+      "driver_cap_gib": 19.5,
+      "checkpointing": "rrdb-block-v1",
+      "source_images_used": false,
+      "updates": [
+        {
+          "step": 1,
+          "loss": 1.6450252532958984,
+          "gradient_norm": 0.29018837213516235,
+          "driver_gib": 18.673446655273438
+        },
+        {
+          "step": 2,
+          "loss": 1.6454925537109375,
+          "gradient_norm": 0.29068630933761597,
+          "driver_gib": 11.735946655273438
+        },
+        {
+          "step": 3,
+          "loss": 1.6460121870040894,
+          "gradient_norm": 0.2895580530166626,
+          "driver_gib": 18.368759155273438
+        }
+      ],
+      "succeeded": true,
+      "elapsed_seconds": 55.914614417008124,
+      "peak_driver_gib": 19.735946655273438,
+      "process_peak_rss_bytes": 1347059712
+    },
+    {
+      "schema": "texture-studio-native-lora-memory-probe-v1",
+      "size": 2048,
+      "target": "height",
+      "scope": "final-map",
+      "rank": 8,
+      "dtype": "float32",
+      "budget_gib": 48,
+      "cpu_cache_gib": 1,
+      "driver_cap_gib": 45,
+      "checkpointing": "rrdb-block-v1",
+      "source_images_used": false,
+      "started_utc": "2026-10-09T00:30:51Z",
+      "succeeded": true,
+      "finite_gradient": true,
+      "gradient_norm": 0.2896101772785187,
+      "loss": 1.6456917524337769,
+      "metrics": {
+        "value_l1": 0.10672479122877121,
+        "detail_l1": 0.38474175333976746,
+        "total": 1.6456917524337769
+      },
+      "adapter_parameters_updated": true,
+      "forward_backward_optimizer_completed": true,
+      "elapsed_seconds": 79.15850083300029,
+      "peak_driver_gib": 42.34480285644531,
+      "process_peak_rss_bytes": 1343864832
+    }
+  ]
+}

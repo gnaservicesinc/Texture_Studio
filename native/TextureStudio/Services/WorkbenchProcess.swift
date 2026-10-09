@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 /// Logs are files rather than pipes, so long training runs cannot deadlock.
-/// Stop sends SIGINT: the trainer saves its latest optimizer state before exit.
+/// Stop sends SIGINT: the trainer finishes its update and saves its LoRA before exit.
 final class WorkbenchProcess: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?

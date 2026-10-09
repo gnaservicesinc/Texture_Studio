@@ -11,15 +11,15 @@ final class TextureWorkspace {
     var generatedProvenance: ModelDepthProvenance?
     var depthURL: URL?
     var settings = TextureSettings() { didSet { if settings != oldValue { savePreferences(); markEdited() } } }
-    var depthChoice = DepthChoice.model {
+    var depthChoice = DepthChoice.photoDetail {
         didSet {
-            if depthChoice == .materialCheckpoint { retireMaterialCheckpoint(); return }
             if depthChoice != oldValue { savePreferences(); markEdited() }
         }
     }
     var heightSourceNotice: String?
     private(set) var selectedMaterialCheckpoint: SelectedMaterialCheckpoint?
-    var modelID = LocalModelDescriptor.da3GiantID { didSet { if modelID != oldValue { savePreferences(); invalidateModelDepth() } } }
+    private(set) var selectedMaterialMaps: [String: SelectedMaterialCheckpoint] = [:]
+    var modelID = LocalModelDescriptor.customDepthID { didSet { if modelID != oldValue { savePreferences(); invalidateModelDepth() } } }
     var customInverseDepth = true { didSet { if customInverseDepth != oldValue { savePreferences(); invalidateModelDepth() } } }
     var selectedPreview = MaterialPreview.diffuse { didSet { savePreferences() } }
     var renderedPreview = MaterialPreview.source
@@ -41,7 +41,6 @@ final class TextureWorkspace {
     private let engine = TextureEngine()
     private let modelService = ModelDepthService()
     private let materialCheckpointService = MaterialCheckpointService()
-    let pythonDepthService: PythonDepthService
     private var operation: Task<Void, Never>?
     private var generatedModelID: String?
     private var generatedResolution: Int?
@@ -49,6 +48,7 @@ final class TextureWorkspace {
     private var generatedFileSignature: String?
     private var sourcePreview: CGImage?
     private var recipeCheckpoint: MaterialCheckpointIdentity?
+    private var recipeMapCheckpoints: [String: MaterialCheckpointIdentity]?
     private var lastRegistrySelectionIdentity: String?
     private var generatedCheckpointKey: String?
     private var materialCache: MaterialRenderCache?
@@ -56,26 +56,27 @@ final class TextureWorkspace {
     @ObservationIgnored private let preferences: UserDefaults?
     @ObservationIgnored private let checkpointPredictor: (@MainActor (TextureSource, SelectedMaterialCheckpoint, Int) async throws -> TextureDepth)?
     @ObservationIgnored private let materialProcessor: (@MainActor (TextureSource, TextureSettings, TextureDepth?) async throws -> MaterialResult)?
+    @ObservationIgnored private let mapPredictor: (@MainActor (CIImage, SelectedMaterialCheckpoint, Int) async throws -> MaterialModelMap)?
     private var exportDirectory: String?
     private let checkpointRegistryURL: URL
     @ObservationIgnored private var selectionObserver: MaterialSelectionObserver?
     @ObservationIgnored private var pendingCheckpointActivation = false
 
-    init(pythonDepthService: PythonDepthService = PythonDepthService(),
-         checkpointRegistryURL: URL = SelectedMaterialCheckpoint.registryURL,
+    init(checkpointRegistryURL: URL = SelectedMaterialCheckpoint.registryURL,
          preferences: UserDefaults? = nil,
          checkpointPredictor: (@MainActor (TextureSource, SelectedMaterialCheckpoint, Int) async throws -> TextureDepth)? = nil,
-         materialProcessor: (@MainActor (TextureSource, TextureSettings, TextureDepth?) async throws -> MaterialResult)? = nil) {
-        self.pythonDepthService = pythonDepthService
+         materialProcessor: (@MainActor (TextureSource, TextureSettings, TextureDepth?) async throws -> MaterialResult)? = nil,
+         mapPredictor: (@MainActor (CIImage, SelectedMaterialCheckpoint, Int) async throws -> MaterialModelMap)? = nil) {
         self.checkpointRegistryURL = checkpointRegistryURL
         self.preferences = preferences
         self.checkpointPredictor = checkpointPredictor
         self.materialProcessor = materialProcessor
+        self.mapPredictor = mapPredictor
         selectedMaterialCheckpoint = try? SelectedMaterialCheckpoint.read(from: checkpointRegistryURL)
+        selectedMaterialMaps = SelectedMaterialCheckpoint.readAll(heightRegistryURL: checkpointRegistryURL)
         lastRegistrySelectionIdentity = selectedMaterialCheckpoint?.selectionIdentity
-        if selectedMaterialCheckpoint?.target == "height" {
-            depthChoice = .photoDetail
-            heightSourceNotice = MaterialTrainingPolicy.retirementNotice
+        if selectedMaterialCheckpoint?.supportsStudioInference == true, selectedMaterialCheckpoint?.target == "height" {
+            depthChoice = .materialCheckpoint
         }
         if let preferences {
             let saved = StudioPreferences.load(from: preferences)
@@ -87,14 +88,9 @@ final class TextureWorkspace {
             showInspector = saved.showInspector ?? showInspector
             exportDirectory = saved.exportDirectory
         }
-        if depthChoice == .materialCheckpoint {
-            depthChoice = .photoDetail
-            heightSourceNotice = MaterialTrainingPolicy.retirementNotice
-            savePreferences()
+        selectionObserver = MaterialSelectionObserver { [weak self] in
+            self?.reloadSelectedCheckpoint(activate: true, target: self?.selectionObserver?.changedTarget)
         }
-        selectionObserver = MaterialSelectionObserver { [weak self] in self?.reloadSelectedCheckpoint(activate: true) }
-        // Persist decoded migrations as well as user edits. Retired portrait
-        // settings must not reappear in preferences on the next launch.
         if preferences != nil { savePreferences() }
     }
 
@@ -122,7 +118,9 @@ final class TextureWorkspace {
             depthIdentity = "attached|\(ObjectIdentifier(attachedDepth.image))|\(settings.attachedMapIsHeight)"
         case .photoDetail: depthIdentity = "flat"
         }
-        return MaterialRenderKey(sourceIdentity: "\(source.url.path)|\(ObjectIdentifier(source.orientedImage))", depthIdentity: depthIdentity, settings: settings)
+        guard let auxiliary = try? activeAuxiliaryCheckpoints() else { return nil }
+        let auxiliaryKey = auxiliary.keys.sorted().compactMap { auxiliary[$0].map(checkpointCacheKey) }.joined(separator: "|")
+        return MaterialRenderKey(sourceIdentity: "\(source.url.path)|\(ObjectIdentifier(source.orientedImage))", depthIdentity: depthIdentity + "|material-maps|" + auxiliaryKey, settings: settings)
     }
 
     private var currentCache: MaterialRenderCache? {
@@ -144,33 +142,35 @@ final class TextureWorkspace {
         return "\(checkpoint.selectionIdentity)|\(checkpoint.pythonPath)|\(checkpoint.modelDirectory)|\(checkpoint.codeDirectory)|\(settings.outputSize)|\(source.map { ObjectIdentifier($0.orientedImage).debugDescription } ?? "")|\(values?.fileSize ?? -1)|\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
     }
 
-    func reloadSelectedCheckpoint(activate: Bool = false) {
+    func reloadSelectedCheckpoint(activate: Bool = false, target: String? = nil) {
+        selectedMaterialMaps = SelectedMaterialCheckpoint.readAll(heightRegistryURL: checkpointRegistryURL)
+        let activateHeight = activate && (target == nil || target == "height")
+        if activate, target != "height" { recipeMapCheckpoints = nil; markEdited() }
         let selected = try? SelectedMaterialCheckpoint.read(from: checkpointRegistryURL)
         let changed = selected?.selectionIdentity != lastRegistrySelectionIdentity
         lastRegistrySelectionIdentity = selected?.selectionIdentity
-        if activate || changed { recipeCheckpoint = nil }
+        if activateHeight || changed { recipeCheckpoint = nil }
         if let recipeCheckpoint, let selected { selectedMaterialCheckpoint = recipeCheckpoint.resolve(using: selected) }
         else { selectedMaterialCheckpoint = selected }
-        guard (activate || changed), selected?.target == "height" else { return }
-        heightSourceNotice = MaterialTrainingPolicy.retirementNotice
-        if depthChoice == .materialCheckpoint { retireMaterialCheckpoint() }
-    }
-
-    private func retireMaterialCheckpoint() {
-        heightSourceNotice = MaterialTrainingPolicy.retirementNotice
-        // A previously attached map is the user's own input. With no such map,
-        // the safe replacement is neutral relief; never silently select DA3.
-        depthChoice = attachedDepth == nil ? .photoDetail : .attached
+        guard (activateHeight || changed), selected?.target == "height" else { return }
+        guard selected?.supportsStudioInference == true else { return }
+        heightSourceNotice = nil
+        depthChoice = .materialCheckpoint
         invalidateModelDepth()
     }
 
     var activeHeightSourceLabel: String {
         switch depthChoice {
-        case .materialCheckpoint: "Retired material checkpoint"
-        case .model: modelID == LocalModelDescriptor.da3GiantID ? "DA3 GIANT 1.1 · camera depth" : "Custom local depth model"
+        case .materialCheckpoint: selectedMaterialCheckpoint?.title ?? "Material checkpoint"
+        case .model: "Custom local depth model"
         case .attached: depthURL?.lastPathComponent ?? "Attached height / depth map"
         case .photoDetail: "Flat surface"
         }
+    }
+    var activeMaterialModels: [String: SelectedMaterialCheckpoint] {
+        var selected = (try? activeAuxiliaryCheckpoints()) ?? [:]
+        if depthChoice == .materialCheckpoint, let height = try? currentMaterialCheckpoint() { selected["height"] = height }
+        return selected
     }
 
     func choosePhoto() {
@@ -193,6 +193,7 @@ final class TextureWorkspace {
             self.sourcePreview = preview
             self.materialCache = nil
             self.recipeCheckpoint = nil
+            self.recipeMapCheckpoints = nil
             self.attachedDepth = nil
             self.generatedDepth = nil
             self.generatedProvenance = nil
@@ -207,11 +208,14 @@ final class TextureWorkspace {
             self.recipeURL = nil
             self.exportURL = nil
             self.selectedMaterialCheckpoint = try? SelectedMaterialCheckpoint.read(from: self.checkpointRegistryURL)
+            self.selectedMaterialMaps = SelectedMaterialCheckpoint.readAll(heightRegistryURL: self.checkpointRegistryURL)
             self.lastRegistrySelectionIdentity = self.selectedMaterialCheckpoint?.selectionIdentity
             if self.depthChoice == .attached {
                 self.depthChoice = .photoDetail
             }
-            if self.depthChoice == .materialCheckpoint { self.retireMaterialCheckpoint() }
+            if self.depthChoice == .materialCheckpoint, self.selectedMaterialCheckpoint?.supportsStudioInference != true {
+                self.depthChoice = .photoDetail
+            }
             self.hasEdits = false
             self.preview = preview
             self.renderedPreview = .source
@@ -275,13 +279,38 @@ final class TextureWorkspace {
         renderModels = models
         if let currentCache { return currentCache }
         guard let source else { throw StudioError("Import a surface photo to generate its material.") }
-        let depth = try await selectedDepth(models: models)
+        var preparedDiffuse: TextureEngine.PreparedDiffuse?
+        let auxiliary = try activeAuxiliaryCheckpoints()
+        if depthChoice == .materialCheckpoint || !auxiliary.isEmpty {
+            activity = "Preparing the diffuse input for the material models…"
+            preparedDiffuse = try await engine.prepareDiffuse(source: source, settings: settings)
+        }
+        let depth: TextureDepth?
+        if depthChoice == .materialCheckpoint {
+            let checkpoint = try currentMaterialCheckpoint()
+            let prepared = preparedDiffuse!
+            if let checkpointPredictor {
+                let input = TextureSource(url: source.url, orientedImage: prepared.diffuse, camera: source.camera,
+                    pixelWidth: settings.outputSize, pixelHeight: settings.outputSize)
+                depth = try await checkpointPredictor(input, checkpoint, settings.outputSize)
+            } else {
+                depth = try await materialCheckpointService.predict(diffuse: prepared.diffuse, checkpoint: checkpoint, size: settings.outputSize)
+            }
+        } else { depth = try await selectedDepth(models: models) }
+        var modelMaps: [String: MaterialModelMap] = [:]
+        for target in ["roughness", "normal"] {
+            guard let checkpoint = auxiliary[target], let preparedDiffuse else { continue }
+            activity = "Generating \(target) with \(checkpoint.title)…"
+            if let mapPredictor { modelMaps[target] = try await mapPredictor(preparedDiffuse.diffuse, checkpoint, settings.outputSize) }
+            else { modelMaps[target] = try await materialCheckpointService.predictMap(diffuse: preparedDiffuse.diffuse, checkpoint: checkpoint, size: settings.outputSize) }
+            try Task.checkCancellation()
+        }
         guard let key = currentRenderKey() else { throw StudioError("Choose a height source before generating the material.") }
         let renderSettings = settings
         activity = "Generating \(renderSettings.outputSize) × \(renderSettings.outputSize) maps…"
         let material: MaterialResult
         if let materialProcessor { material = try await materialProcessor(source, renderSettings, depth) }
-        else { material = try await engine.process(source: source, settings: renderSettings, attachedDepth: depth) }
+        else { material = try await engine.process(source: source, settings: renderSettings, attachedDepth: depth, preparedDiffuse: preparedDiffuse, modelMaps: modelMaps) }
         activity = "Retaining native maps for immediate inspection and export…"
         let cache = try await MaterialRenderCache.make(material: material, key: key, engine: engine)
         try Task.checkCancellation()
@@ -329,8 +358,7 @@ final class TextureWorkspace {
     private func selectedDepth(models: ModelManager) async throws -> TextureDepth? {
         switch depthChoice {
         case .materialCheckpoint:
-            retireMaterialCheckpoint()
-            return nil
+            throw StudioError("Material inference requires the prepared diffuse input.")
         case .photoDetail: return nil
         case .attached:
             guard let attachedDepth else { throw StudioError("Attach a height/depth map, or choose Flat surface.") }
@@ -345,10 +373,6 @@ final class TextureWorkspace {
                 throw StudioError("Choose an available depth model in Local Models.")
             }
             let signature = modelFileSignature(modelURL, record: models.records[modelID])
-            if descriptor.backend == .pytorchDA3 && !pythonDepthService.runtimeStatus.isReady {
-                showModels = true
-                throw StudioError("The local PyTorch runtime is missing or unavailable. Install it or locate its Python executable in Local Models.")
-            }
             if let generatedDepth, generatedModelID == modelID,
                generatedModelPath == modelURL.path, generatedResolution == settings.modelProcessResolution,
                generatedFileSignature == signature {
@@ -358,20 +382,14 @@ final class TextureWorkspace {
             let input = try await engine.preview(source!.orientedImage, maxDimension: settings.modelProcessResolution)
             let prediction: ModelDepthResult
             do {
-                switch descriptor.backend {
-                case .coreML:
-                    prediction = try await modelService.predict(image: input, modelURL: modelURL,
-                        outputName: models.records[modelID]?.selectedOutput)
-                case .pytorchDA3:
-                    prediction = try await pythonDepthService.predict(image: input, modelURL: modelURL,
-                        processResolution: settings.modelProcessResolution)
-                }
+                prediction = try await modelService.predict(image: input, modelURL: modelURL,
+                    outputName: models.records[modelID]?.selectedOutput)
             } catch LocalModelError.missingModel {
                 models.refresh()
                 showModelRecovery = true
                 throw StudioError("The model moved while loading. Locate it or download it in Models.")
             }
-            let inverse = descriptor.backend == .coreML && customInverseDepth
+            let inverse = customInverseDepth
             let depth = try TextureDepth(width: prediction.width, height: prediction.height,
                                          values: prediction.values, sourceLabel: "\(descriptor.name) · \(prediction.width) × \(prediction.height)",
                                          interpretation: inverse ? .inverseDepth : .distance)
@@ -442,6 +460,13 @@ final class TextureWorkspace {
             if self.depthChoice == .materialCheckpoint {
                 try self.materialCheckpointProvenance().write(to: staging.appendingPathComponent("depth-source.json"), options: .atomic)
             }
+            let modelSelections = try self.activeAuxiliaryCheckpoints()
+            if !modelSelections.isEmpty {
+                let identity = modelSelections.mapValues { ["checkpoint_path": $0.checkpointPath, "checkpoint_sha256": $0.sha256, "target": $0.target, "model_name": $0.title] }
+                try JSONSerialization.data(withJSONObject: ["input": "Shared prepared diffuse map", "native_size": self.settings.outputSize,
+                    "numeric_values_preserved": true, "models": identity], options: [.prettyPrinted, .sortedKeys])
+                    .write(to: staging.appendingPathComponent("material-models.json"), options: .atomic)
+            }
             if let decision = self.decision {
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 try encoder.encode(decision).write(to: staging.appendingPathComponent("photo-review.json"), options: .atomic)
@@ -477,8 +502,21 @@ final class TextureWorkspace {
     private func currentMaterialCheckpoint() throws -> SelectedMaterialCheckpoint {
         let runtime = try SelectedMaterialCheckpoint.read(from: checkpointRegistryURL)
         let checkpoint = recipeCheckpoint?.resolve(using: runtime) ?? runtime
-        guard checkpoint.supportsStudioInference else { throw StudioError(MaterialTrainingPolicy.retirementNotice) }
+        guard checkpoint.supportsStudioInference else { throw StudioError("Select a supported material safetensors checkpoint in Model Training.") }
         return checkpoint
+    }
+    private func activeAuxiliaryCheckpoints() throws -> [String: SelectedMaterialCheckpoint] {
+        let selected = SelectedMaterialCheckpoint.readAll(heightRegistryURL: checkpointRegistryURL)
+        guard let pins = recipeMapCheckpoints else { return selected.filter { ["roughness", "normal"].contains($0.key) } }
+        var resolved: [String: SelectedMaterialCheckpoint] = [:]
+        for (target, identity) in pins {
+            guard ["roughness", "normal"].contains(target), identity.target == target,
+                  let runtime = selected[target] ?? selected["height"] ?? selected.values.first else {
+                throw StudioError("Reconnect the material runtime in Model Training to use this recipe's \(target) model.")
+            }
+            resolved[target] = identity.resolve(using: runtime)
+        }
+        return resolved
     }
 
     func makeRecipe() throws -> TextureRecipe {
@@ -486,14 +524,15 @@ final class TextureWorkspace {
         var recipe = TextureRecipe(photoPath: source.url.path, depthPath: depthURL?.path,
             depthChoice: depthChoice, modelID: modelID, customInverseDepth: customInverseDepth, settings: settings)
         if depthChoice == .materialCheckpoint { recipe.materialCheckpoint = MaterialCheckpointIdentity(try currentMaterialCheckpoint()) }
+        recipe.materialMapCheckpoints = try activeAuxiliaryCheckpoints().mapValues(MaterialCheckpointIdentity.init)
         return recipe
     }
 
     func materialCheckpointProvenance() throws -> Data {
         let checkpoint = try currentMaterialCheckpoint()
         return try JSONSerialization.data(withJSONObject: [
-            "backend": "PyTorch / Metal", "model_type": "DINOv2 features + trained material-height head",
-            "base_encoder": "facebook/dinov2-base", "checkpoint_path": checkpoint.checkpointPath,
+            "backend": "PyTorch / Metal", "model_type": "PBRnxt material refinement",
+            "input": "Prepared diffuse map shared with material rendering", "checkpoint_path": checkpoint.checkpointPath,
             "checkpoint_sha256": checkpoint.sha256, "target": checkpoint.target,
             "model_name": checkpoint.title, "height_interpretation": "surface height; no camera-depth normalization"
         ], options: [.prettyPrinted, .sortedKeys])
@@ -512,7 +551,7 @@ final class TextureWorkspace {
         guard !isBusy else { return }
         run("Opening texture recipe…") {
             let recipe = try JSONDecoder().decode(TextureRecipe.self, from: Data(contentsOf: url))
-            guard [1, 2, 3].contains(recipe.version) else { throw StudioError("This recipe version is not supported.") }
+            guard recipe.version == 3 else { throw StudioError("This recipe version is not supported.") }
             let runtime = try? SelectedMaterialCheckpoint.read(from: self.checkpointRegistryURL)
             let pinnedCheckpoint = recipe.depthChoice == .materialCheckpoint ? recipe.materialCheckpoint : nil
             let photoURL = URL(fileURLWithPath: recipe.photoPath)
@@ -535,13 +574,11 @@ final class TextureWorkspace {
             self.sourcePreview = preview
             self.materialCache = nil
             self.recipeCheckpoint = pinnedCheckpoint
+            self.recipeMapCheckpoints = recipe.materialMapCheckpoints
+            self.selectedMaterialMaps = SelectedMaterialCheckpoint.readAll(heightRegistryURL: self.checkpointRegistryURL)
             self.lastRegistrySelectionIdentity = runtime?.selectionIdentity
             self.selectedMaterialCheckpoint = pinnedCheckpoint.flatMap { pin in runtime.map { pin.resolve(using: $0) } } ?? runtime
             self.settings = recipe.settings
-            if recipe.version == 1 {
-                self.settings.heightDetail = 0
-                self.settings.attachedMapIsHeight = false
-            }
             self.attachedDepth = depth
             self.depthURL = depthURL
             self.generatedDepth = nil
@@ -552,17 +589,16 @@ final class TextureWorkspace {
             self.generatedModelPath = nil
             self.generatedFileSignature = nil
             if recipe.depthChoice == .materialCheckpoint {
-                self.heightSourceNotice = MaterialTrainingPolicy.retirementNotice
-                self.depthChoice = depth == nil ? .photoDetail : .attached
+                self.depthChoice = .materialCheckpoint
             } else {
                 self.depthChoice = recipe.depthChoice == .attached && depth == nil ? .photoDetail : recipe.depthChoice
             }
-            self.modelID = recipe.modelID == "depth-anything-v2-small" ? LocalModelDescriptor.da3GiantID : recipe.modelID
+            self.modelID = recipe.modelID
             self.customInverseDepth = recipe.customInverseDepth
             self.recipeURL = url
             self.decision = nil
             self.exportURL = nil
-            self.warnings = recipe.version == 1 ? ["Recipe upgraded: portrait depth and automatic brightness bumps have been removed. Choose an explicit surface-height map or model when needed."] : []
+            self.warnings = []
             self.hasEdits = false
             self.result = nil
             self.preview = preview
@@ -580,9 +616,17 @@ final class TextureWorkspace {
         }
         guard let cache = currentCache, let url = cache.mapURL(selectedPreview) else { return }
         let choice = selectedPreview
-        ReviewWindowController.shared.open(candidates: [MapReviewCandidate(id: url.path,
+        let target = choice == .height ? "height" : choice == .normal ? "normal" : choice == .roughness ? "roughness" : "input"
+        let checkpoint = activeMaterialModels[target]
+        var candidates = [MapReviewCandidate(id: url.path,
             label: "\(source.url.deletingPathExtension().lastPathComponent) · \(choice.rawValue) · \(cache.material.outputSize) × \(cache.material.outputSize)",
-            mapURL: url, numeric: choice != .diffuse)], retaining: cache)
+            mapURL: url, numeric: choice != .diffuse, role: choice == .diffuse ? "diffuse" : checkpoint == nil ? "map" : "checkpoint",
+            modelIdentity: checkpoint.map { MapReviewModelIdentity(checkpointPath: $0.checkpointPath,
+                checkpointSHA256: $0.sha256, architecture: $0.modelSummary, mapType: target, modelName: $0.title) })]
+        if choice != .diffuse, let diffuse = cache.mapURL(.diffuse) {
+            candidates.insert(MapReviewCandidate(label: "Diffuse · model input", mapURL: diffuse, numeric: false, role: "diffuse"), at: 0)
+        }
+        ReviewWindowController.shared.open(candidates: candidates, retaining: cache)
     }
 
     func requestAdvice(adviser: OllamaDecisionService) {
@@ -598,7 +642,6 @@ final class TextureWorkspace {
     func applyDecision() {
         guard let decision, !isBusy else { return }
         settings.lightingStrength = switch decision.lighting { case .none: 0; case .mild: 0.35; case .strong: 0.7 }
-        settings.noiseReduction = switch decision.noise { case .none: 0; case .mild: 0.01; case .moderate: 0.03 }
         settings.heightStrength = switch decision.relief { case .subtle: 0.3; case .medium: 0.65; case .strong: 1 }
         settings.roughnessBase = switch decision.roughness { case .matte: 0.8; case .mixed: 0.55; case .glossy: 0.25 }
         markEdited()

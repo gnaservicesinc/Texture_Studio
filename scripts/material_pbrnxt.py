@@ -112,6 +112,15 @@ def obtain_pretrained(directory: Path, download: bool = False) -> tuple[Path, Pa
     return source_dir, weights
 
 
+def obtain_source(directory: Path, download: bool = False) -> Path:
+    """Recover the small pinned architecture without redownloading base weights."""
+    source_dir = directory / "source"
+    for name, (size, digest) in SOURCE_FILES.items():
+        _obtain_file(source_dir / name, size, digest,
+                     f"https://raw.githubusercontent.com/aaf6aa/PBRnxt/{REVISION}/{name}", download)
+    return source_dir
+
+
 class DeviceGaussianNoise(nn.Module):
     """Same training noise on the input device; deterministic evaluation.
 
@@ -257,7 +266,20 @@ def native_branch_forward(branch: nn.Module, value: torch.Tensor) -> torch.Tenso
                 raise ValueError("Pinned RRDB branch has an unexpected enlargement operator")
             skipped += 1
             continue
-        output = module(output)
+        if (getattr(branch, "material_gradient_checkpointing", False) and torch.is_grad_enabled()
+                and module.__class__.__name__ == "ShortcutBlock" and isinstance(module.sub, nn.Sequential)):
+            # The pinned RRDB implementation already recomputes each dense
+            # sub-block. Checkpoint the outer RRDB too, so large native LoRA
+            # updates retain one boundary tensor per RRDB rather than all three
+            # dense boundaries. State keys, float32 operations, and outputs are
+            # unchanged; only backward activation storage/recomputation differs.
+            from torch.utils.checkpoint import checkpoint
+            residual = output
+            for block in module.sub:
+                output = checkpoint(block, output, use_reentrant=False) if block.__class__.__name__ == "RRDB" else block(output)
+            output = residual + output
+        else:
+            output = module(output)
     if skipped != 2:
         raise ValueError("Native-scale adaptation requires exactly two pinned RRDB enlargements")
     if output.shape[0] != value.shape[0] or output.shape[-2:] != value.shape[-2:]:
@@ -294,9 +316,25 @@ class NativePBRnxtComplete(nn.Module):
             raise ValueError("Pretrained PBRnxt height branch must return one scalar channel")
         return output
 
+    def map(self, value: torch.Tensor, target: str) -> torch.Tensor:
+        """Evaluate one existing trained material output branch."""
+        if target not in MAP_NAMES:
+            raise ValueError("Unknown material map target")
+        index = MAP_NAMES.index(target)
+        return native_branch_forward(self.ups[index], self._branch_input(value))
+
     def maps(self, value: torch.Tensor) -> dict[str, torch.Tensor]:
         """Raw outputs with no clipping, height range stretch, or gamma changes."""
         return dict(zip(MAP_NAMES, self(value).split(MAP_CHANNELS, dim=1)))
+
+
+def complete_architecture(source_dir: Path) -> NativePBRnxtComplete:
+    """Build the verified architecture for loading a complete fused checkpoint."""
+    architecture, rrdb = _architecture(source_dir), _rrdb_architecture(source_dir)
+    gen = architecture.SCUNet(3, list(MAP_CHANNELS), 96, 1, 2, 2, 4, .1, 0., 128, 1)
+    ups = nn.ModuleList([rrdb.RRDBNet(3 + sum(MAP_CHANNELS), channels, 32, 12, upscale=4, plus=True)
+                         for channels in MAP_CHANNELS])
+    return NativePBRnxtComplete(gen, ups, {})
 
 
 def load_complete_pretrained(source_dir: Path, weights_path: Path, device: str | torch.device = "cpu",
@@ -309,11 +347,7 @@ def load_complete_pretrained(source_dir: Path, weights_path: Path, device: str |
     requires visual qualification and refinement before production selection.
     """
     checked_file(weights_path, WEIGHTS_BYTES, WEIGHTS_SHA256)
-    architecture, rrdb = _architecture(source_dir), _rrdb_architecture(source_dir)
-    gen = architecture.SCUNet(3, list(MAP_CHANNELS), 96, 1, 2, 2, 4, .1, 0., 128, 1)
-    ups = nn.ModuleList([rrdb.RRDBNet(3 + sum(MAP_CHANNELS), channels, 32, 12, upscale=4, plus=True)
-                         for channels in MAP_CHANNELS])
-    model = NativePBRnxtComplete(gen, ups, {})
+    model = complete_architecture(source_dir)
     state = torch.load(weights_path, map_location="cpu", weights_only=True)
     if not isinstance(state, dict) or any(not isinstance(key, str) or not isinstance(value, torch.Tensor) for key, value in state.items()):
         raise ValueError("PBRnxt checkpoint must be a tensor state dictionary")
@@ -327,8 +361,8 @@ def load_complete_pretrained(source_dir: Path, weights_path: Path, device: str |
         "source_files": source_provenance(source_dir), "licenses": ["MIT", "Apache-2.0"],
         "native_grid": GRID, "map_channels": dict(zip(MAP_NAMES, MAP_CHANNELS)), "normal_convention": "OpenGL +Y",
         "complete_parameters": sum(parameter.numel() for parameter in model.parameters()),
-        "generator_parameters": sum(parameter.numel() for parameter in gen.parameters()),
-        "final_height_branch_parameters": sum(parameter.numel() for parameter in ups[3].parameters()),
+        "generator_parameters": sum(parameter.numel() for parameter in model.gen.parameters()),
+        "final_height_branch_parameters": sum(parameter.numel() for parameter in model.ups[3].parameters()),
         "adaptation": "All pretrained generator and RRDB convolutions/heads retained; omit only two nearest-neighbor2x enlargements per final branch",
         "published_output_scale": 4, "adapted_output_scale": 1,
         "enlargement_operations_omitted_per_branch": 2, "all_pretrained_parameter_keys_loaded": True,

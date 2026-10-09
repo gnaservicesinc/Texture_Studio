@@ -16,7 +16,7 @@ XCODEBUILD = xcodebuild -project "$(XCODE_PROJECT)" -scheme "$(XCODE_SCHEME)" \
 check-toolchain:
 	./script/check_toolchain.sh
 
-# Retained extraction/research environment. The app manages its separate DA3 runtime in Local Models.
+# Extraction and material-model development environment.
 setup:
 	$(PYTHON_BASE) -m venv .venv
 	.venv/bin/python -m pip install --upgrade pip

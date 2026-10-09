@@ -28,20 +28,6 @@ final class ModelManager {
         do {
             if fileManager.fileExists(atPath: registryURL.path) {
                 records = try JSONDecoder().decode([String: InstalledLocalModel].self, from: Data(contentsOf: registryURL))
-                // The user retired the app's previous compact default. Only
-                // delete its registered, exact managed path; external files stay.
-                if let retired = records[LocalModelDescriptor.depthAnythingSmallID], retired.isManaged,
-                   !catalog.contains(where: { $0.id == LocalModelDescriptor.depthAnythingSmallID }) {
-                    let folder = self.storageDirectory.appendingPathComponent(LocalModelDescriptor.depthAnythingSmallID)
-                    let package = folder.appendingPathComponent("DepthAnythingV2SmallF16.mlpackage")
-                    if URL(fileURLWithPath: retired.path).standardizedFileURL.path == package.standardizedFileURL.path,
-                       folder.resolvingSymlinksInPath().deletingLastPathComponent().path == self.storageDirectory.path,
-                       (try? folder.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true {
-                        if fileManager.fileExists(atPath: folder.path) { try fileManager.removeItem(at: folder) }
-                        records[LocalModelDescriptor.depthAnythingSmallID] = nil
-                        try JSONEncoder().encode(records).write(to: registryURL, options: .atomic)
-                    }
-                }
                 records = records.filter { key, _ in catalog.contains { $0.id == key } }
             }
         } catch { lastError = "Could not read the model library: \(error.localizedDescription). Locate a model to reconnect it." }
@@ -144,12 +130,7 @@ final class ModelManager {
     }
 
     private func modelFilesExist(id: String, record: InstalledLocalModel) -> Bool {
-        guard fileManager.fileExists(atPath: record.path) else { return false }
-        guard let descriptor = catalog.first(where: { $0.id == id }), descriptor.backend == .pytorchDA3 else { return true }
-        return descriptor.artifacts.filter { $0.relativePath != "README.md" }.allSatisfy {
-            let path = URL(fileURLWithPath: record.path).appendingPathComponent($0.relativePath)
-            return fileManager.fileExists(atPath: path.path)
-        }
+        fileManager.fileExists(atPath: record.path)
     }
 
     private func install(_ descriptor: LocalModelDescriptor, operationID: UUID) async {
@@ -245,9 +226,8 @@ final class ModelManager {
     }
 
     private static func requireBackend(_ backend: LocalModelBackend, at url: URL) throws {
-        let coreML = ["mlpackage", "mlmodel", "mlmodelc"].contains(url.pathExtension.lowercased())
-        guard (backend == .coreML) == coreML else {
-            throw LocalModelError.unsupported(backend == .pytorchDA3 ? "select the folder containing GIANT 1.1 config.json and model.safetensors" : "select a Core ML model package")
+        guard ["mlpackage", "mlmodel", "mlmodelc"].contains(url.pathExtension.lowercased()) else {
+            throw LocalModelError.unsupported("select a Core ML model package")
         }
     }
 

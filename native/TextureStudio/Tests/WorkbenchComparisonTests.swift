@@ -4,6 +4,68 @@ import XCTest
 
 @MainActor
 final class WorkbenchComparisonTests: XCTestCase {
+    func testComparisonReconstructsTrainingGridAndRetainsOnlyOriginalReferences() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "comparison-grid-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(root.path, forKey: "workspace")
+        let diffuse = root.appendingPathComponent("source-diffuse.png")
+        let height = root.appendingPathComponent("source-height.png")
+        try Data("original diffuse values".utf8).write(to: diffuse)
+        try Data("original height values".utf8).write(to: height)
+        let diffuseHash = ReviewImageLoader.hash(try Data(contentsOf: diffuse))
+        let heightHash = ReviewImageLoader.hash(try Data(contentsOf: height))
+        var calls: [[String]] = []
+        var temporaryInput: URL?
+        let store = WorkbenchStore(preferences: defaults, managedWorkspaceURL: root, workerOverride: { arguments, _ in
+            calls.append(arguments)
+            let output = arguments[try XCTUnwrap(arguments.firstIndex(of: "--output")) + 1]
+            if arguments.first == "review-source" {
+                XCTAssertEqual(arguments[try XCTUnwrap(arguments.firstIndex(of: "--image")) + 1], diffuse.path)
+                XCTAssertEqual(arguments[try XCTUnwrap(arguments.firstIndex(of: "--expected-sha256")) + 1], diffuseHash)
+                XCTAssertEqual(arguments[try XCTUnwrap(arguments.firstIndex(of: "--size")) + 1], "1024")
+                temporaryInput = URL(fileURLWithPath: output)
+                try Data("exact training resize".utf8).write(to: temporaryInput!)
+                return "{}"
+            }
+            let input = URL(fileURLWithPath: arguments[try XCTUnwrap(arguments.firstIndex(of: "--image")) + 1])
+            XCTAssertEqual(input, temporaryInput)
+            XCTAssertEqual(try Data(contentsOf: input), Data("exact training resize".utf8))
+            return "{\"outputs\":{\"height\":{\"path\":\"\(output)/height.exr\"}},\"checkpoint_sha256\":\"exact-sha\"}"
+        })
+        let maps: [String: Any] = ["input": ["path": "/purged-stage/diffuse.png", "width": 1024, "height": 1024,
+            "original_source_path": diffuse.path, "original_source_sha256": diffuseHash,
+            "original_source_width": 4096, "original_source_height": 4096],
+            "height": ["path": "/purged-stage/height.png", "width": 1024, "height": 1024,
+            "source_bits": 16, "original_source_path": height.path, "original_source_sha256": heightHash,
+            "original_source_width": 4096, "original_source_height": 4096]]
+        let document: [String: Any] = ["dataset_path": root.path, "index_sha256": "index-sha", "materials": [
+            ["material_id": "soil", "samples": [["sample_id": "soil_full", "status": "approved", "split": "train",
+                "width": 1024, "height": 1024, "maps": maps]]]]]
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        store.dataset = try decoder.decode(WorkbenchDataset.self, from: JSONSerialization.data(withJSONObject: document))
+        store.selectedSampleId = "soil_full"
+        store.checkpoints = [try checkpoint(sha: "exact-sha", target: "height")]
+        store.comparisonCheckpointIds = ["exact-sha"]
+        store.compare()
+        try await waitForOperation(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(calls.map { $0[0] }, ["review-source", "infer", "infer"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(temporaryInput).deletingLastPathComponent().path))
+        XCTAssertEqual(store.comparisonCandidates.first?.mapURL, diffuse)
+        XCTAssertEqual(store.comparisonCandidates.first?.displayTransform?.size, 1024)
+        XCTAssertEqual(store.comparisonCandidates.first { $0.role == "target" }?.mapURL, height)
+        let review = ReviewSessionStore(preferences: defaults)
+        review.load(try XCTUnwrap(store.lastOutputURL).appendingPathComponent("review-manifest.json"))
+        XCTAssertNil(review.error)
+        XCTAssertEqual(review.groups.first?.candidates.first?.mapURL, diffuse)
+        XCTAssertEqual(review.groups.first?.candidates.first?.displayTransform?.sourceSHA256, diffuseHash)
+        XCTAssertEqual(review.groups.first?.candidates.first { $0.role == "target" }?.displayTransform?.sourceSHA256, heightHash)
+        XCTAssertEqual(try Data(contentsOf: diffuse), Data("original diffuse values".utf8))
+    }
+
     func testOneCheckpointComparesWithHonestBaseAndLabelsSampleAndReference() async throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -33,19 +95,19 @@ final class WorkbenchComparisonTests: XCTestCase {
             XCTAssertEqual(call[try XCTUnwrap(call.firstIndex(of: "--image")) + 1], "/dataset/soil/photo.png")
             XCTAssertEqual(call[try XCTUnwrap(call.firstIndex(of: "--expected-sha256")) + 1], "exact-sha")
         }
-        XCTAssertEqual(store.comparisonCandidates.map(\.role), ["source", "target", "base", "checkpoint"])
+        XCTAssertEqual(store.comparisonCandidates.map(\.role), ["diffuse", "target", "base", "checkpoint"])
         XCTAssertTrue(store.comparisonCandidates.allSatisfy { $0.sampleLabel == "soil_crop_002" })
         let base = try XCTUnwrap(store.comparisonCandidates.first { $0.role == "base" })
-        XCTAssertTrue(base.label.contains("untrained"))
-        XCTAssertTrue(base.detail?.contains("not a pretrained depth estimator") == true)
-        XCTAssertEqual(base.modelIdentity?.architecture, "DINOv2 Base + untrained material head")
+        XCTAssertTrue(base.label.contains("Base"))
+        XCTAssertTrue(base.detail?.contains("before refinement") == true)
+        XCTAssertEqual(base.modelIdentity?.architecture, "PBRnxt material model")
         XCTAssertNil(base.modelIdentity?.checkpointStep, "The untrained baseline does not inherit a trained checkpoint's step")
         let trained = try XCTUnwrap(store.comparisonCandidates.first { $0.role == "checkpoint" })
         XCTAssertTrue(trained.detail?.contains("step 42") == true)
-        XCTAssertEqual(trained.modelIdentity?.checkpointPath, "/runs/material-2k/checkpoint.selected.pt")
+        XCTAssertEqual(trained.modelIdentity?.checkpointPath, "/runs/material-2k/model.safetensors")
         XCTAssertEqual(trained.modelIdentity?.checkpointSHA256, "exact-sha")
         XCTAssertEqual(trained.modelIdentity?.checkpointStep, 42)
-        XCTAssertEqual(trained.modelIdentity?.architecture, "DINOv2 Base + trained material head")
+        XCTAssertEqual(trained.modelIdentity?.architecture, "PBRnxt material model")
         XCTAssertEqual(trained.modelIdentity?.mapType, "height")
         XCTAssertTrue(trained.accessibleLabel.contains("soil_crop_002"))
         XCTAssertTrue(trained.exportFilename.contains("soil_crop_002"))
@@ -59,7 +121,7 @@ final class WorkbenchComparisonTests: XCTestCase {
         review.load(manifest)
         XCTAssertNil(review.error)
         XCTAssertEqual(review.groups.first?.id, "soil_crop_002")
-        XCTAssertEqual(review.groups.first?.candidates.map(\.role), ["source", "target", "base", "checkpoint"])
+        XCTAssertEqual(review.groups.first?.candidates.map(\.role), ["diffuse", "target", "base", "checkpoint"])
         XCTAssertEqual(review.groups.first?.candidates.last?.detail, trained.detail)
         XCTAssertEqual(review.groups.first?.candidates.last?.modelIdentity, trained.modelIdentity)
         XCTAssertEqual(review.groups.first?.candidates.first { $0.role == "base" }?.modelIdentity, base.modelIdentity)
@@ -166,7 +228,7 @@ final class WorkbenchComparisonTests: XCTestCase {
 
     private func checkpoint(sha: String, target: String) throws -> WorkbenchCheckpoint {
         try WorkbenchProcess.decode(WorkbenchCheckpoint.self, output: """
-        {"checkpoint_path":"/runs/material-2k/checkpoint.selected.pt","sha256":"\(sha)","schema":"texture-studio-material-training-cycle-v1","target":"\(target)","step":42,"compatible":true}
+        {"checkpoint_path":"/runs/material-2k/model.safetensors","sha256":"\(sha)","schema":"texture-studio-material-checkpoint-v1","target":"\(target)","step":42,"compatible":true}
         """)
     }
 

@@ -6,15 +6,15 @@ struct TextureStudioApp: App {
     @NSApplicationDelegateAdaptor(StudioAppDelegate.self) private var delegate
     @State private var models = ModelManager()
     @State private var adviser = OllamaDecisionService()
-    @State private var runtime = PythonDepthService()
     @State private var workbench = WorkbenchStore()
+    @AppStorage(StudioPreferences.developerModeKey, store: StudioPreferences.defaults) private var developerMode = false
 
     var body: some Scene {
         WindowGroup(MaterialTool.launchRole?.title ?? "Texture Studio") {
             if let role = MaterialTool.launchRole {
                 MaterialToolRootView(role: role, store: workbench)
             } else {
-                ContentView(models: models, adviser: adviser, runtime: runtime)
+                ContentView(models: models, adviser: adviser)
                     .frame(minWidth: 980, minHeight: 680)
             }
         }
@@ -28,8 +28,13 @@ struct TextureStudioApp: App {
             if MaterialTool.launchRole != nil {
                 WorkbenchRuntimeView(store: workbench).frame(width: 710, height: 500)
             } else {
-                ModelLibraryView(models: models, adviser: adviser, runtime: runtime)
-                    .frame(width: 640, height: 540)
+                VStack(alignment: .leading, spacing: 0) {
+                    Toggle("Developer mode", isOn: $developerMode).padding(20)
+                        .help("Expose advanced model controls. Export fused full checkpoints alongside the separate LoRA, with Hugging Face publishing controls.")
+                    Divider()
+                    ModelLibraryView(models: models, adviser: adviser)
+                        .frame(width: 640, height: 540)
+                }
             }
         }
     }
@@ -51,6 +56,7 @@ struct MaterialToolCommands: Commands {
 }
 
 final class StudioAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard WorkbenchLifecycle.shared.hasOperations else { return .terminateNow }
         WorkbenchLifecycle.shared.stopAll()

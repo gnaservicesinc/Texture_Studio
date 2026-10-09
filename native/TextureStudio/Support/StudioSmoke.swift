@@ -8,10 +8,6 @@ enum StudioSmoke {
             try await StudioSurfaceValidation.importDirectory(directory)
             return
         }
-        if ProcessInfo.processInfo.environment["TEXTURE_STUDIO_SMOKE_DA3"] == "1" {
-            try await StudioSurfaceValidation.run()
-            return
-        }
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("texture-studio-smoke-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temporary) }

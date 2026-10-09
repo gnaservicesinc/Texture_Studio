@@ -55,6 +55,18 @@ def mutate_metadata(folder, **updates):
     return payload
 
 
+def add_color_variant(folder, values, name="col2", **updates):
+    path = folder / (name + ".png")
+    write_png(path, values)
+    metadata_path = folder / "sample.json"
+    metadata = json.loads(metadata_path.read_text())
+    primary = dict(metadata["map_metadata"]["input"], path=metadata["maps"]["input"], variant_id="col1")
+    variant = dict(primary, path=path.name, variant_id=name, sample_sha256=data.digest(path), **updates)
+    metadata["input_variants"] = [primary, variant]
+    metadata_path.write_text(json.dumps(metadata))
+    return path
+
+
 def test_adjacent_uint16_height_codes_survive_numeric_transfer_and_exact_native_crop(tmp_path):
     folder, native_rgb, native_height = add_sample(tmp_path)
     before = {path: data.digest(path) for path in folder.iterdir()}
@@ -66,12 +78,10 @@ def test_adjacent_uint16_height_codes_survive_numeric_transfer_and_exact_native_
     np.testing.assert_array_equal(height.numpy()[0, 0], native_height[..., 0].astype(np.float32) / np.float32(65535))
     assert height[0, 0, 0, 1] > height[0, 0, 0, 0], "Adjacent codes must not collapse to an 8-bit display grid"
     rng = random.Random(43)
-    expected_rng = random.Random(43)
-    x, y = expected_rng.randrange(65), expected_rng.randrange(65)
-    crop_rgb, crop_height, rectangle = data.crop_pair(rgb, height, 64, rng)
-    assert rectangle == [x, y, 64, 64]
-    np.testing.assert_array_equal(crop_height.numpy()[0, 0], native_height[y:y+64, x:x+64, 0].astype(np.float32) / np.float32(65535))
-    np.testing.assert_array_equal(crop_rgb.numpy()[0], (native_rgb[y:y+64, x:x+64].astype(np.float32) / np.float32(65535)).transpose(2, 0, 1))
+    crop_rgb, crop_height, rectangle = data.crop_pair(rgb, height, 128, rng)
+    assert rectangle == [0, 0, 128, 128]
+    np.testing.assert_array_equal(crop_height.numpy()[0, 0], native_height[..., 0].astype(np.float32) / np.float32(65535))
+    np.testing.assert_array_equal(crop_rgb.numpy()[0], (native_rgb.astype(np.float32) / np.float32(65535)).transpose(2, 0, 1))
     assert {path: data.digest(path) for path in folder.iterdir()} == before
 
 
@@ -231,6 +241,73 @@ def test_cache_decodes_once_on_hit_and_obeys_byte_budget(tmp_path, monkeypatch):
     assert disabled.bytes == 0 and not disabled.entries
 
 
+def test_registered_color_variants_are_seeded_real_inputs_with_identical_numeric_target(tmp_path):
+    folder, rgb, native_height = add_sample(tmp_path)
+    second_path = add_color_variant(folder, np.iinfo(rgb.dtype).max - rgb)
+    pair = data.select_pairs(tmp_path)[0][0]
+    left_rng, right_rng = random.Random(29), random.Random(29)
+    cache = data.PairCache(1024 * 1024)
+    left = [data.select_input_variant(pair, left_rng) for _ in range(12)]
+    right = [data.select_input_variant(pair, right_rng) for _ in range(12)]
+    assert [p["sha256"] for p in left] == [p["sha256"] for p in right]
+    assert {p["paths"]["input"] for p in left} == {folder / "input.png", second_path}
+    for chosen in left:
+        rgb_tensor, target = cache.load(chosen)
+        expected_rgb, _ = read_png(chosen["paths"]["input"])
+        np.testing.assert_array_equal(rgb_tensor.numpy()[0], (expected_rgb.astype(np.float32) / 65535).transpose(2, 0, 1))
+        np.testing.assert_array_equal(target.numpy()[0, 0], native_height[..., 0].astype(np.float32) / 65535)
+        assert chosen["paths"]["height"] == pair["paths"]["height"]
+
+
+@pytest.mark.parametrize("problem", ["dimensions", "checksum", "encoding", "crop", "geometry", "primary-absent"])
+def test_mismatched_color_variant_cannot_enter_training(tmp_path, problem):
+    folder, rgb, _ = add_sample(tmp_path)
+    add_color_variant(folder, rgb[:64, :64] if problem == "dimensions" else rgb + np.uint16(1))
+    metadata_path = folder / "sample.json"
+    metadata = json.loads(metadata_path.read_text())
+    variant = metadata["input_variants"][1]
+    if problem == "checksum":
+        variant["sample_sha256"] = "0" * 64
+    elif problem == "encoding":
+        variant["encoding"] = "linear"
+    elif problem == "crop":
+        variant["crop_rectangle_top_left_xywh"] = [128, 0, 128, 128]
+    elif problem == "geometry":
+        variant["source"] = {"width": 1024, "height": 1024}
+    elif problem == "primary-absent":
+        metadata["input_variants"] = [variant]
+    metadata_path.write_text(json.dumps(metadata))
+    with pytest.raises(ValueError):
+        data.select_pairs(tmp_path)
+
+
+def test_same_asset_at_other_resolution_cannot_leak_into_validation(tmp_path):
+    train, _, _ = add_sample(tmp_path, "asset_2k_train", "asset_2k")
+    check, _, _ = add_sample(tmp_path, "asset_8k_validation", "asset_8k", split="validation", origin=(256, 256))
+    mutate_metadata(train, source_family_id="asset", source_set_id="asset_2k")
+    mutate_metadata(check, source_family_id="asset", source_set_id="asset_8k", source_pixel_dimensions=[1024, 1024])
+    with pytest.raises(ValueError, match="across source-resolution sets"):
+        data.select_pairs(tmp_path)
+
+
+def test_older_sets_missing_displacement_remain_available_for_their_actual_targets(tmp_path):
+    add_sample(tmp_path, "precise_height", "precise")
+    older, _, _ = add_sample(tmp_path, "older_roughness", "older")
+    path = older / "sample.json"
+    metadata = json.loads(path.read_text())
+    metadata["maps"]["roughness"] = metadata["maps"].pop("height")
+    metadata["map_metadata"]["roughness"] = metadata["map_metadata"].pop("height")
+    metadata["available_targets"] = ["roughness"]
+    path.write_text(json.dumps(metadata))
+    training, _, _ = data.select_pairs(tmp_path, target="height")
+    assert [pair["metadata"]["material_id"] for pair in training] == ["precise"]
+    training, _, _ = data.select_pairs(tmp_path, target="roughness")
+    assert [pair["metadata"]["material_id"] for pair in training] == ["older"]
+    assert data.PairCache(0).load(training[0])[1].shape == (1, 1, 128, 128)
+    with pytest.raises(ValueError, match="older"):
+        data.select_pairs(tmp_path, materials=["older"], target="height")
+
+
 @pytest.mark.parametrize("size", [192, 63, 65])
 def test_native_crop_rejects_undersized_source_or_non_native_grid(size):
     rgb = torch.zeros(1, 3, 128, 128)
@@ -245,34 +322,24 @@ def test_geometric_augmentation_only_reorders_real_target_codes():
     yy, xx = torch.meshgrid(torch.arange(128), torch.arange(128), indexing="ij")
     height = (yy * 128 + xx).to(torch.float32)[None, None] / 65535
     rgb = torch.cat((height, height, height), dim=1)
-    _, augmented, rectangle = data.crop_pair(rgb, height, 64, random.Random(12), augment=True)
+    _, augmented, rectangle = data.crop_pair(rgb, height, 128, random.Random(12), augment=True)
     x, y, _, _ = rectangle
-    expected = height[..., y:y+64, x:x+64]
+    expected = height[..., y:y+128, x:x+128]
     assert torch.equal(augmented.flatten().sort().values, expected.flatten().sort().values)
 
 
-def test_whole_rectangular_maps_retain_every_real_pixel_without_padding_or_resizing():
+def test_rectangular_maps_cannot_silently_use_a_different_training_grid():
     codes = np.arange(512 * 1024, dtype=np.uint32).reshape(512, 1024).astype(np.uint16)
     height = torch.from_numpy(data.numeric_height(codes)[None, None])
     rgb = height.repeat(1, 3, 1, 1)
-    full_rgb, full_height, rectangle = data.crop_pair(rgb, height, 1024, random.Random(7), whole_maps=True)
-    assert rectangle == [0, 0, 1024, 512]
-    assert torch.equal(full_rgb, rgb) and torch.equal(full_height, height)
-    shapes = set()
-    for seed in range(8):
-        transformed_rgb, transformed_height, source_rectangle = data.crop_pair(
-            rgb, height, 1024, random.Random(seed), augment=True, whole_maps=True)
-        assert source_rectangle == rectangle
-        assert transformed_rgb.shape[-2:] == transformed_height.shape[-2:]
-        assert torch.equal(torch.sort(transformed_height.flatten()).values, torch.sort(height.flatten()).values)
-        shapes.add(tuple(transformed_height.shape[-2:]))
-    assert shapes == {(512, 1024), (1024, 512)}
+    with pytest.raises(ValueError, match='selected 1024×1024 training grid'):
+        data.crop_pair(rgb, height, 1024, random.Random(7), whole_maps=True)
 
 
 @pytest.mark.parametrize("dimensions,size,message", [
-    ((512, 1024), 512, "maximum edge"),
-    ((128, 1024), 1024, "at least256"),
-    ((480, 1024), 1024, "divisible by64"),
+    ((512, 1024), 512, "selected"),
+    ((128, 1024), 1024, "selected"),
+    ((480, 1024), 1024, "selected"),
 ])
 def test_whole_maps_reject_unusable_native_dimensions_without_repair(dimensions, size, message):
     height = torch.zeros(1, 1, *dimensions)
@@ -329,3 +396,43 @@ def test_export_rejects_nonfinite_values_instead_of_burning_invalid_pixels(tmp_p
     with pytest.raises(ValueError, match="finite"):
         writer(tmp_path / "invalid", np.array([[np.nan, np.inf]], dtype=np.float32))
     assert not (tmp_path / "invalid").exists()
+
+
+def test_selected_size_rejects_hidden_crop_and_mixed_training_grids(tmp_path):
+    add_sample(tmp_path)
+    with pytest.raises(ValueError,match='exactly 64×64'):
+        data.select_pairs(tmp_path,expected_size=64)
+    add_sample(tmp_path,'second_001','second',dimensions=(64,64))
+    with pytest.raises(ValueError,match='same exact dimensions'):
+        data.select_pairs(tmp_path)
+
+
+@pytest.mark.parametrize('target,channels,bits',[('roughness',1,8),('normal',3,16)])
+def test_auxiliary_targets_preserve_linear_numeric_codes(tmp_path,target,channels,bits):
+    folder, _, _ = add_sample(tmp_path)
+    dtype = np.uint8 if bits==8 else np.uint16
+    codes = np.full((128,128,channels),42,dtype)
+    if channels==3:
+        codes[...,1] = 100
+    path = folder/(target+'.png')
+    write_png(path,codes)
+    metadata = json.loads((folder/'sample.json').read_text())
+    metadata['maps'][target] = path.name
+    metadata['map_metadata'][target] = {'sample_sha256':data.digest(path),'sample_bits':bits,
+        'channels':channels,'encoding':'linear_data'}
+    (folder/'sample.json').write_text(json.dumps(metadata))
+    pair = data.select_pairs(tmp_path,target=target,expected_size=128)[0][0]
+    rgb, auxiliary = data.PairCache(0).load(pair)
+    assert rgb.shape == (1,3,128,128)
+    assert auxiliary.shape == (1,channels,128,128)
+    np.testing.assert_array_equal(auxiliary.numpy()[0],(codes.astype(np.float32)/np.float32(np.iinfo(dtype).max)).transpose(2,0,1))
+
+
+def test_rgb_exr_roundtrip_keeps_unclipped_float_normals(tmp_path):
+    pytest.importorskip('OpenEXR')
+    import OpenEXR
+    values = np.array([[[-.01,.5,1.2],[0,.4,1.0]]],np.float32)
+    path = tmp_path/'normal.exr'
+    data.write_exr(path,values)
+    channels = OpenEXR.File(str(path),separate_channels=True).channels()
+    np.testing.assert_array_equal(np.stack([channels[name].pixels for name in 'RGB'],-1),values)

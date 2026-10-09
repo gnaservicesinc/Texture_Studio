@@ -4,19 +4,81 @@ import XCTest
 
 @MainActor
 final class ReviewIdentityTests: XCTestCase {
-    func testLegacyReviewNamesIdentifyExactTrainingRunsAndNonModelReferences() throws {
+    func testTrainingReviewRestoresExactGridAndSavesSourceTransforms() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "review-transform-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let manifest = root.appendingPathComponent("training-review.json")
+        let diffuseHash = String(repeating: "a", count: 64), targetHash = String(repeating: "b", count: 64)
+        let material: [String: Any] = ["material_id": "stone", "diffuse": "/original/diffuse.png",
+            "diffuse_source_sha256": diffuseHash, "diffuse_native_size": 2048, "diffuse_resize_algorithm": "exact_native_integer_codes", "diffuse_source_crop_rectangle": [1024, 1024, 2048, 2048],
+            "variants": [["name": "target", "role": "target", "height": "/original/height.png",
+                "source_sha256": targetHash, "native_dimensions": [2048, 2048],
+                "source_resize_algorithm": MapReviewDisplayTransform.exactCrop],
+                ["name": "refined", "role": "checkpoint", "height": "/prediction/height.exr", "map_type": "height"]]]
+        try JSONSerialization.data(withJSONObject: ["materials": [material], "comparison_target": "height"]).write(to: manifest)
+        let store = ReviewSessionStore(preferences: preferences)
+        store.load(manifest)
+        XCTAssertNil(store.error)
+        let candidates = try XCTUnwrap(store.selected?.candidates)
+        let diffuse = try XCTUnwrap(candidates.first { $0.role == "diffuse" })
+        XCTAssertEqual(diffuse.label, "Diffuse · model input")
+        XCTAssertEqual(diffuse.mapURL.path, "/original/diffuse.png")
+        XCTAssertEqual(diffuse.displayTransform?.sourceSHA256, diffuseHash)
+        XCTAssertEqual(diffuse.displayTransform?.size, 2048)
+        let reference = try XCTUnwrap(candidates.first(where: \.isReference))
+        XCTAssertEqual(reference.displayTransform?.sourceSHA256, targetHash)
+        XCTAssertNil(try XCTUnwrap(reference.fullSourceReference).displayTransform, "Full source opens without reconstructing a training grid")
+        let saved = root.appendingPathComponent("saved.json")
+        try store.writeReview(to: saved)
+        let reopened = ReviewSessionStore(preferences: preferences)
+        reopened.load(saved)
+        XCTAssertNil(reopened.error)
+        XCTAssertEqual(reopened.selected?.candidates.first { $0.role == "diffuse" }?.displayTransform, diffuse.displayTransform)
+    }
+    func testNormalCropConventionSurvivesSavedReviewWithoutGlobalTarget() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "normal-crop-review-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let manifest = root.appendingPathComponent("normal-review.json")
+        let variant: [String: Any] = ["name": "source normal", "role": "target", "normal": "/source/normal.png",
+            "map_type": "normal", "source_sha256": String(repeating: "a", count: 64), "native_dimensions": [2048, 2048],
+            "source_resize_algorithm": MapReviewDisplayTransform.exactCrop, "source_normal_convention": "directx",
+            "source_crop_rectangle": [1024, 1024, 2048, 2048]]
+        let document: [String: Any] = ["comparison_target": "normal", "materials": [["material_id": "stone", "variants": [variant]]]]
+        try JSONSerialization.data(withJSONObject: document).write(to: manifest)
+        let store = ReviewSessionStore(preferences: preferences)
+        store.load(manifest)
+        XCTAssertNil(store.error)
+        let original = try XCTUnwrap(store.groups.first?.candidates.first)
+        let saved = root.appendingPathComponent("saved.json")
+        try store.writeReview(to: saved)
+        store.load(saved)
+        XCTAssertNil(store.error)
+        let restored = try XCTUnwrap(store.groups.first?.candidates.first)
+        XCTAssertEqual(restored.displayTransform, original.displayTransform)
+        XCTAssertEqual(restored.displayTransform?.mapType, "normal")
+        XCTAssertEqual(restored.displayTransform?.normalConvention, "directx")
+        XCTAssertEqual(restored.displayTransform?.cropRectangle, [1024, 1024, 2048, 2048])
+    }
+
+    func testDeclaredReviewRolesIdentifyExactTrainingRunsAndRealReferences() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let suite = "review-identity-\(UUID().uuidString)"
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { preferences.removePersistentDomain(forName: suite) }
-        let manifest = root.appendingPathComponent("legacy.json")
+        let manifest = root.appendingPathComponent("review.json")
         let variants: [[String: Any]] = [
-            ["name": "flat", "height": "flat.exr"],
-            ["name": "target", "height": "displacement.png"],
-            ["name": "starting_head", "height": "starting.exr", "checkpoint": "/runs/four-material-adaptation-01/frozen/checkpoint.final.pt",
+            ["name": "Pretrained base", "role": "base", "height": "base.exr"],
+            ["name": "target", "role": "target", "height": "displacement.png"],
+            ["name": "Starting model", "role": "checkpoint", "height": "starting.exr", "checkpoint": "/runs/four-material-adaptation-01/frozen/checkpoint.final.pt",
              "checkpoint_sha256": "2bec143e0c5f-exact-starting", "checkpoint_step": 1200],
-            ["name": "trained_2k", "height": "trained.exr", "checkpoint": "/runs/native-2k-material-cycle-01/checkpoint.final.pt",
+            ["name": "Trained model", "role": "checkpoint", "height": "trained.exr", "checkpoint": "/runs/native-2k-material-cycle-01/checkpoint.final.pt",
              "checkpoint_sha256": "1a3b86ed7008-exact-trained", "checkpoint_step": 800]
         ]
         try writeManifest(variants, to: manifest)
@@ -24,9 +86,9 @@ final class ReviewIdentityTests: XCTestCase {
         store.load(manifest)
         XCTAssertNil(store.error)
         let candidates = try XCTUnwrap(store.groups.first?.candidates)
-        XCTAssertEqual(candidates.map(\.role), ["source", "base", "target", "checkpoint", "checkpoint"])
-        XCTAssertEqual(candidates[1].label, "Flat baseline · no model")
-        XCTAssertTrue(candidates[1].detail?.contains("no model inference") == true)
+        XCTAssertEqual(candidates.map(\.role), ["diffuse", "base", "target", "checkpoint", "checkpoint"])
+        XCTAssertEqual(candidates[1].label, "Pretrained base")
+        XCTAssertTrue(candidates[1].detail?.contains("Base model prediction") == true)
         XCTAssertEqual(candidates[2].label, "Source displacement · reference")
         XCTAssertTrue(candidates[2].detail?.contains("not a model output") == true)
         XCTAssertTrue(candidates[2].detail?.contains("16-bit") == true)
@@ -50,9 +112,9 @@ final class ReviewIdentityTests: XCTestCase {
         let original = Data("signed float source samples must stay untouched".utf8)
         try original.write(to: map)
         let manifest = root.appendingPathComponent("comparison.json")
-        try writeManifest([["name": "trained_2k", "height": map.path,
+        try writeManifest([["name": "Trained model", "role": "checkpoint", "height": map.path,
             "checkpoint": "runs/refined/checkpoint.selected.pt", "checkpoint_sha256": "unique-verified-checkpoint-sha",
-            "checkpoint_step": 7600, "model_architecture": "DINOv2 Base features + material height head"]], to: manifest)
+            "checkpoint_step": 7600, "model_architecture": "PBRnxt material height"]], to: manifest)
         let store = ReviewSessionStore(preferences: preferences)
         store.load(manifest)
         let candidate = try XCTUnwrap(store.groups.first?.candidates.last)
@@ -67,7 +129,7 @@ final class ReviewIdentityTests: XCTestCase {
         XCTAssertEqual(recorded["checkpoint"] as? String, root.appendingPathComponent("runs/refined/checkpoint.selected.pt").path)
         XCTAssertEqual(recorded["checkpoint_sha256"] as? String, "unique-verified-checkpoint-sha")
         XCTAssertEqual(recorded["checkpoint_step"] as? Int, 7600)
-        XCTAssertEqual(recorded["model_architecture"] as? String, "DINOv2 Base features + material height head")
+        XCTAssertEqual(recorded["model_architecture"] as? String, "PBRnxt material height")
         let reopened = ReviewSessionStore(preferences: preferences)
         reopened.load(saved)
         XCTAssertNil(reopened.error)
@@ -79,7 +141,7 @@ final class ReviewIdentityTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: map), original)
     }
 
-    func testDeepBumpAndMissingArchitectureRemainHonest() throws {
+    func testUnknownNamesNeverInferAnArchitectureOrPredictionRole() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let suite = "review-identity-\(UUID().uuidString)"
@@ -87,18 +149,17 @@ final class ReviewIdentityTests: XCTestCase {
         defer { preferences.removePersistentDomain(forName: suite) }
         let manifest = root.appendingPathComponent("comparison.json")
         try writeManifest([
-            ["name": "deepbump_height", "height": "deepbump.exr"],
-            ["name": "trained_2k", "height": "unknown.exr", "checkpoint": "/runs/da3-in-filename/checkpoint.pt"]
+            ["name": "unknown_height", "height": "unknown-height.exr"],
+            ["name": "Trained model", "role": "checkpoint", "height": "unknown.exr", "checkpoint": "/runs/misleading-model-name/checkpoint.safetensors"]
         ], to: manifest)
         let store = ReviewSessionStore(preferences: preferences)
         store.load(manifest)
         let candidates = try XCTUnwrap(store.groups.first?.candidates)
-        XCTAssertEqual(candidates[1].role, "model")
-        XCTAssertEqual(candidates[1].label, "DeepBump · displacement")
-        XCTAssertTrue(candidates[1].detail?.contains("not the dataset reference") == true)
+        XCTAssertEqual(candidates[1].role, "map")
+        XCTAssertEqual(candidates[1].label, "unknown_height")
+        XCTAssertNil(candidates[1].modelIdentity?.architecture)
         XCTAssertNil(candidates[2].modelIdentity?.architecture)
         XCTAssertTrue(candidates[2].detail?.contains("Architecture not recorded") == true)
-        XCTAssertFalse(candidates[2].detail?.contains("Depth Anything 3") == true)
     }
 
     func testSavedCheckpointRunWithUnderscoresDoesNotAccumulateDuplicateLabels() throws {
@@ -111,7 +172,7 @@ final class ReviewIdentityTests: XCTestCase {
         let name = "native_2k_refinement · Displacement"
         try writeManifest([["name": name, "height": "height.exr", "role": "checkpoint", "candidate_id": "exact-candidate",
             "checkpoint": "/runs/native_2k_refinement/checkpoint.selected.pt", "checkpoint_sha256": "exact-model-sha",
-            "checkpoint_step": 123, "model_architecture": "DINOv2 Base + trained material head"]], to: initial)
+            "checkpoint_step": 123, "model_architecture": "PBRnxt material height"]], to: initial)
         let store = ReviewSessionStore(preferences: preferences)
         store.load(initial)
         let candidate = try XCTUnwrap(store.groups.first?.candidates.last)
@@ -221,7 +282,7 @@ final class ReviewIdentityTests: XCTestCase {
         let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { preferences.removePersistentDomain(forName: suite) }
         let manifest = root.appendingPathComponent("review-manifest.json")
-        try writeManifest([["name": "target", "height": "display-preview.png", "reference_exr": "raw-reference.exr"]], to: manifest)
+        try writeManifest([["name": "target", "role": "target", "height": "display-preview.png", "reference_exr": "raw-reference.exr"]], to: manifest)
         let store = ReviewSessionStore(preferences: preferences)
         store.load(manifest)
         XCTAssertNil(store.error)

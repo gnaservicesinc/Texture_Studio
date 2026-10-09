@@ -1,73 +1,29 @@
-# Texture-height model vetting
+# Material model quality and export contract
 
-Checked against primary sources and native Metal probes on 2026-10-08. The previous DINOv2 material-head experiment is retired. Dataset preparation, saved review and export remain available. Studio does not automatically substitute DA3 or activate an unreviewed replacement.
+The current development backend uses the complete revision-pinned PBRnxt material network, adapted to map input and output pixels at the same native grid. The original pretrained generator and final output branches are loaded strictly. The adaptation is experimental; it must earn acceptance for this surface-material task through actual maps and displaced-surface review.
 
-## Current experimental base: complete PBRnxt
+## Training and model identity
 
-[PBRnxt](https://github.com/aaf6aa/PBRnxt) is trained for flat diffuse-to-material decomposition, with albedo, OpenGL normal, roughness and displacement outputs. Its source is MIT with retained Apache-2.0/MIT component notices. The pinned checkpoint is `pbrnxt_402236.pth`, revision `73ab49a0cc0de5ea70e7aa94fb1a7234dd59ab35`, 349,493,406 bytes, SHA256 `3f25b03e950c6199b53a3e1581296831e71555e1928ad209232b757f75153b7d`.
+The model receives a prepared diffuse map and one registered target: height, roughness or normal. Every pair matches the chosen training grid. There is no hidden smaller crop, per-image range stretching, numeric gamma correction, or fabricated enlargement of undersized targets. Training loss includes the complete target grid.
 
-The complete network has **86,763,756 pretrained parameters**. All 2,896 state keys load strictly. Keeping only its 66.52M-parameter intermediate generator produces a repeating grid, not usable displacement; CPU and Metal agree. The final pretrained RRDB branches are essential. The native-scale adapter retains every trained convolution and output head, omits the two nearest-neighbor enlargements per final branch, and removes the wrapper's artificial image borders. It disables stochastic evaluation noise for repeatable comparisons. This is an explicit **experimental 1:1 adaptation**, not the unchanged published 4x model.
+LoRA refinement targets the selected map's final branch, optionally including its decoder. The base identity, target, scope, rank, alpha, module layout, training size and step are stored in checkpoint metadata. Full and adapter checkpoints use `.safetensors`. A fused full checkpoint retains the separate LoRA so the changes can be examined and reproduced against the recorded base.
 
-At native 512, the complete mapping responds to photographed stucco chips and brick pores. Broad relief can be shallow or inverted and boundaries have artifacts. A small supervised fitting trial is appropriate; production quality has not been established. Refinement first trains the existing final height branch (5,059,745 parameters) while preserving the complete pretrained material core. A saved delta is not a standalone small model: it requires the exact 349MB pretrained base and its notices.
+Weighted adapter mixing requires the exact same base identity and compatible target modules. Fusion adds the weighted adapter deltas to the base. Tests verify that the fused network agrees with the base-plus-adapter network within floating-point arithmetic tolerance; a saved file format cannot make two separately evaluated operation orders bitwise identical.
 
-The first actual native 1024 trial completed 40 updates on four paired stucco/brick crops. Its lower fitting loss did **not** improve material quality: all four native comparisons lost relief. For example, interior stucco height standard deviation fell from 0.00858 in the base to 0.00188 after refinement, while the reference is 0.04558. Brick still turned some bright color flecks into false raised bumps. This checkpoint is rejected for Studio use; repeating the same final-branch-only configuration is not justified.
+Developer mode exposes controls for this refinement workflow and defaults to a full fused model plus LoRA. User mode exports the LoRA. A future V1 material catalog is intended to use validated refined full models as the starting points for further task-specific refinement.
 
-The second bounded experiment widened refinement to the existing pretrained height decoder and tail (`gen.m_dec_3`, `gen.m_tail_3`) plus the final height branch. This made 18,288,455 parameters trainable without adding a random head. The shared encoder/body/fusion and other task decoder parameters remained frozen. Fusion remains differentiable, so changing the height decoder can also affect intermediate material features; no claim is made that other outputs stay identical. The loss, crop policy and source values stayed the same so the scope change could be judged directly.
+## Acceptance
 
-That refinement completed another 40 updates (80 total), but **also failed visual acceptance**. Brick gained broad blotchy relief and severe dark edge frames while its fine grain became blurrier. Stucco stayed shallow and acquired false bright hotspots. Its interior height standard deviation was 0.00240 versus 0.04558 in the reference; greater brick variation was mostly broad artifacts. Neither checkpoint is selected for Studio. A longer full-dataset run with this configuration is not the next step.
+Inspect maps at the actual model input resolution. Compare the pretrained base, source reference and result on the same diffuse pixels. Examine relief placement, inversion, grain, false bumps from color, halos, edge frames, seams and excessive smoothing. Inspect displaced geometry under neutral and grazing light. A lower fitting loss or larger output file does not establish improved material quality.
 
-Both failed checkpoint/output directories have since been deleted with explicit user authorization. Their small records remain in `material-pbrnxt-trial-results.json`. A later no-training evaluation on complete publisher-native 1K stucco/brick maps also showed shallow, blurred stucco relief; whole-map context alone does not qualify this adaptation. See [the current scale/review record](material-scale-review-2026-10-08.md) for the 97-material native source collection and exact evaluation identity.
+Automatic checks hold out source families at the selected grid, keeping all resolutions and colors together. Regional checks of disjoint corners of a known material are labeled separately. Fresh materials and photographs prepared through the application's diffuse process are still required to assess use outside the training set. A one-region fitting run has no independent validation set.
 
-Upstream [preprocessing](https://github.com/aaf6aa/PBRnxt/blob/73ab49a0cc0de5ea70e7aa94fb1a7234dd59ab35/scripts/dataset_preprocess.py) writes UInt8 JPEG training references. Our refinement bypasses it, retaining the original **UInt16 linear numeric height codes**, mapped to Float32 by division by65535 only. No target gamma, min/max stretching, source padding or rescaling occurs. Float32 computation/export preserves those codes' distinctions; it cannot add missing source information.
+The local decision model can rank detail, visual appeal and visible artifacts and preselect a recommendation. Its output is advisory and retains the user's final review choice. Neither a decision score nor a numerical metric automatically promotes a model into the shipped catalog.
 
-## Actual training size and resources
+## Precision, memory and recovery
 
-The active `/opt/ipde/material-dataset-2048` dataset contains genuine 2048 paired maps. Each update in the first trial sees a **real 1024 × 1024 crop** from those maps. Dataset size and model input size are different recorded fields. Joint flips/90-degree rotations and modest exposure changes affect derived training tensors only. The height loss excludes 64 boundary pixels; the input still contains 1024 real pixels per axis. Original PNGs remain unchanged.
+Height uses original UInt16 numeric codes transferred to Float32 by division by 65535. Roughness and normal maps use their actual integer precision. Raw predictions export lossless unclipped Float32 EXR; display PNGs are separate derivatives. Source images remain unchanged.
 
-A complete native 1024 forward/backward on the 64GiB M2 Max took 10.40/7.64 seconds and 18.67GiB sampled Metal driver memory. The fitting run settles around 25GiB including optimizer/workspace caching. Memory estimates, CPU cache, driver cap and actual native crop are recorded. The driver limit follows the selected unified-memory budget with room for host cache and macOS. Native 2048 training remains unmeasured and unqualified; the activation extrapolation is not a measured 2048 failure. Any revised memory strategy or smaller architecture needs an actual full-resolution forward/backward/optimizer test. Never manufacture border pixels or upscale a 1K target.
+Memory preflight determines which training grids are offered for the selected scope and budget. Generation may tile larger prepared diffuse maps independently of training size. Hardware estimates and a successful run describe runtime feasibility, not model quality.
 
-The wider pretrained height decoder also passed an actual native 1024 forward/backward/AdamW step: 10.41 seconds forward, 17.41 seconds backward, 34.28GiB sampled driver memory, finite gradients. These are measured probes, not a promise about peak usage over a complete training run. The resource preflight distinguishes the two refinement scopes.
-
-The complete wider run settled at 36.98GiB driver memory and about 27.8 seconds per update. **Requested native 2048 training has not been completed or qualified.** The 2048 dataset must not be presented as evidence that the model trained at 2048. A different memory strategy needs a real 2048 forward/backward/optimizer test; padding or stretched targets are not substitutes. Separately, the current 1:1 model adaptation and fitting objective need to learn useful relief before a long run is worthwhile.
-
-The reusable research entry point is [train_material_pbrnxt.py](../scripts/train_material_pbrnxt.py). It supports train-from-base, refine-from-checkpoint and evaluation, saves exact identities and raw Float32 EXRs, and produces labeled native review manifests. It does not automatically mark results production-ready or change Studio's model. The native training interface stays paused while this replacement is evaluated.
-
-It also supports `evaluate-base --whole-maps`, which does not train or save a checkpoint. Actual rectangular dimensions are preserved where the architecture supports them, and original full-parent height paths remain available alongside raw cropped reference EXRs.
-
-Evaluation now uses an inference-only budget and allocates no optimizer. A real publisher-native 2048 whole-stucco base inference completed in 49.45 seconds with sampled Metal driver allocation reaching 51.34 GiB under a positive 53 GiB driver cap. Its relief remained shallow and blurred with dark borders. This is a successful bounded inference probe, not native 2048 training qualification or visual acceptance; see the scale/review record for the exact artifacts and sampling limits.
-
-The following commands describe the experimental interface. They are not a recommendation to repeat the rejected configuration or start unattended full-dataset training.
-
-```sh
-.venv/bin/python scripts/train_material_pbrnxt.py train \
-  --dataset /opt/ipde/material-dataset-2048 \
-  --output out/material-training/my-pbrnxt-run \
-  --download --scope height-decoder --size 1024 --updates 40 --memory-gib 56
-
-.venv/bin/python scripts/train_material_pbrnxt.py refine \
-  --dataset /opt/ipde/material-dataset-2048 \
-  --output out/material-training/my-pbrnxt-refinement \
-  --checkpoint out/material-training/my-pbrnxt-run/checkpoint.latest.pt \
-  --scope height-decoder --size 1024 --updates 40 --learning-rate 0.00003 --memory-gib 56
-```
-
-Use spaces between each option and its value (for example `--size 1024`). Use new output folders; previous runs are preserved. Base source/licenses/weights can be downloaded with `--download`, or supplied through both `--source-dir` and `--weights`. No models, datasets or generated maps enter Git.
-
-`final-height` means only the existing final RRDB output branch. `height-decoder` also refines the upstream pretrained height task decoder. Refining/evaluating a saved checkpoint inherits its recorded scope unless explicitly widening a final-height checkpoint. A narrower scope cannot silently discard already-refined decoder weights. Neither scope is production-approved merely because training finishes.
-
-## Excluded or secondary candidates
-
-- **DA3 / DA3MONO:** camera-depth estimators are not the chosen texture-height training base. The requested rejection is honored; no DA3 material training ran. An explicit Studio camera-depth option is a separate workflow.
-- **DeepBump:** texture-trained normal-to-height baseline, GPL-3.0, about 26.7MB. It remains a comparison reference; its small normal network and integration are not substituted for a qualified complete material model. [Official source](https://github.com/HugoTini/DeepBump).
-- **PBRify Remix height:** directly trained material-height SPAN, with CC0 weights and an Apache-2.0 architecture; a possible bounded comparison, not an approved replacement. Its pinned weight at revision `190db5378909749bdbad0f951b5724ba066ea32d` is 8,938,652 bytes, SHA256 `5b973ecb8bae9d96d14d77b8a8f1d88fb6a8580bcc1bb55d2872811acdc4277d`. Its author explicitly warns that baked lighting can cause large height failures. Original target precision and native 2K training memory are unverified. Model byte size establishes neither adequacy nor quality. [Primary project](https://github.com/Kim2091/PBRify_Remix), [technical notes](https://github.com/Kim2091/PBRify_Remix/blob/190db5378909749bdbad0f951b5724ba066ea32d/EXTRA_INFO.md).
-- **MaterialPalette decomposition:** a substantial pretrained BRDF network, but no learned displacement output. The [actual architecture](https://github.com/astra-vision/MaterialPalette/blob/0ddd360467cce8879c9772fb791924b0dc0b9d9b/capture/source/model.py) declares Monodepth2 noncommercial restrictions despite the repository's MIT label. Exclude it pending license clarification. Its stock loaders/exporters also reduce maps to 8-bit and resize inference to 512.
-- **CHORD:** relevant material decomposition, but its research-only model license is unsuitable as this GPL production default. [Official source](https://github.com/ubisoft/ubisoft-laforge-chord).
-- **Generated material diffusion:** image-prompt generation can change photographed texture identity. It is not this initial supervised enhancement path.
-
-## What counts as improvement
-
-Inspect original-resolution maps at 100% and displaced Blender surfaces under neutral/grazing light. Check bumps in the right places, inversion, false relief from shadows, grain, halos, seams and noise. Always compare the exact pretrained base and checkpoint on the same pixels with durable labels. Raw EXRs retain unclipped values; explicitly labeled shared display contrast affects previews only.
-
-The first short trial uses known stucco/brick sources to test fitting. The small automatic same-source check set measures fitting progress, not unseen-material generalization. Fresh photographs and additional independently captured materials must test generalization before production selection. A score improvement alone is not acceptance.
-
-[Prodigy](https://github.com/konstmish/prodigy) adapts learning-rate estimates; it is not an overfitting detector. Scheduled AdamW, conservative refinement, paired-data quality, realistic illumination changes, material balancing and visual checkpoint selection address the actual risks. Compare another optimizer only after the task and baseline work.
+Hub exports retain model metadata, licenses, source files and base identity and exclude source photographs and optimizer state. Successfully uploaded models remain in the app's download catalog by repository revision. Local full checkpoints can be used as a different base without silently changing architecture or tensor layout.

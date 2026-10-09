@@ -6,8 +6,7 @@
 	objects = {
 		A10000000000000000000001 /* Texture Studio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Texture Studio.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000002 /* TextureStudioTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TextureStudioTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		A10000000000000000000003 /* DA3Backend */ = {isa = PBXFileReference; lastKnownFileType = folder; name = DA3Backend; path = Resources/DA3Backend; sourceTree = "<group>"; };
-		A20000000000000000000001 = {isa = PBXGroup; children = (A30000000000000000000001, A30000000000000000000002, A30000000000000000000003, A30000000000000000000004, A30000000000000000000005, A30000000000000000000006, A30000000000000000000007, A30000000000000000000008, A10000000000000000000003, A20000000000000000000002); sourceTree = "<group>"; };
+		A20000000000000000000001 = {isa = PBXGroup; children = (A30000000000000000000001, A30000000000000000000002, A30000000000000000000003, A30000000000000000000004, A30000000000000000000005, A30000000000000000000006, A30000000000000000000007, A30000000000000000000008, A20000000000000000000002); sourceTree = "<group>"; };
 		A20000000000000000000002 /* Products */ = {isa = PBXGroup; children = (A10000000000000000000001, A10000000000000000000002); name = Products; sourceTree = "<group>"; };
 		A30000000000000000000001 /* App */ = {isa = PBXFileSystemSynchronizedRootGroup; path = App; sourceTree = "<group>"; };
 		A30000000000000000000002 /* Views */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Views; sourceTree = "<group>"; };

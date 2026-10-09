@@ -144,7 +144,10 @@ def fetch_metadata(material: str, cache: Path | None = None) -> tuple[dict, dict
 def selected_map(material: str, role: str, payload: dict, resolution: str) -> dict:
     aliases = ROLES[role]
     matches = [(name, item) for name, item in payload.items() if name.casefold() in aliases]
-    if len(matches) != 1:
+    if role == "input" and not matches:
+        matches = sorted((name, item) for name, item in payload.items()
+                         if re.fullmatch(r"col(?:l)?(?:_?\d+)?|color(?:_?\d+)?|albedo(?:_?\d+)?", name.casefold()))
+    if not matches or (role != "input" and len(matches) != 1):
         raise ValueError(f"Need one official {role} map for {material}, got {len(matches)}")
     provider_role, variants = matches[0]
     record = variants.get(resolution, {}).get("png")
@@ -165,8 +168,19 @@ def selected_map(material: str, role: str, payload: dict, resolution: str) -> di
 
 
 def make_plan(material: str, payload: dict, provenance: dict, references: dict, resolution: str) -> dict:
-    maps = {role: selected_map(material, role, payload, resolution) for role in ROLES}
-    return {"material_id": material, "provider": "Poly Haven", "license": "CC0-1.0", "license_url": "https://polyhaven.com/license", "asset_url": f"https://polyhaven.com/a/{material}", "resolution": resolution, "published_original_bytes": True, "resized_from_existing_4k": False, "distinct_camera_exposure_claimed": False, "api": provenance, "maps": maps, "published_bytes": sum(item["published_bytes"] for item in maps.values()), "existing_dataset_references": references, "cross_resolution_registration_verified": False, "training_split_assigned": False, "leakage_policy": "Same material may represent the same photographed surface at another published resolution. Register/verify geographic footprints before mixing with existing train/validation regions; resolution difference is not an independent observation."}
+    maps, unavailable = {}, []
+    for role in ROLES:
+        if role != "input" and not any(name.casefold() in ROLES[role] for name in payload):
+            unavailable.append(role)
+            continue
+        maps[role] = selected_map(material, role, payload, resolution)
+    if not any(role in maps for role in ("height", "normal", "roughness")):
+        raise ValueError(f"No supported published target maps for {material}")
+    colors = sorted(name for name in payload if re.fullmatch(r"col(?:l)?(?:_?\d+)?|color(?:_?\d+)?|albedo(?:_?\d+)?", name.casefold()))
+    for name in colors:
+        if name != maps["input"]["provider_map_name"]:
+            maps["input_" + name.casefold()] = selected_map(material, "input", {name: payload[name]}, resolution)
+    return {"material_id": material, "provider": "Poly Haven", "license": "CC0-1.0", "license_url": "https://polyhaven.com/license", "asset_url": f"https://polyhaven.com/a/{material}", "resolution": resolution, "published_original_bytes": True, "resized_from_existing_4k": False, "distinct_camera_exposure_claimed": False, "api": provenance, "maps": maps, "unavailable_roles": unavailable, "published_bytes": sum(item["published_bytes"] for item in maps.values()), "existing_dataset_references": references, "cross_resolution_registration_verified": False, "training_split_assigned": False, "leakage_policy": "Same material may represent the same photographed surface at another published resolution. Register/verify geographic footprints before mixing with existing train/validation regions; resolution difference is not an independent observation."}
 
 
 def verify_map(path: Path, entry: dict, resolution: str) -> dict:
@@ -191,17 +205,29 @@ def verify_map(path: Path, entry: dict, resolution: str) -> dict:
 
 def check_pairs(records: dict[str, dict]) -> list[int]:
     dimensions = {(item["png_header"]["width"], item["png_header"]["height"]) for item in records.values()}
-    if len(records) != len(ROLES) or len(dimensions) != 1:
+    if "input" not in records or not any(role in records for role in ("height", "normal", "roughness")) or len(dimensions) != 1:
         raise ValueError("Published diffuse/height/normal/roughness native pixel dimensions differ")
     return list(next(iter(dimensions)))
 
 
+def asset_directory(plan: dict, destination: Path) -> Path:
+    """Reuse an existing source folder for this asset instead of duplicating it."""
+    folders = {path.parent for path in destination.glob("*/*.png")
+               if re.fullmatch(re.escape(plan["material_id"]) + r"_(?:diff(?:use)?|disp(?:lacement)?|nor_gl|normalgl|rough(?:ness)?|col(?:l)?(?:_?\d+)?|color(?:_?\d+)?|albedo(?:_?\d+)?)_\d+k\.png", path.name.casefold())}
+    if len(folders) > 1:
+        exact = {folder for folder in folders if any((folder / entry["filename"]).is_file() for entry in plan["maps"].values())}
+        if len(exact) == 1:
+            return next(iter(exact))
+        raise ValueError(f"Asset exists in several source folders; cannot choose a duplicate download destination: {plan['material_id']}")
+    return next(iter(folders)) if folders else destination / plan["material_id"]
+
+
 def download_asset(plan: dict, destination: Path) -> dict:
-    directory = destination / plan["material_id"]
+    directory = asset_directory(plan, destination)
     if directory.is_symlink():
         raise ValueError(f"Destination asset directory is a symlink: {directory}")
     directory.mkdir(parents=True, exist_ok=True)
-    records, pending = {}, []
+    records, pending, owned = {}, [], []
     try:
         for role, entry in plan["maps"].items():
             target = directory / entry["filename"]
@@ -217,15 +243,22 @@ def download_asset(plan: dict, destination: Path) -> dict:
                 raise ValueError(f"Published map download failed ({role}): {result.stderr.decode(errors='replace')[:300]}")
             records[role] = dict(verify_map(temporary, entry, plan["resolution"]), path=str(target.absolute()), action="downloaded_verified")
         dimensions = check_pairs(records)
+        manifest = directory / f"material-source-{plan['resolution']}.json"
+        if manifest.exists() or manifest.is_symlink():
+            previous = json.loads(manifest.read_text()) if not manifest.is_symlink() else {}
+            if previous.get("material_id") != plan["material_id"] or previous.get("resolution") != plan["resolution"] or {role: item.get("sha256") for role, item in previous.get("downloaded_maps", {}).items()} != {role: item["sha256"] for role, item in records.items()}:
+                raise ValueError(f"Existing provenance manifest differs; left untouched: {manifest}")
         # Stage the complete coherent set first, then publish without replacing
         # any existing path. Hard-link creation provides atomic no-clobber.
         for temporary, target, role, entry in pending:
             try:
                 os.link(temporary, target)
+                state = target.stat()
+                owned.append((target, (state.st_dev, state.st_ino, state.st_size, state.st_mtime_ns)))
             except FileExistsError:
                 records[role] = dict(verify_map(target, entry, plan["resolution"]), path=str(target.resolve()), action="concurrent_verified_reuse")
         result = dict(plan, downloaded_maps=records, actual_native_pixel_dimensions=dimensions, actual_headers_verified=True, status="downloaded_or_reused_verified", completed_utc=utc_now())
-        manifest = directory / "material-source.json"
+        manifest = directory / f"material-source-{plan['resolution']}.json"
         if manifest.exists():
             previous = json.loads(manifest.read_text())
             if previous.get("material_id") != plan["material_id"] or previous.get("resolution") != plan["resolution"] or {role: item.get("sha256") for role, item in previous.get("downloaded_maps", {}).items()} != {role: item["sha256"] for role, item in records.items()}:
@@ -237,6 +270,13 @@ def download_asset(plan: dict, destination: Path) -> dict:
             result["existing_manifest_reused"] = False
         result["manifest_path"] = str(manifest.resolve())
         return result
+    except Exception:
+        for target, identity in reversed(owned):
+            if target.is_file() and not target.is_symlink():
+                state = target.stat()
+                if (state.st_dev, state.st_ino, state.st_size, state.st_mtime_ns) == identity:
+                    target.unlink()
+        raise
     finally:
         for temporary, _, _, _ in pending:
             temporary.unlink(missing_ok=True)
@@ -286,18 +326,18 @@ def main(argv: list[str] | None = None) -> int:
         for item in pool.map(fetch, materials):
             (report["errors"] if "error" in item else report["materials"]).append(item)
     report["planned_material_count"] = len(report["materials"])
-    report["planned_png_count"] = len(report["materials"]) * len(ROLES)
+    report["planned_png_count"] = sum(len(item["maps"]) for item in report["materials"])
     report["total_published_bytes"] = sum(item["published_bytes"] for item in report["materials"])
     report["within_requested_byte_budget"] = report["total_published_bytes"] <= args.max_bytes
     report["status"] = "plan_complete" if not report["errors"] else "incomplete"
-    if args.download and not report["errors"]:
+    if args.download and report["materials"]:
         try:
             if not report["within_requested_byte_budget"]:
                 raise ValueError("Published byte total exceeds explicit disk/download budget; no PNG downloaded")
             missing_bytes = 0
             for item in report["materials"]:
                 for entry in item["maps"].values():
-                    path = args.destination / item["material_id"] / entry["filename"]
+                    path = asset_directory(item, args.destination) / entry["filename"]
                     if path.exists() or path.is_symlink():
                         verify_map(path, entry, args.resolution)
                     else:

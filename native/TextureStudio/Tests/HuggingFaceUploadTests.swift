@@ -7,8 +7,9 @@ final class HuggingFaceUploadTests: XCTestCase {
     func testBlankDestinationUsesSavedAccountAndExactSelectedCheckpoint() async throws {
         let fixture = try UploadFixture()
         defer { fixture.remove() }
-        let store = fixture.store { _, _ in
-            "{\"authenticated\":true,\"username\":\"artist\",\"message\":\"Signed in as artist\"}"
+        let store = fixture.store { args, _ in
+            if args.first == "hub-models" { return "{\"models\":[]}" }
+            return "{\"authenticated\":true,\"username\":\"artist\",\"message\":\"Signed in as artist\"}"
         }
         let first = try fixture.checkpoint(hash: "abcdef0123456789", directory: "Native 2K Height")
         let second = try fixture.checkpoint(hash: "9876543210abcdef", directory: "Refined Height")
@@ -34,6 +35,7 @@ final class HuggingFaceUploadTests: XCTestCase {
         let selected = try fixture.checkpoint(hash: "selected-sha", directory: "Selected Run")
         let store = fixture.store { args, _ in
             calls.append(args)
+            if args.first == "hub-models" { return "{\"models\":[]}" }
             if args.first == "hub-account" {
                 return "{\"authenticated\":true,\"username\":\"artist\",\"message\":\"Signed in as artist\"}"
             }
@@ -55,12 +57,12 @@ final class HuggingFaceUploadTests: XCTestCase {
         store.uploadPackage()
         try await settled(store)
         XCTAssertNil(store.error)
-        XCTAssertEqual(calls.compactMap(\.first), ["hub-account", "upload-selected"])
-        let upload = try XCTUnwrap(calls.last)
+        XCTAssertEqual(calls.compactMap(\.first), ["hub-account", "hub-models", "upload-selected", "hub-models"])
+        let upload = try XCTUnwrap(calls.first { $0.first == "upload-selected" })
         XCTAssertEqual(value("--repo", in: upload), "artist/chosen-destination")
         XCTAssertTrue(upload.contains("--public"))
-        XCTAssertEqual(store.lastPackageCheckpointId, selected.id)
-        XCTAssertTrue(store.lastPackageURL?.lastPathComponent.hasPrefix("upload-height-") == true)
+        let staged = URL(fileURLWithPath: try XCTUnwrap(value("--output", in: upload)))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staged.path), "Upload staging must be purged after publication")
         XCTAssertEqual(store.lastUploadURL?.absoluteString, "https://huggingface.co/artist/chosen-destination/commit/verified")
     }
 
@@ -94,6 +96,7 @@ final class HuggingFaceUploadTests: XCTestCase {
         let fixture = try UploadFixture()
         defer { fixture.remove() }
         let store = fixture.store { args, _ in
+            if args.first == "hub-models" { return "{\"models\":[]}" }
             if args.first == "hub-account" {
                 return "{\"authenticated\":true,\"username\":\"artist\",\"message\":\"Signed in as artist\"}"
             }
@@ -147,9 +150,9 @@ final class HuggingFaceUploadTests: XCTestCase {
         WorkbenchStore(preferences: preferences, workerOverride: worker)
     }
     func checkpoint(hash: String, directory: String) throws -> WorkbenchCheckpoint {
-        let data = try JSONSerialization.data(withJSONObject: ["checkpoint_path": root.appendingPathComponent(directory).appendingPathComponent("head.pt").path,
-            "sha256": hash, "schema": "material-native-map-cycle-v1", "target": "height", "step": 25,
-            "compatible": true, "variant": "frozen"])
+        let data = try JSONSerialization.data(withJSONObject: ["checkpoint_path": root.appendingPathComponent(directory).appendingPathComponent("adapter.safetensors").path,
+            "sha256": hash, "schema": "texture-studio-material-lora-v1", "target": "height", "step": 25,
+            "compatible": true, "variant": "lora"])
         return try WorkbenchProcess.decode(WorkbenchCheckpoint.self, output: String(decoding: data, as: UTF8.self))
     }
     func uploadResponse(repository: String, checksum: String, path: String, isPrivate: Bool) throws -> String {

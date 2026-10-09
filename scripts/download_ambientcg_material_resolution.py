@@ -140,7 +140,11 @@ def matching_manifest(previous: dict, plan: dict, records: dict) -> bool:
 
 
 def download_asset(plan: dict, destination: Path, evidence: Path) -> dict:
-    directory = destination / plan["material_id"]
+    folders = {path.parent for path in destination.glob("*/*.png")
+               if re.fullmatch(re.escape(plan["asset_id"]) + r"_\d+K-PNG_(?:Color|Displacement|NormalGL|Roughness)\.png", path.name, re.IGNORECASE)}
+    if len(folders) > 1:
+        raise ValueError("Asset exists in multiple source folders; avoid another copy")
+    directory = next(iter(folders)) if folders else destination / plan["material_id"]
     if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
         raise ValueError(f"Invalid destination material directory: {directory}")
     destination.mkdir(parents=True, exist_ok=True)
@@ -154,7 +158,7 @@ def download_asset(plan: dict, destination: Path, evidence: Path) -> dict:
         # Verify the whole archive/member contract before publishing any image.
         staged_audit = audit.compare_package(archive, temporary / "maps", plan["asset_id"], plan["resolution"].upper(),
                                             plan["package"]["published_api_bytes"], transport["headers"].get("x-bz-content-sha1"))
-        manifest = directory / "material-source.json"
+        manifest = directory / f"material-source-{plan['resolution']}.json"
         if manifest.exists() or manifest.is_symlink():
             if manifest.is_symlink() or not matching_manifest(json.loads(manifest.read_text()), plan, records):
                 raise ValueError(f"Existing provenance manifest differs; left untouched: {manifest}")

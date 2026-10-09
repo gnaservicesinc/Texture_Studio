@@ -6,6 +6,71 @@ import XCTest
 
 @MainActor
 final class ModelDecisionTests: XCTestCase {
+    private static func qualityResponse(change: (inout [String: Any]) -> Void = { _ in }) throws -> Data {
+        var answers: [String: Any] = [:]
+        for (name, criteria) in MaterialQualityDecision.scoreCriteria {
+            answers[name] = ["type": "score", "score": 3.0, "confidence": 1.0,
+                "legend": Dictionary(uniqueKeysWithValues: criteria.enumerated().map { (String($0.offset), $0.element) }),
+                "probabilities": ["0": 0.0, "1": 0.0, "2": 0.0, "3": 1.0, "4": 0.0]]
+        }
+        answers["artifact_free"] = ["type": "noul", "noul": 0.95]
+        answers["diffuse_ready"] = ["type": "noul", "noul": 0.9]
+        answers["recommendation"] = ["type": "choice", "choice": "approve", "confidence": 0.8,
+            "probabilities": ["approve": 0.9, "review": 0.08, "exclude": 0.02]]
+        change(&answers)
+        return try JSONSerialization.data(withJSONObject: ["model": MaterialDecision.exactModel, "answers": answers,
+            "usage": ["input_tokens": 8000, "output_tokens": 6]])
+    }
+
+    func testPairedQualityReviewUsesAlignedNativeDetailCropsAndFixedQuestions() throws {
+        let diffuse = try image(width: 2048, height: 1024)
+        let map = try image(width: 2048, height: 1024)
+        let images = try OllamaDecisionService.reviewImages(diffuse: diffuse, map: map)
+        XCTAssertEqual(images.count, 4)
+        let dimensions = try images.map { data -> [Int] in
+            let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
+            let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+            return [image.width, image.height]
+        }
+        XCTAssertEqual(dimensions, [[768, 384], [768, 384], [768, 768], [768, 768]])
+        let request = try OllamaDecisionService.qualityReviewRequest(imageData: images, mapType: "height", purpose: .dataset)
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        XCTAssertEqual((body["images"] as? [String])?.count, 4)
+        let questions = try XCTUnwrap(body["questions"] as? [String: [String: Any]])
+        XCTAssertEqual(questions["detail"]?["type"] as? String, "score")
+        XCTAssertEqual(questions["artifact_free"]?["type"] as? String, "noul")
+        XCTAssertEqual(questions["recommendation"]?["type"] as? String, "choice")
+        XCTAssertEqual(body["keep_alive"] as? Int, 0)
+        XCTAssertThrowsError(try OllamaDecisionService.reviewImages(diffuse: diffuse, map: image()))
+        XCTAssertThrowsError(try OllamaDecisionService.qualityReviewRequest(imageData: images, mapType: "shell", purpose: .result))
+    }
+
+    func testQualitySchemaValidatesScoresAndKeepsAmbiguousRecommendationsInReview() throws {
+        let result = try MaterialQualityDecision.decodeSystemOne(Self.qualityResponse())
+        XCTAssertEqual(result.detail, 3)
+        XCTAssertEqual(result.artifactFree, 0.95)
+        XCTAssertEqual(result.recommendation, .approve)
+        let ambiguous = try MaterialQualityDecision.decodeSystemOne(Self.qualityResponse {
+            $0["recommendation"] = ["type": "choice", "choice": "approve", "confidence": 0.05,
+                "probabilities": ["approve": 0.49, "review": 0.48, "exclude": 0.03]]
+        })
+        XCTAssertEqual(ambiguous.recommendation, .review)
+        XCTAssertThrowsError(try MaterialQualityDecision.decodeSystemOne(Self.qualityResponse {
+            $0["artifact_free"] = ["type": "noul", "noul": 1.01]
+        }))
+        XCTAssertThrowsError(try MaterialQualityDecision.decodeSystemOne(Self.qualityResponse {
+            var detail = $0["detail"] as! [String: Any]; detail["score"] = 1.0; $0["detail"] = detail
+        }))
+    }
+
+    func testQualityReviewUsesExistingLocalModelAndReturnsAdvisoryResult() async throws {
+        let transport = DecisionTransport(decision: try Self.qualityResponse())
+        let service = OllamaDecisionService(transport: transport,
+            memoryAssessment: OllamaMemoryAssessment(physicalBytes: 64 * 1_073_741_824, availableBytes: 40 * 1_073_741_824))
+        let result = try await service.reviewMaterial(diffuse: image(), map: image(), mapType: "normal", purpose: .result)
+        XCTAssertEqual(service.status, .ready)
+        XCTAssertEqual(result.recommendation, .approve)
+    }
     private static func response(model: String = MaterialDecision.exactModel, change: (inout [String: Any]) -> Void = { _ in }) throws -> Data {
         var answers: [String: Any] = [:]
         for (key, choices) in MaterialDecision.allowedChoices {

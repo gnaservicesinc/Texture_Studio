@@ -25,7 +25,7 @@ struct DatasetWorkbenchView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Materials").font(.headline)
                         if let dataset = store.dataset {
-                            Text("\(dataset.materials.count) materials · \(dataset.samples.filter { $0.split == "train" }.count) training crops · \(store.datasetNativeSizeLabel)")
+                            Text("\(dataset.materials.count) materials · \(dataset.samples.filter { $0.split == "train" }.count) training material sets · \(store.training.size) × \(store.training.size) training grid")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -43,7 +43,7 @@ struct DatasetWorkbenchView: View {
                     ContentUnavailableView {
                         Label("Open a dataset", systemImage: "square.stack.3d.up")
                     } description: {
-                        Text("Choose your prepared crops to inspect and review their original maps.")
+                        Text("Choose your source dataset to inspect the exact training grid.")
                     } actions: {
                         Button("Open Dataset…") { store.chooseDataset() }
                             .buttonStyle(.glassProminent)
@@ -59,7 +59,7 @@ struct DatasetWorkbenchView: View {
                                     ForEach(material.samples) { sample in
                                         MaterialSidebarRow(selected: store.selectedSampleId == sample.id,
                                                            action: { store.selectedSampleId = sample.id }) {
-                                            DatasetCropRow(sample: sample)
+                                            DatasetCropRow(sample: sample, trainingSize: store.training.size)
                                         }.id(sample.id)
                                     }
                                 }
@@ -78,23 +78,26 @@ struct DatasetWorkbenchView: View {
                     cropHeader(sample)
                     Divider()
                     if let map = store.selectedMap {
-                        MapInspectionView(url: map.url, numeric: store.selectedRole != "input",
-                                          viewport: viewport, title: mapTitle(store.selectedRole))
+                        MapInspectionView(url: store.datasetReviewURL(map), numeric: store.selectedRole != "input",
+                                          viewport: viewport, title: mapTitle(store.selectedRole),
+                                          sourceSHA256: store.datasetReviewSHA256(map), onMissingSource: { missing in
+                                              store.removeMissingSource(missing, sampleID: sample.id)
+                                          }, displayTransform: store.datasetDisplayTransform(map, role: store.selectedRole))
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        ContentUnavailableView("Map unavailable", systemImage: "photo", description: Text("Choose a map available in this crop."))
+                        ContentUnavailableView("Map unavailable", systemImage: "photo", description: Text("Choose a map available in this material."))
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                     Divider()
                     cropReview(sample)
                 } else {
-                    ContentUnavailableView("Select a crop", systemImage: "photo.on.rectangle", description: Text("Select a crop to inspect its maps and review its training use."))
+                    ContentUnavailableView("Select a material", systemImage: "photo.on.rectangle", description: Text("Select a material to inspect its maps and review its training use."))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             .frame(minWidth: 470)
         }
-        .searchable(text: $query, prompt: "Find a material or crop")
+        .searchable(text: $query, prompt: "Find a material")
         .onChange(of: store.selectedSampleId) { _, _ in
             reviewNote = store.selectedSample?.note ?? ""
             viewport.fitToView = true
@@ -126,8 +129,16 @@ struct DatasetWorkbenchView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text((store.selectedMaterialId ?? sample.id).replacingOccurrences(of: "_", with: " "))
                         .font(.headline)
-                    Text("\(sample.id) · \(sample.width) × \(sample.height)")
+                    Text("\(sample.id) · \(store.training.size) × \(store.training.size) training grid")
                         .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    if let map = store.selectedMap, let width = map.originalSourceWidth, let height = map.originalSourceHeight {
+                        Text("Original source \(width) × \(height)")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if let rectangle = map.cropRectangle, rectangle.count == 4 {
+                            Text("Native crop: x\(rectangle[0]), y\(rectangle[1]), \(rectangle[2]) × \(rectangle[3])")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                 }
                 Spacer()
                 Button { store.inspectSelectedMap() } label: {
@@ -135,6 +146,16 @@ struct DatasetWorkbenchView: View {
                 }
                 .disabled(store.selectedMap == nil)
                 .help("Open the original map in an independent window with pixel zoom, pan, lossless export and GIMP access.")
+            }
+            if let variants = sample.inputVariants, variants.count > 1 {
+                Picker("Diffuse color", selection: Binding(get: { store.selectedDiffuseMap?.variantId ?? "" }, set: { store.selectedInputVariantId = $0 })) {
+                    ForEach(variants, id: \.path) { variant in
+                        Text(variant.variantId ?? variant.url.lastPathComponent).tag(variant.variantId ?? "")
+                    }
+                }
+                .disabled(store.isBusy)
+                Text("Training randomly chooses a registered diffuse color for this same target crop.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             HStack {
                 Picker("Map", selection: $store.selectedRole) {
@@ -164,12 +185,12 @@ struct DatasetWorkbenchView: View {
                     store.curateSelected(status: "approved", note: reviewNote.isEmpty ? nil : reviewNote)
                 }
                 .disabled(sample.status == "approved")
-                .help("Mark this crop as reviewed and suitable for training. The original map files remain unchanged.")
+                .help("Mark this material as reviewed and suitable for training. The original map files remain unchanged.")
                 Button("Exclude") {
                     store.curateSelected(status: "excluded", note: reviewNote.isEmpty ? nil : reviewNote)
                 }
                 .disabled(sample.status == "excluded")
-                .help("Keep this crop and its files, but leave it out of training. Reapprove it at any time.")
+                .help("Keep this material and its files, but leave it out of training. Reapprove it at any time.")
             }
             HStack {
                 TextField("Review note", text: $reviewNote).textFieldStyle(.roundedBorder)
@@ -180,14 +201,24 @@ struct DatasetWorkbenchView: View {
                 Menu {
                     Button("Mark Unreviewed") { store.curateSelected(status: "unreviewed") }
                 } label: { Label("More Review Actions", systemImage: "ellipsis") }
-                .menuStyle(.borderlessButton).fixedSize().help("Mark this crop for another review")
+                .menuStyle(.borderlessButton).fixedSize().help("Mark this material for another review")
             }
-            Text("Approve usable crops or exclude problems. A small automatic check sample is managed in the background; original files stay in place.")
+            Text("Approve usable materials or exclude problems. A small automatic check sample is managed in the background; original files stay in place.")
                 .font(.caption).foregroundStyle(.secondary)
+            if let diffuse = store.selectedDiffuseMap, let map = store.selectedMap,
+               ["height", "roughness", "normal"].contains(store.selectedRole) {
+                MaterialQualityReviewPanel(diffuseURL: store.datasetReviewURL(diffuse), mapURL: store.datasetReviewURL(map), mapType: store.selectedRole,
+                    purpose: .dataset, diffuseSHA256: store.datasetReviewSHA256(diffuse), mapSHA256: store.datasetReviewSHA256(map),
+                    diffuseTransform: store.datasetDisplayTransform(diffuse, role: "input"),
+                    mapTransform: store.datasetDisplayTransform(map, role: store.selectedRole), onApply: { recommendation in
+                        let status = recommendation == .approve ? "approved" : recommendation == .exclude ? "excluded" : "unreviewed"
+                        store.curateSelected(status: status, note: reviewNote.isEmpty ? nil : reviewNote)
+                    })
+            }
             if let map = store.selectedMap {
                 DisclosureGroup("Original file") {
-                    Text(map.path).textSelection(.enabled)
-                    if let hash = map.sha256 { Text("SHA256: \(hash)").textSelection(.enabled) }
+                    Text(store.datasetReviewURL(map).path).textSelection(.enabled)
+                    if let hash = store.datasetReviewSHA256(map) { Text("SHA256: \(hash)").textSelection(.enabled) }
                 }
                 .font(.caption).foregroundStyle(.secondary)
             }
@@ -219,12 +250,13 @@ struct DatasetWorkbenchView: View {
 
 private struct DatasetCropRow: View {
     let sample: WorkbenchSample
+    let trainingSize: Int
     var body: some View {
         HStack(spacing: 9) {
             Image(systemName: sample.status == "excluded" ? "eye.slash" : "photo").foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Crop \(sample.id.components(separatedBy: "_").last ?? sample.id)").lineLimit(1)
-                Text("\(sample.width) × \(sample.height)")
+                Text(sample.id).lineLimit(1)
+                Text("\(trainingSize) × \(trainingSize)")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
         }

@@ -1,6 +1,6 @@
 # Texture Studio
 
-A standalone SwiftUI app for Apple Silicon, turning a real surface photograph into an editable Blender Cycles material. Requires macOS 26 or later and full Xcode 26 or later to build. The active app uses SwiftUI, Liquid Glass, ImageIO, AVFoundation, Vision, Core Image, Metal and Core ML. Qt and the CMake application build have been removed.
+A standalone SwiftUI app for Apple Silicon that turns a surface photograph into an editable Blender Cycles material. The app uses ImageIO, Core Image, Metal and a local Python/PyTorch material-model backend. It requires macOS 26 and full Xcode 26 to build.
 
 ## Build and launch
 
@@ -9,47 +9,45 @@ make build
 ./script/build_and_run.sh
 ```
 
-Open `native/TextureStudio/TextureStudio.xcodeproj` in Xcode and choose the shared `TextureStudio` scheme, or use the Codex Run action. The default local app is `build/TextureStudio/Build/Products/Release/Texture Studio.app`. `make test-native` runs native regressions; `make smoke` exercises both EXR formats. `make package` produces an ad-hoc signed archive; this is not notarization or publication. There are no Windows or Linux application build targets.
+Open `native/TextureStudio/TextureStudio.xcodeproj` and select the shared `TextureStudio` scheme. Release is the default configuration. `make test-native` runs native regressions; `make smoke` exercises EXR formats. `make package` produces an ad-hoc signed local archive. Packaging does not publish or notarize the app.
 
-Use **Model Training** in Texture Studio’s toolbar or sidebar to prepare native crops, inspect full-resolution maps, and compare or export saved experimental checkpoints. DINOv2 material training and Studio activation are retired; new runs and resume stay unavailable until a replacement texture-height backend passes visual and runtime checks. **Material Review**, **Checkpoint Compare**, **Material Dataset**, and **Material Trainer** remain independently launchable apps inside Texture Studio. Normal builds and Run actions use Release. Changing crop size automatically prepares matching crops from original maps. See [native material tools](docs/native-material-tools.md) and [model vetting](docs/material-model-vetting.md).
+**Model Training** opens the dataset, trainer, checkpoint and review workspaces. Material Review, Checkpoint Compare, Material Dataset and Material Trainer also launch independently from the app bundle. See [native material tools](docs/native-material-tools.md).
 
 ## Photo to material
 
-1. Import a HEIC, JPEG, PNG, TIFF or Apple-supported RAW photograph of a surface. Camera, lens and auxiliary metadata are displayed. Spatial companion photographs come from ImageIO stereo groups, rather than arbitrary auxiliary images.
-2. Adjust X/Y tilt and Z rotation around the image center. The square crop is computed inside the projected footprint. Crop scale and position select a tighter area. Override focal length when needed; missing calibration is identified as an estimate. Manual radial correction handles modest lens distortion.
-3. Balance broad illumination and reduce noise conservatively. Preview the changes rather than assuming a perfect separation of lighting and reflectance.
-4. Attach a registered height map, explicitly choose DA3-GIANT-1.1 camera depth, or keep a flat surface. A map identified as surface height retains its supplied amplitude through the shared crop and explicit relief controls. Retired DINOv2 checkpoints cannot be activated. Embedded portrait depth never supplies material relief. Spatial companions are aligned and exposure/color matched; only regions passing agreement checks contribute. Occlusions, parallax and weak matches keep the primary photograph.
-5. Review diffuse, roughness, normal and displacement separately. Set material width and displacement scale. Save a JSON recipe to repeat the edits.
-6. Export a new material folder. Default size is 1024 square; 2048, the requested 4098, and 8192 are available. Previews and inference stay small independently of export size. Large exports require acknowledgement and pass a memory budget check.
+1. Import a HEIC, JPEG, PNG, TIFF or Apple-supported RAW surface photograph.
+2. Correct perspective and framing. Camera metadata can guide focal settings; unknown calibration remains an estimate.
+3. Prepare a balanced diffuse map using broad illumination correction and color processing. Preserve fine detail. Registered companion photographs may reduce capture noise; the photo path applies no spatial denoiser.
+4. Generate material maps with a selected refined material checkpoint, attach a registered surface-height map, or keep flat displacement. Embedded portrait depth does not supply material relief.
+5. Review diffuse, roughness, normal and displacement. Set material width and displacement scale and save the recipe.
+6. Export maps and the Blender setup script into a new folder. Generation/export size remains independent of the training size.
 
 | Map | Export | Blender interpretation |
 | --- | --- | --- |
-| Diffuse/base color | 8-bit sRGB PNG | sRGB, Base Color |
-| Roughness | 16- or 32-bit float EXR | Non-Color, scalar |
-| Normal | 16- or 32-bit float EXR | Non-Color, tangent-space OpenGL +Y, RGB encoded 0–1 |
-| Displacement | 16- or 32-bit float EXR | Non-Color, relative height 0–1, midlevel 0.5 |
+| Diffuse | 16-bit sRGB PNG | sRGB base color |
+| Roughness | 16- or 32-bit float EXR | Non-Color scalar |
+| Normal | 16- or 32-bit float EXR | Non-Color, tangent-space OpenGL +Y |
+| Displacement | 16- or 32-bit float EXR | Non-Color relative height |
 
-Exports include `material.json`, setup notes, and a Blender Python script that creates shader nodes without changing geometry. All maps share the crop and UV layout. Originals and extracted scientific data are preserved. Float32 storage does not recover lost camera or FP16 model precision. HDR is decoded as a full float frame before cropping; the finished diffuse pixels are frozen once and reused for preview, numeric-map processing and the 8-bit SDR PNG. Highlight rolloff applies to photographic color only; height, normal and roughness values receive no display gamma.
+Numeric map exports receive no photographic gamma or tone mapping. Float32 export preserves the current Float32 samples; it cannot recover detail absent from a source or prediction. Original files and precision-preserving HEIF auxiliary exports remain unchanged.
 
-## Local models
+## Refine a material model
 
-Missing models offer **Locate**, **Download**, or **Continue with Flat Surface**. Managed downloads live in `~/Library/Application Support/Texture Studio/Models`; **Remove** deletes those downloads. Located external files are unlinked without deletion. Downloads are revision pinned, SHA-256 checked and staged, with progress, cancellation and retry. Model validation follows the selected backend.
+Training uses complete registered diffuse and target maps at one explicit grid. Every input, target and training review matches that grid; no smaller random crop is hidden inside the loader. Supported training sizes are filtered by source pixels and the machine's memory budget. A test photo passes through the same diffuse preparation as application generation before reaching the model.
 
-DINOv2 Base plus the small learned material head was an experimental material model. Its coarse contextual features and training on diffuse inputs did not establish dependable relief from real lit photos. Dataset preparation remains available. Older checkpoint files can be inspected, compared and exported when still present, but cannot start/resume training or become Studio’s height source. No newly evaluated model is advertised as a production replacement.
+Exact-size originals are referenced directly. Only intentional rescaling creates final temporary training images. Changing size, finishing training or stopping a run removes those owned files while preserving original sources and small per-size review records. The local `/opt/ipde/material-dataset` collection now references 97 original material sets without duplicating their image files.
 
-Studio offers [Depth Anything 3 GIANT 1.1](https://huggingface.co/depth-anything/DA3-GIANT-1.1) as an explicit camera-depth choice running locally through PyTorch/MPS. It is not a pretrained texture-height model or the retired material trainer's base, and is not converted to a smaller Core ML model. Choose an explicit 1036, 1540 or 2044 pixel inference edge independently of export size; the app does not attempt 5K transformer inference or silently change the selected size. Its weights are **CC BY-NC 4.0, non-commercial**. Scene depth is converted into artistic relative material height with plane removal and depth-only cleanup. Near-flat protection limits amplification of weak variations and can be disabled. Raw model samples remain untouched; brightness-derived relief is off by default. Compatible custom Core ML models remain an optional backend. The retired Apple Small V2 model is removed from the active catalog.
+The experimental backend uses a complete pinned PBRnxt material network adapted to native output scale. It refines height, roughness or normal with LoRA. Enable **Developer mode** in Settings to expose model controls and export a full fused `.safetensors` checkpoint plus the separate LoRA. Normal mode exports the LoRA. Compatible adapters can be combined with explicit weights against the same base and target modules.
 
-**Local Models** also installs a managed PyTorch/DA3 environment or locates an existing Python executable. The native app includes its own worker and does not communicate with the old studio. Runtime removal deletes only the managed environment; external environments are unlinked. Inference cancellation terminates the worker and releases its model memory.
+Saved models can be uploaded to Hugging Face using the selected account, repository and visibility. Developer mode offers upload after training. Successfully uploaded models appear in the saved Hub catalog with a download action. App-owned base models can be removed and downloaded again from their recorded origin.
 
-**Photo Review** uses exactly [clef:27b-nvfp4](https://ollama.com/library/clef:27b-nvfp4), the optional 18 GB MLX decision model, through local Ollama. [Ollama v0.40.0](https://github.com/ollama/ollama/releases/tag/v0.40.0) adds MLX decision support and automatically uses MLX for supported architectures on Apple Silicon. Texture Studio requires that version or newer, validates the exact tag's format/quantization and capabilities, and never silently substitutes GGUF. The adviser chooses among predefined lighting, noise, relief and roughness options; suggestions require review and **Apply**. Photos go to numeric loopback only as bounded 768-pixel copies. `keep_alive: 0` releases model memory after requests. Pull/cancel/delete controls identify the large download and shared Ollama model explicitly.
+The optional local Clef decision model can advise on photo preparation, dataset suitability and output detail, appeal and artifacts. Review recommendations remain editable. Full-resolution maps and displaced surfaces determine acceptance; a lower loss or an adviser score does not automatically select a shipped model.
 
-## Scope and quality
+See [training workflow](docs/material-training-workflow.md), [data contract](docs/material-training-data.md), [quality acceptance](docs/material-model-vetting.md), and [model setup](docs/model-setup.md).
 
-This native workflow produces artistic photo-based material estimates. Embedded effects depth and printed colors do not become geometry by default. A replacement material model must preserve real photo detail and pass full-resolution map inspection and displaced Blender reviews; a better aggregate loss alone is insufficient. Automatic hard-shadow reconstruction, guaranteed seamless tiling and a validated refinement backend remain future work. See [workflow](docs/texture-studio.md), [native material tools](docs/native-material-tools.md), [current model vetting](docs/material-model-vetting.md), and [historical refinement research](docs/material-refinement-research.md).
+## Precision-preserving extraction
 
-RAFT research remains a separate Python tool; it is not part of the new photo-material workflow. Historical Qt documentation lives under `docs/legacy`. Python extraction/dataset/training source remains for optional research interoperability. The material tools bundle their Python source backend; local models, datasets and Python environments are managed separately and may need reconnecting after external cleanup.
-
-For the retained precision-preserving extraction CLI:
+The retained Python extraction tools use `pillow-heif>=1.5.0`, inspect actual source precision and preserve raw depth and auxiliary image data independently of the artistic material workflow.
 
 ```sh
 make setup
@@ -57,4 +55,4 @@ PYTHONPATH=src .venv/bin/python ipde_extract.py --help
 make test-python
 ```
 
-See [model setup](docs/model-setup.md), [surface validation](docs/texture-surface-validation-2026-10-07.md), [release requirements](docs/releasing.md), and [license](LICENSE).
+Datasets, model weights, generated outputs and app bundles stay outside Git. This repository is in development before V1; removed experiments are not released features and have no compatibility support in the material app. See [release requirements](docs/releasing.md) and [license](LICENSE).

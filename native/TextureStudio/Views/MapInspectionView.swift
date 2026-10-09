@@ -23,8 +23,7 @@ import SwiftUI
     }
     private func restoreDisplay() {
         // Loading a context must not save intermediate defaults over either
-        // context. Unknown legacy global settings cannot identify which maps
-        // they belonged to, so leave them untouched and start new maps neutral.
+        // comparison. Each newly opened map starts with a neutral display.
         isRestoringDisplay = true
         defer { isRestoringDisplay = false }
         zoom = 1; fitToView = false
@@ -65,10 +64,16 @@ struct MapInspectionView: View {
     let viewport: InspectionViewport
     var title = ""
     var onLoad: ((ReviewLoadedImage?) -> Void)? = nil
+    var sourceSHA256: String? = nil
+    var onMissingSource: ((URL) -> Void)? = nil
+    var displayTransform: MapReviewDisplayTransform? = nil
     @State private var loaded: ReviewLoadedImage?
     @State private var failure: String?
     @State private var pinnedHash: String?
     @State private var pinnedURL: URL?
+    @State private var pinnedRevision: String?
+    @State private var isMissing = false
+    @State private var reload = 0
     var body: some View {
         VStack(spacing: 0) {
             if let loaded {
@@ -82,23 +87,53 @@ struct MapInspectionView: View {
                 }.font(.caption).foregroundStyle(.secondary).padding(8)
                     .fixedSize(horizontal: false, vertical: true)
                     .background(.bar)
+                if let failure { previewNotice(failure) }
             } else if let failure {
-                ContentUnavailableView("Map could not be opened", systemImage: "exclamationmark.triangle", description: Text(failure))
+                ContentUnavailableView {
+                    Label(isMissing ? "Source file missing" : "Preview unavailable", systemImage: isMissing ? "doc.badge.ellipsis" : "photo")
+                } description: {
+                    Text(failure)
+                } actions: {
+                    if !isMissing { Button("Retry Preview") { reload += 1 } }
+                }
             } else { ProgressView("Loading full map…").frame(maxWidth: .infinity, maxHeight: .infinity) }
         }
-        .task(id: url.path + (numeric ? "numeric:\(viewport.displayContrast):\(viewport.displayMidpoint)" : "color")) {
-            if pinnedURL != url { loaded = nil; pinnedHash = nil; pinnedURL = url; onLoad?(nil) }
-            failure = nil
+        .task(id: url.path + (sourceSHA256 ?? "") + (displayTransform?.identity ?? "") + "\(reload)" + (numeric ? "numeric:\(viewport.displayContrast):\(viewport.displayMidpoint)" : "color")) {
+            if pinnedURL != url || pinnedRevision != sourceSHA256 {
+                loaded = nil; pinnedHash = sourceSHA256; pinnedURL = url; pinnedRevision = sourceSHA256; onLoad?(nil)
+            }
+            failure = nil; isMissing = false
             do {
                 if loaded != nil { try await Task.sleep(for: .milliseconds(120)) }
                 let value = try await ReviewImageLoader.shared.load(url, numeric: numeric,
-                    contrast: viewport.displayContrast, midpoint: viewport.displayMidpoint, expectedSHA256: pinnedHash)
+                    contrast: viewport.displayContrast, midpoint: viewport.displayMidpoint, expectedSHA256: pinnedHash,
+                    displayTransform: displayTransform)
                 try Task.checkCancellation()
                 loaded = value; pinnedHash = value.sourceSHA256
                 onLoad?(value)
             } catch is CancellationError { }
-            catch { if !Task.isCancelled { failure = error.localizedDescription; loaded = nil; onLoad?(nil) } }
+            catch ReviewImageError.missingSource {
+                if !Task.isCancelled {
+                    loaded = nil; failure = ReviewImageError.missingSource.localizedDescription; isMissing = true
+                    onLoad?(nil); onMissingSource?(url)
+                }
+            }
+            catch {
+                if !Task.isCancelled {
+                    failure = error.localizedDescription
+                    // A contrast refresh failure must not replace a valid map
+                    // with an error panel or discard its pinned export hash.
+                    if loaded == nil { onLoad?(nil) }
+                }
+            }
         }
+    }
+    private func previewNotice(_ message: String) -> some View {
+        HStack {
+            Text(message).font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Button("Retry Preview") { reload += 1 }.font(.caption)
+        }.padding(8).background(.bar)
     }
 }
 

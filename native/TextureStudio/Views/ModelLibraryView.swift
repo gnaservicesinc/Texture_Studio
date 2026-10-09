@@ -4,18 +4,17 @@ import AppKit
 struct ModelLibraryView: View {
     @Bindable var models: ModelManager
     let adviser: OllamaDecisionService?
-    let runtime: PythonDepthService?
     var workspace: TextureWorkspace?
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismiss) private var dismiss
     @State private var pendingRemoval: LocalModelDescriptor?
-    @State private var selectedCheckpoint = try? SelectedMaterialCheckpoint.read()
+    @State private var selectedModels = SelectedMaterialCheckpoint.readAll()
+    @AppStorage(StudioPreferences.developerModeKey, store: StudioPreferences.defaults) private var developerMode = false
 
-    init(models: ModelManager, adviser: OllamaDecisionService? = nil, runtime: PythonDepthService? = nil,
+    init(models: ModelManager, adviser: OllamaDecisionService? = nil,
          workspace: TextureWorkspace? = nil) {
         self.models = models
         self.adviser = adviser
-        self.runtime = runtime
         self.workspace = workspace
     }
 
@@ -31,34 +30,28 @@ struct ModelLibraryView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    archivedMaterialSection
-                    if let runtime {
-                        PythonRuntimeControls(runtime: runtime)
-                        Divider()
-                    }
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("Camera-depth models").font(.headline)
-                        Text("Camera depth describes distance from the camera. Use an attached material height map when you already have surface-detail data.")
-                            .font(.callout).foregroundStyle(.secondary)
-                    }
-                    ForEach(models.catalog) { descriptor in
-                        ModelRow(models: models, descriptor: descriptor) { pendingRemoval = descriptor }
-                        Divider()
+                    materialSection
+                    if developerMode {
+                        Text("Developer Core ML models").font(.headline)
+                        ForEach(models.catalog) { descriptor in
+                            ModelRow(models: models, descriptor: descriptor) { pendingRemoval = descriptor }
+                            Divider()
+                        }
                     }
                     if let adviser { OllamaModelControls(adviser: adviser) }
                 }
             }
             if let error = models.lastError { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
-            Text("Remove deletes only downloads managed by Texture Studio. External models and Python environments are unlinked and their files stay in place.")
+            Text("Remove deletes only downloads managed by Texture Studio. Located external models are unlinked; their files stay in place.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(24)
-        .onAppear { models.refresh(); selectedCheckpoint = try? SelectedMaterialCheckpoint.read() }
+        .onAppear { models.refresh(); selectedModels = SelectedMaterialCheckpoint.readAll() }
         .onReceive(NotificationCenter.default.publisher(for: SelectedMaterialCheckpoint.changeNotification)) { _ in
-            selectedCheckpoint = try? SelectedMaterialCheckpoint.read()
+            selectedModels = SelectedMaterialCheckpoint.readAll()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            selectedCheckpoint = try? SelectedMaterialCheckpoint.read()
+            selectedModels = SelectedMaterialCheckpoint.readAll()
         }
         .confirmationDialog("Remove this model?", isPresented: Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }), titleVisibility: .visible) {
             Button("Remove Model", role: .destructive) {
@@ -73,24 +66,26 @@ struct ModelLibraryView: View {
     }
 
     @ViewBuilder
-    private var archivedMaterialSection: some View {
-        if let checkpoint = workspace?.selectedMaterialCheckpoint ?? selectedCheckpoint, !checkpoint.supportsStudioInference {
-            DisclosureGroup("Archive · previously selected material model") {
-                VStack(alignment: .leading, spacing: 9) {
-                    Text("This checkpoint is retained for review and export. It is not an active Studio model.")
-                        .font(.callout).foregroundStyle(.secondary)
-                    Text(checkpoint.title).font(.headline).textSelection(.enabled)
-                    Text(checkpoint.modelSummary ?? "Archived DINOv2 material-height experiment")
-                        .font(.callout).foregroundStyle(.secondary)
-                    Text("SHA256 \(checkpoint.sha256.prefix(12))")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text(checkpoint.checkpointPath).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
-                    Button("Open Saved Checkpoints…") { openWindow(id: "model-training") }
-                        .help("Open this archive for comparison and export. Historical files remain intact.")
-                }.padding(.top, 8)
+    private var materialSection: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("Material models").font(.headline)
+            let active = workspace?.activeMaterialModels ?? selectedModels
+            if !active.isEmpty {
+                ForEach(["height", "roughness", "normal"].filter { active[$0] != nil }, id: \.self) { target in
+                    if let checkpoint = active[target] {
+                        Text("\(target.capitalized) · \(checkpoint.title)").font(.headline).textSelection(.enabled)
+                        if let summary = checkpoint.modelSummary { Text(summary).font(.callout).foregroundStyle(.secondary) }
+                        Text("SHA256 \(checkpoint.sha256.prefix(12))").font(.caption).foregroundStyle(.secondary)
+                        Text(checkpoint.checkpointPath).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                }
+            } else {
+                Text("Select a trained material model in Model Training, or attach your own surface maps.")
+                    .font(.callout).foregroundStyle(.secondary)
             }
-            Divider()
+            Button("Open Model Training…") { openWindow(id: "model-training") }
         }
+        Divider()
     }
 }
 
@@ -156,12 +151,7 @@ struct MissingModelView: View {
             if let descriptor = models.catalog.first(where: { $0.id == workspace.modelID }) {
                 Text(models.status(for: descriptor.id).message).font(.caption)
                 if let progress = models.status(for: descriptor.id).progress { ProgressView(value: progress) }
-                if descriptor.backend == .pytorchDA3 && !workspace.pythonDepthService.runtimeStatus.isReady {
-                    Text(workspace.pythonDepthService.runtimeStatus.message).font(.caption)
-                    Button("Set Up PyTorch Runtime…") { dismiss(); workspace.showModels = true }
-                }
-                if models.availableURL(for: descriptor.id) != nil &&
-                    (descriptor.backend == .coreML || workspace.pythonDepthService.runtimeStatus.isReady) {
+                if models.availableURL(for: descriptor.id) != nil {
                     Button("Use Model & Update Preview") { dismiss(); workspace.updatePreview(models: models) }
                         .buttonStyle(.glassProminent)
                 } else if descriptor.downloadable && models.availableURL(for: descriptor.id) == nil {
@@ -195,9 +185,7 @@ private func locateModel(descriptor: LocalModelDescriptor, models: ModelManager)
     panel.canChooseDirectories = true
     panel.canChooseFiles = true
     panel.allowsMultipleSelection = false
-    panel.message = descriptor.backend == .pytorchDA3
-        ? "Choose the DA3-GIANT-1.1 folder containing config.json and model.safetensors. The selected folder is validated and stays in place."
-        : "Choose a compatible image-to-depth Core ML .mlpackage, .mlmodel or .mlmodelc. DA3 PyTorch models use their own backend."
+    panel.message = "Choose a compatible image-to-depth Core ML .mlpackage, .mlmodel or .mlmodelc. The selected model stays in place."
     panel.prompt = "Use Model"
     panel.begin { response in
         guard response == .OK, let url = panel.url else { return }

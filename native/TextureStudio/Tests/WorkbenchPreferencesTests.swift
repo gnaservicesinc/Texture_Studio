@@ -13,8 +13,6 @@ final class WorkbenchPreferencesTests: XCTestCase {
         first.training.updatesPerCrop = 875
         first.training.maxMinutes = 120
         first.training.memoryGB = 56
-        first.training.allowUnreviewed = false
-        first.training.maskTransparency = false
         first.training.useSelectedMaterialOnly = true
         first.training.useWarmStart = true
         first.selectedSampleId = "soil_crop_002"
@@ -57,12 +55,13 @@ final class WorkbenchPreferencesTests: XCTestCase {
         var calls: [String] = []
         let restored = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources, workerOverride: { arguments, _ in
             calls.append(arguments[0])
+            if arguments.first == "capabilities" { return "{\"training_sizes\":[512,1024,2048]}" }
             if arguments.first == "dataset" { return try Self.datasetJSON() }
             if arguments.first == "prepare-size" { return try Self.datasetJSON(size: 2048, prepared: true) }
             let path = arguments[try XCTUnwrap(arguments.firstIndex(of: "--checkpoint")) + 1]
             let id = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
             return """
-            {"checkpoint_path":"\(path)","sha256":"\(id)","schema":"texture-studio-material-training-cycle-v1","target":"height","step":42,"compatible":true}
+            {"checkpoint_path":"\(path)","sha256":"\(id)","schema":"texture-studio-material-lora-v1","target":"height","step":42,"compatible":true}
             """
         })
         restored.restore()
@@ -73,8 +72,8 @@ final class WorkbenchPreferencesTests: XCTestCase {
         XCTAssertEqual(restored.comparisonCheckpointIds, ["second"])
         XCTAssertFalse(restored.comparisonIncludesBase)
         XCTAssertEqual(restored.training.size, 2048, "Reopening a 1K dataset cannot reset the requested 2K size")
-        XCTAssertEqual(calls, ["dataset", "prepare-size", "checkpoint", "checkpoint"])
-        XCTAssertTrue(restored.dataset?.hasNativeSize(2048) == true)
+        XCTAssertEqual(calls, ["capabilities", "dataset", "checkpoint", "checkpoint"])
+        XCTAssertTrue(restored.dataset?.hasNativeSize(1024) == true, "Opening preserves source references and allocates no rescaled dataset")
         XCTAssertEqual(fixture.defaults.stringArray(forKey: "checkpoints"), [firstPath.path, secondPath.path])
         restored.restore()
         XCTAssertEqual(calls.count, 4, "A view appearing again must not reload and overwrite selections")
@@ -82,6 +81,39 @@ final class WorkbenchPreferencesTests: XCTestCase {
         XCTAssertEqual(next.selectedCheckpointId, "first")
         XCTAssertEqual(next.selectedSampleId, "soil_002")
         XCTAssertEqual(next.comparisonCheckpointIds, ["second"])
+    }
+
+    func testAutomaticBudgetFollowsResolutionAndManualOverridePersists() async throws {
+        let fixture = try PreferencesFixture()
+        defer { fixture.remove() }
+        var budgets: [Double] = []
+        let store = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources, workerOverride: { arguments, _ in
+            let index = try XCTUnwrap(arguments.firstIndex(of: "--memory-gib"))
+            budgets.append(try XCTUnwrap(Double(arguments[index + 1])))
+            return """
+            {"training_sizes":[1024,2048],"memory_plans":{
+                "1024":{"required_memory_gib":15,"recommended_memory_gib":18},
+                "2048":{"required_memory_gib":47.5,"recommended_memory_gib":48}}}
+            """.replacingOccurrences(of: "\n", with: "")
+        })
+        store.training.size = 2048
+        store.training.memoryGB = 8
+        try await store.loadTrainingCapabilities()
+        XCTAssertEqual(store.training.size, 2048, "A stale small budget cannot hide a resolution the machine can train")
+        XCTAssertEqual(store.training.memoryGB, 48)
+        XCTAssertEqual(budgets.last, fixture.resources.maximumTrainingGiB)
+        store.selectTrainingSize(1024)
+        XCTAssertEqual(store.training.memoryGB, 18)
+        store.selectTrainingSize(2048)
+        XCTAssertEqual(store.training.memoryGB, 48)
+        store.training.automaticMemory = false
+        store.training.memoryGB = 50
+        try await store.loadTrainingCapabilities()
+        XCTAssertEqual(budgets.last, 50)
+        XCTAssertEqual(store.training.memoryGB, 50)
+        let reopened = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
+        XCTAssertFalse(reopened.training.automaticMemory)
+        XCTAssertEqual(reopened.training.memoryGB, 50)
     }
 
     func testRuntimeAndUploadEditsSaveImmediately() throws {
@@ -103,15 +135,14 @@ final class WorkbenchPreferencesTests: XCTestCase {
         XCTAssertTrue(reopened.uploadPublic)
     }
 
-    func testPartialAndOlderTrainingPreferencesKeepSupportedChoices() throws {
+    func testPartialTrainingPreferencesKeepSupportedChoices() throws {
         let fixture = try PreferencesFixture()
         defer { fixture.remove() }
         let options = try JSONDecoder().decode(MaterialTrainingOptions.self,
-            from: Data("{\"size\":2048,\"memoryGB\":56,\"maskTransparency\":false}".utf8))
+            from: Data("{\"size\":2048,\"memoryGB\":56}".utf8))
         XCTAssertEqual(options.size, 2048)
         XCTAssertEqual(options.memoryGB, 56)
         XCTAssertEqual(options.target, "height")
-        XCTAssertFalse(options.maskTransparency)
         XCTAssertEqual(options.restored(for: fixture.resources), options)
         fixture.defaults.set(Data("{\"training\":{\"size\":2048,\"memoryGB\":56}}".utf8), forKey: WorkbenchPreferences.key)
         let restored = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
@@ -179,7 +210,7 @@ final class WorkbenchPreferencesTests: XCTestCase {
         var document: [String: Any] = ["dataset_path": path, "index_sha256": prepared ? "prepared-sha" : "source-sha",
             "materials": [["material_id": "soil", "samples": samples]]]
         if prepared {
-            document["automatic_validation"] = ["policy": "automatic-material-check-5pct-v1", "material_ids": ["soil"]]
+            document["automatic_validation"] = ["policy": "source-family-native-regions-v1", "material_ids": ["soil"]]
             document["preparation"] = ["source_dataset_path": source, "source_index_sha256": "source-sha",
                 "prepared_dataset_path": path, "crop_size": size, "reused": true, "target_resized": false,
                 "original_dataset_modified": false, "split_lineage_changed": true]

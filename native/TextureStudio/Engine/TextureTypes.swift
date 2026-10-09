@@ -22,7 +22,6 @@ struct TextureSettings: Codable, Sendable, Equatable {
     var exrPrecision: EXRPrecision = .float32
     var lightingStrength: Float = 0.65
     var lightingRadius: Float = 0.12
-    var noiseReduction: Float = 0.015
     var heightStrength: Float = 1
     var heightDetail: Float = 0
     var surfacePlaneRemoval: Float = 1
@@ -42,7 +41,7 @@ struct TextureSettings: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case rotationX, rotationY, rotationZ, focalLengthPixels, cropScale, cropOffsetX, cropOffsetY,
              outputSize, useSupportingViews, useHDRGainMap, lensDistortion,
-             exrPrecision, lightingStrength, lightingRadius, noiseReduction, heightStrength,
+             exrPrecision, lightingStrength, lightingRadius, heightStrength,
              heightDetail, surfacePlaneRemoval, depthCleanup, heightInvert, adaptiveRelief, attachedMapIsHeight, modelProcessResolution,
              roughnessBase, roughnessDetail, materialWidthMeters, displacementScaleMeters
     }
@@ -57,15 +56,12 @@ struct TextureSettings: Codable, Sendable, Equatable {
         cropOffsetX = try c.decodeIfPresent(Double.self,forKey:.cropOffsetX) ?? cropOffsetX
         cropOffsetY = try c.decodeIfPresent(Double.self,forKey:.cropOffsetY) ?? cropOffsetY
         outputSize = try c.decodeIfPresent(Int.self,forKey:.outputSize) ?? outputSize
-        // Unknown legacy keys, including useEmbeddedDepth, are deliberately
-        // ignored. There is no portrait-depth source in the material workflow.
         useSupportingViews = try c.decodeIfPresent(Bool.self,forKey:.useSupportingViews) ?? useSupportingViews
         useHDRGainMap = try c.decodeIfPresent(Bool.self,forKey:.useHDRGainMap) ?? useHDRGainMap
         lensDistortion = try c.decodeIfPresent(Double.self,forKey:.lensDistortion) ?? lensDistortion
         exrPrecision = try c.decodeIfPresent(EXRPrecision.self,forKey:.exrPrecision) ?? exrPrecision
         lightingStrength = try c.decodeIfPresent(Float.self,forKey:.lightingStrength) ?? lightingStrength
         lightingRadius = try c.decodeIfPresent(Float.self,forKey:.lightingRadius) ?? lightingRadius
-        noiseReduction = try c.decodeIfPresent(Float.self,forKey:.noiseReduction) ?? noiseReduction
         heightStrength = try c.decodeIfPresent(Float.self,forKey:.heightStrength) ?? heightStrength
         heightDetail = try c.decodeIfPresent(Float.self,forKey:.heightDetail) ?? heightDetail
         surfacePlaneRemoval = try c.decodeIfPresent(Float.self,forKey:.surfacePlaneRemoval) ?? surfacePlaneRemoval
@@ -122,6 +118,7 @@ struct TextureDepth: @unchecked Sendable {
     let image: CIImage
     let sourceLabel: String
     let interpretation: DepthInterpretation
+    var alignedToOutput = false
     init(image: CIImage, sourceLabel: String, interpretation: DepthInterpretation = .distance) {
         self.image = image
         self.sourceLabel = sourceLabel
@@ -139,6 +136,12 @@ struct TextureDepth: @unchecked Sendable {
                                 size: CGSize(width: width, height: height), format: .Rf, colorSpace: nil),
                   sourceLabel: sourceLabel, interpretation: interpretation)
     }
+}
+
+struct MaterialModelMap: @unchecked Sendable {
+    let target: String
+    let image: CIImage
+    let sourceLabel: String
 }
 
 struct MaterialResult: @unchecked Sendable {

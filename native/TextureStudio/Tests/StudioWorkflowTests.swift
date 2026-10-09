@@ -63,7 +63,7 @@ final class StudioWorkflowTests: XCTestCase {
         workspace.updatePreview(models: models)
         try await finish(workspace)
         XCTAssertNil(workspace.notice)
-        XCTAssertEqual(predictions, 0, "An attached map never runs the retired checkpoint model")
+        XCTAssertEqual(predictions, 0, "An attached map bypasses model prediction")
         XCTAssertEqual(processedSizes, [2048, 2048])
 
         workspace.settings.outputSize = 1024

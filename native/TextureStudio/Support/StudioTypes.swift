@@ -24,29 +24,18 @@ enum DepthChoice: String, Codable, CaseIterable, Identifiable {
     case model = "Local ML depth"
     case materialCheckpoint = "Material checkpoint"
     var id: String { rawValue }
-    static let studioChoices: [DepthChoice] = [.photoDetail, .attached, .model]
+    static let studioChoices: [DepthChoice] = [.photoDetail, .attached, .materialCheckpoint]
 
     var title: String {
         switch self {
         case .photoDetail: "Flat surface"
         case .attached: "Attached height / depth map"
-        case .model: "Camera-depth model (DA3 / custom)"
-        case .materialCheckpoint: "Retired DINOv2 material checkpoint"
+        case .model: "Custom depth model"
+        case .materialCheckpoint: "Trained material model"
         }
     }
 
-    init(from decoder: Decoder) throws {
-        let value = try decoder.singleValueContainer().decode(String.self)
-        switch value {
-        case "Photo detail", "Flat surface": self = .photoDetail
-        // Retired portrait maps do not imply consent to run a different model.
-        case "Embedded depth": self = .photoDetail
-        case "Attached depth": self = .attached
-        case "Local ML depth": self = .model
-        case "Material checkpoint": self = .materialCheckpoint
-        default: throw DecodingError.dataCorruptedError(in: try decoder.singleValueContainer(), debugDescription: "Unknown depth source")
-        }
-    }
+
 }
 
 struct TextureRecipe: Codable {
@@ -58,6 +47,7 @@ struct TextureRecipe: Codable {
     var customInverseDepth: Bool
     var settings: TextureSettings
     var materialCheckpoint: MaterialCheckpointIdentity? = nil
+    var materialMapCheckpoints: [String: MaterialCheckpointIdentity]? = nil
 }
 
 /// Recipes identify model data, never an executable or a Python environment.
@@ -66,16 +56,18 @@ struct MaterialCheckpointIdentity: Codable, Sendable {
     let sha256: String
     let displayName: String?
     let modelSummary: String?
+    let target: String
 
     init(_ checkpoint: SelectedMaterialCheckpoint) {
         checkpointPath = checkpoint.checkpointPath
         sha256 = checkpoint.sha256
         displayName = checkpoint.displayName
         modelSummary = checkpoint.modelSummary
+        target = checkpoint.target
     }
 
     func resolve(using runtime: SelectedMaterialCheckpoint) -> SelectedMaterialCheckpoint {
-        SelectedMaterialCheckpoint(checkpointPath: checkpointPath, sha256: sha256, target: "height",
+        SelectedMaterialCheckpoint(checkpointPath: checkpointPath, sha256: sha256, target: target,
             pythonPath: runtime.pythonPath, workspacePath: runtime.workspacePath,
             modelDirectory: runtime.modelDirectory, codeDirectory: runtime.codeDirectory,
             displayName: displayName, modelSummary: modelSummary)

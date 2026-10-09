@@ -20,12 +20,20 @@ struct ReviewWorkbenchView: View {
     @State private var exportedURL: URL?
     @State private var isExporting = false
     @State private var paneHeaderHeight: CGFloat = 0
+    @State private var qualityCandidateID: String?
+    @State private var missingIDs: Set<String> = []
     private let preferences: UserDefaults
+    private let onMissingSource: ((URL) -> Void)?
+    private let onConfirmReview: ((String, MaterialQualityDecision.Recommendation) -> Void)?
     init(candidates: [MapReviewCandidate], blendURL: URL? = nil,
-         preferences: UserDefaults = UserDefaults(suiteName: "org.ipde.material-tools")!) {
+         preferences: UserDefaults = UserDefaults(suiteName: "org.ipde.material-tools")!,
+         onMissingSource: ((URL) -> Void)? = nil,
+         onConfirmReview: ((String, MaterialQualityDecision.Recommendation) -> Void)? = nil) {
         self.candidates = candidates
         self.blendURL = blendURL
         self.preferences = preferences
+        self.onMissingSource = onMissingSource
+        self.onConfirmReview = onConfirmReview
         _viewport = State(initialValue: InspectionViewport(preferences: preferences, preferenceKey: Self.displayPreferenceKey(candidates)))
     }
     static func selectionPreferenceKey(_ candidates: [MapReviewCandidate]) -> String {
@@ -38,7 +46,17 @@ struct ReviewWorkbenchView: View {
         selectionPreferenceKey(candidates) + ".display"
     }
     private var visibleCandidates: [MapReviewCandidate] {
-        Self.resolvedCandidates(candidates, visibleIDs: visibleIDs)
+        Self.resolvedCandidates(candidates.filter { !missingIDs.contains($0.id) }, visibleIDs: visibleIDs)
+    }
+    private var diffuseCandidate: MapReviewCandidate? {
+        candidates.first { !missingIDs.contains($0.id) && !$0.numeric && ($0.role == "diffuse" || $0.label.lowercased().contains("diffuse")) }
+    }
+    private var qualityCandidates: [MapReviewCandidate] {
+        candidates.filter { !missingIDs.contains($0.id) && $0.numeric && ["base", "checkpoint", "model"].contains($0.role)
+            && ["height", "depth", "roughness", "normal"].contains($0.modelIdentity?.mapType ?? "") }
+    }
+    private var qualityCandidate: MapReviewCandidate? {
+        qualityCandidates.first { $0.id == qualityCandidateID } ?? qualityCandidates.last
     }
     static func resolvedCandidates(_ candidates: [MapReviewCandidate], visibleIDs: Set<String>) -> [MapReviewCandidate] {
         let selected = candidates.filter { visibleIDs.contains($0.id) }
@@ -55,8 +73,7 @@ struct ReviewWorkbenchView: View {
         guard let target = candidates.first(where: \.isReference) else {
             return Array(candidates.prefix(2))
         }
-        let model = candidates.last { !$0.isReference && $0.role != "source" && $0.label.lowercased() != "flat" }
-        return model.map { [target, $0] } ?? [target]
+        return [target]
     }
     var body: some View {
         VStack(spacing: 0) {
@@ -73,6 +90,17 @@ struct ReviewWorkbenchView: View {
                     .help("A real source displacement map must be identified explicitly in the review manifest. A model output is never substituted for it.")
             }
             inspectionControls.padding(8).background(.bar)
+            if let diffuse = diffuseCandidate, let map = qualityCandidate {
+                VStack(alignment: .leading, spacing: 6) {
+                    Picker("Adviser output", selection: Binding(get: { map.id }, set: { qualityCandidateID = $0 })) {
+                        ForEach(qualityCandidates) { Text($0.label).tag($0.id) }
+                    }.frame(maxWidth: 440)
+                    MaterialQualityReviewPanel(diffuseURL: diffuse.mapURL, mapURL: map.mapURL,
+                        mapType: map.modelIdentity?.mapType ?? "height", purpose: .result,
+                        diffuseTransform: diffuse.displayTransform, mapTransform: map.displayTransform,
+                        onApply: onConfirmReview.map { confirm in { recommendation in confirm(map.id, recommendation) } })
+                }.padding(.horizontal, 12).padding(.vertical, 8)
+            }
             HStack {
                 Text("Drag or scroll to pan · Pinch or Option-scroll to zoom · 100% shows original pixels")
                 Spacer()
@@ -155,8 +183,12 @@ struct ReviewWorkbenchView: View {
                             Divider()
                             MapInspectionView(url: candidate.mapURL, numeric: candidate.numeric, viewport: viewport, onLoad: { value in
                                 inspectedHashes[candidate.id] = value?.sourceSHA256
-                                inspectedDescriptions[candidate.id] = value.map { "Displayed file: \($0.pixelWidth) × \($0.pixelHeight) · \($0.storageDescription)" }
-                            }).frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
+                                inspectedDescriptions[candidate.id] = value.map { "Displayed \(candidate.displayTransform == nil ? "file" : "training grid"): \($0.pixelWidth) × \($0.pixelHeight) · \($0.storageDescription)" }
+                            }, onMissingSource: { source in
+                                missingIDs.insert(candidate.id)
+                                visibleIDs.remove(candidate.id)
+                                onMissingSource?(source)
+                            }, displayTransform: candidate.displayTransform).frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
                         }.frame(minWidth: 240)
                     }
                 }

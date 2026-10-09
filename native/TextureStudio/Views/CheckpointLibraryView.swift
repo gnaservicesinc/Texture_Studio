@@ -4,6 +4,7 @@ import AppKit
 struct CheckpointLibraryView: View {
     @Bindable var store: WorkbenchStore
     var showsDismissButton = true
+    @AppStorage(StudioPreferences.developerModeKey, store: StudioPreferences.defaults) private var developerMode = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -54,6 +55,16 @@ struct CheckpointLibraryView: View {
                         .disabled(store.isBusy)
                     }
                     Divider()
+                    VStack(alignment: .leading, spacing: 8) {
+                        Button("Refresh My Hugging Face Models") { store.refreshHubModels() }.disabled(store.isBusy || store.uploadAccount == nil)
+                        ForEach(store.hubModels) { model in
+                            HStack {
+                                Text(model.repository).font(.caption).lineLimit(2)
+                                Spacer()
+                                Button("Download") { store.downloadHubModel(model) }.disabled(store.isBusy)
+                            }
+                        }
+                    }.padding(12)
                     HStack {
                         Button { store.chooseCheckpoint() } label: { Label("Locate…", systemImage: "plus") }
                             .disabled(store.isBusy)
@@ -86,7 +97,7 @@ struct CheckpointLibraryView: View {
                 if let error = store.error {
                     Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
                 }
-                Text("Unlinking keeps checkpoint files. Export creates a new package; uploading is an explicit action.")
+                Text("Unlinking keeps checkpoint files. Export creates a new package. Developer settings control uploads after training.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -116,11 +127,14 @@ struct CheckpointLibraryView: View {
                 LabeledContent("Interface", value: checkpoint.compatible ? "Compatible" : "Unsupported")
                 Text(checkpoint.schema).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             }
-            Section("Archived experiment") {
-                Text(MaterialTrainingPolicy.retirementNotice)
-                    .font(.caption).foregroundStyle(.secondary)
+            Section("Use this model") {
+                Button("Use in Texture Studio") { store.useSelectedInStudio() }.disabled(store.isBusy || !checkpoint.supportsStudioInference)
+                Button("Refine this model") { store.training.useWarmStart = true; store.training.target = checkpoint.target }
+                    .disabled(store.isBusy || !checkpoint.supportsTrainingWarmStart)
             }
             Section("Model package") {
+                Text(developerMode ? "Full fused safetensors checkpoint + separate LoRA" : "Separate safetensors LoRA")
+                    .font(.caption).foregroundStyle(.secondary)
                 Button("Export Package…") { store.exportSelectedCheckpoint() }
                     .disabled(store.isBusy)
                     .help("Create a new portable package containing learned weights, a model card and dependency identities. Training photos and optimizer state stay local.")
@@ -156,7 +170,7 @@ struct CheckpointLibraryView: View {
                 }
                 Toggle("Public repository", isOn: $store.uploadPublic).disabled(store.isBusy)
                     .help("Off creates a private repository. Existing repository visibility must match this choice; the app never changes its visibility silently.")
-                Text("Upload packages the selected checkpoint and its model card automatically. Source photos, optimizer state and separate pretrained encoder files stay local.")
+                Text("Upload packages the selected checkpoint and its model card automatically. Source photos, optimizer state and base model files stay local.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button { store.uploadPackage() } label: {
                     Label("Upload Selected Model", systemImage: "square.and.arrow.up")
@@ -166,6 +180,20 @@ struct CheckpointLibraryView: View {
                 .help("Upload this selected model directly to the destination shown above. A fresh, checksum-verified package is created first. No additional confirmation is shown.")
                 if let uploaded = store.lastUploadURL {
                     Link("Open Last Uploaded Model", destination: uploaded)
+                }
+            }
+            if developerMode {
+                Section("Mix compatible LoRAs") {
+                    Button("Add LoRA…") { store.chooseMixAdapter() }.disabled(store.isBusy)
+                    ForEach($store.adapterMix) { $adapter in
+                        HStack {
+                            Text(URL(fileURLWithPath: adapter.path).lastPathComponent).lineLimit(1)
+                            TextField("Weight", value: $adapter.weight, format: .number).frame(width: 65)
+                            Button("Remove") { store.adapterMix.removeAll { $0.id == adapter.id } }
+                        }
+                    }
+                    Text("Export verifies the exact base identity and target modules. Weights scale each adapter delta; image size alone does not establish compatibility.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             Section("File identity") {

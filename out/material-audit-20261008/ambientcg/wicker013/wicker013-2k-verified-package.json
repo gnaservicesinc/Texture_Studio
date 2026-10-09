@@ -1,0 +1,237 @@
+{
+  "schema": "ipde-material-package-audit-v1",
+  "provider": "ambientCG",
+  "material_id": "wicker013",
+  "asset_id": "Wicker013",
+  "asset_url": "https://ambientcg.com/view?id=Wicker013",
+  "completed_utc": "2026-10-09T00:35:57.879632+00:00",
+  "api_provenance": {
+    "api_url": "https://ambientcg.com/api/v2/full_json?include=downloadData&id=Wicker013",
+    "snapshot_sha256": "8be85995805d9d74e9ea64f11f593d525e247dac5e672e193ac8c65bfc62b950",
+    "transport": {
+      "url": "https://ambientcg.com/api/v2/full_json?include=downloadData&id=Wicker013",
+      "final_url": "https://ambientcg.com/api/v2/full_json?include=downloadData&id=Wicker013",
+      "redirect_chain": [
+        {
+          "url": "https://ambientcg.com/api/v2/full_json?include=downloadData&id=Wicker013",
+          "status": 200,
+          "headers_sha256": "63b5b4b09c36741531186d6c65345145e00f10946c45f0fee5372ac098cd0e85"
+        }
+      ],
+      "headers": {
+        "server": "nginx",
+        "date": "Fri, 09 Oct 2026 00:35:21 GMT",
+        "content-type": "application/json;charset=utf-8",
+        "vary": "Accept-Encoding",
+        "content-disposition": "inline; filename=ambientCG_full_json.json",
+        "x-cache-status": "BYPASS"
+      },
+      "completed_utc": "2026-10-09T00:35:22.159878+00:00"
+    },
+    "snapshot_path": "/opt/ipde/ipde/out/material-audit-20261008/ambientcg/wicker013/official-metadata-8be85995805d9d74e9ea64f11f593d525e247dac5e672e193ac8c65bfc62b950.json"
+  },
+  "creation_method": {
+    "id": "PBRPhotogrammetry",
+    "name": "Height field photogrammetry",
+    "description": "Displacement generated using photogrammetry.",
+    "asset_page_label": "Surface Photogrammetry",
+    "scope": "This asset only; not inferred for other ambientCG materials"
+  },
+  "physical_width_meters": null,
+  "physical_height_meters": null,
+  "provider_dimensions_raw": {
+    "dimensionX": 50,
+    "dimensionY": 50,
+    "dimensionZ": 0
+  },
+  "provider_dimension_unit": "Unverified; raw API fields retained without conversion or physical scale inference",
+  "license": {
+    "spdx": "CC0-1.0",
+    "url": "https://docs.ambientcg.com/license/",
+    "snapshot_sha256": "60138e09b277c89977841462634b36e99d7bae5b77174777813502069c59461c",
+    "retrieved_utc": "2026-10-09T00:35:23.052172+00:00",
+    "snapshot_path": "/opt/ipde/ipde/out/material-audit-20261008/ambientcg/wicker013/license-60138e09b277c89977841462634b36e99d7bae5b77174777813502069c59461c.html",
+    "scope": "Official license applies to downloadable asset files"
+  },
+  "package": {
+    "filename": "Wicker013_2K-PNG.zip",
+    "file_bytes": 60071432,
+    "sha256": "9c3b462b2a55e290c6710cd9fd047976fa93c8a8f1a26eb53e72c239112f8c21",
+    "sha1": "958bfbbcae5dac77b90ff98ebb38014fb377aa36",
+    "provider_sha1": "958bfbbcae5dac77b90ff98ebb38014fb377aa36",
+    "sha1_matches_provider_header": true,
+    "provider_sha1_available": true,
+    "url": "https://ambientcg.com/get?file=Wicker013_2K-PNG.zip",
+    "download_transport": {
+      "url": "https://ambientcg.com/get?file=Wicker013_2K-PNG.zip",
+      "final_url": "https://acg-download.struffelproductions.com/file/ambientCG-Web/download/Wicker013_mSak1pGC/Wicker013_2K-PNG.zip",
+      "redirect_chain": [
+        {
+          "url": "https://ambientcg.com/get?file=Wicker013_2K-PNG.zip",
+          "status": 302,
+          "headers_sha256": "c0c8f337ab8b8fc025c55d536fd88e364e8b89d017b40b55d9dd4adb5aa2115d"
+        },
+        {
+          "url": "https://acg-download.struffelproductions.com/file/ambientCG-Web/download/Wicker013_mSak1pGC/Wicker013_2K-PNG.zip",
+          "status": 200,
+          "headers_sha256": "ea72ed91f2d7b7ba3a67eea4a4e63d172b6c714ee31361013315b0e464126b59"
+        }
+      ],
+      "headers": {
+        "date": "Fri, 09 Oct 2026 00:35:26 GMT",
+        "content-type": "application/zip",
+        "content-length": "60071432",
+        "strict-transport-security": "max-age=63072000",
+        "x-bz-file-name": "download/Wicker013_mSak1pGC/Wicker013_2K-PNG.zip",
+        "x-bz-file-id": "4_z753f349018de0fd087a8061b_f11643d6237d5330d_d20251104_m172512_c003_v0312030_t0007_u01762277112559",
+        "x-bz-content-sha1": "958bfbbcae5dac77b90ff98ebb38014fb377aa36",
+        "x-bz-upload-timestamp": "1762277112559",
+        "accept-ranges": "bytes",
+        "x-bz-info-src_last_modified_millis": "1760073578000",
+        "nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+        "report-to": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=dCRoe%2BEzs6hxnN0WIeVeo8eP7r4N%2FpUpyYOEHxs6loozE00DuHKrwE0lIz6kizUZwtRfEs%2FVnWyj5rdC1lh6A4nlse%2BjjVR3jG2hzZD0a4j0MFAmpWMlkYu6MUZOaDp4Uf0s7c9pkFDwLG1Llz%2BBsWnmIMC%2BSg%2BIaJxpFKTn1vm8tw%3D%3D\"}]}",
+        "last-modified": "Fri, 09 Oct 2026 00:35:26 GMT",
+        "cache-control": "max-age=57600",
+        "cf-cache-status": "EXPIRED",
+        "server": "cloudflare",
+        "cf-ray": "a4794e262cc7e808-ORD"
+      },
+      "completed_utc": "2026-10-09T00:35:57.565143+00:00"
+    },
+    "published_api_bytes": 60071432
+  },
+  "files": [
+    {
+      "source_filename": "Wicker013_2K-PNG_Displacement.png",
+      "source_path": "/opt/ipde/material-dataset/sources/wicker013/Wicker013_2K-PNG_Displacement.png",
+      "role": "height",
+      "source_sha256": "7aa6155b5db40327758e744e68d255d82db72cca71d3097880555ec358f05e08",
+      "source_bytes": 6323469,
+      "archive_member": "Wicker013_2K-PNG_Displacement.png",
+      "member_sha256": "7aa6155b5db40327758e744e68d255d82db72cca71d3097880555ec358f05e08",
+      "member_bytes": 6323469,
+      "exact_full_file_match": true,
+      "source_stable": true,
+      "source_stat": {
+        "device": 16777233,
+        "inode": 389114008,
+        "size": 6323469,
+        "mtime_ns": 1791506157568039828
+      },
+      "restoration_transform": "None; original source filename and bytes identical",
+      "source_sample_bits": 16,
+      "source_pixel_dimensions": [
+        2048,
+        2048
+      ],
+      "actual_png_header": {
+        "width": 2048,
+        "height": 2048,
+        "sample_bits": 16,
+        "channels": 1,
+        "png_color_type": 0,
+        "interlace": 0
+      }
+    },
+    {
+      "source_filename": "Wicker013_2K-PNG_Color.png",
+      "source_path": "/opt/ipde/material-dataset/sources/wicker013/Wicker013_2K-PNG_Color.png",
+      "role": "input",
+      "source_sha256": "65c3c63ee8c92d8eac296b8cfe67cee2e1acbd8d5927ef67037f23a7fad26da4",
+      "source_bytes": 5533162,
+      "archive_member": "Wicker013_2K-PNG_Color.png",
+      "member_sha256": "65c3c63ee8c92d8eac296b8cfe67cee2e1acbd8d5927ef67037f23a7fad26da4",
+      "member_bytes": 5533162,
+      "exact_full_file_match": true,
+      "source_stable": true,
+      "source_stat": {
+        "device": 16777233,
+        "inode": 389114007,
+        "size": 5533162,
+        "mtime_ns": 1791506157566606579
+      },
+      "restoration_transform": "None; original source filename and bytes identical",
+      "source_sample_bits": 8,
+      "source_pixel_dimensions": [
+        2048,
+        2048
+      ],
+      "actual_png_header": {
+        "width": 2048,
+        "height": 2048,
+        "sample_bits": 8,
+        "channels": 3,
+        "png_color_type": 2,
+        "interlace": 0
+      }
+    },
+    {
+      "source_filename": "Wicker013_2K-PNG_NormalGL.png",
+      "source_path": "/opt/ipde/material-dataset/sources/wicker013/Wicker013_2K-PNG_NormalGL.png",
+      "role": "normal",
+      "source_sha256": "04bdf42a84a63aeda7bc66ee70d42ed52a2d5aa497ae814dbe3b93daec835cc2",
+      "source_bytes": 21487097,
+      "archive_member": "Wicker013_2K-PNG_NormalGL.png",
+      "member_sha256": "04bdf42a84a63aeda7bc66ee70d42ed52a2d5aa497ae814dbe3b93daec835cc2",
+      "member_bytes": 21487097,
+      "exact_full_file_match": true,
+      "source_stable": true,
+      "source_stat": {
+        "device": 16777233,
+        "inode": 389114009,
+        "size": 21487097,
+        "mtime_ns": 1791506157573938449
+      },
+      "restoration_transform": "None; original source filename and bytes identical",
+      "source_sample_bits": 16,
+      "source_pixel_dimensions": [
+        2048,
+        2048
+      ],
+      "actual_png_header": {
+        "width": 2048,
+        "height": 2048,
+        "sample_bits": 16,
+        "channels": 3,
+        "png_color_type": 2,
+        "interlace": 0
+      }
+    },
+    {
+      "source_filename": "Wicker013_2K-PNG_Roughness.png",
+      "source_path": "/opt/ipde/material-dataset/sources/wicker013/Wicker013_2K-PNG_Roughness.png",
+      "role": "roughness",
+      "source_sha256": "53d1d73483b2b907b5aeccad9ada0e4e1a6cba2fa3110afbd3b1bcb3fc1c56f7",
+      "source_bytes": 1942849,
+      "archive_member": "Wicker013_2K-PNG_Roughness.png",
+      "member_sha256": "53d1d73483b2b907b5aeccad9ada0e4e1a6cba2fa3110afbd3b1bcb3fc1c56f7",
+      "member_bytes": 1942849,
+      "exact_full_file_match": true,
+      "source_stable": true,
+      "source_stat": {
+        "device": 16777233,
+        "inode": 389114010,
+        "size": 1942849,
+        "mtime_ns": 1791506157578498363
+      },
+      "restoration_transform": "None; original source filename and bytes identical",
+      "source_sample_bits": 8,
+      "source_pixel_dimensions": [
+        2048,
+        2048
+      ],
+      "actual_png_header": {
+        "width": 2048,
+        "height": 2048,
+        "sample_bits": 8,
+        "channels": 1,
+        "png_color_type": 0,
+        "interlace": 0
+      }
+    }
+  ],
+  "source_pixels_modified": false,
+  "source_files_modified": false,
+  "original_files_deleted": false,
+  "verification_download_retained": false
+}

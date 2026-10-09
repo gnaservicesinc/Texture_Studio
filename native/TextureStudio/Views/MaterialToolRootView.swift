@@ -35,7 +35,7 @@ struct MaterialToolRootView: View {
                 Button { showModels = true } label: { Label("Checkpoints", systemImage: "shippingbox") }
                     .help("Inspect saved checkpoints, compare their outputs or export a portable package.")
                 Button { showRuntime = true } label: { Label("Runtime", systemImage: "gearshape") }
-                    .help("Configure the local Python environment and working folder. Archived experiments have separate optional dependencies.")
+                    .help("Configure the local Python environment and working folder. Developer mode exposes material model controls.")
                 Menu {
                     ForEach(MaterialTool.allCases) { tool in
                         Button(tool.title, systemImage: tool.symbol) { MaterialToolLauncher.open(tool) }
@@ -56,7 +56,7 @@ struct MaterialToolRootView: View {
         .onOpenURL { url in
             if url.lastPathComponent == "dataset.json" { store.openDataset(url) }
             else if url.pathExtension == "json" { review.load(url) }
-            else if url.pathExtension == "pt" { store.openCheckpoint(url) }
+            else if url.pathExtension == "safetensors" { store.openCheckpoint(url) }
             else { review.groups = [MaterialReviewGroup(id: url.lastPathComponent, candidates: [MapReviewCandidate(id: url.path, label: url.lastPathComponent, mapURL: url, numeric: true)])]; review.selectedGroupId = url.lastPathComponent }
         }
     }
@@ -100,7 +100,13 @@ struct MaterialToolRootView: View {
                             .help("Save decisions and notes to a separate file you can reopen. Original maps and selected models stay intact.")
                     }.padding(12)
                     Divider()
-                    ReviewWorkbenchView(candidates: selected.candidates, blendURL: review.blendURL)
+                    ReviewWorkbenchView(candidates: selected.candidates, blendURL: review.blendURL,
+                        onMissingSource: { url in
+                            review.removeMissingSource(url)
+                        }, onConfirmReview: { candidateID, recommendation in
+                            review.decisions[candidateID] = recommendation == .approve ? "usable" : recommendation == .exclude ? "reject" : "needs_work"
+                            review.selectedCandidateId = candidateID
+                        })
                 }
             } else {
                 ContentUnavailableView("Inspect material details", systemImage: "photo.on.rectangle", description: Text("Open original maps or a review manifest. Each map supports native resolution, pan, zoom, pop-out and lossless export."))
@@ -118,28 +124,45 @@ struct MaterialToolRootView: View {
     private var compareView: some View {
         VStack(spacing: 0) {
             HStack {
-                Button("Source Photo…", systemImage: "photo") { store.chooseSourceImage() }
-                    .help("Use one native crop, up to 2048 pixels per side, for every checkpoint. A selected dataset crop is used when no separate photo is chosen.")
+                Button("Test Photo…", systemImage: "photo") { store.chooseSourceImage() }
+                    .help("Use the same prepared diffuse at the chosen grid, for every checkpoint. A selected dataset material is used when no separate photo is chosen.")
                 VStack(alignment: .leading, spacing: 3) {
                     Text(store.sourceImageURL.map { "Source photo: \($0.lastPathComponent)" }
-                         ?? store.selectedSampleId.map { "Dataset crop: \($0)" } ?? "Choose a photo or dataset crop")
+                         ?? store.selectedSampleId.map { "Dataset material: \($0)" } ?? "Choose a photo or dataset material")
                         .lineLimit(1).truncationMode(.middle)
                     if store.sourceImageURL != nil {
                         Text("This saved photo is used instead of the dataset selection.").font(.caption)
                     }
                 }.foregroundStyle(.secondary)
                 if store.sourceImageURL != nil {
-                    Button("Use Dataset Crop") { store.sourceImageURL = nil }
+                    Button("Use Dataset Material") { store.sourceImageURL = nil }
                         .disabled(store.isBusy || store.selectedSample?.maps["input"] == nil)
-                        .help("Switch back to the crop currently selected in Dataset. Its source photo and reference map will be used for this comparison.")
+                        .help("Switch back to the material currently selected in Dataset. Its diffuse and reference map will be used for this comparison.")
                 }
                 Spacer()
                 Button("Choose Checkpoints…") { store.chooseCheckpoint() }
-                    .help("Select one checkpoint to compare with its untrained base, or multiple saved checkpoints predicting the same map type. Their exact hashes are recorded with the results.")
+                    .help("Select one checkpoint to compare with its material base, or multiple saved checkpoints predicting the same map type. Their exact hashes are recorded with the results.")
                 Button("Run Comparison", systemImage: "play.fill") { store.compare() }
                     .buttonStyle(.glassProminent).disabled(store.isBusy || !comparisonReady)
                     .help("Run checked candidates one at a time on Metal, then inspect their matching full-resolution outputs.")
             }.padding()
+            if store.sourceImageURL != nil {
+                DisclosureGroup("Prepare test diffuse") {
+                    HStack(alignment: .top, spacing: 20) {
+                        VStack {
+                            DoubleControl(title: "Tilt X", value: $store.testPhotoSettings.rotationX, range: -45...45, suffix: "°")
+                            DoubleControl(title: "Tilt Y", value: $store.testPhotoSettings.rotationY, range: -45...45, suffix: "°")
+                            DoubleControl(title: "Rotate", value: $store.testPhotoSettings.rotationZ, range: -45...45, suffix: "°")
+                        }
+                        VStack {
+                            FloatControl(title: "Lighting balance", value: $store.testPhotoSettings.lightingStrength, range: 0...1)
+                            FloatControl(title: "Lighting scale", value: $store.testPhotoSettings.lightingRadius, range: 0.01...0.5)
+                            Text("The shared Studio pipeline prepares one diffuse map at the selected grid. Inspect it alongside predictions before rating the result.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }.padding(.horizontal).padding(.bottom, 10).disabled(store.isBusy)
+            }
             ScrollView(.horizontal) {
                 HStack {
                     ForEach(store.checkpoints) { checkpoint in
@@ -149,16 +172,10 @@ struct MaterialToolRootView: View {
                     }
                 }.padding(.horizontal)
             }.disabled(store.isBusy)
-            if store.checkpoints.contains(where: { !$0.supportsStudioInference }) {
-                DisclosureGroup("Archive comparison options") {
-                    Toggle("Include the experiment’s original untrained baseline", isOn: $store.comparisonIncludesBase)
-                        .toggleStyle(.checkbox)
-                        .help("For archived DINOv2 experiments, the fresh material head starts flat: 0.5 displacement/roughness or a flat OpenGL normal. This records the original before-training baseline; it does not enable Studio inference.")
-                        .disabled(store.isBusy)
-                }.padding(.horizontal).padding(.vertical, 8)
-            }
+            Toggle("Include the material base before refinement", isOn: $store.comparisonIncludesBase)
+                .toggleStyle(.checkbox).disabled(store.isBusy).padding(.horizontal).padding(.vertical, 8)
             if !comparisonReady && !store.isBusy {
-                Text("Choose a photo or dataset crop, then select one checkpoint plus the untrained base, or two checkpoints for the same map type.")
+                Text("Choose a photo or dataset material, then select one checkpoint plus the material base, or two checkpoints for the same map type.")
                     .font(.caption).foregroundStyle(.secondary).padding(.horizontal).padding(.vertical, 8)
             }
             Divider()
@@ -183,6 +200,7 @@ struct WorkbenchActivityView: View {
 }
 
 struct WorkbenchRuntimeView: View {
+    @AppStorage(StudioPreferences.developerModeKey, store: StudioPreferences.defaults) private var developerMode = false
     @Bindable var store: WorkbenchStore
     @Environment(\.dismiss) private var dismiss
     var body: some View {
@@ -194,19 +212,22 @@ struct WorkbenchRuntimeView: View {
                     Text("Choose a working folder for datasets, results and logs. Use a local Python environment with the dependencies required by your model backend.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if store.checkpoints.contains(where: { !$0.supportsStudioInference }) {
-                    DisclosureGroup("Archive · old experiment dependencies") {
-                        runtimeRow("DINOv2 archive weights", path: store.modelDirectory, choose: store.chooseEncoder)
-                        runtimeRow("DINOv2 archive source", path: store.codeDirectory, choose: store.chooseEncoderCode)
-                        HStack {
-                            Button("Download Archive Dependencies") { store.installEncoder() }.disabled(store.isBusy)
-                                .help("Obtain the pinned DINOv2 weights and source only for comparing archived experiments. This does not enable training or Studio inference.")
-                            Button("Remove Downloaded Archive Dependencies", role: .destructive) { store.removeDownloadedEncoder() }.disabled(store.isBusy)
-                                .help("Remove only the downloaded archive dependencies. External copies and saved checkpoints remain intact.")
-                        }
-                        Text("These dependencies are optional compatibility tools for archived experiments. Their original model identity is retained; no current production model is substituted.")
-                            .font(.caption).foregroundStyle(.secondary)
+                Section("Material base") {
+                    runtimeRow("Weights", path: store.modelDirectory, choose: store.chooseEncoder)
+                    if developerMode {
+                        runtimeRow("Architecture source", path: store.codeDirectory, choose: store.chooseEncoderCode)
                     }
+                    HStack {
+                        Button("Download Base Model") { store.installEncoder() }.disabled(store.isBusy)
+                        Button("Remove Downloaded Base Weights", role: .destructive) { store.removeDownloadedEncoder() }.disabled(store.isBusy)
+                    }
+                    Text("Keep the base while refining a LoRA. A full fused checkpoint contains its weights; downloaded base weights can then be removed and obtained again.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Settings") {
+                    Toggle("Developer mode", isOn: $developerMode)
+                    Text("Expose adapter controls and export a full fused checkpoint alongside the separate LoRA.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
 
             }.formStyle(.grouped)

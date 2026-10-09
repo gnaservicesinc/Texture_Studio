@@ -23,6 +23,7 @@ import sys
 import tempfile
 import unicodedata
 import zlib
+from urllib.parse import parse_qs, urlparse
 
 import cv2
 import numpy as np
@@ -31,14 +32,15 @@ PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 COLOR_CHUNKS = {b"gAMA", b"cHRM", b"sRGB", b"iCCP", b"cICP"}
 MAP_NAMES = {"input": "diffuse.png", "height": "displacement.png",
              "normal": "normal.png", "roughness": "roughness.png"}
-MAP_ROLES = {"diff": "input", "diffuse": "input", "disp": "height", "disp_gl": "height",
+MAP_ROLES = {"diff": "input", "diffuse": "input", "col": "input", "color": "input", "albedo": "input", "disp": "height", "disp_gl": "height",
              "displacement": "height", "nor_gl": "normal", "nor_dx": "normal",
              "rough": "roughness", "roughness": "roughness"}
-KNOWN_SUFFIXES = "nor_gl|nor_dx|disp_gl|rough_ao|translucent|diffuse|displacement|roughness|diff|disp|rough|anisotropy_rotation|anisotropy_strength|spec_ior|spec|bump|metal|ao|arm"
-FILE_PATTERN = re.compile(r"^(.+?)_(" + KNOWN_SUFFIXES + r")_(\d+k)\.png$", re.I)
+KNOWN_SUFFIXES = "nor_gl|nor_dx|disp_gl|rough_ao|translucent|(?:diffuse|diff|color|col|albedo)(?:_?\\d+)?|coll\\d+|displacement|roughness|disp|rough|anisotropy_rotation|anisotropy_strength|spec_ior|spec|bump|metal|ao|arm"
+FILE_PATTERN = re.compile(r"^(.+?)_(" + KNOWN_SUFFIXES + r")_(\d+k)(?: \(\d+\))?\.png$", re.I)
 AMBIENT_PATTERN = re.compile(r"^([A-Za-z][A-Za-z0-9]*)_([1248]K)-PNG_(Color|Displacement|NormalGL|NormalDX|Roughness)\.png$", re.I)
 AMBIENT_SUFFIXES = {"color": "diff", "displacement": "disp", "normalgl": "nor_gl", "normaldx": "nor_dx", "roughness": "rough"}
 GENERATOR = "ipde-material-dataset-v2"
+PACKAGE_AUDIT_SCHEMA = "ipde-material-package-audit-v1"
 
 
 def source_cache_budget() -> int:
@@ -98,12 +100,30 @@ def parse_source_filename(filename: str) -> tuple[str, str, str] | None:
     """Recognize original provider names without changing filenames or bytes."""
     match = FILE_PATTERN.fullmatch(filename)
     if match:
-        return match.groups()
+        asset, suffix, resolution = match.groups()
+        # Earlier Poly Haven releases used coll1/coll2 as well as col_01.
+        if re.fullmatch(r"coll\d+", suffix, re.I):
+            suffix = "col_" + suffix[4:]
+        return asset, suffix, resolution
     match = AMBIENT_PATTERN.fullmatch(filename)
     if match:
         asset, resolution, role = match.groups()
         return asset, AMBIENT_SUFFIXES[role.casefold()], resolution.casefold()
     return None
+
+
+def source_role(suffix: str) -> str | None:
+    suffix = suffix.casefold()
+    if re.fullmatch(r"(?:diffuse|diff|color|col|albedo)(?:_?\d+)?", suffix):
+        return "input"
+    return MAP_ROLES.get(suffix)
+
+
+def color_variant_id(suffix: str) -> str:
+    match = re.fullmatch(r"(?:diffuse|diff|color|col|albedo)_?(\d+)?", suffix, re.I)
+    if not match:
+        raise ValueError("Source suffix does not describe a diffuse/color map")
+    return "color_" + str(int(match[1])) if match[1] else "color_default"
 
 
 def png_chunks(data: bytes):
@@ -289,6 +309,54 @@ class SourceDecodeCache:
                 "scope": "Source verification only; decode working buffers are outside retained cache budget"}
 
 
+def package_download_evidence(source: dict, asset: str, package_audits: list[dict]) -> dict | None:
+    """Record an independently verified archive member, without inventing a file URL."""
+    if (not re.fullmatch(r"[a-f0-9]{64}", source.get("file_sha256", ""))
+            or not isinstance(source.get("file_bytes"), int) or source["file_bytes"] <= 0):
+        return None
+    for audit in package_audits:
+        if (audit.get("schema") != PACKAGE_AUDIT_SCHEMA or audit.get("provider") != "ambientCG"
+                or audit.get("material_id") != asset):
+            continue
+        package = audit.get("package", {})
+        parsed = urlparse(package.get("url", ""))
+        filename = package.get("filename", "")
+        asset_id = audit.get("asset_id", "")
+        license_info = audit.get("license", {})
+        if (not re.fullmatch(r"[A-Za-z0-9]+_[1248]K-PNG\.zip", filename)
+                or not filename.startswith(asset_id + "_") or asset_id.casefold() != asset.casefold()
+                or parsed.scheme != "https" or parsed.hostname != "ambientcg.com"
+                or parsed.path != "/get" or parse_qs(parsed.query) != {"file": [filename]}
+                or not re.fullmatch(r"[a-f0-9]{64}", package.get("sha256", ""))
+                or not isinstance(package.get("file_bytes"), int) or package["file_bytes"] <= 0
+                or license_info.get("spdx") != "CC0-1.0"
+                or license_info.get("url") != "https://docs.ambientcg.com/license/"
+                or not re.fullmatch(r"[a-f0-9]{64}", license_info.get("snapshot_sha256", ""))):
+            continue
+        for entry in audit.get("files", []):
+            member = entry.get("archive_member", "")
+            if (entry.get("source_filename") != source["filename"]
+                    or entry.get("exact_full_file_match") is not True
+                    or entry.get("source_stable") is False
+                    or entry.get("source_sha256") != source["file_sha256"]
+                    or entry.get("member_sha256") != source["file_sha256"]
+                    or entry.get("source_bytes") != source["file_bytes"]
+                    or entry.get("member_bytes") != source["file_bytes"]
+                    or not member or Path(member).is_absolute() or ".." in Path(member).parts
+                    or not member.startswith(filename[:-4] + "_") or not member.endswith(".png")):
+                continue
+            return {"url": package["url"], "download_kind": "zip_archive_member",
+                    "archive_filename": filename, "archive_sha256": package["sha256"],
+                    "archive_bytes": package["file_bytes"], "archive_member": member,
+                    "member_sha256": entry["member_sha256"], "member_bytes": entry["member_bytes"],
+                    "restore_filename": source["filename"], "provider": "ambientCG", "asset_id": asset_id,
+                    "asset_url": audit.get("asset_url"), "api_provenance": audit.get("api_provenance"),
+                    "creation_method": audit.get("creation_method"), "license": license_info,
+                    "audit_time_utc": audit.get("completed_utc"),
+                    "verification_basis": "Downloaded official package; archive SHA256/byte count and each full member/source SHA256/byte count matched; archive member and local restoration filenames are explicitly recorded"}
+    return None
+
+
 def published_source_provenance(source: dict, material_id: str, audit: dict | None) -> dict:
     """Attach CC0 evidence only after matching current bytes to an API audit."""
     if not audit:
@@ -312,7 +380,6 @@ def published_source_provenance(source: dict, material_id: str, audit: dict | No
                     "published_url": entry["published_url"], "published_md5": entry["published_md5"],
                     "published_bytes": entry["published_bytes"], "published_api_url": api_url,
                     "published_audit_timestamp_utc": audit.get("snapshot_completed_utc") or audit.get("timestamp_utc")}
-    from material_recreation import package_download_evidence
     package_evidence = package_download_evidence(source, material_id, audit.get("package_audits", []))
     if package_evidence:
         return {"provider": "ambientCG", "asset_id": package_evidence["asset_id"],
@@ -375,13 +442,183 @@ def write_png(path: Path | str, array: np.ndarray, metadata: dict | None = None,
 
 def source_summary(path: Path) -> dict:
     """Inspect without allocating decoded image memory."""
+    before = path.stat()
     metadata = png_metadata(path.read_bytes())
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+        raise ValueError(f"Source changed while inspecting: {path}")
     metadata["filename"] = path.name
-    metadata["file_bytes"] = path.stat().st_size
+    metadata["file_bytes"] = after.st_size
+    metadata["source_stat"] = {"size": after.st_size, "mtime_ns": after.st_mtime_ns, "ctime_ns": after.st_ctime_ns}
     return metadata
 
 
+def discover_source_sets(sources: Path, source_cache: dict[str, dict] | None = None) -> list[dict]:
+    """Discover registered original sets without mixing resolution or color.
+
+    Pixel dimensions establish registration; filenames establish the original
+    material family and color variant. Specular/AO/other maps are ignored by the
+    application. Cached inspections are reusable only while the file stat is
+    unchanged, so adding another download does not rehash every existing GB.
+    """
+    groups: dict[tuple[Path, str, int, int], dict] = {}
+    source_cache = source_cache or {}
+    for folder in sorted((item for item in sources.iterdir() if item.is_dir()), key=lambda p: p.name.casefold()):
+        manifests = []
+        for manifest_path in sorted(folder.glob("material-source*.json")):
+            if manifest_path.is_file() and not manifest_path.is_symlink() and manifest_path.stat().st_size <= 16 * 1024**2:
+                try:
+                    manifests.append((manifest_path, json.loads(manifest_path.read_text())))
+                except (OSError, ValueError):
+                    pass
+        for path in sorted(folder.iterdir(), key=lambda p: p.name.casefold()):
+            parsed = parse_source_filename(path.name)
+            if not path.is_file() or parsed is None:
+                continue
+            asset, suffix, label = parsed
+            role = source_role(suffix)
+            if role is None:
+                continue
+            family = slugify(asset)
+            # Resolution sometimes appears in the enclosing asset name too.
+            family = re.sub(r"_" + re.escape(label.casefold()) + r"$", "", family)
+            resolved = str(path.resolve())
+            state = path.stat()
+            fingerprint = {"size": state.st_size, "mtime_ns": state.st_mtime_ns, "ctime_ns": state.st_ctime_ns}
+            cached = source_cache.get(resolved, {})
+            if cached.get("source_stat") == fingerprint:
+                header = dict(cached)
+            else:
+                header = source_summary(path)
+            source = {**header, "path": resolved, "filename": path.name, "suffix": suffix.casefold(),
+                      "resolution_label": label.casefold(), "source_family_id": family,
+                      "asset_family_id": family}
+            source.update(_sidecar_source_provenance(source, family, manifests))
+            width, height = source["width"], source["height"]
+            key = (folder, family, width, height)
+            group = groups.setdefault(key, {"source_family_id": family, "asset_family_id": family,
+                "source_set_id": f"{family}_{width}x{height}", "source_directory": str(folder.resolve()),
+                "source_directory_symlink": folder.is_symlink(), "maps": {}, "input_variants": [],
+                "source_files": [],
+                "common_pixel_dimensions": [width, height], "ignored_files": [], "warnings": [], "problems": [],
+                "resolution_labels": set()})
+            group["resolution_labels"].add(label.casefold())
+            group["source_files"].append(source)
+            if width != int(label[:-1]) * 1024 or height != int(label[:-1]) * 1024:
+                group["warnings"].append(f"{path.name}: named {label} but actual registration is {width}×{height}; actual pixels are used")
+            if role == "input":
+                source["variant_id"] = color_variant_id(suffix)
+                previous = next((v for v in group["input_variants"] if v["variant_id"] == source["variant_id"]), None)
+                if previous:
+                    if previous["file_sha256"] == source["file_sha256"]:
+                        group["ignored_files"].append(path.name)
+                    else:
+                        group["problems"].append(f"Different source maps claim the same color variant {source['variant_id']}; choose one explicitly")
+                else:
+                    group["input_variants"].append(source)
+            elif role == "normal" and role in group["maps"]:
+                previous = group["maps"][role]
+                if previous["suffix"] == "nor_gl" and suffix.casefold() == "nor_dx":
+                    group["ignored_files"].append(path.name)
+                elif previous["suffix"] == "nor_dx" and suffix.casefold() == "nor_gl":
+                    group["ignored_files"].append(previous["filename"])
+                    group["maps"][role] = source
+                elif previous["file_sha256"] == source["file_sha256"]:
+                    group["ignored_files"].append(path.name)
+                else:
+                    group["problems"].append("Multiple source maps for normal")
+            elif role in group["maps"]:
+                if group["maps"][role]["file_sha256"] == source["file_sha256"]:
+                    group["ignored_files"].append(path.name)
+                else:
+                    group["problems"].append(f"Multiple source maps for {role}")
+            else:
+                group["maps"][role] = source
+    result = []
+    seen = {}
+    for group in groups.values():
+        width, height = group["common_pixel_dimensions"]
+        labels = sorted(group.pop("resolution_labels"))
+        if width == height and width >= 1024 and width % 1024 == 0:
+            resolution = f"{width // 1024}k"
+        elif len(labels) == 1:
+            resolution = labels[0]
+        else:
+            resolution = f"{width}x{height}"
+        group["resolution_label"] = resolution
+        group["material_id"] = f"{group['source_family_id']}_{resolution}"
+        group["canonical_directory_name"] = group["source_family_id"]
+        variants = sorted(group["input_variants"], key=lambda v: (v["variant_id"] != "color_default", v["variant_id"], v["filename"].casefold()))
+        group["input_variants"] = variants
+        if variants:
+            group["maps"]["input"] = variants[0]
+        if "input" in group["maps"] and any(role in group["maps"] for role in ("height", "roughness", "normal")):
+            previous = seen.get(group["material_id"])
+            if previous:
+                group["problems"].append("Duplicate normalized material identity; refusing merged source sets")
+            seen[group["material_id"]] = group
+        group["ready"] = not group["problems"]
+        result.append(group)
+    return sorted(result, key=lambda g: (g["source_family_id"], g["common_pixel_dimensions"], g["source_directory"]))
+
+
+def _sidecar_source_provenance(source: dict, family: str, manifests: list[tuple[Path, dict]]) -> dict:
+    """Bind provider evidence only to the exact inspected original file bytes."""
+    for path, manifest in manifests:
+        if manifest.get("material_id") != family or manifest.get("resolution", "").casefold() != source["resolution_label"]:
+            continue
+        for role, downloaded in manifest.get("downloaded_maps", {}).items():
+            if (Path(downloaded.get("path", "")).name != source["filename"]
+                    or downloaded.get("sha256") != source["file_sha256"]
+                    or downloaded.get("bytes") != source["file_bytes"]):
+                continue
+            provider = manifest.get("provider")
+            if provider == "Poly Haven":
+                published = manifest.get("maps", {}).get(role, {})
+                if (manifest.get("license") != "CC0-1.0"
+                        or manifest.get("api", {}).get("api_url") != f"https://api.polyhaven.com/files/{family}"
+                        or published.get("published_bytes") != source["file_bytes"]
+                        or published.get("published_md5", "").casefold() != source.get("file_md5", "").casefold()
+                        or not published.get("url", "").startswith("https://dl.polyhaven.org/file/ph-assets/Textures/png/")):
+                    continue
+                return {"provider": provider, "asset_id": family, "asset_url": f"https://polyhaven.com/a/{family}",
+                    "license": "CC0-1.0", "license_url": "https://polyhaven.com/license",
+                    "license_basis": "Current full source SHA256, MD5 and byte count match the verified official download manifest",
+                    "published_url": published["url"], "published_md5": published["published_md5"],
+                    "published_bytes": published["published_bytes"], "published_api_url": manifest["api"]["api_url"],
+                    "published_audit_timestamp_utc": manifest.get("completed_utc"),
+                    "published_manifest_path": str(path.resolve())}
+            if provider == "ambientCG":
+                audit_path = Path(manifest.get("package_audit_path", ""))
+                if not audit_path.is_file() or audit_path.is_symlink() or audit_path.stat().st_size > 16 * 1024**2:
+                    continue
+                try:
+                    audit = json.loads(audit_path.read_text())
+                except (OSError, ValueError):
+                    continue
+                evidence = published_source_provenance(source, family, {"files": [], "package_audits": [audit]})
+                if evidence:
+                    return {**evidence, "published_manifest_path": str(path.resolve())}
+    return {}
+
+
 def discover_materials(sources: Path, crop_size: int, dimension_policy: str = "strict", whole_maps: bool = False) -> list[dict]:
+    # Keep the explicit offline registration/crop workflow for old single-set
+    # imports, while expanded resolution/color collections use the same strict
+    # registration grouping as the application's source manifests.
+    expanded = False
+    for folder in (item for item in sources.iterdir() if item.is_dir()):
+        identities: dict[str, set[str]] = {}
+        for path in folder.iterdir():
+            parsed = parse_source_filename(path.name)
+            if parsed is None:
+                continue
+            asset, suffix, label = parsed
+            identities.setdefault(slugify(asset), set()).add(label.casefold())
+            expanded |= source_role(suffix) == "input" and color_variant_id(suffix) != "color_default"
+        expanded |= any(len(labels) > 1 for labels in identities.values())
+    if expanded:
+        return _expanded_materials(discover_source_sets(sources), crop_size, dimension_policy, whole_maps)
     discovered = []
     identifiers: set[str] = set()
     for folder in sorted((item for item in sources.iterdir() if item.is_dir()), key=lambda item: item.name.casefold()):
@@ -398,7 +635,7 @@ def discover_materials(sources: Path, crop_size: int, dimension_policy: str = "s
                 continue
             file_id, suffix, resolution = parsed
             file_material_ids.add(slugify(file_id))
-            role = MAP_ROLES.get(suffix.lower(), "extra:" + slugify(suffix))
+            role = source_role(suffix) or "extra:" + slugify(suffix)
             # Prefer OpenGL if both convention variants are present.
             if role == "normal" and role in candidates and suffix.lower() == "nor_dx":
                 ignored.append(path.name)
@@ -457,6 +694,35 @@ def discover_materials(sources: Path, crop_size: int, dimension_policy: str = "s
                            "ignored_files": ignored, "warnings": warnings,
                            "problems": problems, "ready": not problems})
     return discovered
+
+
+def _expanded_materials(materials: list[dict], crop_size: int, dimension_policy: str, whole_maps: bool) -> list[dict]:
+    for material in materials:
+        maps = material["maps"]
+        problems = material["problems"]
+        for role in MAP_NAMES:
+            if role not in maps:
+                problems.append(f"Missing {role} map at this source resolution; different resolutions cannot establish registration")
+        if maps.get("height", {}).get("sample_bits", 16) < 16:
+            problems.append("High-detail displacement requires original 16-bit samples; 8-bit height is excluded")
+        width, height = material["common_pixel_dimensions"]
+        if whole_maps:
+            rectangles = [[0, 0, width, height]]
+            if max(width, height) > crop_size:
+                problems.append(f"Whole map exceeds requested {crop_size} maximum edge; never resized")
+        else:
+            rectangles = [[0, 0, crop_size, crop_size]]
+            opposite = [width - crop_size, height - crop_size, crop_size, crop_size]
+            if opposite != rectangles[0]:
+                rectangles.append(opposite)
+            if min(width, height) < crop_size:
+                problems.append(f"Source is smaller than native {crop_size} crop")
+        material.update(crop_rectangles_top_left_xywh=rectangles, dimension_policy=dimension_policy,
+                        ready=not problems)
+        for role, source in maps.items():
+            if role != "input" and ("srgb_rendering_intent" in source or source.get("png_gamma", 1) != 1 or "icc_profile_name" in source):
+                material["warnings"].append(f"{role}: display color metadata found; raw codes will be retained")
+    return materials
 
 
 def split_for(material_id: str, fraction: float) -> str:
@@ -534,6 +800,28 @@ def contained_path(root: Path, relative: str, label: str) -> Path:
     return candidate
 
 
+def resolve_map_path(folder: Path, sample: dict, role: str) -> Path:
+    """Resolve a local prepared map or an explicitly bound original source.
+
+    Source references are paths, not copied images or filesystem links. Absolute
+    paths are valid only when the map identity binds them to the recorded parent.
+    Consumers still verify its checksum before accepting pixels for training.
+    """
+    name = (sample["maps"][role] if role in sample["maps"]
+            else sample.get("extra_maps", {})[role.removeprefix("extra:")])
+    details = sample.get("map_metadata", {}).get(role, {})
+    if details.get("storage") != "source_reference":
+        return contained_path(folder, name, "Prepared material map")
+    source = details.get("source", {})
+    if (not isinstance(name, str) or not Path(name).is_absolute()
+            or name != source.get("path")
+            or details.get("sample_sha256") != source.get("file_sha256")
+            or not isinstance(source.get("file_sha256"), str)
+            or len(source["file_sha256"]) != 64):
+        raise ValueError("Original map reference differs from its recorded source identity")
+    return Path(name)
+
+
 def prepare_material(material: dict, output: Path, overrides: dict, approve: bool, validation_fraction: float,
                      published_audit: dict | None = None) -> list[dict]:
     if material["maps"].get("height", {}).get("sample_bits", 0) < 16:
@@ -541,7 +829,7 @@ def prepare_material(material: dict, output: Path, overrides: dict, approve: boo
     sample_root = output / "samples"
     sample_root.mkdir(parents=True, exist_ok=True)
     identities = material.get("sample_ids") or [f"{material['material_id']}_auto_{number + 1:03d}" for number in range(len(material["crop_rectangles_top_left_xywh"]))]
-    desired_split = material.get("explicit_split") or split_for(material["material_id"], validation_fraction)
+    desired_split = material.get("explicit_split") or split_for(material.get("source_family_id", material["material_id"]), validation_fraction)
     if len(identities) != len(material["crop_rectangles_top_left_xywh"]) or desired_split not in ("train", "validation"):
         raise ValueError("Explicit sample identity or split contract is invalid")
     if any(not isinstance(identity, str) or identity != slugify(identity) for identity in identities):
@@ -551,6 +839,7 @@ def prepare_material(material: dict, output: Path, overrides: dict, approve: boo
     for rectangle in material["crop_rectangles_top_left_xywh"]:
         contract = {"generator": GENERATOR, "material": material["material_id"], "crop": rectangle,
                     "sources": {role: item["file_sha256"] for role, item in material["maps"].items()},
+                    "input_variants": [item["file_sha256"] for item in material.get("input_variants", [])],
                     "overrides": material_override, "dimension_policy": material["dimension_policy"]}
         signatures.append(sha256_bytes(json.dumps(contract, sort_keys=True).encode()))
     existing = []
@@ -588,6 +877,9 @@ def prepare_material(material: dict, output: Path, overrides: dict, approve: boo
                             "split": desired_split,
                             "preparation_signature": signatures[number], "encoding_warnings": material["warnings"],
                             "dimension_policy": material["dimension_policy"], "source_notes": []})
+            for key in ("source_family_id", "asset_family_id", "source_set_id", "resolution_label"):
+                if key in material:
+                    records[-1][key] = material[key]
         for role, source in material["maps"].items():
             decoded, metadata = read_png(source["path"])
             if metadata["file_sha256"] != source["file_sha256"]:
@@ -609,8 +901,16 @@ def prepare_material(material: dict, output: Path, overrides: dict, approve: boo
                 crop, transforms, color_metadata = transformed_crop(original, role, source, material_override.get(role))
                 filename = MAP_NAMES.get(role, slugify(role.removeprefix("extra:")) + ".png")
                 target = staging / record["sample_id"] / filename
-                write_png(target, crop, color_metadata)
-                round_trip, target_header = read_png(target)
+                whole_original = [x, y, width, height] == [0, 0, source["width"], source["height"]]
+                if whole_original:
+                    if any(t["type"] != "directx_to_opengl" for t in transforms):
+                        raise ValueError("Full original maps are referenced unchanged; numeric transfer conversion requires an explicit different data product")
+                    filename = str(Path(source["path"]).resolve())
+                    crop, round_trip, target_header = original, original, metadata
+                    transforms = [dict(t, applied_in_memory=True) for t in transforms]
+                else:
+                    write_png(target, crop, color_metadata)
+                    round_trip, target_header = read_png(target)
                 if not np.array_equal(crop, round_trip) or crop.dtype != round_trip.dtype:
                     raise ValueError(f"PNG round trip changed integer pixels: {target}")
                 if role in MAP_NAMES:
@@ -625,6 +925,7 @@ def prepare_material(material: dict, output: Path, overrides: dict, approve: boo
                     "sample_bits": source["sample_bits"], "channels": crop.shape[2], "sample_dtype": str(crop.dtype),
                     "sample_sha256": target_header["file_sha256"], "decoded_pixel_sha256": pixel_sha256(crop),
                     "source_crop_pixel_sha256": pixel_sha256(original), "transforms": transforms,
+                    "storage": "source_reference" if whole_original else "prepared_crop",
                     "exact_source_crop": not transforms, "transformed_source_crop_verified": True,
                     "png_color_metadata": {key: value for key, value in target_header.items() if key not in ("color_chunks", "file_sha256")}}
                 if role in ("height", "roughness") and crop.shape[2] == 2:
@@ -632,6 +933,38 @@ def prepare_material(material: dict, output: Path, overrides: dict, approve: boo
                         "scalar_component": "grayscale", "alpha_preserved_in_png": True,
                         "alpha_used_to_scale_scalar": False, "uint16_near_opaque_tolerance_codes": 8,
                         "meaningful_transparency_requires_review": True}
+            del decoded
+        for source in material.get("input_variants", []):
+            if source["path"] == material["maps"]["input"]["path"]:
+                for record in records:
+                    details = dict(record["map_metadata"]["input"])
+                    details.update(variant_id=source["variant_id"], path=record["maps"]["input"])
+                    record.setdefault("input_variants", []).append(details)
+                continue
+            decoded, metadata = read_png(source["path"])
+            if metadata["file_sha256"] != source["file_sha256"]:
+                raise ValueError(f"Color source changed during preparation: {source['path']}")
+            for record in records:
+                x, y, width, height = record["crop_rectangle_top_left_xywh"]
+                crop = np.ascontiguousarray(decoded[y:y + height, x:x + width])
+                whole = [x, y, width, height] == [0, 0, source["width"], source["height"]]
+                filename = str(Path(source["path"]).resolve()) if whole else source["variant_id"] + ".png"
+                if whole:
+                    target_header = metadata
+                else:
+                    target = staging / record["sample_id"] / filename
+                    write_png(target, crop, metadata)
+                    returned, target_header = read_png(target)
+                    if returned.dtype != crop.dtype or not np.array_equal(returned, crop):
+                        raise ValueError("Color crop PNG export changed original integer samples")
+                record.setdefault("input_variants", []).append({"variant_id": source["variant_id"],
+                    "path": filename, "filename": filename, "source": source,
+                    "storage": "source_reference" if whole else "prepared_crop",
+                    "sample_sha256": target_header["file_sha256"], "sample_bits": source["sample_bits"],
+                    "channels": crop.shape[2], "encoding": describe_encoding("input", source),
+                    "source_pixel_dimensions": [source["width"], source["height"]],
+                    "crop_rectangle_top_left_xywh": record["crop_rectangle_top_left_xywh"],
+                    "transforms": [], "exact_source_crop": True})
             del decoded
         source_folder = Path(material["source_directory"])
         for record in records:
@@ -696,7 +1029,7 @@ def verify_sample(folder: Path, check_sources: bool = False, source_cache: Sourc
             if manifest_filename != item["filename"]:
                 errors.append(f"{role}: map filename disagrees with verified metadata")
                 continue
-            path = contained_path(folder, item["filename"], f"{role} map")
+            path = resolve_map_path(folder, record, role)
             decoded, metadata = read_png(path)
             if metadata["file_sha256"] != item["sample_sha256"]:
                 errors.append(f"{role}: file checksum changed")
@@ -718,7 +1051,7 @@ def verify_sample(folder: Path, check_sources: bool = False, source_cache: Sourc
                     errors.append(f"{role}: source crop values changed")
                 if not item["transforms"] and not np.array_equal(decoded, source_crop):
                     errors.append(f"{role}: crop differs from original source slice")
-                if item["transforms"]:
+                if item["transforms"] and item.get("storage") != "source_reference":
                     transfer = next((transform for transform in item["transforms"] if transform["type"] in ("srgb_to_linear", "gamma_to_linear")), None)
                     override = {"mode": transfer["type"], "exponent": transfer.get("exponent")} if transfer else None
                     expected, _, _ = transformed_crop(source_crop, role, item["source"], override)
@@ -767,12 +1100,16 @@ def identical_visible_files(incoming: list[dict], canonical: list[dict]) -> bool
 def normalization_plan(materials: list[dict], archive_identical_duplicates: Path | None = None) -> list[dict]:
     plan = []
     groups: dict[Path, list[Path]] = {}
+    source_targets: dict[Path, set[Path]] = {}
     for material in materials:
         if material.get("source_directory_symlink"):
             raise ValueError("Normalization refuses symbolic-link source directories")
         source = Path(material["source_directory"])
         target = source.parent / material["canonical_directory_name"]
+        source_targets.setdefault(source, set()).add(target)
         groups.setdefault(target, []).append(source)
+    if any(len(targets) > 1 for targets in source_targets.values()):
+        raise ValueError("One source folder contains several asset families; retain its name or separate the folders explicitly")
     archive_root = archive_identical_duplicates.resolve() if archive_identical_duplicates else None
     if archive_root and any(archive_root.is_relative_to(source.parent.resolve()) for sources in groups.values() for source in sources):
         raise ValueError("Identical duplicate archive must be outside the sources directory")
@@ -1254,9 +1591,10 @@ def main(argv: list[str] | None = None) -> int:
                      "validation_fraction": arguments.validation_fraction,
                      "samples": [{"sample_id": item["sample_id"], "material_id": item["material_id"], "path": "samples/" + item["sample_id"],
                                   "split": item["split"], "status": item["status"]} for item in records],
-                     "skipped_materials": failures, "original_sources_required_for_training": False,
+                     "skipped_materials": failures, "original_sources_required_for_training": any(
+                         details.get("storage") == "source_reference" for item in records for details in item["map_metadata"].values()),
                      "source_deletion_authorized": False,
-                     "preservation_scope": "Generated crops, all discovered paired PNG maps and source text notes are self-contained. Unselected source pixels and ignored files are not retained."}
+                     "preservation_scope": "Full original maps remain at their original paths. Explicit partial crops and source text notes are stored separately; original referenced maps must be retained."}
             write_json(arguments.output / "dataset.json", index)
             report.update(sample_count=len(records), skipped_materials=failures, dataset=str(arguments.output.resolve()))
         if arguments.report:

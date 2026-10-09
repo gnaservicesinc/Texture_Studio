@@ -167,68 +167,28 @@ final class ModelManagerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: external.path))
     }
 
-    func testCatalogUsesExactGIANT11AndKeepsCoreMLOptional() throws {
-        let giant = try XCTUnwrap(LocalModelDescriptor.catalog.first)
-        XCTAssertEqual(giant.id, LocalModelDescriptor.da3GiantID)
-        XCTAssertEqual(giant.backend, .pytorchDA3)
-        XCTAssertEqual(giant.artifacts.first { $0.relativePath == "model.safetensors" }?.byteCount, 5_422_814_644)
-        XCTAssertEqual(giant.artifacts.first { $0.relativePath == "model.safetensors" }?.sha256, LocalModelDescriptor.da3WeightsSHA256)
-        XCTAssertTrue(giant.artifacts.allSatisfy { $0.url.path.contains(LocalModelDescriptor.da3Revision) })
-        XCTAssertFalse(LocalModelDescriptor.catalog.contains { $0.id == LocalModelDescriptor.depthAnythingSmallID })
-        XCTAssertEqual(LocalModelDescriptor.catalog.first { $0.id == LocalModelDescriptor.customDepthID }?.backend, .coreML)
-        XCTAssertTrue(giant.license.contains("noncommercial"))
+
+
+
+
+
+    func testCatalogContainsOnlyDeveloperCoreML() {
+        XCTAssertEqual(LocalModelDescriptor.catalog.map(\.id), [LocalModelDescriptor.customDepthID])
+        XCTAssertEqual(LocalModelDescriptor.catalog.first?.backend, .coreML)
+        XCTAssertTrue(LocalModelDescriptor.catalog.allSatisfy { !$0.downloadable })
     }
 
-    func testRetiredSmallCleanupDeletesOnlyExactManagedCopy() throws {
-        let root = try fixture(), external = try fixture()
-        let folder = root.appendingPathComponent(LocalModelDescriptor.depthAnythingSmallID)
-        let package = folder.appendingPathComponent("DepthAnythingV2SmallF16.mlpackage")
+    func testOpeningLibraryNeverDeletesUnknownModelFiles() throws {
+        let root = try fixture()
+        let package = root.appendingPathComponent("development-model/Model.mlpackage")
         try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
-        let keep = external.appendingPathComponent("original.mlpackage")
-        try Data("original".utf8).write(to: keep)
+        let sentinel = package.appendingPathComponent("weights.bin")
+        try Data("keep existing weights".utf8).write(to: sentinel)
         let record = InstalledLocalModel(path: package.path, isManaged: true, interface: FixtureValidator.interface,
             selectedOutput: "depth", installedAt: Date())
-        try JSONEncoder().encode([LocalModelDescriptor.depthAnythingSmallID: record]).write(to: root.appendingPathComponent("model-records.json"))
-        let manager = ModelManager(storageDirectory: root)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
-        XCTAssertNil(manager.records[LocalModelDescriptor.depthAnythingSmallID])
-        XCTAssertEqual(try Data(contentsOf: keep), Data("original".utf8))
-    }
-
-    func testRetiredSmallExternalCopyIsPreserved() throws {
-        let root = try fixture(), external = try fixture()
-        let original = external.appendingPathComponent("DepthAnythingV2SmallF16.mlpackage")
-        try Data("original".utf8).write(to: original)
-        let record = InstalledLocalModel(path: original.path, isManaged: false, interface: FixtureValidator.interface,
-            selectedOutput: "depth", installedAt: Date())
-        try JSONEncoder().encode([LocalModelDescriptor.depthAnythingSmallID: record]).write(to: root.appendingPathComponent("model-records.json"))
+        try JSONEncoder().encode(["development-model": record]).write(to: root.appendingPathComponent("model-records.json"))
         _ = ModelManager(storageDirectory: root)
-        XCTAssertEqual(try Data(contentsOf: original), Data("original".utf8))
-    }
-
-    func testGIANTLocateRejectsA_CoreMLPackage() async throws {
-        let root = try fixture(), external = try fixture()
-        let wrong = external.appendingPathComponent("wrong.mlpackage")
-        try FileManager.default.createDirectory(at: wrong, withIntermediateDirectories: true)
-        let manager = ModelManager(storageDirectory: root, validator: FixtureValidator())
-        do { try await manager.locate(id: LocalModelDescriptor.da3GiantID, url: wrong); XCTFail("Backend mismatch accepted") }
-        catch { XCTAssertNil(manager.records[LocalModelDescriptor.da3GiantID]) }
-    }
-
-    func testGIANTMissingWeightIsReportedMissingDespiteExistingFolder() throws {
-        let root = try fixture(), external = try fixture()
-        let folder = external.appendingPathComponent("DA3-GIANT-1.1")
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try Data("config".utf8).write(to: folder.appendingPathComponent("config.json"))
-        let record = InstalledLocalModel(path: folder.path, isManaged: false, interface: FixtureValidator.interface,
-            selectedOutput: "depth", installedAt: Date())
-        try JSONEncoder().encode([LocalModelDescriptor.da3GiantID: record]).write(to: root.appendingPathComponent("model-records.json"))
-        let manager = ModelManager(storageDirectory: root)
-        XCTAssertEqual(manager.status(for: LocalModelDescriptor.da3GiantID), .missing)
-        XCTAssertNil(manager.availableURL(for: LocalModelDescriptor.da3GiantID))
-        try Data("weights".utf8).write(to: folder.appendingPathComponent("model.safetensors"))
-        manager.refresh()
-        XCTAssertEqual(manager.status(for: LocalModelDescriptor.da3GiantID), .ready)
+        XCTAssertEqual(try Data(contentsOf: sentinel), Data("keep existing weights".utf8))
     }
 
     func testRawTensorDecodingHonorsStridesAndKeepsValues() throws {

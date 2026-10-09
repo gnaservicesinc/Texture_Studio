@@ -334,7 +334,7 @@ final class EngineTests: XCTestCase {
         XCTAssertThrowsError(try FloatEXRWriter.verifyChannelPrecision(at:folder.appendingPathComponent("normal.exr"),expected:.float32))
         let png = try XCTUnwrap(CGImageSourceCreateWithURL(folder.appendingPathComponent("diffuse.png") as CFURL,nil))
         let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(png,0,nil) as? [String:Any])
-        XCTAssertEqual(properties[kCGImagePropertyDepth as String] as? Int,8)
+        XCTAssertEqual(properties[kCGImagePropertyDepth as String] as? Int,16)
     }
 
     private func assertValid(_ crop: CGRect, in polygon: [CGPoint], inset: Double) throws {

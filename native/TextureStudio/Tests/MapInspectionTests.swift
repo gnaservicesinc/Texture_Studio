@@ -6,6 +6,82 @@ import XCTest
 @testable import TextureStudio
 
 final class MapInspectionTests: XCTestCase {
+    func testTrainingGridReconstructionPurgesTemporaryBytesAndExportsOriginalSource() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = try pngBytes(size: 4)
+        let reconstructed = try pngBytes(size: 2)
+        let source = directory.appendingPathComponent("original.png")
+        try original.write(to: source)
+        let recorder = ReviewReconstructionRecorder()
+        let loader = ReviewImageLoader(reconstruct: { _, _, destination in
+            await recorder.record(destination)
+            try reconstructed.write(to: destination)
+        })
+        let transform = MapReviewDisplayTransform(size: 2, sourceSHA256: ReviewImageLoader.hash(original), algorithm: MapReviewDisplayTransform.exactCrop)
+        let loaded = try await loader.load(source, numeric: true, displayTransform: transform)
+        XCTAssertEqual([loaded.pixelWidth, loaded.pixelHeight], [2, 2])
+        XCTAssertEqual(loaded.sourceURL, source)
+        XCTAssertEqual(loaded.sourceSHA256, ReviewImageLoader.hash(original))
+        let recordedOutput = await recorder.output
+        let output = try XCTUnwrap(recordedOutput)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.deletingLastPathComponent().path))
+        let exported = directory.appendingPathComponent("export.png")
+        try ReviewImageLoader.exportOriginal(source, expectedSHA256: loaded.sourceSHA256, to: exported)
+        XCTAssertEqual(try Data(contentsOf: exported), original)
+        XCTAssertEqual(try Data(contentsOf: source), original)
+    }
+
+    func testMissingReconstructedPreviewDoesNotClassifyExistingOriginalAsMissing() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = try pngBytes(size: 4)
+        let source = directory.appendingPathComponent("original.png")
+        try original.write(to: source)
+        let recorder = ReviewReconstructionRecorder()
+        let loader = ReviewImageLoader(reconstruct: { _, _, destination in await recorder.record(destination) })
+        let transform = MapReviewDisplayTransform(size: 2, sourceSHA256: ReviewImageLoader.hash(original), algorithm: MapReviewDisplayTransform.exactCrop)
+        do {
+            _ = try await loader.load(source, numeric: true, displayTransform: transform)
+            XCTFail("A missing reconstruction was displayed")
+        } catch ReviewImageError.invalidImage { }
+        let recordedOutput = await recorder.output
+        let output = try XCTUnwrap(recordedOutput)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.deletingLastPathComponent().path))
+        XCTAssertEqual(try Data(contentsOf: source), original)
+    }
+
+    private func pngBytes(size: Int) throws -> Data {
+        let data = Data(repeating: 64, count: size * size)
+        let image = try XCTUnwrap(CGImage(width: size, height: size, bitsPerComponent: 8, bitsPerPixel: 8,
+            bytesPerRow: size, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: [],
+            provider: CGDataProvider(data: data as CFData)!, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+        let encoded = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(encoded, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        return encoded as Data
+    }
+    func testOnlyMissingSourcesAreClassifiedForRemoval() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let missing = directory.appendingPathComponent("missing.exr")
+        do {
+            _ = try await ReviewImageLoader.shared.load(missing, numeric: true)
+            XCTFail("A missing source was accepted")
+        } catch ReviewImageError.missingSource { }
+        let existing = directory.appendingPathComponent("unsupported.exr")
+        let original = Data([0, 255, 7, 9])
+        try original.write(to: existing)
+        do {
+            _ = try await ReviewImageLoader.shared.load(existing, numeric: true)
+            XCTFail("Invalid preview data was accepted")
+        } catch ReviewImageError.invalidImage { }
+        XCTAssertEqual(try Data(contentsOf: existing), original, "Preview failure must not remove or alter a source")
+        XCTAssertThrowsError(try ReviewImageLoader.readSource(directory)) { error in
+            if case ReviewImageError.missingSource = error { XCTFail("A read failure is not a missing source") }
+        }
+    }
     @MainActor func testNestedInspectorCacheMatchingHonorsFolderBoundaries() {
         let folder = URL(fileURLWithPath: "/tmp/texture-cache", isDirectory: true)
         XCTAssertTrue(ReviewWindowController.mapURL(folder.appendingPathComponent("normal.exr"), isInCacheFolder: folder))
@@ -215,13 +291,13 @@ final class MapInspectionTests: XCTestCase {
         XCTAssertTrue(viewport.zoom.isFinite)
     }
 
-    @MainActor func testReferenceAndLatestModelAreInitiallyVisible() {
-        let candidates = ["flat", "target", "starting_head", "trained_2k"].map {
-            MapReviewCandidate(id: $0, label: $0, mapURL: URL(fileURLWithPath: "/\($0).exr"), numeric: true)
+    @MainActor func testReferenceAndAllExplicitModelCandidatesAreInitiallyVisible() {
+        let candidates = [("diffuse", "diffuse"), ("target", "target"), ("base", "base"), ("trained_2k", "checkpoint")].map { name, role in
+            MapReviewCandidate(id: name, label: name, mapURL: URL(fileURLWithPath: "/\(name).exr"), numeric: role != "diffuse", role: role)
         }
-        XCTAssertEqual(ReviewWorkbenchView.initialCandidates(candidates).map(\.label), ["target", "trained_2k"])
+        XCTAssertEqual(ReviewWorkbenchView.initialCandidates(candidates).map(\.label), ["target", "base", "trained_2k"])
         XCTAssertEqual(ReviewWorkbenchView.initialCandidates([candidates[0], candidates[1]]).map(\.label), ["target"])
-        XCTAssertEqual(ReviewWorkbenchView.initialCandidates([candidates[2], candidates[3]]).map(\.label), ["starting_head", "trained_2k"])
+        XCTAssertEqual(ReviewWorkbenchView.initialCandidates([candidates[2], candidates[3]]).map(\.label), ["base", "trained_2k"])
     }
 
     @MainActor func testSavedVisibilityCannotHideTheRealSourceReferenceOrReplaceItWithABasePrediction() {
@@ -276,4 +352,9 @@ final class MapInspectionTests: XCTestCase {
         }
         return values
     }
+}
+
+private actor ReviewReconstructionRecorder {
+    var output: URL?
+    func record(_ url: URL) { output = url }
 }

@@ -129,8 +129,9 @@ def find_samples(dataset: Path, allow_unreviewed: bool) -> list[dict[str, Any]]:
         # A starter file without real maps is never a training sample.
         if not maps.get("input") or not maps.get("height"):
             raise ValueError(f"Indexed sample is missing input/height maps: {metadata_path}")
-        input_path = checked_relative(metadata_path.parent, maps["input"])
-        height_path = checked_relative(metadata_path.parent, maps["height"])
+        from material_dataset import resolve_map_path
+        input_path = resolve_map_path(metadata_path.parent, metadata, "input")
+        height_path = resolve_map_path(metadata_path.parent, metadata, "height")
         if not input_path.is_file() or not height_path.is_file():
             raise ValueError(f"Indexed sample's input/height files are missing: {metadata_path}")
         if not metadata.get("source_precision_verified") or not metadata.get("crop_values_verified"):

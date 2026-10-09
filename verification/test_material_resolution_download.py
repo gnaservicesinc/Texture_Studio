@@ -98,6 +98,31 @@ class MaterialResolutionDownloadTests(unittest.TestCase):
         self.assertEqual(plan["license"], "CC0-1.0")
         self.assertEqual(plan["maps"]["height"]["published_md5"], payload["Displacement"]["2k"]["png"]["md5"].lower())
 
+    def test_old_color_variants_share_targets_without_inventing_missing_displacement(self):
+        payload = api_payload()
+        color = payload.pop("Diffuse")
+        payload.pop("Displacement")
+        for suffix in ("col_01", "col_02", "col_03"):
+            entry = json.loads(json.dumps(color))
+            entry["2k"]["png"]["url"] = entry["2k"]["png"]["url"].replace("_diff_", "_" + suffix + "_")
+            payload[suffix] = entry
+        plan = download.make_plan("example", payload, {}, {}, "2k")
+        self.assertEqual(plan["unavailable_roles"], ["height"])
+        self.assertNotIn("height", plan["maps"])
+        self.assertEqual(len([m for m in plan["maps"].values() if m["role"] == "input"]), 3)
+        self.assertEqual(set(plan["maps"]) & {"normal", "roughness"}, {"normal", "roughness"})
+
+    def test_source_folder_reuse_does_not_confuse_similar_asset_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "Bamboo Wall"
+            second = root / "Bamboo Wall 02"
+            first.mkdir(); second.mkdir()
+            (first / "bamboo_wall_diff_4k.png").touch()
+            (second / "bamboo_wall_02_diff_4k.png").touch()
+            plan = download.make_plan("bamboo_wall", api_payload("bamboo_wall"), {}, {}, "2k")
+            self.assertEqual(download.asset_directory(plan, root), first)
+
     def test_native_1k_set_preserves_original_codes_and_4k_sources(self):
         plan = download.make_plan("example", api_payload(resolution="1k"), {}, {}, "1k")
         def curl(command, **kwargs):
@@ -233,7 +258,7 @@ class MaterialResolutionDownloadTests(unittest.TestCase):
             self.assertEqual(first["actual_native_pixel_dimensions"], [2048, 1024])
             self.assertTrue(first["actual_headers_verified"])
             self.assertEqual(run.call_count, 4)
-            manifest = root / "example/material-source.json"
+            manifest = root / "example/material-source-2k.json"
             before = manifest.read_bytes()
             second = download.download_asset(plan, root)
             self.assertEqual(run.call_count, 4)

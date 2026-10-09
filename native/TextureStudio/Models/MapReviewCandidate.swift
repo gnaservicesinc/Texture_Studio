@@ -1,5 +1,24 @@
 import Foundation
 
+/// Reconstruct the exact source pixel crop used in training only for
+/// display. The candidate's URL still identifies the original source file.
+struct MapReviewDisplayTransform: Hashable, Sendable {
+    static let exactCrop = "exact_native_integer_codes"
+    let size: Int
+    let sourceSHA256: String
+    let algorithm: String
+    var mapType = "input"
+    var normalConvention = "opengl"
+    var cropRectangle: [Int]? = nil
+    var identity: String { "\(size)|\(sourceSHA256)|\(algorithm)|\(mapType)|\(normalConvention)|\(cropRectangle ?? [])" }
+    var manifestFields: [String: Any] {
+        var fields: [String: Any] = ["native_dimensions": [size, size], "source_sha256": sourceSHA256, "source_resize_algorithm": algorithm,
+         "map_type": mapType, "source_normal_convention": normalConvention]
+        fields["source_crop_rectangle"] = cropRectangle
+        return fields
+    }
+}
+
 /// Provenance of a real photographed material's supplied map, separate from
 /// the checkpoint that predicts one. Paths and crop coordinates are recorded,
 /// never inferred from an image's appearance or filename.
@@ -131,20 +150,23 @@ struct MapReviewCandidate: Identifiable, Hashable {
     let role: String
     let modelIdentity: MapReviewModelIdentity?
     let sourceIdentity: MapReviewSourceIdentity?
+    let displayTransform: MapReviewDisplayTransform?
 
     init(id: String? = nil, label: String, mapURL: URL, numeric: Bool,
          sampleLabel: String? = nil, detail: String? = nil, role: String = "map",
-         modelIdentity: MapReviewModelIdentity? = nil, sourceIdentity: MapReviewSourceIdentity? = nil) {
+         modelIdentity: MapReviewModelIdentity? = nil, sourceIdentity: MapReviewSourceIdentity? = nil,
+         displayTransform: MapReviewDisplayTransform? = nil) {
         self.id = id ?? mapURL.path + "|" + label
         self.label = label; self.mapURL = mapURL; self.numeric = numeric
         self.sampleLabel = sampleLabel; self.detail = detail; self.role = role
         self.modelIdentity = modelIdentity
         self.sourceIdentity = sourceIdentity
+        self.displayTransform = displayTransform
     }
 
     var accessibleLabel: String { [sampleLabel, label, detail].compactMap { $0 }.joined(separator: " · ") }
 
-    var isReference: Bool { role == "target" || (role == "map" && label.lowercased() == "target") }
+    var isReference: Bool { role == "target" }
     var referenceMapName: String { modelIdentity?.mapType == "height" ? "displacement" : modelIdentity?.mapType ?? "map" }
 
     /// The full original target can be inspected without generating a new
@@ -152,7 +174,7 @@ struct MapReviewCandidate: Identifiable, Hashable {
     var fullSourceReference: MapReviewCandidate? {
         guard isReference, let sourceIdentity, let path = sourceIdentity.path, !path.isEmpty else { return nil }
         let source = URL(fileURLWithPath: path)
-        guard source.standardizedFileURL != mapURL.standardizedFileURL else { return nil }
+        guard source.standardizedFileURL != mapURL.standardizedFileURL || displayTransform != nil else { return nil }
         return MapReviewCandidate(id: "full-source|" + source.path, label: "Full source \(referenceMapName) · reference",
             mapURL: source, numeric: true, sampleLabel: sampleLabel,
             detail: (["Full original source map · not a model output"] + sourceIdentity.recordedDetails).joined(separator: " · "),

@@ -36,17 +36,21 @@ final class WorkbenchTests: XCTestCase {
         XCTAssertNil(reopened.selectedCandidateId, "Changing sample clears a candidate that belongs to the previous sample")
     }
 
-    @MainActor func testStudioInferencePhotoRetainsSixteenBitColorAndExplicitSize() throws {
+    @MainActor func testStudioInferenceDiffuseRetainsSixteenBitColorAndExactGrid() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("InferencePhoto-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: url) }
         let image = CIImage(color: CIColor(red: 0.499, green: 0.501, blue: 0.503))
-            .cropped(to: CGRect(x: 0, y: 0, width: 128, height: 64))
+            .cropped(to: CGRect(x: 0, y: 0, width: 64, height: 64))
         try MaterialCheckpointService.writeInferencePhoto(image, maximumSize: 64, to: url)
         let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
         let decoded = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
         XCTAssertEqual(decoded.width, 64)
-        XCTAssertEqual(decoded.height, 32)
+        XCTAssertEqual(decoded.height, 64)
         XCTAssertEqual(decoded.bitsPerComponent, 16)
+        let mismatched = image.cropped(to: CGRect(x: 0, y: 0, width: 64, height: 32))
+        let rejected = url.deletingLastPathComponent().appendingPathComponent("invalid-grid-\(UUID().uuidString).png")
+        XCTAssertThrowsError(try MaterialCheckpointService.writeInferencePhoto(mismatched, maximumSize: 64, to: rejected))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: rejected.path))
     }
 
     @MainActor func testSavedReviewsReopenDecisionsAndExactMapPaths() throws {

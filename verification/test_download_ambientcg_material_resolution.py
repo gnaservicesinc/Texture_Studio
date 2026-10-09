@@ -110,9 +110,9 @@ def test_original_1k_maps_publish_exact_bytes_and_compatible_audit(tmp_path, mon
     entry = next(entry for entry in report["files"] if entry["role"] == "height")
     source = {"filename": entry["source_filename"], "file_bytes": entry["source_bytes"], "file_sha256": entry["source_sha256"]}
     assert package_download_evidence(source, "snow013", [report])["creation_method"]["id"] == "PBRPhotogrammetry"
-    before = (directory / "material-source.json").read_bytes()
+    before = (directory / "material-source-1k.json").read_bytes()
     again = download.download_asset(plan(size=archive.stat().st_size), tmp_path / "sources-1k", tmp_path / "audits")
-    assert again["existing_manifest_reused"] and (directory / "material-source.json").read_bytes() == before
+    assert again["existing_manifest_reused"] and (directory / "material-source-1k.json").read_bytes() == before
     assert all(entry["action"] == "reused_verified" for entry in again["downloaded_maps"].values())
 
 

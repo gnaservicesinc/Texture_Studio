@@ -1,15 +1,6 @@
 import Foundation
 import Darwin
 
-/// The existing material checkpoint protocol is specific to the retired DINOv2
-/// feature-encoder/head experiment. Retain its readers for historical review and
-/// export; a replacement architecture must have its own verified production path.
-enum MaterialTrainingPolicy {
-    static let isTrainingAvailable = false
-    static let retirementNotice = "DINOv2 material-height models are retired. Their checkpoints remain available for comparison and export, but Texture Studio no longer runs them. Attach a height map or explicitly choose another height source."
-    static let trainingIssue = "The previous material trainer has been retired. Your datasets and saved checkpoints remain intact. A replacement photo-to-material training backend is being evaluated before it is connected here."
-}
-
 enum MaterialTool: String, CaseIterable, Identifiable {
     case review, compare, dataset, train
     var id: String { rawValue }
@@ -39,6 +30,14 @@ struct WorkbenchMap: Decodable, Identifiable, Sendable {
     let encoding: String?
     let width: Int?
     let height: Int?
+    var originalSourcePath: String? = nil
+    var originalSourceSha256: String? = nil
+    var originalSourceWidth: Int? = nil
+    var originalSourceHeight: Int? = nil
+    var originalNormalConvention: String? = nil
+    var sourceNormalConvention: String? = nil
+    var cropRectangle: [Int]? = nil
+    var variantId: String? = nil
     var id: String { path }
     var url: URL { URL(fileURLWithPath: path) }
 }
@@ -51,6 +50,10 @@ struct WorkbenchSample: Decodable, Identifiable, Sendable {
     let height: Int
     let maps: [String: WorkbenchMap]
     let note: String?
+    var sourceFamilyId: String? = nil
+    var sourceSetId: String? = nil
+    var inputVariants: [WorkbenchMap]? = nil
+    var availableTargets: [String]? = nil
     var id: String { sampleId }
 }
 
@@ -68,11 +71,13 @@ struct WorkbenchDataset: Decodable, Sendable {
     let crossSizeValidationNotice: String?
     let preparation: WorkbenchDatasetPreparation?
     let automaticValidation: WorkbenchAutomaticValidation?
+    var supportedTrainingSizes: [Int]? = nil
     var samples: [WorkbenchSample] { materials.flatMap(\.samples) }
-    func readyForTraining(size: Int, material: String?) -> Bool {
+    func readyForTraining(size: Int, material: String?, target: String? = nil) -> Bool {
         guard hasNativeSize(size), let policy = automaticValidation,
-              policy.policy == "automatic-material-check-5pct-v1" else { return false }
-        if let material { return policy.materialIds.contains(material) }
+              policy.policy == "source-family-native-regions-v1" else { return false }
+        if let target, let preparedTarget = policy.target, preparedTarget != target { return false }
+        if let material { return policy.quickFitMaterialId == material }
         return policy.quickFitMaterialId == nil
     }
     func hasNativeSize(_ size: Int) -> Bool {
@@ -87,6 +92,7 @@ struct WorkbenchAutomaticValidation: Decodable, Sendable {
     let policy: String
     let materialIds: [String]
     let quickFitMaterialId: String?
+    var target: String? = nil
 }
 
 struct WorkbenchDatasetPreparation: Decodable, Sendable {
@@ -99,6 +105,7 @@ struct WorkbenchDatasetPreparation: Decodable, Sendable {
     let originalDatasetModified: Bool
     let splitLineageChanged: Bool?
     let crossSizeValidationNotice: String?
+    var targetCropped: Bool? = nil
 }
 
 struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
@@ -111,18 +118,22 @@ struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
     let variant: String?
     let warmStartSupported: Bool?
     let refinementPolicy: String?
+    var architecture: String? = nil
+    var scope: String? = nil
     enum CodingKeys: String, CodingKey {
-        case checkpointPath, sha256, schema, target, step, compatible, variant, refinementPolicy
+        case checkpointPath, sha256, schema, target, step, compatible, variant, refinementPolicy, architecture, scope
         case warmStartSupported = "supportsTrainingWarmStart"
     }
-    var supportsTrainingWarmStart: Bool { false }
-    var supportsStudioInference: Bool { false }
-    var availabilityLabel: String { "Retired · review and export only" }
+    var supportsTrainingWarmStart: Bool { compatible && warmStartSupported == true }
+    var supportsStudioInference: Bool {
+        compatible && ["texture-studio-material-lora-v1", "texture-studio-material-checkpoint-v1"].contains(schema)
+    }
+    var availabilityLabel: String { variant == "full" ? "Full material checkpoint" : "Material LoRA" }
     var id: String { sha256 }
     var url: URL { URL(fileURLWithPath: checkpointPath) }
     var title: String { url.deletingLastPathComponent().lastPathComponent + " · " + url.lastPathComponent }
     var trainingBaseLabel: String {
-        variant == "lora" ? "DINOv2 Base + encoder adapters + material head" : "DINOv2 Base + trained material head"
+        architecture ?? "PBRnxt material model"
     }
     var modelSummary: String {
         let map = target == "height" ? "Surface height / displacement" : target.capitalized
@@ -132,35 +143,40 @@ struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
 
 struct MaterialTrainingOptions: Codable, Equatable, Sendable {
     var target = "height"
+    var scope = "final-map"
     var size = 1024
     var updatesPerCrop = 100
     var maxMinutes = 30.0
     /// GiB throughout the UI and CLI; retain the field name for existing callers.
     var memoryGB = MachineResources.current.defaultTrainingGiB
-    var allowUnreviewed = true
-    var maskTransparency = true
+    var automaticMemory = true
     var useSelectedMaterialOnly = false
     var useWarmStart = false
+    var loraRank = 8
+    var loraAlpha = 8.0
+    var cacheGB = 0.5
 
     init() {}
 
     enum CodingKeys: String, CodingKey {
-        case target, size, updatesPerCrop, maxMinutes, memoryGB, allowUnreviewed,
-             maskTransparency, useSelectedMaterialOnly, useWarmStart
+        case target, scope, size, updatesPerCrop, maxMinutes, memoryGB, automaticMemory, useSelectedMaterialOnly, useWarmStart, loraRank, loraAlpha, cacheGB
     }
 
     init(from decoder: Decoder) throws {
         self.init()
         let values = try decoder.container(keyedBy: CodingKeys.self)
         target = try values.decodeIfPresent(String.self, forKey: .target) ?? target
+        scope = try values.decodeIfPresent(String.self, forKey: .scope) ?? scope
         size = try values.decodeIfPresent(Int.self, forKey: .size) ?? size
         updatesPerCrop = try values.decodeIfPresent(Int.self, forKey: .updatesPerCrop) ?? updatesPerCrop
         maxMinutes = try values.decodeIfPresent(Double.self, forKey: .maxMinutes) ?? maxMinutes
         memoryGB = try values.decodeIfPresent(Double.self, forKey: .memoryGB) ?? memoryGB
-        allowUnreviewed = try values.decodeIfPresent(Bool.self, forKey: .allowUnreviewed) ?? allowUnreviewed
-        maskTransparency = try values.decodeIfPresent(Bool.self, forKey: .maskTransparency) ?? maskTransparency
+        automaticMemory = try values.decodeIfPresent(Bool.self, forKey: .automaticMemory) ?? true
         useSelectedMaterialOnly = try values.decodeIfPresent(Bool.self, forKey: .useSelectedMaterialOnly) ?? useSelectedMaterialOnly
         useWarmStart = try values.decodeIfPresent(Bool.self, forKey: .useWarmStart) ?? useWarmStart
+        loraRank = try values.decodeIfPresent(Int.self, forKey: .loraRank) ?? loraRank
+        loraAlpha = try values.decodeIfPresent(Double.self, forKey: .loraAlpha) ?? loraAlpha
+        cacheGB = try values.decodeIfPresent(Double.self, forKey: .cacheGB) ?? cacheGB
     }
 
     /// A stored memory setting can come from a different Mac. Preserve every
@@ -168,7 +184,11 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
     func restored(for resources: MachineResources) -> Self {
         var result = self
         if !["height", "roughness", "normal"].contains(result.target) { result.target = "height" }
-        if ![1024, 2048].contains(result.size) { result.size = 1024 }
+        if !["final-map", "map-decoder"].contains(result.scope) { result.scope = "final-map" }
+        if ![256, 512, 1024, 2048].contains(result.size) { result.size = 1024 }
+        result.loraRank = min(64, max(1, result.loraRank))
+        result.loraAlpha = result.loraAlpha.isFinite ? min(128, max(0.01, result.loraAlpha)) : 8
+        result.cacheGB = result.cacheGB.isFinite ? min(4, max(0, result.cacheGB)) : 0.5
         result.updatesPerCrop = min(10_000, max(1, result.updatesPerCrop))
         result.maxMinutes = result.maxMinutes.isFinite ? min(240, max(1, result.maxMinutes)) : 30
         if resources.trainingMemoryIssue(result.memoryGB) != nil {
@@ -180,12 +200,11 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
     }
 }
 
-/// Optional fields let older preferences gain new controls without losing the
-/// settings they already contain. Runtime paths keep their existing keys.
 struct WorkbenchPreferences: Codable {
     var training: MaterialTrainingOptions?
     var selectedSampleId: String?
     var selectedRole: String?
+    var selectedInputVariantId: String?
     var selectedCheckpointId: String?
     var comparisonCheckpointIds: Set<String>?
     var comparisonIncludesBase: Bool?
@@ -238,7 +257,7 @@ struct SelectedMaterialCheckpoint: Codable, Sendable {
     let codeDirectory: String
     var displayName: String? = nil
     var modelSummary: String? = nil
-    var supportsStudioInference: Bool { false }
+    var supportsStudioInference: Bool { ["height", "normal", "roughness"].contains(target) && URL(fileURLWithPath: checkpointPath).pathExtension == "safetensors" }
     var selectionIdentity: String { checkpointPath + "|" + sha256 }
     var title: String {
         displayName ?? (URL(fileURLWithPath: checkpointPath).deletingLastPathComponent().lastPathComponent
@@ -249,16 +268,27 @@ struct SelectedMaterialCheckpoint: Codable, Sendable {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Texture Studio/selected-material-checkpoint.json")
     }
+    static func registryURL(for target: String, heightRegistryURL: URL = registryURL) -> URL {
+        target == "height" ? heightRegistryURL : heightRegistryURL.deletingPathExtension().appendingPathExtension(target + ".json")
+    }
+    static func readAll(heightRegistryURL: URL = registryURL) -> [String: Self] {
+        Dictionary(uniqueKeysWithValues: ["height", "roughness", "normal"].compactMap { target in
+            guard let checkpoint = try? read(from: registryURL(for: target, heightRegistryURL: heightRegistryURL)),
+                  checkpoint.target == target, checkpoint.supportsStudioInference else { return nil }
+            return (target, checkpoint)
+        })
+    }
     static func read(from url: URL = registryURL) throws -> Self { try JSONDecoder().decode(Self.self, from: Data(contentsOf: url)) }
 
-    func save(to url: URL = registryURL) throws {
+    func save(to requestedURL: URL? = nil) throws {
+        let url = requestedURL ?? Self.registryURL(for: target)
         try Self.withRegistryLock(at: url) {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             try encoder.encode(self).write(to: url, options: .atomic)
         }
-        if url.standardizedFileURL == Self.registryURL.standardizedFileURL {
-            let information = ["selectionID": UUID().uuidString]
+        if ["height", "roughness", "normal"].contains(where: { url.standardizedFileURL == Self.registryURL(for: $0).standardizedFileURL }) {
+            let information = ["selectionID": UUID().uuidString, "target": target]
             NotificationCenter.default.post(name: Self.changeNotification, object: nil, userInfo: information)
             DistributedNotificationCenter.default().postNotificationName(Self.changeNotification, object: nil, userInfo: information, deliverImmediately: true)
         }
@@ -297,4 +327,37 @@ struct SelectedMaterialCheckpoint: Codable, Sendable {
         defer { flock(descriptor, LOCK_UN) }
         try body()
     }
+}
+
+struct WorkbenchTrainingCapabilities: Decodable, Sendable {
+    let trainingSizes: [Int]
+    var memoryPlans: [String: WorkbenchMemoryPlan]? = nil
+}
+struct WorkbenchMemoryPlan: Decodable, Sendable {
+    let requiredMemoryGib: Double
+    let recommendedMemoryGib: Double
+}
+struct WorkbenchTrainingResponse: Decodable, Sendable {
+    let checkpointPath: String
+    let packagePath: String?
+}
+struct WorkbenchAdapterWeight: Identifiable {
+    let id = UUID()
+    var path: String
+    var weight = 1.0
+}
+struct WorkbenchHubModel: Decodable, Identifiable, Sendable {
+    let repository: String
+    let revision: String?
+    let target: String?
+    var id: String { repository }
+}
+struct WorkbenchHubModels: Decodable, Sendable {
+    let models: [WorkbenchHubModel]
+}
+
+struct WorkbenchDatasetCleanup: Decodable {
+    let datasetPath: String
+    let sourceDatasetPath: String?
+    let removed: Bool
 }

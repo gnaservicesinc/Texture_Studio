@@ -21,62 +21,6 @@ from test_material_curriculum import make_dataset
 from train_material_height import digest, find_samples
 
 
-@pytest.mark.parametrize("command,required", (
-    ("train", ["--dataset", "missing-dataset"]),
-    ("resume", ["--resume-checkpoint", "missing-checkpoint.pt"]),
-    ("probe", ["--dataset-1024", "missing-1k", "--dataset-2048", "missing-2k",
-               "--warm-start", "missing-checkpoint.pt"]),
-))
-def test_archival_cli_rejects_without_opt_in_before_loading_or_setup(
-        command, required, tmp_path, monkeypatch, capsys):
-    output = tmp_path / "must-not-exist"
-    monkeypatch.setattr(sys, "argv", ["material_training_cycle.py", command,
-        *required, "--output", str(output)])
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("Retired CLI reached checkpoint loading or training setup")
-    monkeypatch.setattr(cycle.torch, "load", forbidden)
-    monkeypatch.setattr(cycle, "run_train", forbidden)
-    monkeypatch.setattr(cycle, "run_probe", forbidden)
-    monkeypatch.setattr(cycle, "configure_training_resources", forbidden)
-    with pytest.raises(SystemExit) as stopped:
-        cycle.main()
-    assert stopped.value.code == 2
-    assert "--allow-retired-experiment" in capsys.readouterr().err
-    assert not output.exists()
-
-
-@pytest.mark.parametrize("command,required", (
-    ("train", ["--dataset", "historical-dataset"]),
-    ("resume", ["--resume-checkpoint", "historical-checkpoint.pt"]),
-    ("probe", ["--dataset-1024", "historical-1k", "--dataset-2048", "historical-2k",
-               "--warm-start", "historical-checkpoint.pt"]),
-))
-def test_archival_cli_explicit_opt_in_warns_and_preserves_command_dispatch(
-        command, required, tmp_path, monkeypatch, capsys):
-    calls = []
-    def archived_run(settings):
-        calls.append(settings)
-        return {"status": "complete", "selected_step": 4}
-    def checkpoint_load(path, **kwargs):
-        assert command == "resume" and path == Path("historical-checkpoint.pt")
-        assert kwargs == {"map_location": "cpu", "weights_only": True}
-        return {"run_settings": {"learning_rate": 0.002,
-                                  "allow_retired_experiment": False}}
-    monkeypatch.setattr(sys, "argv", ["material_training_cycle.py", command,
-        "--allow-retired-experiment", *required, "--output", str(tmp_path / "archive")])
-    monkeypatch.setattr(cycle.torch, "load", checkpoint_load)
-    monkeypatch.setattr(cycle, "run_train", archived_run)
-    monkeypatch.setattr(cycle, "run_probe", archived_run)
-    cycle.main()
-    assert len(calls) == 1 and calls[0].command == command
-    assert calls[0].allow_retired_experiment
-    if command == "resume":
-        assert calls[0].learning_rate == 0.002
-    captured = capsys.readouterr()
-    assert "WARNING:" in captured.err and "DINOv2 material training is retired" in captured.err
-    assert json.loads(captured.out)["event"] == "complete"
-    assert not (tmp_path / "archive").exists()
-
 
 def dataset_with_two_corners(root):
     make_dataset(root)
