@@ -1,5 +1,4 @@
 import CoreGraphics
-import Darwin
 import Foundation
 import ImageIO
 import Observation
@@ -21,19 +20,13 @@ final class OllamaDecisionService {
     var lastError: String?
     var isBusy: Bool { status.isBusy }
     var progress: Double? { status.progress }
-    var memoryAssessment: OllamaMemoryAssessment {
-        memoryOverride ?? OllamaMemoryAssessment(physicalBytes: ProcessInfo.processInfo.physicalMemory,
-            availableBytes: Self.availableMemory())
-    }
     @ObservationIgnored private let transport: any OllamaHTTPTransport
-    @ObservationIgnored private let memoryOverride: OllamaMemoryAssessment?
     @ObservationIgnored private var operation: Task<Void, Never>?
     @ObservationIgnored private var analysisTask: Task<MaterialDecision, any Error>?
     @ObservationIgnored private var qualityTask: Task<MaterialQualityDecision, any Error>?
 
-    init(transport: any OllamaHTTPTransport = LoopbackOllamaTransport(), memoryAssessment: OllamaMemoryAssessment? = nil) {
+    init(transport: any OllamaHTTPTransport = LoopbackOllamaTransport()) {
         self.transport = transport
-        self.memoryOverride = memoryAssessment
     }
 
     func refresh() async {
@@ -108,8 +101,6 @@ final class OllamaDecisionService {
         do {
             try await checkModel()
             guard case .ready = status else { throw OllamaDecisionError.missing }
-            let memory = memoryAssessment
-            guard memory.canRun else { throw OllamaDecisionError.memory(memory.message) }
             status = .analysing
             let bounded = try Self.boundedPNG(image)
             let request = try Self.decisionRequest(imageData: bounded)
@@ -132,7 +123,6 @@ final class OllamaDecisionService {
             do {
                 try await self.checkModel()
                 guard case .ready = self.status else { throw OllamaDecisionError.missing }
-                guard self.memoryAssessment.canRun else { throw OllamaDecisionError.memory(self.memoryAssessment.message) }
                 self.status = .analysing
                 let images = try Self.reviewImages(diffuse: diffuse, map: map)
                 let request = try Self.qualityReviewRequest(imageData: images, mapType: mapType, purpose: purpose)
@@ -309,19 +299,6 @@ final class OllamaDecisionService {
         CGImageDestinationAddImage(destination, thumbnail, nil)
         guard CGImageDestinationFinalize(destination) else { throw OllamaDecisionError.invalidResponse("adviser image encoding failed") }
         return data as Data
-    }
-
-    private nonisolated static func availableMemory() -> UInt64 {
-        var statistics = vm_statistics64()
-        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
-        let result = withUnsafeMutablePointer(to: &statistics) { pointer in
-            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
-            }
-        }
-        guard result == KERN_SUCCESS else { return 0 }
-        let pages = UInt64(statistics.free_count) + UInt64(statistics.inactive_count) + UInt64(statistics.speculative_count)
-        return min(ProcessInfo.processInfo.physicalMemory, pages * UInt64(max(1, sysconf(_SC_PAGESIZE))))
     }
 
     private struct Version: Decodable { let version: String }

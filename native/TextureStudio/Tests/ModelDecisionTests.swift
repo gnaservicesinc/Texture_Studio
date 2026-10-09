@@ -65,8 +65,7 @@ final class ModelDecisionTests: XCTestCase {
 
     func testQualityReviewUsesExistingLocalModelAndReturnsAdvisoryResult() async throws {
         let transport = DecisionTransport(decision: try Self.qualityResponse())
-        let service = OllamaDecisionService(transport: transport,
-            memoryAssessment: OllamaMemoryAssessment(physicalBytes: 64 * 1_073_741_824, availableBytes: 40 * 1_073_741_824))
+        let service = OllamaDecisionService(transport: transport)
         let result = try await service.reviewMaterial(diffuse: image(), map: image(), mapType: "normal", purpose: .result)
         XCTAssertEqual(service.status, .ready)
         XCTAssertEqual(result.recommendation, .approve)
@@ -157,23 +156,17 @@ final class ModelDecisionTests: XCTestCase {
         XCTAssertNil(missing.modelInfo)
     }
 
-    func testValidatedLocalDecisionAndInsufficientMemoryGuard() async throws {
+    func testValidatedLocalDecisionRunsWithoutHardwareAdmissionCheck() async throws {
         let transport = DecisionTransport(decision: try Self.response())
-        let adequate = OllamaMemoryAssessment(physicalBytes: 64 * 1_073_741_824, availableBytes: 40 * 1_073_741_824)
-        let service = OllamaDecisionService(transport: transport, memoryAssessment: adequate)
+        let service = OllamaDecisionService(transport: transport)
         let decision = try await service.propose(image: image())
         XCTAssertEqual(service.status, .ready)
         XCTAssertEqual(service.modelInfo?.format, "safetensors")
         XCTAssertEqual(decision.model, MaterialDecision.exactModel)
-        let lowMemory = OllamaDecisionService(transport: transport,
-            memoryAssessment: OllamaMemoryAssessment(physicalBytes: 16 * 1_073_741_824, availableBytes: 10 * 1_073_741_824))
-        do { _ = try await lowMemory.propose(image: image()); XCTFail("Memory guard was bypassed") }
-        catch { guard case OllamaDecisionError.memory = error else { return XCTFail("Wrong memory error: \(error)") } }
     }
 
     func testRunnerRejectionReportsUnsupportedAndNeverChangesModel() async throws {
-        let service = OllamaDecisionService(transport: DecisionTransport(rejectRunner: true),
-            memoryAssessment: OllamaMemoryAssessment(physicalBytes: 64 * 1_073_741_824, availableBytes: 40 * 1_073_741_824))
+        let service = OllamaDecisionService(transport: DecisionTransport(rejectRunner: true))
         do { _ = try await service.propose(image: image()); XCTFail("Runner rejection was accepted") }
         catch { guard case .unsupported = service.status else { return XCTFail("Expected incompatibility status") } }
         XCTAssertEqual(service.modelInfo?.name, MaterialDecision.exactModel)

@@ -2,21 +2,19 @@ import SwiftUI
 
 struct MaterialToolRootView: View {
     let role: MaterialTool
+    let embeddedInHub: Bool
     @Bindable var store: WorkbenchStore
     @State private var review = ReviewSessionStore()
     @State private var showModels = false
     @State private var showRuntime = false
-    init(role: MaterialTool, store: WorkbenchStore, review: ReviewSessionStore? = nil) {
+    init(role: MaterialTool, store: WorkbenchStore, review: ReviewSessionStore? = nil, embeddedInHub: Bool = false) {
         self.role = role
+        self.embeddedInHub = embeddedInHub
         self.store = store
         self._review = State(initialValue: review ?? ReviewSessionStore())
     }
-    private var comparisonSelection: [WorkbenchCheckpoint] {
-        store.checkpoints.filter { store.comparisonCheckpointIds.contains($0.id) }
-    }
     private var comparisonReady: Bool {
-        !comparisonSelection.isEmpty && comparisonSelection.count + (store.comparisonIncludesBase ? 1 : 0) >= 2 && Set(comparisonSelection.map(\.target)).count == 1
-            && (store.sourceImageURL != nil || store.selectedSample?.maps["input"] != nil)
+        store.comparisonConfigurationIssue == nil
     }
 
     var body: some View {
@@ -45,7 +43,11 @@ struct MaterialToolRootView: View {
                 } label: { Label("Tools", systemImage: "macwindow.on.rectangle") }
             }
         }
-        .sheet(isPresented: $showModels) { CheckpointLibraryView(store: store).frame(minWidth: 850, minHeight: 620) }
+        .sheet(isPresented: $showModels) {
+            CheckpointLibraryView(store: store, onRefine: embeddedInHub || role == .train ? nil : { checkpoint in
+                launchTrainer(checkpoint)
+            }).frame(minWidth: 850, minHeight: 620)
+        }
         .sheet(isPresented: $showRuntime) { WorkbenchRuntimeView(store: store).frame(width: 710, height: 500) }
         .modifier(DatasetManagementPresentation(store: store))
         .alert("Material tool", isPresented: Binding(get: { (store.error != nil || review.error != nil) && !store.showNewDatasetSheet && !store.showDatasetInfoSheet && !store.showAddMaterialSheet && !store.showImportFolderSheet }, set: { if !$0 { store.error = nil; review.error = nil } })) {
@@ -56,15 +58,34 @@ struct MaterialToolRootView: View {
             if role == .review && review.groups.isEmpty { review.restore(workspace: store.workspacePath) }
         }
         .onOpenURL { url in
+            if url.lastPathComponent == MaterialTrainingHandoff.documentName {
+                do {
+                    let handoff = try MaterialTrainingHandoff.read(from: url)
+                    store.receiveTrainingHandoff(handoff)
+                    _ = try? handoff.discardTemporaryFile(at: url)
+                } catch { store.error = error.localizedDescription }
+                return
+            }
             var isDirectory: ObjCBool = false
             let directoryExists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
             let containsDataset = directoryExists && (FileManager.default.fileExists(atPath: url.appendingPathComponent("dataset.json").path)
                 || (url.lastPathComponent == "sources" && FileManager.default.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("dataset.json").path)))
             if url.lastPathComponent == "dataset.json" || containsDataset || (role == .dataset && directoryExists) { store.receiveDataset(url) }
             else if url.pathExtension == "json" { review.load(url) }
-            else if url.pathExtension == "safetensors" { store.openCheckpoint(url) }
-            else { review.groups = [MaterialReviewGroup(id: url.lastPathComponent, candidates: [MapReviewCandidate(id: url.path, label: url.lastPathComponent, mapURL: url, numeric: true)])]; review.selectedGroupId = url.lastPathComponent }
+            else if url.pathExtension.lowercased() == "safetensors" {
+                if role == .train { store.receiveResumeCheckpoint(url) }
+                else { store.openCheckpoint(url) }
+            }
+            else { review.openMaps([url]) }
         }
+    }
+
+    private func launchTrainer(_ checkpoint: WorkbenchCheckpoint) {
+        do {
+            try MaterialToolLauncher.openTrainer(checkpoint: checkpoint, dataset: store.datasetDisplayURL,
+                training: store.training, sampleID: store.selectedSampleId, inputVariantID: store.selectedInputVariantId,
+                onFailure: { store.error = $0.localizedDescription })
+        } catch { store.error = error.localizedDescription }
     }
 
     private var reviewView: some View {
@@ -131,6 +152,7 @@ struct MaterialToolRootView: View {
         VStack(spacing: 0) {
             HStack {
                 Button("Test Photo…", systemImage: "photo") { store.chooseSourceImage() }
+                    .disabled(store.isBusy)
                     .help("Use the same prepared diffuse at the chosen grid, for every checkpoint. A selected dataset material is used when no separate photo is chosen.")
                 VStack(alignment: .leading, spacing: 3) {
                     Text(store.sourceImageURL.map { "Source photo: \($0.lastPathComponent)" }
@@ -142,11 +164,12 @@ struct MaterialToolRootView: View {
                 }.foregroundStyle(.secondary)
                 if store.sourceImageURL != nil {
                     Button("Use Dataset Material") { store.sourceImageURL = nil }
-                        .disabled(store.isBusy || store.selectedSample?.maps["input"] == nil)
+                        .disabled(store.isBusy || store.selectedDiffuseMap == nil)
                         .help("Switch back to the material currently selected in Dataset. Its diffuse and reference map will be used for this comparison.")
                 }
                 Spacer()
                 Button("Choose Checkpoints…") { store.chooseCheckpoint() }
+                    .disabled(store.isBusy)
                     .help("Select one checkpoint to compare with its material base, or multiple saved checkpoints predicting the same map type. Their exact hashes are recorded with the results.")
                 Button("Run Comparison", systemImage: "play.fill") { store.compare() }
                     .buttonStyle(.glassProminent).disabled(store.isBusy || !comparisonReady)
@@ -180,8 +203,8 @@ struct MaterialToolRootView: View {
             }.disabled(store.isBusy)
             Toggle("Include the material base before refinement", isOn: $store.comparisonIncludesBase)
                 .toggleStyle(.checkbox).disabled(store.isBusy).padding(.horizontal).padding(.vertical, 8)
-            if !comparisonReady && !store.isBusy {
-                Text("Choose a photo or dataset material, then select one checkpoint plus the material base, or two checkpoints for the same map type.")
+            if let issue = store.comparisonConfigurationIssue, !store.isBusy {
+                Text(issue)
                     .font(.caption).foregroundStyle(.secondary).padding(.horizontal).padding(.vertical, 8)
             }
             Divider()

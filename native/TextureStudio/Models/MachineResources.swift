@@ -39,21 +39,4 @@ struct MachineResources: Equatable, Sendable {
     var defaultTrainingGiB: Double { Double(defaultTrainingBytes) / Double(Self.gibibyte) }
     var physicalGiB: Double { Double(physicalBytes) / Double(Self.gibibyte) }
     var reservedGiB: Double { Double(physicalBytes - practicalBytes) / Double(Self.gibibyte) }
-    var trainingMemoryRange: ClosedRange<Double> { min(2, maximumTrainingGiB)...maximumTrainingGiB }
-
-    func trainingMemoryIssue(_ value: Double) -> String? {
-        // Validate the integer byte count sent to Python. The exact 64 GiB
-        // ceiling is a fraction of a byte below the displayed 57.6 GiB value;
-        // both convert to the same allowed byte count after truncation.
-        let bytes = (value * Double(Self.gibibyte)).rounded(.down)
-        guard value.isFinite, value >= trainingMemoryRange.lowerBound,
-              bytes <= Double(maximumTrainingBytes) else {
-            return "Choose a memory limit between \(trainingMemoryRange.lowerBound.formatted(.number.precision(.fractionLength(0...1)))) and \(maximumTrainingGiB.formatted(.number.precision(.fractionLength(0...1)))) GiB for this Mac."
-        }
-        return nil
-    }
-
-    func trainingMemoryBytes(_ value: Double) -> Int64 {
-        Int64(value * Double(Self.gibibyte))
-    }
 }

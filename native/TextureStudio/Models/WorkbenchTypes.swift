@@ -272,8 +272,8 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
         checkpointEvery = try values.decodeIfPresent(Int.self, forKey: .checkpointEvery) ?? checkpointEvery
     }
 
-    /// A stored memory setting can come from a different Mac. Preserve every
-    /// supported choice; adapt only values outside this machine's actual limits.
+    /// Preserve supported choices when reopening on another Mac. Legacy memory
+    /// preferences are retained for compatibility and do not govern admission.
     func restored(for resources: MachineResources) -> Self {
         var result = self
         if !["height", "roughness", "normal"].contains(result.target) { result.target = "height" }
@@ -286,11 +286,6 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
         result.checkpointEvery = min(100000, max(0, result.checkpointEvery))
         result.updatesPerCrop = min(10_000, max(1, result.updatesPerCrop))
         result.maxMinutes = result.maxMinutes.isFinite ? min(240, max(1, result.maxMinutes)) : 30
-        if resources.trainingMemoryIssue(result.memoryGB) != nil {
-            result.memoryGB = result.memoryGB.isFinite
-                ? min(resources.maximumTrainingGiB, max(resources.trainingMemoryRange.lowerBound, result.memoryGB))
-                : resources.defaultTrainingGiB
-        }
         return result
     }
 }
@@ -426,11 +421,6 @@ struct SelectedMaterialCheckpoint: Codable, Sendable {
 
 struct WorkbenchTrainingCapabilities: Decodable, Sendable {
     let trainingSizes: [Int]
-    var memoryPlans: [String: WorkbenchMemoryPlan]? = nil
-}
-struct WorkbenchMemoryPlan: Decodable, Sendable {
-    let requiredMemoryGib: Double
-    let recommendedMemoryGib: Double
 }
 struct WorkbenchTrainingResponse: Decodable, Sendable {
     let checkpointPath: String

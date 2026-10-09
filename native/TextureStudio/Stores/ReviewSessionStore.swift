@@ -70,13 +70,19 @@ final class ReviewSessionStore {
         panel.title = "Open original maps at full resolution"
         panel.begin { response in
             guard response == .OK else { return }
-            let candidates = panel.urls.map { MapReviewCandidate(id: $0.path, label: $0.lastPathComponent, mapURL: $0, numeric: true) }
-            self.manifestURL = nil
-            self.groups = [MaterialReviewGroup(id: "Opened maps", candidates: candidates)]
-            self.selectedGroupId = self.groups.first?.id
-            self.blendURL = nil
-            self.decisions = [:]; self.notes = [:]; self.selectedCandidateId = nil
+            self.openMaps(panel.urls)
         }
+    }
+    func openMaps(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let candidates = urls.map { MapReviewCandidate(id: $0.path, label: $0.lastPathComponent, mapURL: $0, numeric: true) }
+        manifestURL = nil
+        preferences.removeObject(forKey: "reviewManifest")
+        blendURL = nil
+        decisions = [:]; notes = [:]; selectedCandidateId = nil
+        error = nil
+        groups = [MaterialReviewGroup(id: "Opened maps", candidates: candidates)]
+        selectedGroupId = groups.first?.id
     }
     func saveReview() {
         let panel = NSSavePanel(); panel.allowedContentTypes = [.json]; panel.nameFieldStringValue = "material-review.json"
@@ -112,6 +118,10 @@ final class ReviewSessionStore {
             "selected_material_id": selectedGroupId ?? "", "selected_candidate_id": selectedCandidateId ?? "",
             "automatic_model_promotion": false]
         try JSONSerialization.data(withJSONObject: review, options: [.prettyPrinted, .sortedKeys]).write(to: url, options: .atomic)
+        manifestURL = url
+        preferences.set(url.path, forKey: "reviewManifest")
+        persistSelection()
+        error = nil
     }
     func load(_ url: URL) {
         do {

@@ -229,7 +229,12 @@ struct ReviewWorkbenchView: View {
                 Button("200%") { viewport.setZoom(2) }
                 Button { viewport.setZoom(viewport.zoom / 1.25) } label: { Image(systemName: "minus.magnifyingglass") }
                 Button { viewport.setZoom(viewport.zoom * 1.25) } label: { Image(systemName: "plus.magnifyingglass") }
-                Text(viewport.fitToView ? "Fit • linked pan" : "\(Int(viewport.zoom * 100))% • linked pan")
+                Text("Zoom").font(.caption)
+                NumericTextField(title: "Zoom percent", value: Binding(
+                    get: { Double(viewport.zoom) * 100 },
+                    set: { viewport.setZoom(CGFloat($0 / 100)) }), in: 2...3200)
+                    .frame(width: 85)
+                Text(viewport.fitToView ? "% manual · Fit active" : "% · linked pan")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Menu("Visible Maps (\(visibleCandidates.count))") {
@@ -248,12 +253,10 @@ struct ReviewWorkbenchView: View {
             .safeAreaInset(edge: .bottom, spacing: 8) {
                 if visibleCandidates.contains(where: \.numeric) {
                     HStack {
-                        Text("Display contrast")
-                        Slider(value: $viewport.displayContrast, in: 1...32).frame(maxWidth: 160)
-                        Text("\(viewport.displayContrast, specifier: "%.1f")×")
-                        Text("Midpoint")
-                        Slider(value: $viewport.displayMidpoint, in: 0...1).frame(maxWidth: 160)
-                        Text("\(viewport.displayMidpoint, specifier: "%.3f")")
+                        DoubleControl(title: "Display contrast", value: $viewport.displayContrast, range: 1...32, suffix: "×")
+                            .frame(maxWidth: 220)
+                        DoubleControl(title: "Midpoint", value: $viewport.displayMidpoint, range: 0...1)
+                            .frame(maxWidth: 200)
                         Button("Reset Display") { viewport.displayContrast = 1; viewport.displayMidpoint = 0.5 }
                         Spacer()
                         Text("Display only · saved for next time · exports keep raw values").foregroundStyle(.secondary)

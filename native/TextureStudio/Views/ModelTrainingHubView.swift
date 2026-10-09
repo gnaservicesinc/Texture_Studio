@@ -36,7 +36,7 @@ private enum TrainingDestination: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "A practical path from photographed surfaces to a reusable material model."
         case .dataset: "Create, rename and manage datasets, then inspect their original material maps."
-        case .train: "Refine displacement, roughness or normals at a supported pixel grid."
+        case .train: "Refine displacement, roughness or normals at the selected native pixel grid."
         case .compare: "Prepare diffuse once, then compare matching model outputs."
         case .review: "Inspect original pixels, pan together and pop maps out for a closer look."
         case .checkpoints: "Use, export and recover your material models."
@@ -96,16 +96,27 @@ struct ModelTrainingHubView: View {
                 }
                 switch destination ?? .overview {
                 case .overview: overview.modifier(DatasetManagementPresentation(store: store))
-                case .dataset: MaterialToolRootView(role: .dataset, store: store, review: review)
-                case .train: MaterialToolRootView(role: .train, store: store, review: review)
-                case .compare: MaterialToolRootView(role: .compare, store: store, review: review)
-                case .review: MaterialToolRootView(role: .review, store: store, review: review)
+                case .dataset: MaterialToolRootView(role: .dataset, store: store, review: review, embeddedInHub: true)
+                case .train: MaterialToolRootView(role: .train, store: store, review: review, embeddedInHub: true)
+                case .compare: MaterialToolRootView(role: .compare, store: store, review: review, embeddedInHub: true)
+                case .review: MaterialToolRootView(role: .review, store: store, review: review, embeddedInHub: true)
                 case .checkpoints: CheckpointLibraryView(store: store, showsDismissButton: false)
                 }
             }
         }
         .navigationTitle("Model Training")
         .frame(minWidth: 1280, minHeight: 780)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if destination == .overview || destination == .checkpoints || (destination == .review && store.isBusy) {
+                WorkbenchActivityView(store: store)
+            }
+        }
+        .alert("Model Training", isPresented: Binding(get: {
+            store.error != nil && destination == .overview && store.datasetSheet == nil
+        }, set: { if !$0 { store.error = nil } })) {
+            Button("OK") { store.error = nil }
+        } message: { Text(store.error ?? "") }
+        .onChange(of: store.trainingNavigationRequest) { _, _ in destination = .train }
         .task { store.restore() }
     }
 
@@ -151,7 +162,7 @@ struct ModelTrainingHubView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("A workflow you can return to").font(.title2.bold())
                     workflowRow("1", .dataset, "Set up your dataset", "Choose rendering and training resolution, import a material folder, then review the planned native crops and validation checks.")
-                    workflowRow("2", .train, "Train material detail", "Use the saved dataset resolution and review the memory budget. Complete registered maps share the exact grid shown in Dataset.")
+                    workflowRow("2", .train, "Train material detail", "Choose your map and type the training settings directly. Complete registered maps share the exact grid shown in Dataset.")
                     workflowRow("3", .compare, "Compare what changed", "Use the same prepared diffuse for each checkpoint. Inspect detail, noise, inversion and relief.")
                     workflowRow("4", .review, "Inspect at full quality", "Use 100% zoom, linked dragging and pop-out windows. Export the untouched map or open an editable copy in GIMP.")
                     workflowRow("5", .checkpoints, "Keep the model", "Save the LoRA or full checkpoint, upload it to Hugging Face, and download it again when needed.")

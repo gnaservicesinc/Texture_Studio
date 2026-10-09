@@ -42,9 +42,11 @@ struct MaterialInspector: View {
                 DoubleControl(title: "Lens correction", value: $workspace.settings.lensDistortion, range: -0.15...0.15)
                     .help("Correct barrel or pincushion curvature. Leave at zero if straight features already look straight.")
                 LabeledContent("Focal length (px)") {
-                    TextField("Auto", value: $workspace.settings.focalLengthPixels, format: .number)
-                        .frame(width: 90)
+                    OptionalNumericTextField(title: "Focal length in pixels", value: $workspace.settings.focalLengthPixels, greaterThan: 0)
+                        .frame(width: 120)
                 }
+                Text("Leave focal length blank to use the photo's camera information.")
+                    .font(.caption).foregroundStyle(.secondary)
                 DoubleControl(title: "Crop scale", value: $workspace.settings.cropScale, range: 0.2...1)
                 DoubleControl(title: "Crop horizontal", value: $workspace.settings.cropOffsetX, range: -1...1)
                 DoubleControl(title: "Crop vertical", value: $workspace.settings.cropOffsetY, range: -1...1)
@@ -117,25 +119,18 @@ struct MaterialInspector: View {
                     .font(.caption).foregroundStyle(.secondary)
                 FloatControl(title: "Base roughness", value: $workspace.settings.roughnessBase, range: 0...1)
                 FloatControl(title: "Roughness detail", value: $workspace.settings.roughnessDetail, range: 0...1)
-                LabeledContent("Surface width (m)") {
-                    TextField("Meters", value: $workspace.settings.materialWidthMeters, format: .number)
-                        .frame(width: 90)
-                }
+                NumericField("Surface width", value: $workspace.settings.materialWidthMeters, greaterThan: 0, unit: "m")
                 .help("The real or intended width of the material tile in Blender. Used with relief scale to calculate normal strength.")
-                LabeledContent("Relief scale (m)") {
-                    TextField("Meters", value: $workspace.settings.displacementScaleMeters, format: .number)
-                        .frame(width: 90)
-                }
+                NumericField("Relief scale", value: $workspace.settings.displacementScaleMeters, atLeast: 0, unit: "m")
                 .help("The displacement amount for Blender. Adjust for useful visual relief; inferred height is not a calibrated physical measurement.")
                 Text("Depth cleanup targets isolated artifacts while retaining coherent edges. Roughness remains an editable estimate.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Export material") {
                 Picker("Map size", selection: $workspace.settings.outputSize) {
-                    Text("1024 × 1024").tag(1024)
-                    Text("2048 × 2048").tag(2048)
-                    Text("4098 × 4098").tag(4098)
-                    Text("8K · 8192 × 8192").tag(8192)
+                    ForEach(Array(Set(TextureSettings.outputSizes + [workspace.settings.outputSize])).sorted(), id: \.self) { size in
+                        Text("\(size) × \(size)").tag(size)
+                    }
                 }
                 Picker("EXR storage", selection: $workspace.settings.exrPrecision) {
                     Text("16-bit float").tag(EXRPrecision.float16)
@@ -170,7 +165,11 @@ struct FloatControl: View {
     let range: ClosedRange<Float>
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack { Text(title); Spacer(); Text(value, format: .number.precision(.fractionLength(2))).monospacedDigit().foregroundStyle(.secondary) }
+            HStack {
+                Text(title)
+                Spacer()
+                NumericTextField(title: title, value: $value, in: range).frame(width: 120)
+            }
             Slider(value: $value, in: range).labelsHidden().accessibilityLabel(title)
         }
     }
@@ -186,10 +185,7 @@ struct DoubleControl: View {
             HStack {
                 Text(title)
                 Spacer()
-                TextField(title, value: $value, format: .number.precision(.fractionLength(2)))
-                    .multilineTextAlignment(.trailing).frame(width: 68)
-                    .labelsHidden()
-                    .accessibilityLabel(title)
+                NumericTextField(title: title, value: $value, in: range).frame(width: 120)
                 if !suffix.isEmpty { Text(suffix).foregroundStyle(.secondary) }
             }
             Slider(value: $value, in: range).labelsHidden().accessibilityLabel(title)

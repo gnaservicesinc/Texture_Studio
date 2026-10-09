@@ -32,7 +32,6 @@ final class TextureWorkspace {
     var showAdvice = false
     var decision: MaterialDecision?
     var showModelRecovery = false
-    var showMemoryWarning = false
     var showInspector = true { didSet { savePreferences() } }
     var warnings: [String] = []
     var exportURL: URL?
@@ -421,14 +420,10 @@ final class TextureWorkspace {
         markEdited()
     }
 
-    func chooseExport(models: ModelManager, memoryApproved: Bool = false) {
+    func chooseExport(models: ModelManager) {
         guard source != nil, !isBusy else { return }
         if depthChoice == .model, models.availableURL(for: modelID) == nil {
             showModelRecovery = true
-            return
-        }
-        if currentCache == nil, settings.outputSize >= 4098, !memoryApproved {
-            showMemoryWarning = true
             return
         }
         let panel = NSSavePanel()

@@ -29,6 +29,8 @@ final class WorkbenchStore {
     var folderImportURL: URL?
     @ObservationIgnored var folderImportPlanURL: URL?
     @ObservationIgnored private var queuedDatasetURL: URL?
+    @ObservationIgnored private var queuedTrainingHandoff: MaterialTrainingHandoff?
+    @ObservationIgnored private var queuedResumeURL: URL?
     var showTrashDatasetConfirmation = false
     var recentDatasets: [WorkbenchDatasetLocation] = []
     var selectedSampleId: String? { didSet { saveUserSettings() } }
@@ -39,14 +41,14 @@ final class WorkbenchStore {
     var comparisonCheckpointIds: Set<String> = [] { didSet { saveUserSettings() } }
     var comparisonIncludesBase = true { didSet { saveUserSettings() } }
     var training = MaterialTrainingOptions() { didSet { saveUserSettings() } }
+    var trainingNavigationRequest = UUID()
     var developerMode: Bool {
         get { StudioPreferences.defaults.bool(forKey: StudioPreferences.developerModeKey) }
         set { StudioPreferences.defaults.set(newValue, forKey: StudioPreferences.developerModeKey) }
     }
     var uploadAfterTraining = true { didSet { preferences.set(uploadAfterTraining, forKey: "uploadAfterTraining") } }
-    private(set) var supportedTrainingSizes: [Int] = []
-    private var backendTrainingSizes: [Int] = []
-    private var memoryPlans: [String: WorkbenchMemoryPlan] = [:]
+    private(set) var supportedTrainingSizes: [Int] = [256, 512, 1024, 2048]
+    private var backendTrainingSizes: [Int] = [256, 512, 1024, 2048]
     private(set) var hubModels: [WorkbenchHubModel] = []
     var adapterMix: [WorkbenchAdapterWeight] = []
     var activity = ""
@@ -157,7 +159,7 @@ final class WorkbenchStore {
             recentDatasets = locations
         }
         uploadRepo = defaults.string(forKey: "uploadRepository") ?? ""
-        uploadPublic = defaults.object(forKey: "uploadPublic") == nil ? StudioPreferences.defaults.bool(forKey: StudioPreferences.developerModeKey) : defaults.bool(forKey: "uploadPublic")
+        uploadPublic = defaults.bool(forKey: "uploadPublic")
         uploadAfterTraining = defaults.object(forKey: "uploadAfterTraining") == nil ? true : defaults.bool(forKey: "uploadAfterTraining")
         self.resources = resources
         self.selectedCheckpointRegistryURL = selectedCheckpointRegistryURL
@@ -177,7 +179,7 @@ final class WorkbenchStore {
         if let options = saved.training {
             training = options.restored(for: resources)
             if training != options {
-                trainingPreferenceNotice = "Saved training settings were adapted to the supported limits of this Mac. Review the resource limit before training."
+                trainingPreferenceNotice = "Saved training settings were adapted to supported values. Review the training settings before starting."
                 activity = trainingPreferenceNotice!
             }
         } else { training.memoryGB = resources.defaultTrainingGiB }
@@ -353,7 +355,6 @@ final class WorkbenchStore {
         dataset = result
         if let size = result.trainingSize {
             training.size = size
-            applyAutomaticMemoryBudget()
         }
         supportedTrainingSizes = backendTrainingSizes.filter { result.supportedTrainingSizes?.contains($0) ?? true }
         if !result.samples.contains(where: { $0.id == selectedSampleId }) {
@@ -363,8 +364,8 @@ final class WorkbenchStore {
 
     func selectTrainingSize(_ size: Int) {
         guard !isBusy else { return }
-        guard supportedTrainingSizes.contains(size) else { error = "This size does not fit the current training budget."; return }
-        guard dataset != nil else { training.size = size; applyAutomaticMemoryBudget(); return }
+        guard supportedTrainingSizes.contains(size) else { error = "Choose a training size supplied by the original source maps."; return }
+        guard dataset != nil else { training.size = size; return }
         updateDatasetInfo(name: datasetName, description: datasetDescription, size: size)
     }
 
@@ -375,37 +376,40 @@ final class WorkbenchStore {
 
     func prepareTrainingDataset() {
         guard !isBusy, dataset != nil else { return }
-        let size = training.size
-        let material = training.useSelectedMaterialOnly ? selectedMaterialId : nil
-        guard dataset?.readyForTraining(size: size, material: material, target: training.target) != true else { return }
+        let options = training
+        let size = options.size
+        let selectedMaterial = selectedMaterialId
+        let material = options.useSelectedMaterialOnly ? selectedMaterial : nil
+        guard dataset?.readyForTraining(size: size, material: material, target: options.target) != true else { return }
         operation("Preparing \(size) × \(size) complete training maps…") {
-            _ = try await self.ensureTrainingDataset(size: size)
+            _ = try await self.ensureTrainingDataset(options: options, selectedMaterial: selectedMaterial)
             self.activity = self.datasetPreparationSummary
         }
     }
 
-    private func ensureTrainingDataset(size: Int) async throws -> WorkbenchDataset {
+    private func ensureTrainingDataset(options: MaterialTrainingOptions, selectedMaterial: String?) async throws -> WorkbenchDataset {
+        let size = options.size
+        let target = options.target
         guard let current = dataset else { throw StudioError("Open a material dataset first.") }
-        guard supportedTrainingSizes.contains(size) else { throw StudioError("Choose a size supported by the current training budget.") }
-        let material = selectedMaterialId
-        let checkMaterial = training.useSelectedMaterialOnly ? material : nil
-        if current.readyForTraining(size: size, material: checkMaterial, target: training.target) { return current }
+        guard supportedTrainingSizes.contains(size) else { throw StudioError("Choose a training size supported by the model and original source maps.") }
+        let checkMaterial = options.useSelectedMaterialOnly ? selectedMaterial : nil
+        if current.readyForTraining(size: size, material: checkMaterial, target: target) { return current }
         isPreparingDataset = true
         activity = "Preparing \(size) × \(size) complete training maps from the original materials…"
         defer { isPreparingDataset = false }
         var arguments = [
-            "prepare-size", "--dataset", current.datasetPath, "--size", String(size), "--target", training.target,
+            "prepare-size", "--dataset", current.datasetPath, "--size", String(size), "--target", target,
             "--automatic-validation", "--expected-index-sha256", current.indexSha256]
         if let reviewHash = current.reviewSha256 { arguments += ["--expected-review-sha256", reviewHash] }
         if let checkMaterial { arguments += ["--material", checkMaterial] }
         let result: WorkbenchDataset = try WorkbenchProcess.decode(WorkbenchDataset.self, output: await worker(arguments))
-        guard result.readyForTraining(size: size, material: checkMaterial, target: training.target), let preparation = result.preparation,
+        guard result.readyForTraining(size: size, material: checkMaterial, target: target), let preparation = result.preparation,
               preparation.cropSize == size, !preparation.originalDatasetModified,
               URL(fileURLWithPath: preparation.preparedDatasetPath).standardizedFileURL == URL(fileURLWithPath: result.datasetPath).standardizedFileURL else {
             throw StudioError("Dataset preparation did not verify matching map dimensions and preserved originals.")
         }
         try Task.checkCancellation()
-        adoptDataset(result, preferredMaterial: material)
+        adoptDataset(result, preferredMaterial: selectedMaterial)
         preferences.set(preparation.sourceDatasetPath, forKey: "dataset")
         datasetPreparationSummary = "\(size) × \(size) native pixel maps: matching originals are referenced directly; each crop is saved once in temporary training storage."
         return result
@@ -446,6 +450,7 @@ final class WorkbenchStore {
     }
 
     func compare() {
+        if let issue = comparisonConfigurationIssue { error = issue; return }
         let diffuseMap = sourceImageURL == nil ? selectedDiffuseMap : nil
         guard let image = sourceImageURL ?? diffuseMap.map(datasetReviewURL) else {
             error = "Choose a surface photo or select a dataset diffuse map first."; return
@@ -578,19 +583,12 @@ final class WorkbenchStore {
 
     func loadTrainingCapabilities() async throws {
         let result = try WorkbenchProcess.decode(WorkbenchTrainingCapabilities.self,
-            output: await worker(["capabilities", "--memory-gib", String(training.automaticMemory ? resources.maximumTrainingGiB : training.memoryGB), "--cache-gib", String(training.cacheGB), "--scope", training.scope]))
-        memoryPlans = result.memoryPlans ?? [:]
+            output: await worker(["capabilities", "--cache-gib", String(training.cacheGB), "--scope", training.scope]))
         backendTrainingSizes = result.trainingSizes.filter { [256, 512, 1024, 2048].contains($0) }.sorted()
         supportedTrainingSizes = backendTrainingSizes.filter { dataset?.supportedTrainingSizes?.contains($0) ?? true }
         if dataset?.trainingSize == nil, !supportedTrainingSizes.contains(training.size), let size = supportedTrainingSizes.last {
             training.size = size
         }
-        applyAutomaticMemoryBudget()
-    }
-
-    private func applyAutomaticMemoryBudget() {
-        guard training.automaticMemory, let plan = memoryPlans[String(training.size)] else { return }
-        training.memoryGB = min(resources.maximumTrainingGiB, max(resources.trainingMemoryRange.lowerBound, plan.recommendedMemoryGib))
     }
 
     func refreshTrainingCapabilities() {
@@ -604,10 +602,9 @@ final class WorkbenchStore {
 
     var trainingConfigurationIssue: String? {
         if dataset == nil { return "Open your source dataset first." }
-        if let issue = resources.trainingMemoryIssue(training.memoryGB) { return issue }
         if !supportedTrainingSizes.contains(training.size) {
             if dataset?.supportedTrainingSizes?.contains(training.size) == false { return "Choose a training size supplied by the original source maps." }
-            return "No selected training size fits the current memory budget."
+            return "Choose a supported training size."
         }
         if training.useSelectedMaterialOnly && selectedMaterialId == nil { return "Select a material first." }
         let selected = training.useSelectedMaterialOnly ? dataset?.materials.first { $0.id == selectedMaterialId }?.samples ?? [] : samples
@@ -616,7 +613,12 @@ final class WorkbenchStore {
         if eligible.allSatisfy({ $0.split == "validation" && $0.splitAssignment == "manual" }) {
             return "Assign at least one included material to Training in Dataset. All available materials are assigned to Validation."
         }
-        if training.useWarmStart && selectedCheckpoint?.supportsTrainingWarmStart != true { return "Select a material checkpoint to refine." }
+        if training.useWarmStart {
+            guard let checkpoint = selectedCheckpoint, checkpoint.supportsTrainingWarmStart else { return "Select a material checkpoint to refine." }
+            if checkpoint.schema == "texture-studio-material-lora-v1", checkpoint.target != training.target || (checkpoint.scope ?? "final-map") != training.scope {
+                return "Use the selected LoRA's \(checkpoint.target) target and \(checkpoint.scope ?? "final-map") scope when refining it."
+            }
+        }
         return nil
     }
 
@@ -631,20 +633,24 @@ final class WorkbenchStore {
     }
 
     private func runTraining(checkpoint: WorkbenchCheckpoint?) {
+        let options = training
+        let selectedMaterial = selectedMaterialId
+        let dependencies = dependencyArguments
+        let developer = developerMode
+        let publishAfterTraining = developer && uploadAfterTraining
         operation(checkpoint == nil ? "Training material LoRA…" : "Refining material LoRA…", training: true) {
-            try await self.loadTrainingCapabilities()
-            let prepared = try await self.ensureTrainingDataset(size: self.training.size)
-            let output = try self.newOutputURL(prefix: "material-\(self.training.target)")
+            let prepared = try await self.ensureTrainingDataset(options: options, selectedMaterial: selectedMaterial)
+            let output = try self.newOutputURL(prefix: "material-\(options.target)")
             self.lastOutputURL = output
             var args = [checkpoint == nil ? "train" : "refine", "--dataset", prepared.datasetPath,
-                "--output", output.path, "--size", String(self.training.size), "--whole-maps",
-                "--target", self.training.target, "--scope", self.training.scope, "--memory-gib", String(self.training.memoryGB),
-                "--cache-gib", String(self.training.cacheGB), "--max-minutes", String(self.training.maxMinutes),
-                "--updates-per-map", String(self.training.updatesPerCrop),
-                "--validation-every", String(self.training.validationEvery), "--checkpoint-every", String(self.training.checkpointEvery),
-                "--lora-rank", String(self.training.loraRank), "--lora-alpha", String(self.training.loraAlpha)] + self.dependencyArguments
-            if self.developerMode { args += ["--developer-mode"] }
-            if self.training.useSelectedMaterialOnly, let id = self.selectedMaterialId { args += ["--material", id] }
+                "--output", output.path, "--size", String(options.size), "--whole-maps",
+                "--target", options.target, "--scope", options.scope,
+                "--cache-gib", String(options.cacheGB), "--max-minutes", String(options.maxMinutes),
+                "--updates-per-map", String(options.updatesPerCrop),
+                "--validation-every", String(options.validationEvery), "--checkpoint-every", String(options.checkpointEvery),
+                "--lora-rank", String(options.loraRank), "--lora-alpha", String(options.loraAlpha)] + dependencies
+            if developer { args += ["--developer-mode"] }
+            if options.useSelectedMaterialOnly, let id = selectedMaterial { args += ["--material", id] }
             if let checkpoint { args += ["--checkpoint", checkpoint.checkpointPath, "--expected-sha256", checkpoint.sha256] }
             self.isResumingTraining = checkpoint != nil
             do {
@@ -654,7 +660,7 @@ final class WorkbenchStore {
                 self.lastPackageCheckpointId = self.selectedCheckpointId
                 self.activity = self.isSavingTraining ? "Stopped and saved material LoRA." : "Training finished. Review the material maps before using this model."
                 try await self.cleanupTrainingDataset(prepared)
-                if self.developerMode && self.uploadAfterTraining && !self.isStopping {
+                if publishAfterTraining && !self.isStopping {
                     let account = try WorkbenchProcess.decode(HuggingFaceAccountResponse.self, output: await self.worker(["hub-account"]))
                     self.uploadAccount = account.authenticated ? account.username : nil
                     self.uploadAccountChecked = true
@@ -687,11 +693,40 @@ final class WorkbenchStore {
     func resumeTraining(from url: URL) {
         operation("Opening material checkpoint…") {
             try await self.loadCheckpoint(url)
-            self.training.useWarmStart = true
             if let checkpoint = self.selectedCheckpoint {
-                self.training.target = checkpoint.target
-                self.training.scope = checkpoint.scope ?? "final-map"
+                guard checkpoint.supportsTrainingWarmStart else { throw StudioError("This checkpoint does not support material refinement.") }
+                self.configureCheckpointForRefinement(checkpoint)
             }
+        }
+    }
+
+    func receiveResumeCheckpoint(_ url: URL) {
+        if isBusy { queuedResumeURL = url }
+        else { resumeTraining(from: url) }
+    }
+
+    func receiveTrainingHandoff(_ handoff: MaterialTrainingHandoff) {
+        if isBusy { queuedTrainingHandoff = handoff; return }
+        operation("Opening the selected model in Trainer…") {
+            try await self.loadCheckpoint(handoff.checkpointURL, select: false)
+            guard let checkpoint = self.checkpoints.first(where: { $0.url.standardizedFileURL == handoff.checkpointURL.standardizedFileURL }),
+                  checkpoint.sha256.lowercased() == handoff.checkpointSHA256,
+                  checkpoint.supportsTrainingWarmStart else {
+                throw StudioError("The requested checkpoint changed or cannot be refined. Choose the model again.")
+            }
+            self.training = handoff.training
+            if let dataset = handoff.datasetURL { try await self.loadDataset(dataset) }
+            self.training = handoff.training
+            if let sample = handoff.sampleID {
+                guard self.samples.contains(where: { $0.id == sample }) else {
+                    throw StudioError("The requested material is no longer in this dataset. Select it in Dataset before training.")
+                }
+                self.selectedSampleId = sample
+            }
+            self.selectedInputVariantId = handoff.inputVariantID
+            self.configureCheckpointForRefinement(checkpoint)
+            self.activity = "Ready to refine \(checkpoint.title)."
+            self.trainingNavigationRequest = UUID()
         }
     }
 
@@ -961,6 +996,12 @@ final class WorkbenchStore {
                 if let url = queuedDatasetURL {
                     queuedDatasetURL = nil
                     openDataset(url)
+                } else if let handoff = queuedTrainingHandoff {
+                    queuedTrainingHandoff = nil
+                    receiveTrainingHandoff(handoff)
+                } else if let url = queuedResumeURL {
+                    queuedResumeURL = nil
+                    receiveResumeCheckpoint(url)
                 }
             }
             do {

@@ -3,18 +3,6 @@ import CoreImage
 @testable import TextureStudio
 
 final class EngineResourceTests: XCTestCase {
-    func testRenderUsesWholeRecommendedWorkingSetAndCurrentMemory() {
-        let gib:UInt64 = 1_073_741_824
-        XCTAssertEqual(TextureEngine.renderMemoryBudget(practicalBytes:58*gib,
-            metalRecommendedBytes:48*gib,availableBytes:50*gib),48*gib)
-        XCTAssertEqual(TextureEngine.renderMemoryBudget(practicalBytes:58*gib,
-            metalRecommendedBytes:48*gib,availableBytes:35*gib),35*gib)
-        XCTAssertEqual(TextureEngine.renderMemoryBudget(practicalBytes:58*gib,
-            metalRecommendedBytes:0,availableBytes:nil),58*gib)
-        XCTAssertEqual(TextureEngine.renderMemoryBudget(practicalBytes:12*gib,
-            metalRecommendedBytes:14*gib,availableBytes:16*gib),12*gib)
-    }
-
     func testDepthCleanupRetainsAvailableSourceDetailThroughEightK() {
         XCTAssertEqual(TextureEngine.depthCleanupSide(outputSize:4098,
             depthExtent:CGRect(x:0,y:0,width:4096,height:4096)),4096)
@@ -24,9 +12,6 @@ final class EngineResourceTests: XCTestCase {
             depthExtent:CGRect(x:0,y:0,width:8192,height:8192)),1024)
         XCTAssertEqual(TextureEngine.depthCleanupSide(outputSize:8192,
             depthExtent:CGRect(x:0,y:0,width:1536,height:1024)),1536)
-        let base = TextureEngine.workingMemoryEstimate(outputSize:8192,sourcePixels:24_000_000,cleanupSide:0)
-        let full = TextureEngine.workingMemoryEstimate(outputSize:8192,sourcePixels:24_000_000,cleanupSide:8192)
-        XCTAssertEqual(full-base,UInt64(8192)*8192*24)
     }
 
     func testEXRStripUsesAvailableMemoryAndAccountsForPlanarOutput() {

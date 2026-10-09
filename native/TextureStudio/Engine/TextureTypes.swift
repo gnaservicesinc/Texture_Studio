@@ -34,7 +34,7 @@ struct TextureSettings: Codable, Sendable, Equatable {
     var roughnessDetail: Float = 0.2
     var materialWidthMeters: Double = 0.25
     var displacementScaleMeters: Double = 0.005
-    static let outputSizes = [1024, 2048, 4098, 8192]
+    static let outputSizes = [1024, 2048, 4096, 8192]
     static let modelProcessResolutions = [1036, 1540, 2044]
     init() {}
 

@@ -71,7 +71,6 @@ enum OllamaDecisionError: LocalizedError {
     case offline
     case missing
     case unsupported(String)
-    case memory(String)
     case invalidResponse(String)
     case server(String)
     case busy
@@ -80,7 +79,6 @@ enum OllamaDecisionError: LocalizedError {
         case .offline: "Ollama is not running at 127.0.0.1:11434. Open Ollama and check again, or continue without the adviser."
         case .missing: "The optional clef:27b-nvfp4 model is missing. Download this exact MLX model in Local Models or continue without it."
         case .unsupported(let message): "This Ollama setup cannot run the requested MLX vision decision model: \(message)"
-        case .memory(let message): message
         case .invalidResponse(let message): "The model proposal was rejected: \(message). No settings changed."
         case .server(let message): "Ollama: \(message)"
         case .busy: "An Ollama operation is already running. Cancel or wait for it to finish."
@@ -113,14 +111,4 @@ struct OllamaModelInfo: Sendable, Equatable {
     let quantization: String
     let capabilities: [String]
     let sizeBytes: Int64
-}
-
-struct OllamaMemoryAssessment: Sendable {
-    let physicalBytes: UInt64
-    let availableBytes: UInt64
-    var canRun: Bool { physicalBytes >= 32 * 1_073_741_824 && availableBytes >= 24 * 1_073_741_824 }
-    var message: String {
-        canRun ? "Memory budget available for the optional 27B adviser."
-            : "The 18 GB adviser needs at least 32 GB installed memory and an estimated 24 GB available. Close other apps or continue without it."
-    }
 }

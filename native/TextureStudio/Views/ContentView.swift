@@ -75,18 +75,6 @@ struct ContentView: View {
         .alert(item: $workspace.notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message), dismissButton: .default(Text("OK")))
         }
-        .confirmationDialog("Large texture export", isPresented: $workspace.showMemoryWarning, titleVisibility: .visible) {
-            Button("Export \(workspace.settings.outputSize) × \(workspace.settings.outputSize)") {
-                workspace.chooseExport(models: models, memoryApproved: true)
-            }
-            Button("Use 2048 × 2048") {
-                workspace.settings.outputSize = 2048
-                workspace.chooseExport(models: models)
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Large float maps can use several gigabytes of unified memory. Inference capacity depends on the selected model. Export is refused if the available memory budget is too low.")
-        }
         .onOpenURL { url in
             if url.pathExtension.lowercased() == "json" { workspace.openRecipe(url) }
             else { workspace.importPhoto(url) }

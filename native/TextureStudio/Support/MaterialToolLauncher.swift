@@ -27,6 +27,29 @@ enum MaterialToolLauncher {
             launch(app, fallbackArguments: ["--tool", role.rawValue] + (document.map { ["--dataset", $0.path] } ?? []))
         }
     }
+    static func openTrainer(checkpoint: WorkbenchCheckpoint, dataset: URL?, training: MaterialTrainingOptions,
+                            sampleID: String?, inputVariantID: String?,
+                            onFailure: (@MainActor (Error) -> Void)? = nil) throws {
+        let handoff = try MaterialTrainingHandoff(checkpoint: checkpoint, dataset: dataset, training: training,
+                                                sampleID: sampleID, inputVariantID: inputVariantID)
+        let document = try handoff.writeTemporary()
+        let trainer = toolURL(.train, containing: Bundle.main.bundleURL)
+        let installed = FileManager.default.fileExists(atPath: trainer.path)
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        if !installed {
+            config.createsNewApplicationInstance = true
+            config.arguments = ["--tool", MaterialTool.train.rawValue]
+        }
+        NSWorkspace.shared.open([document], withApplicationAt: installed ? trainer : Bundle.main.bundleURL,
+                                configuration: config) { _, error in
+            guard let error else { return }
+            Task { @MainActor in
+                _ = try? handoff.discardTemporaryFile(at: document)
+                onFailure?(error)
+            }
+        }
+    }
     static func openStudio() {
         let app = studioURL(containing: Bundle.main.bundleURL)
         launch(app, fallbackArguments: ["--tool", "studio"])

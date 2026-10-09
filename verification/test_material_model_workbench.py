@@ -168,24 +168,26 @@ def training_memory(monkeypatch, gib=64):
     monkeypatch.setattr(bridge.os, "sysconf", sysconf)
 
 
-def test_capabilities_filters_training_grids_and_keeps_generation_sizes(monkeypatch):
-    training_memory(monkeypatch)
-    result = bridge.capabilities(SimpleNamespace(scope="final-map", memory_gib=48, cache_gib=1))
-    assert result["training_sizes"] == [256, 512, 1024, 2048]
-    assert 8192 in result["inference_sizes"]
-    assert result["memory_plans"]["2048"]["required_memory_gib"] == 48
-    assert result["memory_plans"]["2048"]["recommended_memory_gib"] == 48
-    result = bridge.capabilities(SimpleNamespace(scope="final-map", memory_gib=32, cache_gib=1))
-    assert 2048 not in result["training_sizes"]
-
-
-def test_training_rejects_budget_above_small_machine_before_loading_data_or_model(tmp_path, monkeypatch):
+@pytest.mark.parametrize("scope", ["final-map", "map-decoder"])
+@pytest.mark.parametrize("memory_gib", [1, 32, 48, 1000])
+def test_capabilities_keep_complete_grids_independent_of_memory_predictions(monkeypatch, scope, memory_gib):
     training_memory(monkeypatch, gib=8)
-    monkeypatch.setattr(bridge, "select_pairs", lambda *_args, **_kwargs: pytest.fail("dataset must not load"))
+    result = bridge.capabilities(SimpleNamespace(scope=scope, memory_gib=memory_gib, cache_gib=1))
+    assert result["training_sizes"] == [256, 512, 1024, 2048, 4096]
+    assert 8192 in result["inference_sizes"]
+    assert result["memory_admission_enabled"] is False
+    assert "memory_plans" not in result and "unavailable_training_sizes" not in result
+
+
+def test_training_passes_memory_predictions_to_actual_dataset_validation(tmp_path, monkeypatch):
+    monkeypatch.setattr(bridge.os, "sysconf", lambda *_args: pytest.fail("Starting training must not inspect machine memory"))
+    def validate_actual_dataset(*_args, **_kwargs):
+        raise ValueError("actual dataset validation reached")
+    monkeypatch.setattr(bridge, "select_pairs", validate_actual_dataset)
     monkeypatch.setattr(bridge, "load_base", lambda *_args: pytest.fail("model must not load"))
     args = bridge.parser().parse_args(["train", "--dataset", str(tmp_path / "dataset"), "--output", str(tmp_path / "run"),
                                      "--size", "256", "--memory-gib", "48", "--cache-gib", "0", "--device", "cpu"])
-    with pytest.raises(ValueError, match="hardware budget"):
+    with pytest.raises(ValueError, match="actual dataset validation reached"):
         bridge.train(args)
     assert not args.output.exists()
 
@@ -540,7 +542,7 @@ def test_quick_checks_are_capped_but_requested_and_final_checkpoints_use_full_po
     assert signal.getsignal(signal.SIGUSR1) == original_signal and cleaned == [args.dataset]
 
 
-def test_zero_error_learning_check_is_reported_as_failure_and_restores_model_mode():
+def test_zero_error_learning_check_is_recorded_and_restores_model_mode():
     class Model(nn.Module):
         def map(self, rgb, target):
             return rgb[:, :1]
@@ -549,17 +551,74 @@ def test_zero_error_learning_check_is_reported_as_failure_and_restores_model_mod
     class Cache:
         def load(self, pair):
             return torch.ones(1, 3, 256, 256), torch.ones(1, 1, 256, 256)
-    with pytest.raises(ValueError, match='exactly zero'):
+    result = bridge.validation_check(model, [pair], Cache(), 'height', 256, 17, torch.device('cpu'))
+    assert result['status'] == 'checked' and result['mae'] == 0
+    assert result['samples'] == [{'sample_id': 'same', 'mae': 0}]
+    assert model.training
+
+
+@pytest.mark.parametrize('error', [float('nan'), float('inf')])
+def test_nonfinite_learning_check_still_fails_and_restores_model_mode(error):
+    class Model(nn.Module):
+        def map(self, rgb, target):
+            return rgb[:, :1]
+    model = Model().train()
+    pair = {'metadata': {'sample_id': 'invalid'}, 'paths': {}}
+    class Cache:
+        def load(self, pair):
+            return torch.ones(1, 3, 256, 256), torch.full((1, 1, 256, 256), error)
+    with pytest.raises(ValueError, match='nonfinite'):
         bridge.validation_check(model, [pair], Cache(), 'height', 256, 17, torch.device('cpu'))
     assert model.training
+
+
+def test_exactly_matched_training_maps_complete_updates_and_save_checkpoints(tmp_path, monkeypatch):
+    args, cleaned, _ = train_fixture(tmp_path, monkeypatch, updates=2)
+    from test_material_pbrnxt_data import add_sample
+    add_sample(args.dataset, 'check', 'check-subject', split='validation', dimensions=(256, 256))
+    original = TinyMaterial().eval()
+    monkeypatch.setattr(bridge, 'load_base', lambda *_args: copy.deepcopy(original))
+    source_cache = bridge.PairCache
+    class MatchedCache(source_cache):
+        def load(self, pair):
+            rgb, _reference = super().load(pair)
+            with torch.no_grad():
+                reference = original.map(rgb, args.target)
+            return rgb, reference
+    monkeypatch.setattr(bridge, 'PairCache', MatchedCache)
+    args.validation_every = 1
+    result = bridge.train(args)
+    assert result['status'] == 'completed' and result['completed_updates'] == 2
+    assert all(event['metrics']['total'] == 0 for event in result['steps'])
+    assert all(check['mae'] == 0 for check in result['validation_history'])
+    assert result['final_validation']['status'] == 'checked'
+    assert Path(result['checkpoint_path']).is_file()
+    assert Path(result['best_checkpoint_path']).is_file()
+    assert bridge.snapshot(Path(result['checkpoint_path']))[1]['step'] == 2
+    assert cleaned == [args.dataset]
+
+
+def test_nonfinite_training_error_still_stops_before_weight_update(tmp_path, monkeypatch):
+    args, cleaned, _ = train_fixture(tmp_path, monkeypatch, updates=1)
+    def nonfinite_loss(prediction, reference, **_kwargs):
+        return prediction.sum() * float('nan'), {'total': float('nan')}
+    monkeypatch.setattr(bridge, 'height_loss', nonfinite_loss)
+    monkeypatch.setattr(torch.optim.AdamW, 'step', lambda *_args, **_kwargs: pytest.fail('Invalid loss cannot update weights'))
+    with pytest.raises(ValueError, match='Training error is nonfinite'):
+        bridge.train(args)
+    report = json.loads((args.output / 'run.json').read_text())
+    assert report['status'] == 'failed' and report['completed_updates'] == 0
+    assert report['training_performed'] is False
+    assert not list(args.output.rglob('*.safetensors'))
+    assert cleaned == [args.dataset]
 
 
 def test_failed_initial_check_does_not_claim_training_or_publish_checkpoint(tmp_path, monkeypatch):
     args, cleaned, _ = train_fixture(tmp_path, monkeypatch, updates=1)
     def fail_initial_check(*_args, **_kwargs):
-        raise ValueError('Validation error is exactly zero')
+        raise ValueError('Validation error is nonfinite')
     monkeypatch.setattr(bridge, 'validation_check', fail_initial_check)
-    with pytest.raises(ValueError, match='exactly zero'):
+    with pytest.raises(ValueError, match='nonfinite'):
         bridge.train(args)
     report = json.loads((args.output / 'run.json').read_text())
     assert report['status'] == 'failed' and report['completed_updates'] == 0

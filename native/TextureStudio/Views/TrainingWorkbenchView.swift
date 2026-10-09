@@ -18,6 +18,9 @@ struct TrainingWorkbenchView: View {
                             .help("Open Material Dataset to create or rename datasets, edit their info, and add or remove materials.")
                     }.disabled(store.isBusy)
                     if let dataset = store.dataset {
+                        Text(store.datasetName).font(.headline).textSelection(.enabled)
+                        Text(store.datasetDisplayURL?.path ?? dataset.datasetPath)
+                            .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                         Text("\(dataset.materials.count) materials · \(dataset.samples.count) material sets")
                         Text(store.datasetNativeSizeLabel).font(.caption).foregroundStyle(.secondary)
                     } else {
@@ -34,10 +37,14 @@ struct TrainingWorkbenchView: View {
                     Text("Every diffuse and target map uses this exact grid. Matching sources are referenced directly; each crop is saved once in temporary training storage; smaller source sets are excluded.")
                         .font(.caption).foregroundStyle(.secondary)
                     Toggle("Train only selected material", isOn: $store.training.useSelectedMaterialOnly)
+                    if store.training.useSelectedMaterialOnly {
+                        Text(store.selectedMaterialName.map { "Selected material: \($0)" } ?? "Select a material in Dataset.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     if !store.datasetPreparationSummary.isEmpty {
                         Text(store.datasetPreparationSummary).font(.caption).foregroundStyle(.secondary)
                     }
-                }
+                }.disabled(store.isBusy)
                 Section("Refine a material model") {
                     Picker("Map", selection: Binding(get: { store.training.target }, set: { store.selectTrainingTarget($0) })) {
                         Text("Displacement").tag("height")
@@ -46,16 +53,19 @@ struct TrainingWorkbenchView: View {
                     }
                     Toggle("Start from selected checkpoint", isOn: $store.training.useWarmStart)
                     Button("Choose Starting Checkpoint…") { store.chooseResumeCheckpoint() }
-                    Stepper("Updates per map: \(store.training.updatesPerCrop)", value: $store.training.updatesPerCrop, in: 1...10_000)
-                    LabeledContent("Time limit (minutes)") {
-                        TextField("Minutes", value: $store.training.maxMinutes, format: .number).frame(width: 70)
+                    if store.training.useWarmStart {
+                        if let checkpoint = store.selectedCheckpoint {
+                            Text("Starting model: \(checkpoint.title)").font(.caption).textSelection(.enabled)
+                            Text(checkpoint.modelSummary)
+                                .font(.caption).foregroundStyle(.secondary)
+                            Text("Refinement scope: \(checkpoint.scope == "map-decoder" ? "Map decoder" : "Final map layer")")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Text("Choose a starting checkpoint before training.").font(.caption).foregroundStyle(.secondary)
+                        }
                     }
-                    LabeledContent("Memory budget (GiB)") {
-                        Text(store.training.memoryGB.formatted(.number.precision(.fractionLength(0...1))))
-                    }
-                    Button("Check Supported Sizes") { store.refreshTrainingCapabilities() }
-                    Text("\(store.resources.physicalGiB.formatted(.number.precision(.fractionLength(0)))) GiB installed. Sizes that exceed the training budget are omitted; generation sizes are independent.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    NumericField("Updates per map", value: $store.training.updatesPerCrop, in: 1...10_000, unit: "updates")
+                    NumericField("Time limit", value: $store.training.maxMinutes, in: 1...240, unit: "minutes")
                     Text(developerMode ? "Exports a full fused safetensors checkpoint and a separate LoRA. Upload to Hugging Face from Saved Models." : "Exports a separate safetensors LoRA for refining your material base.")
                         .font(.caption).foregroundStyle(.secondary)
                     if let issue = store.trainingConfigurationIssue {
@@ -69,32 +79,34 @@ struct TrainingWorkbenchView: View {
                         Text(validation.enabled ? "Up to \(validation.quickCount) crops per quick check; full \(validation.percent.formatted())% pool when saving." : "Validation is disabled in Dataset Info.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    Stepper("Quick check every \(store.training.validationEvery) updates", value: $store.training.validationEvery, in: 1...10000)
-                    Stepper("Save every \(store.training.checkpointEvery == 0 ? "request or final export" : "\(store.training.checkpointEvery) updates")",
-                            value: $store.training.checkpointEvery, in: 0...100000)
-                    Text("Every saved checkpoint runs full validation. Save Checkpoint Now finishes the current update and continues training after saving.")
+                    NumericField("Quick check every", value: $store.training.validationEvery, in: 1...10_000, unit: "updates")
+                    NumericField("Save checkpoint every", value: $store.training.checkpointEvery, in: 0...100_000, unit: "updates")
+                    Text("Set checkpoint updates to 0 to save on request and at final export. Every saved checkpoint runs full validation. Save Checkpoint Now finishes the current update and continues training after saving.")
                         .font(.caption).foregroundStyle(.secondary)
                 }.disabled(store.isBusy)
                 if developerMode {
                     Section("Developer controls") {
-                        Toggle("Automatic memory budget", isOn: $store.training.automaticMemory)
-                        if !store.training.automaticMemory {
-                            LabeledContent("Memory budget (GiB)") {
-                                TextField("GiB", value: $store.training.memoryGB, format: .number).frame(width: 70)
-                            }
-                        }
                         Picker("Refinement scope", selection: $store.training.scope) {
                             Text("Final map layer").tag("final-map")
                             Text("Map decoder").tag("map-decoder")
                         }
-                        Text("The final layer makes focused refinements with a small adapter. The map decoder changes more features and needs a larger training budget.")
+                        Text("The final layer makes focused refinements with a small adapter. The map decoder changes more features.")
                             .font(.caption).foregroundStyle(.secondary)
                         Toggle("Upload full checkpoint after training", isOn: $store.uploadAfterTraining)
                         Toggle("Public Hugging Face model", isOn: $store.uploadPublic)
                         TextField("Hugging Face repository (automatic when blank)", text: $store.uploadRepo)
-                        Stepper("LoRA rank: \(store.training.loraRank)", value: $store.training.loraRank, in: 1...64)
-                        LabeledContent("LoRA alpha") { TextField("Alpha", value: $store.training.loraAlpha, format: .number).frame(width: 70) }
-                        LabeledContent("Decoded map cache (GiB)") { TextField("GiB", value: $store.training.cacheGB, format: .number).frame(width: 70) }
+                        if store.uploadAfterTraining {
+                            Text(store.uploadAccount.map { account in
+                                let repository = store.effectiveUploadRepo.isEmpty ? "an automatic repository under \(account)" : store.effectiveUploadRepo
+                                return "After training: upload to \(repository) · \(store.uploadPublic ? "Public" : "Private")"
+                            } ?? "After training: upload when a saved Hugging Face login is available. Set the repository and visibility above.")
+                                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                        }
+                        NumericField("LoRA rank", value: $store.training.loraRank, in: 1...64)
+                        NumericField("LoRA alpha", value: $store.training.loraAlpha, in: 0.01...128)
+                        NumericField("Decoded map cache", value: $store.training.cacheGB, in: 0...4, unit: "GiB")
+                        Text("Set cache to 0 to decode maps when needed without retaining a decoded map cache.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }.disabled(store.isBusy)
                 }
                 Section { Button("Saved Models & Export…") { showCheckpoints = true } }
@@ -105,8 +117,10 @@ struct TrainingWorkbenchView: View {
                     Spacer()
                     if store.isBusy {
                         ProgressView().controlSize(.small)
-                        WorkbenchStopButtons(store: store)
                     }
+                }
+                if store.isBusy {
+                    HStack { WorkbenchStopButtons(store: store) }
                 }
                 ScrollView {
                     Text(store.logText.isEmpty ? "Training and dataset preparation progress appears here." : store.logText)
@@ -123,10 +137,6 @@ struct TrainingWorkbenchView: View {
             }.padding(20).frame(minWidth: 420)
         }
         .sheet(isPresented: $showCheckpoints) { CheckpointLibraryView(store: store).frame(minWidth: 780, minHeight: 560) }
-        .onChange(of: store.training.memoryGB) { if !store.training.automaticMemory { store.refreshTrainingCapabilities() } }
-        .onChange(of: store.training.automaticMemory) { store.refreshTrainingCapabilities() }
-        .onChange(of: store.training.cacheGB) { store.refreshTrainingCapabilities() }
-        .onChange(of: store.training.scope) { store.refreshTrainingCapabilities() }
     }
 }
 

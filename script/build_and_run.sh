@@ -70,7 +70,7 @@ case "$MODE" in
   --verify|verify)
     open_app "$@"
     sleep 1
-    /bin/ps -axo comm= | /usr/bin/grep -Fqx "$APP_BINARY"
+    /bin/ps -axo comm= | /usr/bin/grep -Fx "$APP_BINARY" >/dev/null
     echo "$APP_NAME launched ($CONFIGURATION): $APP_BUNDLE"
     ;;
 esac

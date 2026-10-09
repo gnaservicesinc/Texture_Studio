@@ -30,7 +30,7 @@ import material_lora as lora
 from material_pbrnxt import (REVISION, SOURCE_FILES, WEIGHTS_BYTES, WEIGHTS_NAME, WEIGHTS_SHA256,
                             complete_architecture, load_complete_pretrained, obtain_pretrained, obtain_source, sha256, source_provenance)
 from material_pbrnxt_data import PairCache, crop_pair, height_loss, input_rgb, select_pairs, select_input_variant, write_exr
-from train_material_pbrnxt import resource_plan, training_memory_plan
+from train_material_pbrnxt import validate_training_configuration
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "texture-studio-material-workbench-v1"
@@ -91,21 +91,10 @@ def checkpoint_info(args) -> dict:
 
 
 def capabilities(args) -> dict:
-    scope = args.scope
-    available, rejected, plans = [], {}, {}
-    for size in (256, 512, 1024, 2048, 4096):
-        plans[str(size)] = training_memory_plan(size, args.cache_gib, scope)
-        try:
-            resource_plan(size, args.memory_gib, args.cache_gib, scope)
-            available.append(size)
-        except ValueError as error:
-            rejected[str(size)] = str(error)
-    return {"training_sizes": available, "inference_sizes": [256, 512, 1024, 2048, 4096, 8192],
-            "targets": list(lora.TARGET_BRANCH), "scope": args.scope, "memory_gib": args.memory_gib,
-            "cache_gib": args.cache_gib, "unavailable_training_sizes": rejected,
-            "memory_plans": plans,
+    return {"training_sizes": [256, 512, 1024, 2048, 4096], "inference_sizes": [256, 512, 1024, 2048, 4096, 8192],
+            "targets": list(lora.TARGET_BRANCH), "scope": args.scope,
             "image_size_matches_training_size": True, "hidden_encoder_resize": False,
-            "memory_estimates_are_guarantees": False}
+            "memory_admission_enabled": False}
 
 
 def source_directory(args, *, download: bool = False) -> Path:
@@ -317,8 +306,8 @@ def validation_check(model, checks, cache, target, size, seed, device, *, limit=
                 rgb, reference, _rectangle = crop_pair(*cache.load(pair), size, random.Random(seed), whole_maps=True)
                 prediction = predicted(model, rgb.to(device), target)
                 error = float((prediction - reference.to(device)).abs().mean().cpu())
-                if not math.isfinite(error) or error <= 0:
-                    raise ValueError(f"Validation error for {sample} is nonfinite or exactly zero; inspect the model and reference data")
+                if not math.isfinite(error):
+                    raise ValueError(f"Validation error for {sample} is nonfinite; inspect the model and reference data")
                 result["samples"].append({"sample_id": sample, "mae": error})
         if selected:
             result.update(status="checked", mae=sum(item["mae"] for item in result["samples"]) / len(selected))
@@ -335,8 +324,7 @@ def train(args) -> dict:
             args.code_directory = selected_path.parent / "source"
     args.scope = args.scope or (selected_config.get("scope") if selected_config and selected_config["schema"] == lora.SCHEMA else "final-map")
     args.target = args.target or (selected_config["target"] if selected_config else "height")
-    if args.size not in capabilities(args)["training_sizes"]:
-        raise ValueError("Selected size cannot train within this hardware budget; choose an available training size")
+    validate_training_configuration(args.size, args.cache_gib, args.scope)
     if args.updates_per_map < 1 or not math.isfinite(args.max_minutes) or args.max_minutes <= 0 or not math.isfinite(args.learning_rate) or args.learning_rate <= 0:
         raise ValueError("Updates, time limit and learning rate must be positive")
     training, checks, identity = select_pairs(args.dataset, args.material, expected_size=args.size, target=args.target)
@@ -349,9 +337,6 @@ def train(args) -> dict:
     args.output.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
-    if device.type == "mps":
-        driver = (args.memory_gib - args.cache_gib - 2) * 1024 ** 3
-        torch.mps.set_per_process_memory_fraction(driver / torch.mps.recommended_max_memory())
     base, step = dict(BASE), 0
     if args.checkpoint:
         if selected_config["schema"] == lora.SCHEMA:
@@ -447,8 +432,8 @@ def train(args) -> dict:
                     print(json.dumps({"event": "training_started", "message": "Training updates have started"}), flush=True)
                 prediction = predicted(model, rgb, args.target)
                 loss, metrics = height_loss(prediction, reference, margin=0)
-                if not torch.isfinite(loss) or float(loss.detach().cpu()) <= 0:
-                    raise ValueError("Training error is nonfinite or exactly zero; stopped before updating material weights")
+                if not torch.isfinite(loss):
+                    raise ValueError("Training error is nonfinite; stopped before updating material weights")
                 loss.backward()
                 gradient_norm = torch.nn.utils.clip_grad_norm_(parameters, 1)
                 if not torch.isfinite(gradient_norm):
@@ -584,9 +569,6 @@ def infer(args) -> dict:
     device = torch.device(args.device)
     if (path.parent / "source").is_dir():
         args.code_directory = path.parent / "source"
-    resource_plan(256, args.memory_gib, 0, inference=True)
-    if device.type == "mps":
-        torch.mps.set_per_process_memory_fraction((args.memory_gib - 2) * 1024 ** 3 / torch.mps.recommended_max_memory())
     model = load_base(args, device, configuration["base"]) if args.baseline else load_selected(args, configuration, tensors, device)
     model.requires_grad_(False).eval()
     prediction, tiling = inference_prediction(model, rgb, configuration, device, args.tile_size)
@@ -858,7 +840,7 @@ def parser():
         if command in ("train", "refine", "package", "upload-selected"):
             p.add_argument("--developer-mode", action="store_true")
         if command in ("capabilities", "train", "refine"):
-            p.add_argument("--memory-gib", type=float, default=max(4, os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 1024 ** 3 - 8))
+            p.add_argument("--memory-gib", type=float, default=None, help=argparse.SUPPRESS)
             p.add_argument("--cache-gib", type=float, default=1)
             p.add_argument("--scope", choices=("final-map", "map-decoder"), default="final-map" if command == "capabilities" else None)
         if command in ("train", "refine"):
@@ -885,7 +867,7 @@ def parser():
             p.add_argument("--device", choices=("cpu", "mps"), default="mps" if torch.backends.mps.is_available() else "cpu")
             p.add_argument("--baseline", action="store_true")
             p.add_argument("--tile-size", type=int, choices=(256, 512, 1024), default=512)
-            p.add_argument("--memory-gib", type=float, default=max(4, os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 1024 ** 3 - 8))
+            p.add_argument("--memory-gib", type=float, default=None, help=argparse.SUPPRESS)
         if command == "review-source":
             p.add_argument("--image", type=Path, required=True)
             p.add_argument("--expected-sha256", required=True)

@@ -259,13 +259,12 @@ struct DatasetValidationControls: View {
     var body: some View {
         Section("Validation · shared by all map targets") {
             Toggle("Generate separate validation crops", isOn: $settings.enabled)
-            LabeledContent("Maximum subject percentage") {
-                TextField("Percent", value: $settings.percent, format: .number).labelsHidden().frame(width: 65)
-                Text("%")
-            }.disabled(!settings.enabled)
-            Stepper("Maximum validation crops: \(settings.maxCrops == 0 ? "percentage limit" : String(settings.maxCrops))",
-                    value: $settings.maxCrops, in: 0...10000).disabled(!settings.enabled)
-            Stepper("Quick checks: up to \(settings.quickCount) crops", value: $settings.quickCount, in: 1...100).disabled(!settings.enabled)
+            NumericField("Maximum subject percentage", value: $settings.percent, in: 0...100, unit: "%")
+                .disabled(!settings.enabled)
+            NumericField("Maximum validation crops", value: $settings.maxCrops, in: 0...10_000, unit: "crops")
+                .disabled(!settings.enabled)
+            NumericField("Crops per quick check", value: $settings.quickCount, in: 1...100, unit: "crops")
+                .disabled(!settings.enabled)
             Text("At most one different crop per subject folder. Prefer the unused 8K corner; another corner may overlap training pixels. All targets use the same folders and crops. Quick checks run during training; checkpoint saves and final exports check the entire configured pool. Zero maximum crops uses the percentage limit.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }

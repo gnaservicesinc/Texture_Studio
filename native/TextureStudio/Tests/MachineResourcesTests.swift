@@ -10,12 +10,6 @@ final class MachineResourcesTests: XCTestCase {
         XCTAssertEqual(resources.defaultTrainingGiB, 51.2, accuracy: 0.000_001)
         XCTAssertEqual(resources.maximumTrainingBytes, 61_847_529_062)
         XCTAssertEqual(resources.defaultTrainingBytes, 54_975_581_388)
-        XCTAssertNil(resources.trainingMemoryIssue(56))
-        XCTAssertNil(resources.trainingMemoryIssue(57.6), "The displayed ceiling can be entered in the text field")
-        XCTAssertEqual(resources.trainingMemoryBytes(57.6), Int64(resources.maximumTrainingBytes))
-        XCTAssertNotNil(resources.trainingMemoryIssue(57.7))
-        XCTAssertNotNil(resources.trainingMemoryIssue(64))
-        XCTAssertEqual(resources.trainingMemoryBytes(56), 56 * Int64(gib))
     }
 
     func testMemoryCeilingAndRecommendationScaleWithMachineCapacity() {
@@ -36,11 +30,4 @@ final class MachineResourcesTests: XCTestCase {
         XCTAssertEqual(smallGPU.maximumTrainingGiB, 13.6, accuracy: 0.000_001)
     }
 
-    func testInvalidMemoryNeverReachesByteConversion() {
-        let resources = MachineResources(physicalBytes: 64 * gib)
-        for value in [Double.nan, .infinity, -.infinity, 0, -1, 1000] {
-            XCTAssertNotNil(resources.trainingMemoryIssue(value))
-        }
-        XCTAssertEqual(resources.trainingMemoryBytes(12), 12_884_901_888)
-    }
 }

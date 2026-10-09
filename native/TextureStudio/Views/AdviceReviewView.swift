@@ -47,7 +47,7 @@ struct AdviceReviewView: View {
             } else {
                 Button("Ask Clef to Review Photo") { workspace.requestAdvice(adviser: adviser) }
                     .buttonStyle(.borderedProminent)
-                    .disabled(workspace.source == nil || adviser.isBusy || adviser.modelInfo == nil || !adviser.memoryAssessment.canRun)
+                    .disabled(workspace.source == nil || adviser.isBusy || adviser.modelInfo == nil)
             }
             Text("Fixed choices reduce variation; model judgments still need review. The image is sent only to Ollama on this Mac.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -69,7 +69,6 @@ struct OllamaModelControls: View {
             Text("Optional vision decision model, about 18 GB. Runs through local Ollama; it never generates replacement textures.")
                 .font(.callout).foregroundStyle(.secondary)
             Text(adviser.status.message).font(.caption).foregroundStyle(.secondary)
-            Text(adviser.memoryAssessment.message).font(.caption).foregroundStyle(.secondary)
             if let info = adviser.modelInfo {
                 Text("\(info.format) · \(info.quantization) · \(info.capabilities.joined(separator: ", "))")
                     .font(.caption).foregroundStyle(.secondary)

@@ -121,9 +121,9 @@ actor TextureEngine {
     }
 
     func prepareDiffuse(source: TextureSource, settings: TextureSettings) async throws -> PreparedDiffuse {
-        guard let device else { throw TextureError.missingMetal }
+        guard device != nil else { throw TextureError.missingMetal }
         try Task.checkCancellation()
-        try validate(settings, source:source, attachedDepth:nil, device:device)
+        try validate(settings)
         let kernels = try loadKernels()
         let extent = source.orientedImage.extent
         let focal = settings.focalLengthPixels ?? source.camera.focalLength35mm.map {
@@ -191,8 +191,8 @@ actor TextureEngine {
     func process(source: TextureSource, settings: TextureSettings,
                  attachedDepth: TextureDepth? = nil, preparedDiffuse: PreparedDiffuse? = nil,
                  modelMaps: [String: MaterialModelMap] = [:]) async throws -> MaterialResult {
-        guard let device else { throw TextureError.missingMetal }
-        try validate(settings, source: source, attachedDepth: attachedDepth, device: device)
+        guard device != nil else { throw TextureError.missingMetal }
+        try validate(settings)
         let prepared: PreparedDiffuse
         if let preparedDiffuse { prepared = preparedDiffuse }
         else { prepared = try await prepareDiffuse(source: source, settings: settings) }
@@ -230,9 +230,8 @@ actor TextureEngine {
                 depthOrigin = selected.sourceLabel
                 warnings.append("Supplied surface height keeps its original range and amplitude. Perspective/crop and explicit relief contrast apply; camera-depth normalization, plane removal and depth cleanup are bypassed.")
             } else {
-            // Keep existing prediction detail through cleanup. The working-memory
-            // estimate accounts for these float buffers instead of silently
-            // reducing every 4K/8K source prediction to a 2K grid.
+            // Keep existing prediction detail through cleanup at the selected
+            // output grid rather than silently reducing a 4K/8K prediction.
             let side=Self.depthCleanupSide(outputSize:settings.outputSize, depthExtent:selected.image.extent)
             let depth=transform(aligned,corners:corners,crop:crop,size:side)
             var values=[Float](repeating:0,count:side*side)
@@ -397,8 +396,8 @@ actor TextureEngine {
         return published
     }
 
-    private func validate(_ settings: TextureSettings, source: TextureSource, attachedDepth: TextureDepth?, device: MTLDevice) throws {
-        guard TextureSettings.outputSizes.contains(settings.outputSize),
+    private func validate(_ settings: TextureSettings) throws {
+        guard (TextureSettings.outputSizes.contains(settings.outputSize) || settings.outputSize == 4098),
               settings.lensDistortion.isFinite, abs(settings.lensDistortion) <= 0.15,
               [settings.lightingStrength,settings.lightingRadius,settings.heightStrength,
                settings.heightDetail,settings.surfacePlaneRemoval,settings.depthCleanup,settings.roughnessBase,settings.roughnessDetail].allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }),
@@ -406,49 +405,10 @@ actor TextureEngine {
               settings.displacementScaleMeters.isFinite, settings.displacementScaleMeters >= 0 else {
             throw TextureError.invalidSettings("Use a supported output size and finite material controls within their ranges.")
         }
-        // Lazy Core Image graphs and scanline FLOAT export avoid retaining all output maps at once.
-        // HALF/PNG Apple's writers can materialize a frame; budget for that worst case.
-        let primaryPixels = UInt64(source.pixelWidth) * UInt64(source.pixelHeight)
-        let supportingPixels = settings.useSupportingViews ? source.supportingViews.reduce(UInt64(0)) {
-            $0 + UInt64($1.extent.width) * UInt64($1.extent.height)
-        } : 0
-        let hdrPixels = settings.useHDRGainMap && source.hdrImage != nil ? primaryPixels : 0
-        let cleanupSide = attachedDepth.flatMap {
-            $0.interpretation == .surfaceHeight ? nil :
-                Self.depthCleanupSide(outputSize:settings.outputSize, depthExtent:$0.image.extent)
-        } ?? 0
-        let estimate = Self.workingMemoryEstimate(outputSize:settings.outputSize,
-            sourcePixels:primaryPixels+supportingPixels+hdrPixels, cleanupSide:cleanupSide)
-        let budget = Self.renderMemoryBudget(practicalBytes:MachineResources.current.practicalBytes,
-            metalRecommendedBytes:device.recommendedMaxWorkingSetSize,
-            availableBytes:Self.availableMemoryBytes())
-        guard estimate <= budget else {
-            throw TextureError.insufficientResources("This photo and texture size need approximately \(estimate/1024/1024) MiB of working memory; the current available render budget is \(budget/1024/1024) MiB. Reduce output or input photo size, disable supporting/HDR views, or close memory-heavy apps and retry.")
-        }
-    }
-
-    /// Apple recommends a total Metal working set, not half of that value.
-    /// Keep the machine reserve and other apps' current usage, then allow the
-    /// whole remaining recommended working set rather than applying another
-    /// arbitrary fraction at every layer.
-    static func renderMemoryBudget(practicalBytes:UInt64, metalRecommendedBytes:UInt64,
-                                   availableBytes:UInt64?) -> UInt64 {
-        let recommended = metalRecommendedBytes > 0 ? metalRecommendedBytes : practicalBytes
-        return min(practicalBytes,recommended,availableBytes ?? practicalBytes)
     }
 
     static func depthCleanupSide(outputSize:Int, depthExtent:CGRect) -> Int {
         min(outputSize,max(64,Int(ceil(max(depthExtent.width,depthExtent.height)))))
-    }
-
-    static func workingMemoryEstimate(outputSize:Int, sourcePixels:UInt64, cleanupSide:Int) -> UInt64 {
-        // Six scalar Float32 arrays cover the input, repaired samples, relief,
-        // sorting scratch, and output of the depth-only cleanup path. Include
-        // them in addition to the lazy Core Image/output-writer estimate.
-        let cleanupBytes = UInt64(cleanupSide)*UInt64(cleanupSide)*24
-        // Includes the stable RGBA Float32 diffuse frame retained through export.
-        return UInt64(outputSize)*UInt64(outputSize)*64 + sourcePixels*16 +
-            cleanupBytes + 256*1024*1024
     }
 
     /// A snapshot of free/reclaimable VM pages, refreshed for every render.

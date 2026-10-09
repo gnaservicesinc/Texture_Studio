@@ -4,6 +4,7 @@ import AppKit
 struct CheckpointLibraryView: View {
     @Bindable var store: WorkbenchStore
     var showsDismissButton = true
+    var onRefine: ((WorkbenchCheckpoint) -> Void)? = nil
     @AppStorage(StudioPreferences.developerModeKey, store: StudioPreferences.defaults) private var developerMode = false
     @Environment(\.dismiss) private var dismiss
 
@@ -129,8 +130,14 @@ struct CheckpointLibraryView: View {
             }
             Section("Use this model") {
                 Button("Use in Texture Studio") { store.useSelectedInStudio() }.disabled(store.isBusy || !checkpoint.supportsStudioInference)
-                Button("Refine this model") { store.training.useWarmStart = true; store.training.target = checkpoint.target }
+                Button("Open Trainer with This Model") {
+                    if store.selectCheckpointForRefinement(checkpoint, navigate: onRefine == nil) {
+                        onRefine?(checkpoint)
+                        if showsDismissButton { dismiss() }
+                    }
+                }
                     .disabled(store.isBusy || !checkpoint.supportsTrainingWarmStart)
+                    .help("Open training with this checkpoint's map and refinement scope already selected.")
             }
             Section("Model package") {
                 Text(developerMode ? "Full fused safetensors checkpoint + separate LoRA" : "Separate safetensors LoRA")
@@ -188,7 +195,9 @@ struct CheckpointLibraryView: View {
                     ForEach($store.adapterMix) { $adapter in
                         HStack {
                             Text(URL(fileURLWithPath: adapter.path).lastPathComponent).lineLimit(1)
-                            TextField("Weight", value: $adapter.weight, format: .number).frame(width: 65)
+                            Text("Weight").foregroundStyle(.secondary)
+                            NumericTextField(title: "LoRA weight for \(URL(fileURLWithPath: adapter.path).lastPathComponent)", value: $adapter.weight)
+                                .frame(width: 100)
                             Button("Remove") { store.adapterMix.removeAll { $0.id == adapter.id } }
                         }
                     }
