@@ -72,7 +72,13 @@ final class StudioAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // App-hosted unit tests drive their own lifecycle. Bringing their host
         // forward can redirect a user's Quit command into an asynchronous test.
-        guard NSClassFromString("XCTestCase") == nil else { return }
+        if NSClassFromString("XCTestCase") != nil {
+            if ProcessInfo.processInfo.environment["TEXTURE_STUDIO_CONTROL_UI_VERIFY"] != "1" {
+                NSApp.setActivationPolicy(.prohibited)
+                NSApp.windows.forEach { $0.orderOut(nil) }
+            }
+            return
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--export-auxiliary") {
             Task {
                 do {

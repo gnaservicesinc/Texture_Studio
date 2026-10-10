@@ -5,6 +5,205 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeMaterialModelTests: XCTestCase {
+    func testGraphResultCompactionPreservesStridedLogicalOrderAndFloat32Bits() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        try await Task.detached {
+            let words: [UInt32] = [
+                0x3f800001, 0x80000000, 1, 0x40000001,
+                0x3e000003, 0x007fffff, 0x00800000, 0xbf800008,
+                0x3f000009, 0xbe80000a, 0x3fc0000b, 0x3d00000c,
+                0x4020000d, 0xc010000e, 0x3f400005, 0x3e800006,
+                0x3fa00007, 0x3e800011, 0xbe000004, 0x3e000013,
+                0x3f100015, 0x3f200017, 0xbf300019, 0x3f400021
+            ]
+            var transposed: [UInt32] = [], sliced: [UInt32] = []
+            for channel in 0..<2 {
+                for x in 0..<4 {
+                    for y in 0..<3 {
+                        let word = words[(channel * 3 + y) * 4 + x]
+                        transposed.append(word)
+                        if x == 1 || x == 2 { sliced.append(word) }
+                    }
+                }
+            }
+            let source = NativeTensor(dtype: "F32", shape: [1, 2, 3, 4], bytes: words.withUnsafeBytes { Data($0) })
+            // Keep only returned data after graph/executable destruction. A
+            // strided slice must own precisely its logical, contiguous pixels.
+            let retained: [MPSGraphTensorData] = try autoreleasepool {
+                let graph = MPSGraph()
+                let input = graph.placeholder(shape: [1, 2, 3, 4], dataType: .float32, name: "integer_float_words")
+                let transpose = graph.transpose(input, permutation: [0, 1, 3, 2], name: "strided_transpose")
+                let slice = graph.sliceTensor(transpose, dimension: 2, start: 1, length: 2, name: "noncontiguous_slice")
+                var cache: [String: MPSGraphExecutable] = [:]
+                let result = try NativeGraphExecution.runData(graph,
+                    feeds: [input: NativeGraphExecution.tensorData(source)], targets: [slice, transpose, input, input, slice], cache: &cache)
+                cache.removeAll()
+                return result
+            }
+            XCTAssertEqual(retained[0].shape, [1, 2, 2, 3])
+            XCTAssertEqual(retained[1].shape, [1, 2, 4, 3])
+            for (index, expected) in [sliced, transposed, words, words, sliced].enumerated() {
+                let array = retained[index].mpsndarray()
+                XCTAssertNil(array.parent, "Compacted output must not retain a parent scratch arena.")
+                XCTAssertEqual(array.resourceSize(), expected.count * MemoryLayout<UInt32>.size,
+                               "Each result must own only its contiguous logical Float32 bytes.")
+                var actual = [UInt32](repeating: 0, count: expected.count)
+                actual.withUnsafeMutableBytes { array.readBytes($0.baseAddress!, strideBytes: nil) }
+                XCTAssertEqual(actual, expected, "Logical order, signed zero, subnormal and mantissa bits must survive compaction.")
+            }
+        }.value
+    }
+    func testCheckpointedReverseMatchesMonolithicAdamForEveryFactorOverTwoSteps() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        let verification: Task<Void, Error> = Task.detached {
+            let fixture = NativeMaterialModelFixture()
+            var rgb = [Float](repeating: 0, count: 12_288)
+            for index in rgb.indices {
+                let code = (index * 37 + index / 64) % 251
+                rgb[index] = Float(code) / Float(251)
+            }
+            var reference = [Float](repeating: 0, count: 4_096)
+            for index in reference.indices {
+                let horizontal = Float(index % 64) * Float(0.001)
+                let vertical = Float(index / 64) * Float(0.00037)
+                reference[index] = Float(0.2) + horizontal + vertical
+            }
+            var coordinates = [Float](repeating: 0, count: 15 * 15 * 2)
+            for y in 0..<15 {
+                for x in 0..<15 {
+                    for (axis, coordinate) in [y - 7, x - 7].enumerated() {
+                        let normalized = Float(coordinate) * Float(8) / Float(7)
+                        let logarithm = Float(log2(Double(abs(normalized)) + 1) / 3)
+                        coordinates[(y * 15 + x) * 2 + axis] = normalized < 0 ? -logarithm : logarithm
+                    }
+                }
+            }
+            var positionIndices = [Int64](repeating: 0, count: 64 * 64)
+            for a in 0..<64 {
+                for b in 0..<64 {
+                    let dy = a / 8 - b / 8 + 7
+                    let dx = a % 8 - b % 8 + 7
+                    positionIndices[a * 64 + b] = Int64(dy * 15 + dx)
+                }
+            }
+            func compare(_ actual: NativeTensor, _ expected: NativeTensor, name: String) throws {
+                XCTAssertEqual(actual.shape, expected.shape, name)
+                let a = try actual.floatValues()
+                let e = try expected.floatValues()
+                XCTAssertEqual(a.count, e.count, name)
+                var scale = Float.leastNormalMagnitude
+                var error = Float(0)
+                for index in e.indices {
+                    scale = max(scale, abs(e[index]))
+                    error = max(error, abs(a[index] - e[index]))
+                }
+                let tolerance = scale * Float(0.003) + Float.leastNonzeroMagnitude * Float(16)
+                XCTAssertLessThanOrEqual(error, tolerance,
+                    "All factor gradients and Adam state must agree, including tiny upstream gradients: \(name)")
+            }
+            let cases = ["final-map", "map-decoder"].flatMap { scope in
+                [UInt64(0), UInt64(512 * 1024)].map { (scope, $0) }
+            }
+            for (scope, checkpointByteLimit) in cases {
+                let original = try fixture.model(scope: scope, rank: 4, alpha: 8)
+                var starting = original.adapterWeights
+                // Nonzero B makes both A and B derivatives observable on the
+                // first step. Independent columns avoid artificial rank-one
+                // cancellation in attention/normalization derivatives.
+                var random = NativeMaterialRandom(seed: 9007)
+                for name in starting.keys.sorted() where name.hasSuffix(".lora_B") {
+                    let tensor = starting[name]!
+                    var values = [Float](repeating: 0, count: tensor.shape.reduce(1, *))
+                    for index in values.indices { values[index] = (random.unit() * 2 - 1) * Float(0.005) }
+                    starting[name] = .floats(values, shape: tensor.shape)
+                }
+                var base = original.baseWeights
+                // The shape fixture has zero coordinates and all-zero gather
+                // indices, making every relative bias uniform. Softmax removes
+                // a uniform bias, so its true gradient is zero; relative error
+                // on its ~1e-29 rounding residue is not a useful comparison.
+                // Restore canonical Swin coordinates/indices to test a real
+                // position-dependent bias and its complete gradient path.
+                for name in base.keys.sorted() {
+                    if name.hasSuffix(".relative_coords_table") {
+                        base[name] = .floats(coordinates, shape: [1, 15, 15, 2])
+                    } else if name.hasSuffix(".relative_position_index") {
+                        base[name] = NativeTensor(dtype: "I64", shape: [64, 64], bytes: positionIndices.withUnsafeBytes { Data($0) })
+                    }
+                }
+                let model = try NativeMaterialModel(baseWeights: base, adapterWeights: starting,
+                    layers: original.layers, configuration: original.configuration, baseSHA256: original.baseSHA256, architecture: .test)
+                let monolithic = try NativeMaterialModel.Program(model: model, width: 64, height: 64, target: "height", staged: false)
+                let staged = try NativeMaterialModel.Program(model: model, width: 64, height: 64, target: "height", staged: true,
+                    checkpointByteLimit: checkpointByteLimit)
+                var expectedFactors = starting, actualFactors = starting
+                var expectedState: [String: NativeTensor] = [:], actualState: [String: NativeTensor] = [:]
+                for step in 1...2 {
+                    let expected = try monolithic.execute(rgb: rgb, adapters: expectedFactors, reference: reference,
+                        learningRate: 1e-4, step: step, optimizerState: expectedState)
+                    let actual = try staged.execute(rgb: rgb, adapters: actualFactors, reference: reference,
+                        learningRate: 1e-4, step: step, optimizerState: actualState, featureKey: "same-native-rgb")
+                    XCTAssertEqual(actual.loss!, expected.loss!, accuracy: 2e-6, "\(scope), checkpoint budget \(checkpointByteLimit), step \(step)")
+                    XCTAssertEqual(actual.valueLoss!, expected.valueLoss!, accuracy: 2e-6)
+                    XCTAssertEqual(actual.gradientLoss!, expected.gradientLoss!, accuracy: 2e-6)
+                    XCTAssertEqual(Set(actual.updated.keys), Set(starting.keys))
+                    XCTAssertEqual(Set(actual.optimizerState.keys), Set(expected.optimizerState.keys))
+                    for name in expected.updated.keys {
+                        try compare(actual.updated[name]!, expected.updated[name]!, name: "\(scope), checkpoint budget \(checkpointByteLimit), step \(step), \(name)")
+                    }
+                    // m/v reveal gradient disagreement that a tiny learning
+                    // rate could hide when only updated factors are compared.
+                    for name in expected.optimizerState.keys {
+                        try compare(actual.optimizerState[name]!, expected.optimizerState[name]!, name: "\(scope), checkpoint budget \(checkpointByteLimit), step \(step), \(name)")
+                    }
+                    for (a, e) in zip(actual.output, expected.output) { XCTAssertEqual(a, e, accuracy: 2e-6) }
+                    expectedFactors = expected.updated; actualFactors = actual.updated
+                    expectedState = expected.optimizerState; actualState = actual.optimizerState
+                }
+            }
+        }
+        try await verification.value
+    }
+    func testBoundedStagesMatchWholeGraphAndReuseOnlyUnchangedFeatures() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        try await Task.detached {
+            let model = try NativeMaterialModelFixture().model(adapter: true)
+            let rgb = (0..<3 * 64 * 64).map { Float($0 % 97) / 97 }
+            let reference = [Float](repeating: 0.1, count: 64 * 64)
+            let whole = try NativeMaterialModel.Program(model: model, width: 64, height: 64, target: "height", staged: false)
+            let staged = try model.program(width: 64, height: 64, target: "height")
+            let expected = try whole.execute(rgb: rgb, adapters: model.adapterWeights, reference: reference)
+            var stageCalls = 0
+            let actual = try staged.execute(rgb: rgb, adapters: model.adapterWeights, reference: reference,
+                featureKey: "same-input", onStage: { _, _ in stageCalls += 1 })
+            XCTAssertGreaterThan(stageCalls, 10)
+            for (a, b) in zip(expected.output, actual.output) { XCTAssertEqual(a, b, accuracy: 2e-6) }
+            XCTAssertEqual(expected.loss!, actual.loss!, accuracy: 2e-6)
+            stageCalls = 0
+            let changedReference = reference.map { $0 + 0.1 }
+            let update = try staged.execute(rgb: rgb, adapters: model.adapterWeights, reference: changedReference,
+                learningRate: 1e-3, featureKey: "same-input", onStage: { _, _ in stageCalls += 1 })
+            XCTAssertEqual(stageCalls, 0, "Frozen features are reused, while changed target and adapter feeds stay live")
+            XCTAssertNotEqual(actual.loss, update.loss)
+            XCTAssertNotEqual(update.updated["ups.3.model.10.lora_B"]!.bytes, model.adapterWeights["ups.3.model.10.lora_B"]!.bytes)
+            let control = NativeMaterialTrainingControl()
+            XCTAssertThrowsError(try staged.execute(rgb: rgb, adapters: model.adapterWeights, featureKey: "different-input",
+                checkCancellation: { try control.check() }, onStage: { _, _ in control.stop() })) {
+                XCTAssertTrue($0 is CancellationError)
+            }
+        }.value
+    }
+    func testCapacityAdmissionRejectsBroadLegacyAdaptersBeforeGraphAllocation() throws {
+        let fixture = NativeMaterialModelFixture()
+        let focused = try fixture.model(adapter: true)
+        let broad = try fixture.model(scope: "map-decoder", rank: 8, alpha: 8)
+        let focusedBytes = NativeMaterialTrainer.estimatedWorkingBytes(model: focused, size: 1024)
+        let broadBytes = NativeMaterialTrainer.estimatedWorkingBytes(model: broad, size: 1024)
+        XCTAssertGreaterThanOrEqual(broadBytes, UInt64(3 * 1_073_741_824))
+        XCTAssertNoThrow(try NativeMaterialTrainer.admitTraining(model: focused, size: 1024, budget: focusedBytes))
+        XCTAssertThrowsError(try NativeMaterialTrainer.admitTraining(model: broad, size: 1024, budget: broadBytes - 1))
+    }
+
     func testCachedProgramDoesNotRetainOwningModel() throws {
         weak var releasedModel: NativeMaterialModel?
         weak var releasedProgram: NativeMaterialModel.Program?
@@ -131,7 +330,7 @@ final class NativeMaterialModelTests: XCTestCase {
             for scope in ["final-map", "map-decoder"] {
                 let model = try fixture.model(scope: scope, rank: 64, alpha: 16)
                 let program = try model.program(width: 64, height: 64, target: "height")
-                XCTAssertEqual(program.frozenStageCount, 0)
+                XCTAssertGreaterThan(program.frozenStageCount, 10)
                 let reference = baseline.values.map { $0 + 0.01 }
                 let validation = try program.execute(rgb: rgb, adapters: model.adapterWeights, reference: reference)
                 XCTAssertFalse(program.optimizerPrepared)
@@ -141,7 +340,7 @@ final class NativeMaterialModelTests: XCTestCase {
                 let updated = try program.execute(rgb: rgb, adapters: model.adapterWeights,
                     reference: reference, learningRate: 1e-3)
                 XCTAssertTrue(program.optimizerPrepared)
-                XCTAssertEqual(program.frozenStageCount, scope == "final-map" ? 1 : 2)
+                XCTAssertGreaterThan(program.frozenStageCount, 10)
                 XCTAssertEqual(Set(updated.updated.keys), Set(model.adapterWeights.keys))
                 XCTAssertEqual(updated.optimizerState.count, model.adapterWeights.count * 2)
                 let outputLayer = "ups.3.model.10.lora_B"
@@ -164,6 +363,7 @@ final class NativeMaterialModelTests: XCTestCase {
         let incomplete = try NativeMaterialModel(baseWeights: weights, baseSHA256: "fixture", architecture: .test)
         XCTAssertThrowsError(try incomplete.predict(rgb: [Float](repeating: 0, count: 64 * 64 * 3), width: 64, height: 64, target: "height"))
         XCTAssertThrowsError(try model.program(width: 0, height: 64, target: "height"))
+        XCTAssertThrowsError(try model.program(width: -64, height: -64, target: "height"))
         var invalid = fixture.weights
         let name = "gen.m_body.0.trans_block.msa.relative_position_index"
         let indices = [Int64](repeating: 225, count: 4096)

@@ -1,0 +1,9 @@
+PROOF scope=final-map budget=0 step=1 metal=4063232 elapsed=37.19040804166798
+PROOF scope=final-map budget=0 step=2 metal=18743296 elapsed=43.18127208333681
+PROOF scope=map-decoder budget=0 step=1 metal=21151744 elapsed=118.79341750000094
+PROOF scope=map-decoder budget=0 step=2 metal=21151744 elapsed=149.19205225000042
+PROOF scope=final-map budget=524288 step=1 metal=8257536 elapsed=186.1333783333357
+PROOF scope=final-map budget=524288 step=2 metal=22937600 elapsed=191.95560554166877
+PROOF scope=map-decoder budget=524288 step=1 metal=21151744 elapsed=246.43779600000198
+PROOF scope=map-decoder budget=524288 step=2 metal=23248896 elapsed=256.05926337500205
+PASS packaged vs monolithic every adapter factor + Adam moment, both scopes, two updates; checkpoint budgets0/512KiB; hybrid linear/GELU and tail cuts, complete/partial replay

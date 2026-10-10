@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Metal
 import XCTest
@@ -64,6 +65,8 @@ final class NativeMaterialTrainerTests: XCTestCase {
         }, control: control, model: model) }.value
         let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
         XCTAssertEqual(result["status"] as? String, "stopped"); XCTAssertEqual(result["completed_updates"] as? Int, 2)
+        XCTAssertEqual(result["stopped_reason"] as? String, "user_stop")
+        XCTAssertEqual(result["requested_updates"] as? Int, 5)
         let saved = try NativeSafetensors(contentsOf: output.appendingPathComponent("export/adapter.safetensors"))
         XCTAssertNotEqual(try saved.tensorBytes(named: "ups.3.model.10.lora_B"), original.adapterWeights["ups.3.model.10.lora_B"]!.bytes)
         XCTAssertNoThrow(try NativeMaterialPackage.verify(output.appendingPathComponent("export")))
@@ -81,20 +84,519 @@ final class NativeMaterialTrainerTests: XCTestCase {
         XCTAssertThrowsError(try NativeMaterialTrainer.train(options, onEvent: { _ in }, control: control)) { XCTAssertTrue($0 is CancellationError) }
         XCTAssertFalse(FileManager.default.fileExists(atPath: options.output.path))
     }
+    func testAbortFromFinalValidationPreventsCheckpointAndExport() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("aborted-before-save")
+        try datasetFixture(dataset)
+        let model = try trainerModel()
+        let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
+            "--size", "256", "--updates-per-map", "1", "--validation-every", "2", "--learning-rate", "0.001"])
+        let control = NativeMaterialTrainingControl(), events = Recorder()
+        do {
+            _ = try await Task.detached { try NativeMaterialTrainer.train(options, onEvent: { line in
+                events.append(line)
+                if line.contains("\"event\":\"validation\""), events.updates == 1 { control.stop() }
+            }, control: control, model: model) }.value
+            XCTFail("Abort from final validation must prevent checkpoint and package publication")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(events.updates, 1)
+        XCTAssertFalse(events.events.contains { $0["event"] as? String == "checkpoint_saved" })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.appendingPathComponent("checkpoint-step-00000001.safetensors").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.appendingPathComponent("export").path))
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: output.appendingPathComponent("run.json"))) as? [String: Any])
+        XCTAssertEqual(result["status"] as? String, "aborted")
+        XCTAssertEqual(result["completed_updates"] as? Int, 1)
+    }
+    func testAbortFromFinalCheckpointEventKeepsCheckpointAndPreventsExport() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("aborted")
+        try datasetFixture(dataset)
+        let original = try NativeMaterialModelFixture().model(adapter: true)
+        var configuration: [String: Any] = ["schema": "texture-studio-material-lora-v1", "architecture": "pbrnxt-native-v1",
+            "target": "height", "scope": "final-map", "step": 0, "training_size": 256,
+            "image_padding": false, "image_resizing": false, "base": ["sha256": String(repeating: "a", count: 64)]]
+        configuration["layers"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(original.layers))
+        let model = try NativeMaterialModel(baseWeights: original.baseWeights, adapterWeights: original.adapterWeights,
+            layers: original.layers, configuration: configuration, baseSHA256: String(repeating: "a", count: 64), architecture: .test)
+        let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
+            "--size", "256", "--updates-per-map", "1", "--validation-every", "2", "--learning-rate", "0.001"])
+        let control = NativeMaterialTrainingControl(), events = Recorder()
+        do {
+            _ = try await Task.detached { try NativeMaterialTrainer.train(options, onEvent: { line in
+                events.append(line)
+                if line.contains("\"event\":\"checkpoint_saved\"") { control.stop() }
+            }, control: control, model: model) }.value
+            XCTFail("Abort after the final checkpoint must prevent package publication")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(events.updates, 1)
+        let checkpoint = output.appendingPathComponent("checkpoint-step-00000001.safetensors")
+        XCTAssertNoThrow(try NativeMaterialCheckpoint.inspect(at: checkpoint))
+        let saved = try NativeSafetensors(contentsOf: checkpoint)
+        XCTAssertNotEqual(try saved.tensorBytes(named: "ups.3.model.10.lora_B"), original.adapterWeights["ups.3.model.10.lora_B"]!.bytes)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.appendingPathComponent("export").path))
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: output.appendingPathComponent("run.json"))) as? [String: Any])
+        XCTAssertEqual(result["status"] as? String, "aborted")
+        XCTAssertEqual(result["completed_updates"] as? Int, 1)
+    }
+    func testTimeLimitAfterBaselineStartsNoUpdateAndSavesUnchangedCheckpoint() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("timed-out-before-update")
+        try datasetFixture(dataset)
+        let model = try trainerModel(), original = model.adapterWeights
+        let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
+            "--size", "256", "--updates-per-map", "3", "--max-minutes", "1"])
+        let clock = ManualTrainingClock(), events = Recorder()
+        let text = try await Task.detached { try NativeMaterialTrainer.train(options, onEvent: { line in
+            events.append(line)
+            if line.contains("\"event\":\"validation\"") { clock.advanceOnce(by: .seconds(61)) }
+        }, control: .init(), model: model, now: { clock.now }) }.value
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        XCTAssertEqual(result["status"] as? String, "stopped")
+        XCTAssertEqual(result["stopped_reason"] as? String, "time_limit")
+        XCTAssertEqual(result["completed_updates"] as? Int, 0)
+        XCTAssertEqual(result["requested_updates"] as? Int, 3)
+        XCTAssertEqual(result["training_performed"] as? Bool, false)
+        XCTAssertEqual(result["elapsed_training_seconds"] as? Double, 61)
+        XCTAssertEqual(events.updates, 0, "An expired baseline must not start another whole-grid training step")
+        let stopped = try XCTUnwrap(events.events.first { $0["event"] as? String == "training_stopped" })
+        XCTAssertEqual(stopped["stopped_reason"] as? String, "time_limit")
+        let saved = try NativeSafetensors(contentsOf: output.appendingPathComponent("checkpoint-step-00000000.safetensors"))
+        for (name, weight) in original { XCTAssertEqual(try saved.tensorBytes(named: name), weight.bytes, name) }
+        XCTAssertNoThrow(try NativeMaterialPackage.verify(output.appendingPathComponent("export")))
+        let recorded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: output.appendingPathComponent("run.json"))) as? [String: Any])
+        XCTAssertEqual(recorded["status"] as? String, "stopped")
+        XCTAssertEqual(recorded["stopped_reason"] as? String, "time_limit")
+    }
+    func testTimeLimitDuringUpdateFinishesCurrentStepAndReportsDuration() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("timed-out-after-update")
+        try datasetFixture(dataset, trainingInputCode: 126)
+        let model = try trainerModel(), original = model.adapterWeights
+        let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
+            "--size", "256", "--updates-per-map", "3", "--max-minutes", "1", "--learning-rate", "0.001"])
+        let clock = ManualTrainingClock(), events = Recorder()
+        let text = try await Task.detached { try NativeMaterialTrainer.train(options, onEvent: { line in
+            events.append(line)
+            if line.contains("\"phase\":\"training\"") { clock.advanceOnce(by: .seconds(61)) }
+        }, control: .init(), model: model, now: { clock.now }) }.value
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        XCTAssertEqual(result["status"] as? String, "stopped")
+        XCTAssertEqual(result["stopped_reason"] as? String, "time_limit")
+        XCTAssertEqual(result["completed_updates"] as? Int, 1)
+        XCTAssertEqual(result["requested_updates"] as? Int, 3)
+        XCTAssertEqual(events.updates, 1, "The in-flight update completes, but no next step starts after the deadline")
+        let update = try XCTUnwrap(events.events.first { $0["event"] as? String == "update" })
+        XCTAssertEqual(update["update_duration_seconds"] as? Double, 61)
+        XCTAssertEqual(update["elapsed_training_seconds"] as? Double, 61)
+        let saved = try NativeSafetensors(contentsOf: output.appendingPathComponent("checkpoint-step-00000001.safetensors"))
+        XCTAssertNotEqual(try saved.tensorBytes(named: "ups.3.model.10.lora_B"), original["ups.3.model.10.lora_B"]!.bytes)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.appendingPathComponent("checkpoint-step-00000002.safetensors").path))
+        XCTAssertNoThrow(try NativeMaterialPackage.verify(output.appendingPathComponent("export")))
+    }
+    func testAllRequestedUpdatesRemainCompletedWhenLastStepCrossesDeadline() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("completed-at-deadline")
+        try datasetFixture(dataset, trainingInputCode: 126)
+        let model = try trainerModel(), clock = ManualTrainingClock(), events = Recorder()
+        let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
+            "--size", "256", "--updates-per-map", "1", "--max-minutes", "1"])
+        let text = try await Task.detached { try NativeMaterialTrainer.train(options, onEvent: { line in
+            events.append(line)
+            if line.contains("\"phase\":\"training\"") { clock.advanceOnce(by: .seconds(61)) }
+        }, control: .init(), model: model, now: { clock.now }) }.value
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        XCTAssertEqual(result["status"] as? String, "completed")
+        XCTAssertNil(result["stopped_reason"])
+        XCTAssertEqual(result["completed_updates"] as? Int, 1)
+        XCTAssertEqual(result["requested_updates"] as? Int, 1)
+        XCTAssertEqual(events.updates, 1)
+        XCTAssertEqual(result["elapsed_training_seconds"] as? Double, 61)
+        let update = try XCTUnwrap(events.events.first { $0["event"] as? String == "update" })
+        XCTAssertEqual(update["update_duration_seconds"] as? Double, 61)
+        XCTAssertTrue(events.events.contains { $0["event"] as? String == "feature_progress" && $0["phase"] as? String == "training" })
+        XCTAssertFalse(events.events.contains { $0["event"] as? String == "training_stopped" })
+    }
+    func testStopDuringNumericStepFinishesItAndAbortDiscardsUnfinishedStep() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("dataset")
+        try datasetFixture(dataset, trainingInputCode: 126)
+        for abort in [false, true] {
+            let output = root.appendingPathComponent(abort ? "abort-in-step" : "stop-in-step")
+            let model = try trainerModel(), original = model.adapterWeights
+            let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
+                "--size", "256", "--updates-per-map", "3", "--learning-rate", "0.001"])
+            let control = NativeMaterialTrainingControl(), events = Recorder()
+            do {
+                let text = try await Task.detached { try NativeMaterialTrainer.train(options, onEvent: { line in
+                    events.append(line)
+                    if line.contains("\"phase\":\"training\"") {
+                        if abort { control.stop() } else { control.stopAndSave() }
+                    }
+                }, control: control, model: model) }.value
+                XCTAssertFalse(abort, "Immediate Abort must cancel before the adapter update is committed")
+                let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+                XCTAssertEqual(result["status"] as? String, "stopped")
+                XCTAssertEqual(result["stopped_reason"] as? String, "user_stop")
+                XCTAssertEqual(result["completed_updates"] as? Int, 1)
+                XCTAssertEqual(events.updates, 1)
+                let saved = try NativeSafetensors(contentsOf: output.appendingPathComponent("checkpoint-step-00000001.safetensors"))
+                XCTAssertNotEqual(try saved.tensorBytes(named: "ups.3.model.10.lora_B"), original["ups.3.model.10.lora_B"]!.bytes)
+                XCTAssertNoThrow(try NativeMaterialPackage.verify(output.appendingPathComponent("export")))
+            } catch {
+                XCTAssertTrue(abort, "Graceful Stop must finish its active numeric step")
+                XCTAssertTrue(error is CancellationError)
+                XCTAssertEqual(events.updates, 0)
+                for (name, weight) in original { XCTAssertEqual(model.adapterWeights[name]?.bytes, weight.bytes, name) }
+                XCTAssertFalse(FileManager.default.fileExists(atPath: output.appendingPathComponent("export").path))
+                let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: output.appendingPathComponent("run.json"))) as? [String: Any])
+                XCTAssertEqual(result["status"] as? String, "aborted")
+                XCTAssertEqual(result["completed_updates"] as? Int, 0)
+            }
+        }
+    }
+    /// Opt in on the installed learned base and real maps. The ordinary small
+    /// graph fixtures cannot detect production-grid compilation/activation
+    /// runaway. Real pairs measure numeric execution, not material quality.
+    func testProductionExactGridTrainingResourceRegression() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["TEXTURE_STUDIO_PRODUCTION_TRAINING_BENCHMARK"] == "1" else {
+            throw XCTSkip("Set TEXTURE_STUDIO_PRODUCTION_TRAINING_BENCHMARK=1 to train the pinned learned base on real 1K/2K maps.")
+        }
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("Metal is unavailable.") }
+        let base = URL(fileURLWithPath: environment["TEXTURE_STUDIO_BENCHMARK_BASE_CHECKPOINT"] ??
+            FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+                .appendingPathComponent("Texture Studio/Material Models/pbrnxt-base/" + NativeMaterialModel.pinnedFilename).path)
+        let source = URL(fileURLWithPath: environment["TEXTURE_STUDIO_BENCHMARK_SOURCE_DIRECTORY"] ?? "/opt/ipde/sources_mats/white_stucco_02")
+        let pairCount = Int(environment["TEXTURE_STUDIO_PRODUCTION_TRAINING_PAIRS"] ?? "1") ?? 1
+        guard (1...4).contains(pairCount) else { throw StudioError("Production benchmark supports 1 through 4 distinct real material pairs.") }
+        var availablePairs = [ProductionPair(id: "white_stucco_02", directory: source)]
+        for name in ["red_brick", "pine_bark", "concrete_layers"] {
+            let directory = name == "red_brick" ? environment["TEXTURE_STUDIO_BENCHMARK_SECOND_SOURCE_DIRECTORY"] : nil
+            availablePairs.append(ProductionPair(id: name, directory: URL(fileURLWithPath: directory ?? "/opt/ipde/sources_mats/" + name)))
+        }
+        let pairs = Array(availablePairs.prefix(pairCount))
+        let sourceFiles = pairs.flatMap { [$0.input, $0.target] }
+        for file in [base] + sourceFiles { XCTAssertTrue(FileManager.default.fileExists(atPath: file.path), "Missing benchmark input: \(file.path)") }
+        let sizes = (environment["TEXTURE_STUDIO_PRODUCTION_TRAINING_SIZES"] ?? "1024,2048").split(separator: ",").compactMap { Int($0) }
+        XCTAssertFalse(sizes.isEmpty)
+        XCTAssertTrue(sizes.allSatisfy { [256, 512, 1024, 2048].contains($0) })
+        let updates = Int(environment["TEXTURE_STUDIO_PRODUCTION_TRAINING_UPDATES"] ?? "1") ?? 1
+        XCTAssertGreaterThan(updates, 0)
+        let expectedUpdates = updates * pairCount
+        let maxMinutes = 90
+        let scope = environment["TEXTURE_STUDIO_PRODUCTION_TRAINING_SCOPE"] ?? "final-map"
+        XCTAssertTrue(["final-map", "map-decoder"].contains(scope))
+        let rank = Int(environment["TEXTURE_STUDIO_PRODUCTION_TRAINING_RANK"] ?? "8") ?? 8
+        let alpha = Float(environment["TEXTURE_STUDIO_PRODUCTION_TRAINING_ALPHA"] ?? "8") ?? 8
+        XCTAssertTrue((1...64).contains(rank))
+        XCTAssertTrue(alpha.isFinite && alpha > 0)
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let reports = URL(fileURLWithPath: environment["TEXTURE_STUDIO_BENCHMARK_OUTPUT_DIRECTORY"] ??
+            repository.appendingPathComponent("out/native-training-regression").path)
+            .appendingPathComponent("run-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: reports, withIntermediateDirectories: true)
+        let sourceHashes = try sourceFiles.map { try NativeMaterialTrainer.checksum(Data(contentsOf: $0, options: .mappedIfSafe)) }
+        for size in sizes {
+            let temporary = try temporary(); defer { try? FileManager.default.removeItem(at: temporary) }
+            let dataset = temporary.appendingPathComponent("dataset")
+            let inputHashes = try productionDatasetFixture(dataset, pairs: pairs, size: size)
+            XCTAssertEqual(Set(inputHashes).count, pairCount, "Distinct material pixels must exercise frozen-prefix cache eviction.")
+            let output = reports.appendingPathComponent("trained-\(size)")
+            let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
+                "--base-checkpoint", base.path, "--size", String(size), "--scope", scope, "--updates-per-map", String(updates),
+                "--validation-every", "20", "--lora-rank", String(rank), "--lora-alpha", String(alpha), "--learning-rate", "0.00001", "--max-minutes", String(maxMinutes)])
+            let control = NativeMaterialTrainingControl()
+            let metrics = ProductionMetrics(device: device, control: control, volumeURL: reports)
+            let started = ContinuousClock.now
+            metrics.start()
+            defer { metrics.stop() }
+            let completed: (String, [String: Data])
+            do {
+                completed = try await Task.detached {
+                    try autoreleasepool {
+                        let model = try NativeMaterialModel.load(checkpointURL: nil, baseURL: base,
+                            target: "height", scope: scope, rank: rank, alpha: alpha, training: true)
+                        let originalFactors = model.adapterWeights.mapValues(\.bytes)
+                        let text = try NativeMaterialTrainer.train(options, onEvent: { metrics.record($0) },
+                            control: control, model: model)
+                        return (text, originalFactors)
+                    }
+                }.value
+            } catch {
+                metrics.stop()
+                let failure: [String: Any] = ["size": size, "status": "failed", "error": error.localizedDescription,
+                    "scope": scope, "rank": rank, "alpha": Double(alpha), "training_pair_count": pairCount,
+                    "updates_per_map": updates, "max_minutes": maxMinutes,
+                    "training_input_sha256": inputHashes, "source_sha256": sourceHashes,
+                    "resources": metrics.snapshot, "events": metrics.events]
+                try JSONSerialization.data(withJSONObject: failure, options: [.sortedKeys, .prettyPrinted])
+                    .write(to: reports.appendingPathComponent("training-\(size)-failed.json"), options: .atomic)
+                print("PRODUCTION_TRAINING_FAILED report=\(reports.path); resources=\(metrics.snapshot)")
+                throw error
+            }
+            let (text, originalFactors) = completed
+            metrics.stop()
+            let finalResources = metrics.snapshot
+            let resourceLimit = try XCTUnwrap(finalResources["benchmark_resource_abort_limit_bytes"] as? UInt64)
+            XCTAssertEqual(finalResources["benchmark_resource_abort_requested"] as? Bool, false,
+                           "Crossing the resource guard must fail even if it occurs after the last update.")
+            XCTAssertLessThanOrEqual(try XCTUnwrap(finalResources["process_peak_physical_footprint_bytes"] as? UInt64), resourceLimit)
+            XCTAssertLessThanOrEqual(try XCTUnwrap(finalResources["sampled_peak_metal_allocation_bytes"] as? UInt64), resourceLimit)
+            let duration = started.duration(to: .now).components
+            let elapsed = Double(duration.seconds) + Double(duration.attoseconds) / 1e18
+            let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+            let actualUpdates = result["completed_updates"] as? Int ?? 0
+            XCTAssertEqual(result["status"] as? String, "completed")
+            XCTAssertEqual(actualUpdates, expectedUpdates)
+            XCTAssertEqual(result["native_dimensions"] as? [Int], [size, size])
+            XCTAssertEqual(result["image_padding"] as? Bool, false)
+            XCTAssertEqual(result["image_resizing"] as? Bool, false)
+            let package = output.appendingPathComponent("export")
+            XCTAssertNoThrow(try NativeMaterialPackage.verify(package))
+            let saved = try NativeSafetensors(contentsOf: package.appendingPathComponent("adapter.safetensors"))
+            let configuration = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(saved.metadata["configuration"]!.utf8)) as? [String: Any])
+            XCTAssertEqual(configuration["training_size"] as? Int, size)
+            XCTAssertEqual(configuration["step"] as? Int, expectedUpdates)
+            XCTAssertEqual(configuration["scope"] as? String, scope)
+            XCTAssertEqual((configuration["base"] as? [String: Any])?["sha256"] as? String, NativeMaterialModel.pinnedSHA256,
+                "The production benchmark must run the actual pinned learned base.")
+            let layerRecords = try XCTUnwrap(configuration["layers"] as? [String: [String: Any]])
+            for (name, layer) in layerRecords {
+                XCTAssertEqual(layer["rank"] as? Int, rank, name)
+                XCTAssertEqual(layer["alpha"] as? Double, Double(alpha), name)
+            }
+            XCTAssertGreaterThan(originalFactors.count, 100, "Production training must preserve the complete selected adapter scope.")
+            XCTAssertEqual(Set(saved.tensors.keys), Set(originalFactors.keys))
+            XCTAssertTrue(try originalFactors.keys.contains { name in
+                try name.hasSuffix(".lora_B") && saved.tensorBytes(named: name) != originalFactors[name]!
+            }, "The actual production LoRA factors must change.")
+            for name in ["ups.3.model.0.lora_B", "ups.3.model.1.sub.0.RDB1.conv1.0.lora_B", "ups.3.model.10.lora_B"] {
+                let original = try XCTUnwrap(originalFactors[name], "Missing early/late production adapter: \(name)")
+                XCTAssertNotEqual(try saved.tensorBytes(named: name), original, "Gradients must reach the complete selected branch: \(name)")
+            }
+            if scope == "map-decoder" {
+                let name = "gen.m_dec_3.m_up3.0.up.1.lora_B"
+                XCTAssertNotEqual(try saved.tensorBytes(named: name), try XCTUnwrap(originalFactors[name]), "Gradients must reach decoder upsampling.")
+            }
+            let baseline = try XCTUnwrap(result["baseline_validation"] as? [String: Any])
+            let final = try XCTUnwrap(result["final_validation"] as? [String: Any])
+            XCTAssertEqual(baseline["sample_count"] as? Int, 1)
+            XCTAssertEqual(final["sample_count"] as? Int, 1)
+            XCTAssertTrue((baseline["mae"] as? Double)?.isFinite == true)
+            XCTAssertTrue((final["mae"] as? Double)?.isFinite == true)
+            let updateEvents = metrics.events.filter { $0["event"] as? String == "update" }
+            XCTAssertEqual(updateEvents.count, expectedUpdates)
+            let trainingIDs = pairs.indices.map { pairCount == 1 ? "train" : "train-" + pairs[$0].id }
+            for id in trainingIDs {
+                XCTAssertEqual(updateEvents.filter { $0["sample_id"] as? String == id }.count, updates, "Each real material must recur in the shuffled training passes.")
+            }
+            for (index, file) in sourceFiles.enumerated() {
+                XCTAssertEqual(try NativeMaterialTrainer.checksum(Data(contentsOf: file, options: .mappedIfSafe)), sourceHashes[index])
+            }
+            let report: [String: Any] = ["size": size, "elapsed_seconds": elapsed,
+                "source_directory": source.path, "base_checkpoint": base.path,
+                "base_sha256": NativeMaterialModel.pinnedSHA256, "source_sha256": sourceHashes,
+                "scope": scope, "rank": rank, "alpha": Double(alpha), "completed_updates": actualUpdates,
+                "requested_updates": expectedUpdates, "status": result["status"] as? String ?? "unknown",
+                "training_pair_count": pairCount, "updates_per_map": updates, "max_minutes": maxMinutes, "training_input_sha256": inputHashes,
+                "source_pairs": pairs.map { ["material_id": $0.id, "input": $0.input.path, "target": $0.target.path] },
+                "measurement_scope": "Real learned base, exact native pixels, distinct real training materials in repeated shuffled passes and the first pair repeated for validation; numeric execution and resource regression, not material quality.",
+                "resource_measurement_scope": "RSS and physical-footprint peaks are process lifetime high-water marks; Metal peak is sampled for this run. Later sizes may include an earlier process peak.",
+                "resources": finalResources, "events": metrics.events, "run": result]
+            let bytes = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys, .prettyPrinted])
+            try bytes.write(to: reports.appendingPathComponent("training-\(size).json"), options: .atomic)
+            print("PRODUCTION_TRAINING_METRICS \(size): \(String(decoding: try JSONSerialization.data(withJSONObject: metrics.snapshot, options: [.sortedKeys]), as: UTF8.self)); elapsed_seconds=\(elapsed); report=\(reports.path)")
+        }
+    }
+    private final class ProductionMetrics: @unchecked Sendable {
+        private let lock = NSLock(), device: MTLDevice, control: NativeMaterialTrainingControl
+        private let footprintLimit = ProcessInfo.processInfo.physicalMemory * 9 / 10
+        private var resourceAbortRequested = false
+        private let started = ProcessInfo.processInfo.systemUptime
+        private var timer: DispatchSourceTimer?
+        private var maximumMetal: UInt64 = 0, maximumResident: UInt64 = 0, peakFootprint: UInt64 = 0
+        private var currentResident: UInt64 = 0, currentFootprint: UInt64 = 0, currentMetal: UInt64 = 0
+        private var recorded: [[String: Any]] = []
+        private let volumeURL: URL
+        private let initialSwapBytes: UInt64?, initialAvailableDiskBytes: UInt64?
+        init(device: MTLDevice, control: NativeMaterialTrainingControl, volumeURL: URL) {
+            self.device = device; self.control = control; self.volumeURL = volumeURL
+            initialSwapBytes = Self.systemSwapUsedBytes()
+            initialAvailableDiskBytes = Self.availableDiskBytes(at: volumeURL)
+        }
+        func start() {
+            let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "production-training-resource-sampler"))
+            timer.schedule(deadline: .now(), repeating: .milliseconds(100))
+            timer.setEventHandler { [weak self] in self?.sample() }
+            self.timer = timer; timer.resume(); sample()
+        }
+        func stop() { timer?.cancel(); timer = nil; sample() }
+        func sample() {
+            var usage = rusage(); _ = getrusage(RUSAGE_SELF, &usage)
+            var info = task_vm_info_data_t()
+            var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+            let status = withUnsafeMutablePointer(to: &info) { pointer in
+                pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                    task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+                }
+            }
+            let metal = UInt64(device.currentAllocatedSize)
+            let abort = lock.withLock {
+                maximumMetal = max(maximumMetal, metal)
+                maximumResident = max(maximumResident, UInt64(max(0, usage.ru_maxrss)))
+                currentMetal = metal
+                if status == KERN_SUCCESS {
+                    peakFootprint = max(peakFootprint, UInt64(max(0, info.ledger_phys_footprint_peak)))
+                    currentResident = info.resident_size; currentFootprint = info.phys_footprint
+                }
+                if max(currentFootprint, currentMetal) > footprintLimit {
+                    resourceAbortRequested = true
+                    return true
+                }
+                return false
+            }
+            if abort { control.stop() }
+        }
+        func record(_ text: String) {
+            sample()
+            guard let data = text.data(using: .utf8), var event = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            event["elapsed_seconds"] = ProcessInfo.processInfo.systemUptime - started
+            event["resources"] = snapshot
+            lock.withLock { recorded.append(event) }
+            let annotated = (try? JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])) ?? data
+            print("PRODUCTION_TRAINING_EVENT " + String(decoding: annotated, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        var snapshot: [String: Any] {
+            // Storage queries run only when an event/report requests a snapshot,
+            // rather than adding filesystem work to the 100 ms memory sampler.
+            let swapBytes = Self.systemSwapUsedBytes(), availableDiskBytes = Self.availableDiskBytes(at: volumeURL)
+            var result: [String: Any] = lock.withLock { ["process_maximum_rss_bytes": maximumResident,
+                "process_peak_physical_footprint_bytes": peakFootprint, "sampled_peak_metal_allocation_bytes": maximumMetal,
+                "current_resident_bytes": currentResident, "current_physical_footprint_bytes": currentFootprint,
+                "current_metal_allocation_bytes": currentMetal,
+                "benchmark_resource_abort_limit_bytes": footprintLimit, "benchmark_resource_abort_requested": resourceAbortRequested,
+                "metal_sample_interval_ms": 100, "physical_memory_bytes": ProcessInfo.processInfo.physicalMemory,
+                "metal_recommended_working_set_bytes": device.recommendedMaxWorkingSetSize] }
+            result["initial_system_swap_used_bytes"] = initialSwapBytes.map { $0 as Any } ?? NSNull()
+            result["system_swap_used_bytes"] = swapBytes.map { $0 as Any } ?? NSNull()
+            result["system_swap_used_delta_bytes"] = Self.signedDelta(swapBytes, from: initialSwapBytes).map { $0 as Any } ?? NSNull()
+            result["initial_volume_available_capacity_bytes"] = initialAvailableDiskBytes.map { $0 as Any } ?? NSNull()
+            result["volume_available_capacity_bytes"] = availableDiskBytes.map { $0 as Any } ?? NSNull()
+            result["volume_available_capacity_delta_bytes"] = Self.signedDelta(availableDiskBytes, from: initialAvailableDiskBytes).map { $0 as Any } ?? NSNull()
+            result["volume_measurement_path"] = volumeURL.path
+            result["storage_measurement_scope"] = "Swap is system-wide and available capacity is volume-wide. Deltas can include activity outside this training process."
+            return result
+        }
+        private static func systemSwapUsedBytes() -> UInt64? {
+            var usage = xsw_usage(), size = MemoryLayout<xsw_usage>.size
+            guard sysctlbyname("vm.swapusage", &usage, &size, nil, 0) == 0 else { return nil }
+            return usage.xsu_used
+        }
+        private static func availableDiskBytes(at url: URL) -> UInt64? {
+            // URL resource values may cache capacity across snapshots. Ask the
+            // filesystem each time so growth on this volume remains observable.
+            guard let attributes = try? FileManager.default.attributesOfFileSystem(forPath: url.path),
+                  let available = attributes[.systemFreeSize] as? NSNumber,
+                  available.int64Value >= 0 else { return nil }
+            return available.uint64Value
+        }
+        private static func signedDelta(_ current: UInt64?, from initial: UInt64?) -> Int64? {
+            guard let current, let initial, let currentSigned = Int64(exactly: current),
+                  let initialSigned = Int64(exactly: initial) else { return nil }
+            return currentSigned - initialSigned
+        }
+        var events: [[String: Any]] { lock.withLock { recorded } }
+    }
+    private struct ProductionPair: Sendable {
+        let id: String, input: URL, target: URL
+        init(id: String, directory: URL) {
+            self.id = id
+            input = directory.appendingPathComponent(id + "_diff_2k.png")
+            target = directory.appendingPathComponent(id + "_disp_2k.png")
+        }
+    }
+    private func productionDatasetFixture(_ root: URL, pairs: [ProductionPair], size: Int) throws -> [String] {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        var entries: [[String: Any]] = [], inputHashes: [String] = []
+        for (pairIndex, pair) in pairs.enumerated() {
+            var files: [String: URL] = [:], hashes: [String: String] = [:]
+            for (role, original) in [("input", pair.input), ("height", pair.target)] {
+                let header = try NativePNG.inspect(original)
+                XCTAssertEqual(header.bits, 16)
+                XCTAssertGreaterThanOrEqual(header.width, size); XCTAssertGreaterThanOrEqual(header.height, size)
+                let file: URL
+                if header.width == size, header.height == size { file = original }
+                else {
+                    file = root.appendingPathComponent(pair.id + "-" + role + ".png")
+                    let rectangle = [(header.width - size) / 2, (header.height - size) / 2, size, size]
+                    try NativePNG.crop(original, rectangle: rectangle).encoded().write(to: file)
+                }
+                files[role] = file
+                hashes[role] = try NativeMaterialTrainer.checksum(Data(contentsOf: file, options: .mappedIfSafe))
+            }
+            inputHashes.append(hashes["input"]!)
+            let splits = pairIndex == 0 ? ["train", "validation"] : ["train"]
+            for split in splits {
+                let id = split == "validation" || pairs.count == 1 ? split : "train-" + pair.id
+                let folder = root.appendingPathComponent("samples/" + id)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                var metadata: [String: [String: Any]] = [:]
+                for role in ["input", "height"] {
+                    metadata[role] = ["filename": files[role]!.path, "storage": "source_reference", "encoding": role == "input" ? "srgb" : "linear_data",
+                        "sample_sha256": hashes[role]!, "source": ["path": files[role]!.path, "file_sha256": hashes[role]!]]
+                }
+                let sample: [String: Any] = ["sample_id": id, "material_id": id, "status": "approved", "split": split,
+                    "sample_pixel_dimensions": [size, size], "maps": files.mapValues(\.path), "map_metadata": metadata]
+                try JSONSerialization.data(withJSONObject: sample).write(to: folder.appendingPathComponent("sample.json"))
+                entries.append(["sample_id": id, "material_id": id, "status": "approved", "split": split, "path": "samples/" + id])
+            }
+        }
+        try JSONSerialization.data(withJSONObject: ["schema_version": 2, "samples": entries]).write(to: root.appendingPathComponent("dataset.json"))
+        return inputHashes
+    }
     private final class Recorder: @unchecked Sendable {
         let lock = NSLock(); private var lines: [String] = [], mainThread = false
         func append(_ line: String) { lock.withLock { lines.append(line); mainThread = mainThread || Thread.isMainThread } }
         var updates: Int { lock.withLock { lines.filter { $0.contains("\"event\":\"update\"") }.count } }
         var executedOnMain: Bool { lock.withLock { mainThread } }
+        var events: [[String: Any]] { lock.withLock { lines.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] } } }
     }
-    private func datasetFixture(_ root: URL) throws {
+    private final class ManualTrainingClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var instant = ContinuousClock.now
+        private var advanced = false
+        var now: ContinuousClock.Instant { lock.withLock { instant } }
+        func advanceOnce(by duration: Duration) {
+            lock.withLock {
+                guard !advanced else { return }
+                instant = instant.advanced(by: duration)
+                advanced = true
+            }
+        }
+    }
+    private func trainerModel() throws -> NativeMaterialModel {
+        let original = try NativeMaterialModelFixture().model(adapter: true)
+        var configuration: [String: Any] = ["schema": "texture-studio-material-lora-v1", "architecture": "pbrnxt-native-v1",
+            "target": "height", "scope": "final-map", "step": 0, "training_size": 256,
+            "image_padding": false, "image_resizing": false, "base": ["sha256": String(repeating: "a", count: 64)]]
+        configuration["layers"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(original.layers))
+        return try NativeMaterialModel(baseWeights: original.baseWeights, adapterWeights: original.adapterWeights,
+            layers: original.layers, configuration: configuration, baseSHA256: String(repeating: "a", count: 64), architecture: .test)
+    }
+    private func datasetFixture(_ root: URL, trainingInputCode: UInt8 = 127) throws {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         var entries: [[String: Any]] = []
         for split in ["train", "validation"] {
             let folder = root.appendingPathComponent("samples/" + split)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let input = try NativePNG(header: .init(width: 256, height: 256, bits: 8, channels: 3, color: 2, interlace: 0),
-                pixels: Data(repeating: 127, count: 256 * 256 * 3), colorChunks: []).encoded()
+                pixels: Data(repeating: split == "train" ? trainingInputCode : 127, count: 256 * 256 * 3), colorChunks: []).encoded()
             let target = try NativePNG(header: .init(width: 256, height: 256, bits: 16, channels: 1, color: 0, interlace: 0),
                 pixels: Data(repeating: 128, count: 256 * 256 * 2), colorChunks: []).encoded()
             try input.write(to: folder.appendingPathComponent("diffuse.png")); try target.write(to: folder.appendingPathComponent("height.png"))

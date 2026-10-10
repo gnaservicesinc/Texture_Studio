@@ -1,0 +1,995 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Native training validation evidence",
+  "description": "Permanent evidence for one implementation. Pending, failed and interrupted runs cannot be promoted to passing. JSON Schema checks structure; the evidence producer must verify hashes and numerical comparisons.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "recorded_at",
+    "status",
+    "implementation",
+    "machine",
+    "strict_proof",
+    "native_suite",
+    "final_validation_abort",
+    "production_runs",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "$ref": "#/$defs/status"
+    },
+    "implementation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "git_commit",
+        "worktree_dirty",
+        "source_files",
+        "patch_sha256",
+        "app_version",
+        "app_build"
+      ],
+      "properties": {
+        "git_commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "worktree_dirty": {
+          "type": "boolean"
+        },
+        "source_files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/file_hash"
+          }
+        },
+        "patch_sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "app_version": {
+          "type": "string"
+        },
+        "app_build": {
+          "type": "string"
+        }
+      }
+    },
+    "machine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hardware",
+        "os",
+        "architecture",
+        "physical_memory_bytes"
+      ],
+      "properties": {
+        "hardware": {
+          "type": "string"
+        },
+        "os": {
+          "type": "string"
+        },
+        "architecture": {
+          "type": "string"
+        },
+        "physical_memory_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "strict_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "artifacts",
+        "tested_source_sha256",
+        "scopes",
+        "checkpoint_budgets_bytes",
+        "updates_per_case",
+        "cases_completed",
+        "tolerances",
+        "comparisons_passed",
+        "failure_reason"
+      ],
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "artifacts": {
+          "$ref": "#/$defs/artifacts"
+        },
+        "tested_source_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "binary_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "note": {
+          "type": "string"
+        },
+        "scopes": {
+          "const": [
+            "final-map",
+            "map-decoder"
+          ]
+        },
+        "checkpoint_budgets_bytes": {
+          "const": [
+            0,
+            524288
+          ]
+        },
+        "updates_per_case": {
+          "const": 2
+        },
+        "cases_completed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4
+        },
+        "tolerances": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "factor_moment_max_scaled",
+            "subnormal_floor_multiplier",
+            "output_loss_absolute"
+          ],
+          "properties": {
+            "factor_moment_max_scaled": {
+              "const": 0.003
+            },
+            "subnormal_floor_multiplier": {
+              "const": 16
+            },
+            "output_loss_absolute": {
+              "const": 2e-06
+            }
+          }
+        },
+        "comparisons_passed": {
+          "type": "boolean",
+          "description": "All factors, Adam m/v, every output pixel, and total/value/gradient losses against monolithic execution."
+        },
+        "failure_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "artifacts": {
+                "minItems": 1
+              },
+              "cases_completed": {
+                "const": 4
+              },
+              "comparisons_passed": {
+                "const": true
+              },
+              "failure_reason": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "native_suite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "artifacts",
+        "command",
+        "configuration",
+        "executed",
+        "skipped",
+        "failures",
+        "elapsed_seconds",
+        "failure_reason"
+      ],
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "artifacts": {
+          "$ref": "#/$defs/artifacts"
+        },
+        "command": {
+          "type": "string"
+        },
+        "configuration": {
+          "enum": [
+            "Debug",
+            "Release"
+          ]
+        },
+        "executed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "skipped": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "failures": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "elapsed_seconds": {
+          "$ref": "#/$defs/nullable_seconds"
+        },
+        "failure_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "artifacts": {
+                "minItems": 1
+              },
+              "executed": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "skipped": {
+                "type": "integer"
+              },
+              "failures": {
+                "const": 0
+              },
+              "elapsed_seconds": {
+                "$ref": "#/$defs/seconds"
+              },
+              "failure_reason": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "final_validation_abort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "test_name",
+        "artifacts",
+        "note"
+      ],
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "test_name": {
+          "type": "string"
+        },
+        "artifacts": {
+          "$ref": "#/$defs/artifacts"
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "production_runs": {
+      "type": "array",
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/production_run"
+      }
+    },
+    "prior_measurements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "relationship_to_current_code",
+          "implementation_source_sha256",
+          "source_hash_status",
+          "artifacts",
+          "report",
+          "update_events"
+        ],
+        "properties": {
+          "relationship_to_current_code": {
+            "const": "prior_code"
+          },
+          "implementation_source_sha256": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/sha256"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_hash_status": {
+            "enum": [
+              "recorded",
+              "unavailable"
+            ]
+          },
+          "artifacts": {
+            "$ref": "#/$defs/artifacts"
+          },
+          "report": {
+            "type": "object",
+            "description": "Verbatim selected fields from the historical report; never used to satisfy current production passing requirements."
+          },
+          "update_events": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "validation_events": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "passed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "strict_proof": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            }
+          },
+          "native_suite": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            }
+          },
+          "final_validation_abort": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              },
+              "artifacts": {
+                "minItems": 1
+              }
+            }
+          },
+          "production_runs": {
+            "minItems": 2,
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "size": {
+                      "const": 1024
+                    },
+                    "status": {
+                      "const": "passed"
+                    }
+                  },
+                  "required": [
+                    "size",
+                    "status"
+                  ]
+                }
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "size": {
+                      "const": 2048
+                    },
+                    "status": {
+                      "const": "passed"
+                    }
+                  },
+                  "required": [
+                    "size",
+                    "status"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "status": {
+      "enum": [
+        "pending",
+        "passed",
+        "failed",
+        "interrupted"
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "nullable_seconds": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/seconds"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "nullable_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "file_hash": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/file_hash"
+      },
+      "description": "Use durable repository-relative paths for evidence logs/reports; pending checks may have no completed artifact."
+    },
+    "validation": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "sample_count",
+        "mae"
+      ],
+      "properties": {
+        "sample_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mae": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "production_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "size",
+        "status"
+      ],
+      "properties": {
+        "size": {
+          "enum": [
+            1024,
+            2048
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "trainer_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stopped_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failure_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifacts": {
+          "$ref": "#/$defs/artifacts"
+        },
+        "binary_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_files": {
+          "type": "array",
+          "minItems": 4,
+          "items": {
+            "$ref": "#/$defs/file_hash"
+          }
+        },
+        "training_input_sha256": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/sha256"
+          }
+        },
+        "base_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "dataset_manifest_sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "configuration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "build_configuration",
+            "fresh_process",
+            "scope",
+            "target",
+            "rank",
+            "alpha",
+            "training_pairs",
+            "updates_per_map",
+            "max_minutes",
+            "checkpoint_budget_bytes",
+            "image_padding",
+            "image_resizing"
+          ],
+          "properties": {
+            "build_configuration": {
+              "const": "Release"
+            },
+            "fresh_process": {
+              "type": "boolean"
+            },
+            "scope": {
+              "const": "map-decoder"
+            },
+            "target": {
+              "const": "height"
+            },
+            "rank": {
+              "const": 64
+            },
+            "alpha": {
+              "const": 16
+            },
+            "training_pairs": {
+              "const": 2
+            },
+            "updates_per_map": {
+              "const": 3
+            },
+            "max_minutes": {
+              "const": 90
+            },
+            "checkpoint_budget_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "image_padding": {
+              "type": "boolean"
+            },
+            "image_resizing": {
+              "type": "boolean"
+            }
+          }
+        },
+        "requested_updates": {
+          "const": 6
+        },
+        "completed_updates": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 6
+        },
+        "updates": {
+          "type": "array",
+          "maxItems": 6,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "step",
+              "sample_id",
+              "duration_seconds"
+            ],
+            "properties": {
+              "step": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 6
+              },
+              "sample_id": {
+                "type": "string"
+              },
+              "duration_seconds": {
+                "$ref": "#/$defs/seconds"
+              }
+            }
+          }
+        },
+        "elapsed_seconds": {
+          "$ref": "#/$defs/nullable_seconds"
+        },
+        "elapsed_training_seconds": {
+          "$ref": "#/$defs/nullable_seconds"
+        },
+        "baseline_validation": {
+          "$ref": "#/$defs/validation"
+        },
+        "final_validation": {
+          "$ref": "#/$defs/validation"
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "process_peak_physical_footprint_bytes",
+            "sampled_peak_metal_allocation_bytes",
+            "metal_sample_interval_ms",
+            "benchmark_resource_abort_limit_bytes",
+            "benchmark_resource_abort_requested",
+            "initial_system_swap_used_bytes",
+            "system_swap_used_bytes",
+            "system_swap_used_delta_bytes",
+            "initial_volume_available_capacity_bytes",
+            "volume_available_capacity_bytes",
+            "volume_available_capacity_delta_bytes",
+            "persistent_artifact_bytes",
+            "temporary_code_cache_peak_bytes",
+            "temporary_code_cache_removed",
+            "measurement_scope"
+          ],
+          "properties": {
+            "process_peak_physical_footprint_bytes": {
+              "$ref": "#/$defs/nullable_bytes"
+            },
+            "sampled_peak_metal_allocation_bytes": {
+              "$ref": "#/$defs/nullable_bytes"
+            },
+            "metal_sample_interval_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "benchmark_resource_abort_limit_bytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "benchmark_resource_abort_requested": {
+              "type": "boolean"
+            },
+            "initial_system_swap_used_bytes": {
+              "$ref": "#/$defs/nullable_bytes"
+            },
+            "system_swap_used_bytes": {
+              "$ref": "#/$defs/nullable_bytes"
+            },
+            "system_swap_used_delta_bytes": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "initial_volume_available_capacity_bytes": {
+              "$ref": "#/$defs/nullable_bytes"
+            },
+            "volume_available_capacity_bytes": {
+              "$ref": "#/$defs/nullable_bytes"
+            },
+            "volume_available_capacity_delta_bytes": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "persistent_artifact_bytes": {
+              "$ref": "#/$defs/nullable_bytes"
+            },
+            "temporary_code_cache_peak_bytes": {
+              "$ref": "#/$defs/nullable_bytes"
+            },
+            "temporary_code_cache_removed": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "measurement_scope": {
+              "type": "string",
+              "description": "Physical peak includes unified GPU memory; do not add Metal to it. Swap is system-wide, free capacity is volume-wide; null means unavailable, not zero."
+            }
+          }
+        },
+        "checks": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_hashes_unchanged",
+            "native_grid_preserved",
+            "pinned_base_verified",
+            "complete_adapter_scope",
+            "selected_branch_factors_changed",
+            "six_update_events_verified",
+            "validation_finite",
+            "export_verified",
+            "physical_peak_within_guard",
+            "metal_peak_within_guard"
+          ],
+          "properties": {
+            "source_hashes_unchanged": {
+              "type": "boolean"
+            },
+            "native_grid_preserved": {
+              "type": "boolean"
+            },
+            "pinned_base_verified": {
+              "type": "boolean"
+            },
+            "complete_adapter_scope": {
+              "type": "boolean"
+            },
+            "selected_branch_factors_changed": {
+              "type": "boolean"
+            },
+            "six_update_events_verified": {
+              "type": "boolean"
+            },
+            "validation_finite": {
+              "type": "boolean"
+            },
+            "export_verified": {
+              "type": "boolean"
+            },
+            "physical_peak_within_guard": {
+              "type": "boolean"
+            },
+            "metal_peak_within_guard": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "trainer_status",
+              "stopped_reason",
+              "failure_reason",
+              "artifacts",
+              "binary_sha256",
+              "source_files",
+              "training_input_sha256",
+              "base_sha256",
+              "dataset_manifest_sha256",
+              "configuration",
+              "requested_updates",
+              "completed_updates",
+              "updates",
+              "elapsed_seconds",
+              "elapsed_training_seconds",
+              "baseline_validation",
+              "final_validation",
+              "resources",
+              "checks"
+            ],
+            "properties": {
+              "artifacts": {
+                "minItems": 1
+              },
+              "trainer_status": {
+                "const": "completed"
+              },
+              "stopped_reason": {
+                "type": "null"
+              },
+              "failure_reason": {
+                "type": "null"
+              },
+              "completed_updates": {
+                "const": 6
+              },
+              "updates": {
+                "minItems": 6
+              },
+              "elapsed_seconds": {
+                "$ref": "#/$defs/seconds"
+              },
+              "elapsed_training_seconds": {
+                "$ref": "#/$defs/seconds"
+              },
+              "dataset_manifest_sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "baseline_validation": {
+                "type": "object"
+              },
+              "final_validation": {
+                "type": "object"
+              },
+              "configuration": {
+                "properties": {
+                  "fresh_process": {
+                    "const": true
+                  },
+                  "image_padding": {
+                    "const": false
+                  },
+                  "image_resizing": {
+                    "const": false
+                  }
+                }
+              },
+              "resources": {
+                "properties": {
+                  "benchmark_resource_abort_requested": {
+                    "const": false
+                  },
+                  "process_peak_physical_footprint_bytes": {
+                    "type": "integer"
+                  },
+                  "sampled_peak_metal_allocation_bytes": {
+                    "type": "integer"
+                  },
+                  "persistent_artifact_bytes": {
+                    "type": "integer"
+                  },
+                  "temporary_code_cache_removed": {
+                    "const": true
+                  }
+                }
+              },
+              "checks": {
+                "properties": {
+                  "source_hashes_unchanged": {
+                    "const": true
+                  },
+                  "native_grid_preserved": {
+                    "const": true
+                  },
+                  "pinned_base_verified": {
+                    "const": true
+                  },
+                  "complete_adapter_scope": {
+                    "const": true
+                  },
+                  "selected_branch_factors_changed": {
+                    "const": true
+                  },
+                  "six_update_events_verified": {
+                    "const": true
+                  },
+                  "validation_finite": {
+                    "const": true
+                  },
+                  "export_verified": {
+                    "const": true
+                  },
+                  "physical_peak_within_guard": {
+                    "const": true
+                  },
+                  "metal_peak_within_guard": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

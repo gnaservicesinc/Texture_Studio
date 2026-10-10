@@ -14,6 +14,8 @@ Developer mode exposes controls for this refinement workflow and defaults to a f
 
 ## Acceptance
 
+For the current development experiment, acceptance means a visually realistic rendered surface. A generated map may differ substantially from its source reference and still be acceptable. Source-agreement losses remain training diagnostics; the user's visual review decides whether the result succeeds. Rank, alpha and training size remain experimental settings rather than a prescribed final configuration.
+
 Inspect maps at the actual model input resolution. Compare the pretrained base, source reference and result on the same diffuse pixels. Examine relief placement, inversion, grain, false bumps from color, halos, edge frames, seams and excessive smoothing. Inspect displaced geometry under neutral and grazing light. A lower fitting loss or larger output file does not establish improved material quality.
 
 Automatic checks hold out source families at the selected grid, keeping all resolutions and colors together. Regional checks of disjoint corners of a known material are labeled separately. Fresh materials and photographs prepared through the application's diffuse process are still required to assess use outside the training set. A one-region fitting run has no independent validation set.

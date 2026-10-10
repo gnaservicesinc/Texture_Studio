@@ -1,0 +1,738 @@
+Filtered XCTest results from make test-native.
+Original full log SHA-256: bd7fc9bb666bd642f52052a6f02b84de1470f1035eca982dd2eb677de159c5b9
+Model SHA-256: 55d47ba2db7d6a4c3458cfb3c6ed1ce7777ba4a3d0e1b95560047517e2a1c64b
+Trainer SHA-256 at suite build: ff241e496825019150590ee7f8f775f51be3b150bf8b570d05739ec17cde2b9c
+This suite predates the final-validation Abort checks; see the separate focused Release results.
+
+Test Suite 'All tests' started at 2026-10-09 23:13:03.820.
+Test Suite 'TextureStudioTests.xctest' started at 2026-10-09 23:13:03.820.
+Test Suite 'BlenderMaterialSetupTests' started at 2026-10-09 23:13:03.820.
+Test Case '-[TextureStudioTests.BlenderMaterialSetupTests testNativeExportGuideAndNodeMetadataPreserveMapPrecisionAndPhysicalScales]' started.
+Test Case '-[TextureStudioTests.BlenderMaterialSetupTests testNativeExportGuideAndNodeMetadataPreserveMapPrecisionAndPhysicalScales]' passed (0.003 seconds).
+Test Suite 'BlenderMaterialSetupTests' passed at 2026-10-09 23:13:03.825.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.003 (0.004) seconds
+Test Suite 'DatasetBrowserControlTests' started at 2026-10-09 23:13:03.825.
+Test Case '-[TextureStudioTests.DatasetBrowserControlTests testFolderAndCropArrowsSelectImagesAndExposeMapButtons]' started.
+Test Case '-[TextureStudioTests.DatasetBrowserControlTests testFolderAndCropArrowsSelectImagesAndExposeMapButtons]' passed (0.446 seconds).
+Test Case '-[TextureStudioTests.DatasetBrowserControlTests testFolderSelectionResetsUnavailableRoleAndColorVariant]' started.
+Test Case '-[TextureStudioTests.DatasetBrowserControlTests testFolderSelectionResetsUnavailableRoleAndColorVariant]' passed (0.005 seconds).
+Test Suite 'DatasetBrowserControlTests' passed at 2026-10-09 23:13:04.276.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.451 (0.452) seconds
+Test Suite 'DatasetManagementTests' started at 2026-10-09 23:13:04.277.
+Test Case '-[TextureStudioTests.DatasetManagementTests testChangingTrainingTargetDoesNotReloadOrReassignDataset]' started.
+Test Case '-[TextureStudioTests.DatasetManagementTests testChangingTrainingTargetDoesNotReloadOrReassignDataset]' passed (0.007 seconds).
+Test Case '-[TextureStudioTests.DatasetManagementTests testCreateRenameAndReopenKeepOneNamedLibraryEntry]' started.
+Test Case '-[TextureStudioTests.DatasetManagementTests testCreateRenameAndReopenKeepOneNamedLibraryEntry]' passed (0.017 seconds).
+Test Case '-[TextureStudioTests.DatasetManagementTests testDatasetSetupAndImportSheetsRenderAtUsableWindowSizes]' started.
+Test Case '-[TextureStudioTests.DatasetManagementTests testDatasetSetupAndImportSheetsRenderAtUsableWindowSizes]' passed (1.038 seconds).
+Test Case '-[TextureStudioTests.DatasetManagementTests testDeletionRejectsStaleHashAndPathsOutsideOwnedScope]' started.
+Test Case '-[TextureStudioTests.DatasetManagementTests testDeletionRejectsStaleHashAndPathsOutsideOwnedScope]' passed (0.004 seconds).
+Test Case '-[TextureStudioTests.DatasetManagementTests testFolderScanRetainsResolutionEditsWithoutRepeatingScan]' started.
+Test Case '-[TextureStudioTests.DatasetManagementTests testFolderScanRetainsResolutionEditsWithoutRepeatingScan]' passed (0.169 seconds).
+Test Case '-[TextureStudioTests.DatasetManagementTests testLifecycleChangesReconnectDurableSourceBeforeEditingPreparedView]' started.
+Test Case '-[TextureStudioTests.DatasetManagementTests testLifecycleChangesReconnectDurableSourceBeforeEditingPreparedView]' passed (0.020 seconds).
+Test Case '-[TextureStudioTests.DatasetManagementTests testMetadataConflictKeepsDatasetAndEditorOpen]' started.
+Test Case '-[TextureStudioTests.DatasetManagementTests testMetadataConflictKeepsDatasetAndEditorOpen]' passed (0.013 seconds).
+Test Case '-[TextureStudioTests.DatasetManagementTests testNativeLifecycleKeepsOriginalBytes]' started.
+Test Case '-[TextureStudioTests.DatasetManagementTests testNativeLifecycleKeepsOriginalBytes]' passed (0.144 seconds).
+Test Case '-[TextureStudioTests.DatasetManagementTests testOpenFolderAndRestoreDoNotRequireModelCapabilities]' started.
+Test Case '-[TextureStudioTests.DatasetManagementTests testOpenFolderAndRestoreDoNotRequireModelCapabilities]' passed (0.017 seconds).
+Test Case '-[TextureStudioTests.DatasetManagementTests testOpeningFolderDuringRestoreIsQueuedAndSheetsHaveOneRoute]' started.
+Test Case '-[TextureStudioTests.DatasetManagementTests testOpeningFolderDuringRestoreIsQueuedAndSheetsHaveOneRoute]' passed (0.061 seconds).
+Test Case '-[TextureStudioTests.DatasetManagementTests testOwnedFolderTrashRejectsNewOriginalAddedAfterPlan]' started.
+Test Case '-[TextureStudioTests.DatasetManagementTests testOwnedFolderTrashRejectsNewOriginalAddedAfterPlan]' passed (0.006 seconds).
+Test Case '-[TextureStudioTests.DatasetManagementTests testRawFolderStartsSetupWithoutSendingItToDatasetReader]' started.
+Test Case '-[TextureStudioTests.DatasetManagementTests testRawFolderStartsSetupWithoutSendingItToDatasetReader]' passed (0.071 seconds).
+Test Case '-[TextureStudioTests.DatasetManagementTests testResolutionIsSavedWithDatasetAndNeverSilentlyReducedByCapabilities]' started.
+Test Case '-[TextureStudioTests.DatasetManagementTests testResolutionIsSavedWithDatasetAndNeverSilentlyReducedByCapabilities]' passed (0.021 seconds).
+Test Case '-[TextureStudioTests.DatasetManagementTests testTrainerExplainsWhenAllMaterialsAreExplicitlyHeldOut]' started.
+Test Case '-[TextureStudioTests.DatasetManagementTests testTrainerExplainsWhenAllMaterialsAreExplicitlyHeldOut]' passed (0.108 seconds).
+Test Case '-[TextureStudioTests.DatasetManagementTests testTrashUsesVerifiedMetadataScopeAndClearsLibraryOnlyAfterSuccess]' started.
+Test Case '-[TextureStudioTests.DatasetManagementTests testTrashUsesVerifiedMetadataScopeAndClearsLibraryOnlyAfterSuccess]' passed (0.041 seconds).
+Test Suite 'DatasetManagementTests' passed at 2026-10-09 23:13:06.019.
+	 Executed 15 tests, with 0 failures (0 unexpected) in 1.736 (1.742) seconds
+Test Suite 'DiffuseRenderingTests' started at 2026-10-09 23:13:06.020.
+Test Case '-[TextureStudioTests.DiffuseRenderingTests testOptInBrownWallRAWHasFiniteDiffuseWithoutSaturatedRedTiles]' started.
+Test Case '-[TextureStudioTests.DiffuseRenderingTests testOptInBrownWallRAWHasFiniteDiffuseWithoutSaturatedRedTiles]' skipped (0.004 seconds).
+Test Case '-[TextureStudioTests.DiffuseRenderingTests testUniformHDRGainPreservesBasePhotoExposureAt2048]' started.
+Test Case '-[TextureStudioTests.DiffuseRenderingTests testUniformHDRGainPreservesBasePhotoExposureAt2048]' passed (0.140 seconds).
+Test Suite 'DiffuseRenderingTests' passed at 2026-10-09 23:13:06.164.
+	 Executed 2 tests, with 1 test skipped and 0 failures (0 unexpected) in 0.143 (0.145) seconds
+Test Suite 'EngineResourceTests' started at 2026-10-09 23:13:06.165.
+Test Case '-[TextureStudioTests.EngineResourceTests testDepthCleanupRetainsAvailableSourceDetailThroughEightK]' started.
+Test Case '-[TextureStudioTests.EngineResourceTests testDepthCleanupRetainsAvailableSourceDetailThroughEightK]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.EngineResourceTests testEXRAdaptiveStripsKeepIdenticalFloatChannelsAndRowOrientation]' started.
+Test Case '-[TextureStudioTests.EngineResourceTests testEXRAdaptiveStripsKeepIdenticalFloatChannelsAndRowOrientation]' passed (0.032 seconds).
+Test Case '-[TextureStudioTests.EngineResourceTests testEXRStripUsesAvailableMemoryAndAccountsForPlanarOutput]' started.
+Test Case '-[TextureStudioTests.EngineResourceTests testEXRStripUsesAvailableMemoryAndAccountsForPlanarOutput]' passed (0.001 seconds).
+Test Suite 'EngineResourceTests' passed at 2026-10-09 23:13:06.200.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.034 (0.035) seconds
+Test Suite 'EngineTests' started at 2026-10-09 23:13:06.200.
+Test Case '-[TextureStudioTests.EngineTests testAppleHalfEXRAndFullEngineFlatMaterial]' started.
+Test Case '-[TextureStudioTests.EngineTests testAppleHalfEXRAndFullEngineFlatMaterial]' passed (0.271 seconds).
+Test Case '-[TextureStudioTests.EngineTests testDepthBitmapRowsAreTopDownWithoutAnExtraFlip]' started.
+Test Case '-[TextureStudioTests.EngineTests testDepthBitmapRowsAreTopDownWithoutAnExtraFlip]' passed (0.011 seconds).
+Test Case '-[TextureStudioTests.EngineTests testDepthOnlyCleanupReducesIsolatedSpikeAndRetainsStep]' started.
+Test Case '-[TextureStudioTests.EngineTests testDepthOnlyCleanupReducesIsolatedSpikeAndRetainsStep]' passed (0.083 seconds).
+Test Case '-[TextureStudioTests.EngineTests testDistancePlaneBecomesFlatWithoutAlbedoGeometry]' started.
+Test Case '-[TextureStudioTests.EngineTests testDistancePlaneBecomesFlatWithoutAlbedoGeometry]' passed (0.060 seconds).
+Test Case '-[TextureStudioTests.EngineTests testFloatEXRWritesTrue32BitChannelsAndPreservesSamplesAndOrientation]' started.
+Test Case '-[TextureStudioTests.EngineTests testFloatEXRWritesTrue32BitChannelsAndPreservesSamplesAndOrientation]' passed (0.013 seconds).
+Test Case '-[TextureStudioTests.EngineTests testInvalidGeometryAndDepthSamplesAreRejected]' started.
+Test Case '-[TextureStudioTests.EngineTests testInvalidGeometryAndDepthSamplesAreRejected]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.EngineTests testLowResolutionDepthUpsamplingDoesNotCreateRaisedBorderRim]' started.
+Test Case '-[TextureStudioTests.EngineTests testLowResolutionDepthUpsamplingDoesNotCreateRaisedBorderRim]' passed (0.139 seconds).
+Test Case '-[TextureStudioTests.EngineTests testMaterialNormalUsesExactlyFinalDepthHeightAndFloatExport]' started.
+Test Case '-[TextureStudioTests.EngineTests testMaterialNormalUsesExactlyFinalDepthHeightAndFloatExport]' passed (0.901 seconds).
+Test Case '-[TextureStudioTests.EngineTests testMaterialPhotoImportRetainsColourAuxiliariesButNeverReadsPortraitDepth]' started.
+Test Case '-[TextureStudioTests.EngineTests testMaterialPhotoImportRetainsColourAuxiliariesButNeverReadsPortraitDepth]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.EngineTests testMaximumCropKeepsLandscapeCentredAndSquare]' started.
+Test Case '-[TextureStudioTests.EngineTests testMaximumCropKeepsLandscapeCentredAndSquare]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.EngineTests testMaximumSquareMatchesAnalyticTrapezoid]' started.
+Test Case '-[TextureStudioTests.EngineTests testMaximumSquareMatchesAnalyticTrapezoid]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.EngineTests testNearFlatDistanceProtectionDoesNotStretchSmallResidualToFullRange]' started.
+Test Case '-[TextureStudioTests.EngineTests testNearFlatDistanceProtectionDoesNotStretchSmallResidualToFullRange]' passed (0.119 seconds).
+Test Case '-[TextureStudioTests.EngineTests testNormalKernelMatchesAnalyticNonflatOpenGLRamp]' started.
+Test Case '-[TextureStudioTests.EngineTests testNormalKernelMatchesAnalyticNonflatOpenGLRamp]' passed (0.011 seconds).
+Test Case '-[TextureStudioTests.EngineTests testOldSettingsDecodeWithSafeSurfaceHeightDefaults]' started.
+Test Case '-[TextureStudioTests.EngineTests testOldSettingsDecodeWithSafeSurfaceHeightDefaults]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.EngineTests testPhotoPatternsAndLegacyPortraitSettingsNeverBecomeDefaultRelief]' started.
+Test Case '-[TextureStudioTests.EngineTests testPhotoPatternsAndLegacyPortraitSettingsNeverBecomeDefaultRelief]' passed (0.063 seconds).
+Test Case '-[TextureStudioTests.EngineTests testProtectionPreservesRichDistanceAndArtistInverseHeightMaps]' started.
+Test Case '-[TextureStudioTests.EngineTests testProtectionPreservesRichDistanceAndArtistInverseHeightMaps]' passed (0.119 seconds).
+Test Case '-[TextureStudioTests.EngineTests testStereoCompanionsRequireDocumentedGroupMembership]' started.
+Test Case '-[TextureStudioTests.EngineTests testStereoCompanionsRequireDocumentedGroupMembership]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.EngineTests testSurfaceDepthKeepsBroadBumpInsteadOfOnlyEdgeHaloAndPreservesRawSamples]' started.
+Test Case '-[TextureStudioTests.EngineTests testSurfaceDepthKeepsBroadBumpInsteadOfOnlyEdgeHaloAndPreservesRawSamples]' passed (0.414 seconds).
+Test Case '-[TextureStudioTests.EngineTests testUserExampleAndExtremeTransformsLeaveNoBlankCropCorners]' started.
+Test Case '-[TextureStudioTests.EngineTests testUserExampleAndExtremeTransformsLeaveNoBlankCropCorners]' passed (0.001 seconds).
+Test Suite 'EngineTests' passed at 2026-10-09 23:13:08.415.
+	 Executed 19 tests, with 0 failures (0 unexpected) in 2.209 (2.215) seconds
+Test Suite 'HuggingFaceUploadTests' started at 2026-10-09 23:13:08.415.
+Test Case '-[TextureStudioTests.HuggingFaceUploadTests testAccountSetupIsInlineAndUploadPreferencesPersist]' started.
+Test Case '-[TextureStudioTests.HuggingFaceUploadTests testAccountSetupIsInlineAndUploadPreferencesPersist]' passed (0.014 seconds).
+Test Case '-[TextureStudioTests.HuggingFaceUploadTests testBlankDestinationUsesSavedAccountAndExactSelectedCheckpoint]' started.
+Test Case '-[TextureStudioTests.HuggingFaceUploadTests testBlankDestinationUsesSavedAccountAndExactSelectedCheckpoint]' passed (0.015 seconds).
+Test Case '-[TextureStudioTests.HuggingFaceUploadTests testRepositoryValidationRejectsAmbiguousOrUnsafeDestinations]' started.
+Test Case '-[TextureStudioTests.HuggingFaceUploadTests testRepositoryValidationRejectsAmbiguousOrUnsafeDestinations]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.HuggingFaceUploadTests testUploadPackagesTheSelectedModelDirectlyAndNeverUsesPreviousExport]' started.
+Test Case '-[TextureStudioTests.HuggingFaceUploadTests testUploadPackagesTheSelectedModelDirectlyAndNeverUsesPreviousExport]' passed (0.018 seconds).
+Test Case '-[TextureStudioTests.HuggingFaceUploadTests testUploadResponseMustMatchTheCapturedSelectedCheckpoint]' started.
+Test Case '-[TextureStudioTests.HuggingFaceUploadTests testUploadResponseMustMatchTheCapturedSelectedCheckpoint]' passed (0.018 seconds).
+Test Suite 'HuggingFaceUploadTests' passed at 2026-10-09 23:13:08.483.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.066 (0.068) seconds
+Test Suite 'InspectionClippingTests' started at 2026-10-09 23:13:08.483.
+Test Case '-[TextureStudioTests.InspectionClippingTests testMagnifiedAndPannedImageCannotPaintOverNeighboringHeadersOrPanes]' started.
+Test Case '-[TextureStudioTests.InspectionClippingTests testMagnifiedAndPannedImageCannotPaintOverNeighboringHeadersOrPanes]' passed (0.003 seconds).
+Test Case '-[TextureStudioTests.InspectionClippingTests testNativeSizeImageCannotPaintOverNeighboringHeadersOrPanes]' started.
+Test Case '-[TextureStudioTests.InspectionClippingTests testNativeSizeImageCannotPaintOverNeighboringHeadersOrPanes]' passed (0.003 seconds).
+Test Suite 'InspectionClippingTests' passed at 2026-10-09 23:13:08.489.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.006 (0.006) seconds
+Test Suite 'LinearColorFrameTests' started at 2026-10-09 23:13:08.490.
+Test Case '-[TextureStudioTests.LinearColorFrameTests testExposureAnchorDoesNotDivideBlackAndSupportsAllDarkSurfaces]' started.
+Test Case '-[TextureStudioTests.LinearColorFrameTests testExposureAnchorDoesNotDivideBlackAndSupportsAllDarkSurfaces]' passed (0.014 seconds).
+Test Case '-[TextureStudioTests.LinearColorFrameTests testExposureAnchorHandlesBothHDRBoostAndLowerExposure]' started.
+Test Case '-[TextureStudioTests.LinearColorFrameTests testExposureAnchorHandlesBothHDRBoostAndLowerExposure]' passed (0.016 seconds).
+Test Case '-[TextureStudioTests.LinearColorFrameTests testFrozenFrameKeepsFloatRangeChannelsAndRowOrder]' started.
+Test Case '-[TextureStudioTests.LinearColorFrameTests testFrozenFrameKeepsFloatRangeChannelsAndRowOrder]' passed (0.015 seconds).
+Test Suite 'LinearColorFrameTests' passed at 2026-10-09 23:13:08.536.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.045 (0.046) seconds
+Test Suite 'MachineResourcesTests' started at 2026-10-09 23:13:08.536.
+Test Case '-[TextureStudioTests.MachineResourcesTests test64GiBMacAllowsMoreThanHalfOfItsMemoryAndUsesAnAdaptiveDefault]' started.
+Test Case '-[TextureStudioTests.MachineResourcesTests test64GiBMacAllowsMoreThanHalfOfItsMemoryAndUsesAnAdaptiveDefault]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.MachineResourcesTests testExplicitAllocatorLimitIsRespectedAndDisabledAllocatorKeepsOSHeadroom]' started.
+Test Case '-[TextureStudioTests.MachineResourcesTests testExplicitAllocatorLimitIsRespectedAndDisabledAllocatorKeepsOSHeadroom]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.MachineResourcesTests testMemoryCeilingAndRecommendationScaleWithMachineCapacity]' started.
+Test Case '-[TextureStudioTests.MachineResourcesTests testMemoryCeilingAndRecommendationScaleWithMachineCapacity]' passed (0.001 seconds).
+Test Suite 'MachineResourcesTests' passed at 2026-10-09 23:13:08.539.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+Test Suite 'MapInspectionTests' started at 2026-10-09 23:13:08.539.
+Test Case '-[TextureStudioTests.MapInspectionTests testBatchExportRejectsChangedSourcesAndRemovesOnlyItsNewPartialFolder]' started.
+Test Case '-[TextureStudioTests.MapInspectionTests testBatchExportRejectsChangedSourcesAndRemovesOnlyItsNewPartialFolder]' passed (0.003 seconds).
+Test Case '-[TextureStudioTests.MapInspectionTests testDisplaySettingsStayWithExactComparisonAndNewFullSourceStartsNeutral]' started.
+Test Case '-[TextureStudioTests.MapInspectionTests testDisplaySettingsStayWithExactComparisonAndNewFullSourceStartsNeutral]' passed (0.003 seconds).
+Test Case '-[TextureStudioTests.MapInspectionTests testFloatEXRContrastIsAppliedBeforeDisplayQuantizationAndExportUsesPinnedHash]' started.
+Test Case '-[TextureStudioTests.MapInspectionTests testFloatEXRContrastIsAppliedBeforeDisplayQuantizationAndExportUsesPinnedHash]' passed (0.014 seconds).
+Test Case '-[TextureStudioTests.MapInspectionTests testLinkedViewportUsesNormalizedPanAndRetinaDevicePixelZoom]' started.
+Test Case '-[TextureStudioTests.MapInspectionTests testLinkedViewportUsesNormalizedPanAndRetinaDevicePixelZoom]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.MapInspectionTests testMissingReconstructedPreviewDoesNotClassifyExistingOriginalAsMissing]' started.
+Test Case '-[TextureStudioTests.MapInspectionTests testMissingReconstructedPreviewDoesNotClassifyExistingOriginalAsMissing]' passed (0.013 seconds).
+Test Case '-[TextureStudioTests.MapInspectionTests testNestedInspectorCacheMatchingHonorsFolderBoundaries]' started.
+Test Case '-[TextureStudioTests.MapInspectionTests testNestedInspectorCacheMatchingHonorsFolderBoundaries]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.MapInspectionTests testOnlyMissingSourcesAreClassifiedForRemoval]' started.
+Test Case '-[TextureStudioTests.MapInspectionTests testOnlyMissingSourcesAreClassifiedForRemoval]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.MapInspectionTests testOriginalAndBatchExportsDoNotRequireDisplayDecodingAndKeepExactBytes]' started.
+Test Case '-[TextureStudioTests.MapInspectionTests testOriginalAndBatchExportsDoNotRequireDisplayDecodingAndKeepExactBytes]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.MapInspectionTests testPhotoDisplayHonorsWideGamutProfileWhileNumericCodesStayUnmanaged]' started.
+Test Case '-[TextureStudioTests.MapInspectionTests testPhotoDisplayHonorsWideGamutProfileWhileNumericCodesStayUnmanaged]' passed (0.007 seconds).
+Test Case '-[TextureStudioTests.MapInspectionTests testPNGFullDimensionsAndOriginalBytesRemainIntact]' started.
+Test Case '-[TextureStudioTests.MapInspectionTests testPNGFullDimensionsAndOriginalBytesRemainIntact]' passed (0.036 seconds).
+Test Case '-[TextureStudioTests.MapInspectionTests testReferenceAndAllExplicitModelCandidatesAreInitiallyVisible]' started.
+Test Case '-[TextureStudioTests.MapInspectionTests testReferenceAndAllExplicitModelCandidatesAreInitiallyVisible]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.MapInspectionTests testReviewDisplayChoicesSurviveReopeningAndClampInvalidStoredValues]' started.
+Test Case '-[TextureStudioTests.MapInspectionTests testReviewDisplayChoicesSurviveReopeningAndClampInvalidStoredValues]' passed (0.003 seconds).
+Test Case '-[TextureStudioTests.MapInspectionTests testSavedVisibilityCannotHideTheRealSourceReferenceOrReplaceItWithABasePrediction]' started.
+Test Case '-[TextureStudioTests.MapInspectionTests testSavedVisibilityCannotHideTheRealSourceReferenceOrReplaceItWithABasePrediction]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.MapInspectionTests testTrainingGridReconstructionPurgesTemporaryBytesAndExportsOriginalSource]' started.
+Test Case '-[TextureStudioTests.MapInspectionTests testTrainingGridReconstructionPurgesTemporaryBytesAndExportsOriginalSource]' passed (0.015 seconds).
+Test Case '-[TextureStudioTests.MapInspectionTests testVisibleMapPreferencesAreScopedToExactCandidateIdentitiesAndFiles]' started.
+Test Case '-[TextureStudioTests.MapInspectionTests testVisibleMapPreferencesAreScopedToExactCandidateIdentitiesAndFiles]' passed (0.001 seconds).
+Test Suite 'MapInspectionTests' passed at 2026-10-09 23:13:08.645.
+	 Executed 15 tests, with 0 failures (0 unexpected) in 0.102 (0.106) seconds
+Test Suite 'MaterialModelMapsTests' started at 2026-10-09 23:13:08.645.
+Test Case '-[TextureStudioTests.MaterialModelMapsTests testModelGridMismatchFailsInsteadOfResizingPrediction]' started.
+Test Case '-[TextureStudioTests.MaterialModelMapsTests testModelGridMismatchFailsInsteadOfResizingPrediction]' passed (0.035 seconds).
+Test Case '-[TextureStudioTests.MaterialModelMapsTests testSelectedRoughnessAndNormalRunSequentiallyOnIdenticalPreparedDiffuseAndCacheAllModels]' started.
+Test Case '-[TextureStudioTests.MaterialModelMapsTests testSelectedRoughnessAndNormalRunSequentiallyOnIdenticalPreparedDiffuseAndCacheAllModels]' passed (0.829 seconds).
+Test Case '-[TextureStudioTests.MaterialModelMapsTests testTargetRegistriesKeepThreeIndependentSelectedModels]' started.
+Test Case '-[TextureStudioTests.MaterialModelMapsTests testTargetRegistriesKeepThreeIndependentSelectedModels]' passed (0.003 seconds).
+Test Suite 'MaterialModelMapsTests' passed at 2026-10-09 23:13:09.513.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.867 (0.868) seconds
+Test Suite 'MaterialRenderCacheTests' started at 2026-10-09 23:13:09.513.
+Test Case '-[TextureStudioTests.MaterialRenderCacheTests testCacheFreezesNativeFloatMapsAndRemainsIndependentOfOriginalGraphFile]' started.
+Test Case '-[TextureStudioTests.MaterialRenderCacheTests testCacheFreezesNativeFloatMapsAndRemainsIndependentOfOriginalGraphFile]' passed (0.057 seconds).
+Test Case '-[TextureStudioTests.MaterialRenderCacheTests testFloat32MaterialExportCopiesCachedImageBytesExactlyAndUpdatesMetadata]' started.
+Test Case '-[TextureStudioTests.MaterialRenderCacheTests testFloat32MaterialExportCopiesCachedImageBytesExactlyAndUpdatesMetadata]' passed (0.053 seconds).
+Test Case '-[TextureStudioTests.MaterialRenderCacheTests testHalfFloatExportConvertsExistingMapsWithoutChangingFloat32Cache]' started.
+Test Case '-[TextureStudioTests.MaterialRenderCacheTests testHalfFloatExportConvertsExistingMapsWithoutChangingFloat32Cache]' passed (0.097 seconds).
+Test Case '-[TextureStudioTests.MaterialRenderCacheTests testReleasingLastOwnerRemovesOnlyItsTemporaryCache]' started.
+Test Case '-[TextureStudioTests.MaterialRenderCacheTests testReleasingLastOwnerRemovesOnlyItsTemporaryCache]' passed (0.045 seconds).
+Test Case '-[TextureStudioTests.MaterialRenderCacheTests testRenderKeyIgnoresStoragePrecisionOnly]' started.
+Test Case '-[TextureStudioTests.MaterialRenderCacheTests testRenderKeyIgnoresStoragePrecisionOnly]' passed (0.001 seconds).
+Test Suite 'MaterialRenderCacheTests' passed at 2026-10-09 23:13:09.767.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.253 (0.254) seconds
+Test Suite 'MaterialSelectionTests' started at 2026-10-09 23:13:09.768.
+Test Case '-[TextureStudioTests.MaterialSelectionTests testAttachedHeightPreservesItsNumericAmplitudeThroughStudio]' started.
+Test Case '-[TextureStudioTests.MaterialSelectionTests testAttachedHeightPreservesItsNumericAmplitudeThroughStudio]' passed (1.605 seconds).
+Test Case '-[TextureStudioTests.MaterialSelectionTests testMaterialCheckpointActivatesAndPinsRecipeIdentity]' started.
+Test Case '-[TextureStudioTests.MaterialSelectionTests testMaterialCheckpointActivatesAndPinsRecipeIdentity]' passed (0.013 seconds).
+Test Case '-[TextureStudioTests.MaterialSelectionTests testNativeAdapterRetainsItsExactCustomBaseAcrossReopenAndStudioSelection]' started.
+Test Case '-[TextureStudioTests.MaterialSelectionTests testNativeAdapterRetainsItsExactCustomBaseAcrossReopenAndStudioSelection]' passed (0.113 seconds).
+Test Case '-[TextureStudioTests.MaterialSelectionTests testSelectingFullCheckpointWritesExactRuntimeAndIdentity]' started.
+Test Case '-[TextureStudioTests.MaterialSelectionTests testSelectingFullCheckpointWritesExactRuntimeAndIdentity]' passed (0.005 seconds).
+Test Suite 'MaterialSelectionTests' passed at 2026-10-09 23:13:11.505.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 1.736 (1.737) seconds
+Test Suite 'MaterialSidebarTests' started at 2026-10-09 23:13:11.505.
+Test Case '-[TextureStudioTests.MaterialSidebarTests testDatasetBrowserHasNoAppKitTableDragSelectionHandler]' started.
+Test Case '-[TextureStudioTests.MaterialSidebarTests testDatasetBrowserHasNoAppKitTableDragSelectionHandler]' passed (0.077 seconds).
+Test Case '-[TextureStudioTests.MaterialSidebarTests testKeyboardSelectionHandlesEmptyRowsAndRemovedSelection]' started.
+Test Case '-[TextureStudioTests.MaterialSidebarTests testKeyboardSelectionHandlesEmptyRowsAndRemovedSelection]' passed (0.001 seconds).
+Test Suite 'MaterialSidebarTests' passed at 2026-10-09 23:13:11.584.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.078 (0.079) seconds
+Test Suite 'MaterialToolRoutingTests' started at 2026-10-09 23:13:11.584.
+Test Case '-[TextureStudioTests.MaterialToolRoutingTests testInstalledChildFindsItsParentStudioAndEmbeddedSiblings]' started.
+Test Case '-[TextureStudioTests.MaterialToolRoutingTests testInstalledChildFindsItsParentStudioAndEmbeddedSiblings]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.MaterialToolRoutingTests testSeparatelyCopiedToolRetainsSiblingFallback]' started.
+Test Case '-[TextureStudioTests.MaterialToolRoutingTests testSeparatelyCopiedToolRetainsSiblingFallback]' passed (0.001 seconds).
+Test Suite 'MaterialToolRoutingTests' passed at 2026-10-09 23:13:11.588.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.003 (0.004) seconds
+Test Suite 'MaterialTrainingHandoffTests' started at 2026-10-09 23:13:11.588.
+Test Case '-[TextureStudioTests.MaterialTrainingHandoffTests testReadRejectsUnknownSchemaRemotePathsAndInvalidTrainingSettings]' started.
+Test Case '-[TextureStudioTests.MaterialTrainingHandoffTests testReadRejectsUnknownSchemaRemotePathsAndInvalidTrainingSettings]' passed (0.003 seconds).
+Test Case '-[TextureStudioTests.MaterialTrainingHandoffTests testRoundTripCapturesExactCheckpointDatasetSelectionAndTrainingSettings]' started.
+Test Case '-[TextureStudioTests.MaterialTrainingHandoffTests testRoundTripCapturesExactCheckpointDatasetSelectionAndTrainingSettings]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.MaterialTrainingHandoffTests testTemporaryCleanupKeepsSavedCopiesAndUnrelatedFiles]' started.
+Test Case '-[TextureStudioTests.MaterialTrainingHandoffTests testTemporaryCleanupKeepsSavedCopiesAndUnrelatedFiles]' passed (0.002 seconds).
+Test Suite 'MaterialTrainingHandoffTests' passed at 2026-10-09 23:13:11.596.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.007 (0.008) seconds
+Test Suite 'ModelDecisionTests' started at 2026-10-09 23:13:11.596.
+Test Case '-[TextureStudioTests.ModelDecisionTests testBoundedImageAndRepeatableSystemOneRequest]' started.
+Test Case '-[TextureStudioTests.ModelDecisionTests testBoundedImageAndRepeatableSystemOneRequest]' passed (0.008 seconds).
+Test Case '-[TextureStudioTests.ModelDecisionTests testFixedProposalSchemaKeepsReviewableChoices]' started.
+Test Case '-[TextureStudioTests.ModelDecisionTests testFixedProposalSchemaKeepsReviewableChoices]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.ModelDecisionTests testInvalidProbabilitiesAndOversizedResponseAreRejected]' started.
+Test Case '-[TextureStudioTests.ModelDecisionTests testInvalidProbabilitiesAndOversizedResponseAreRejected]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.ModelDecisionTests testMLXRequires040AndRejectsGGUFFallbackMetadata]' started.
+Test Case '-[TextureStudioTests.ModelDecisionTests testMLXRequires040AndRejectsGGUFFallbackMetadata]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.ModelDecisionTests testOfflineAndMissingExactModelAreRecoverable]' started.
+Test Case '-[TextureStudioTests.ModelDecisionTests testOfflineAndMissingExactModelAreRecoverable]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.ModelDecisionTests testPairedQualityReviewUsesAlignedNativeDetailCropsAndFixedQuestions]' started.
+Test Case '-[TextureStudioTests.ModelDecisionTests testPairedQualityReviewUsesAlignedNativeDetailCropsAndFixedQuestions]' passed (0.024 seconds).
+Test Case '-[TextureStudioTests.ModelDecisionTests testPullCancellationAndExactTagRemoval]' started.
+Test Case '-[TextureStudioTests.ModelDecisionTests testPullCancellationAndExactTagRemoval]' passed (0.141 seconds).
+Test Case '-[TextureStudioTests.ModelDecisionTests testQualityReviewUsesExistingLocalModelAndReturnsAdvisoryResult]' started.
+Test Case '-[TextureStudioTests.ModelDecisionTests testQualityReviewUsesExistingLocalModelAndReturnsAdvisoryResult]' passed (0.003 seconds).
+Test Case '-[TextureStudioTests.ModelDecisionTests testQualitySchemaValidatesScoresAndKeepsAmbiguousRecommendationsInReview]' started.
+Test Case '-[TextureStudioTests.ModelDecisionTests testQualitySchemaValidatesScoresAndKeepsAmbiguousRecommendationsInReview]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.ModelDecisionTests testRemoteModelAliasIsRejectedBeforeSendingAPhoto]' started.
+Test Case '-[TextureStudioTests.ModelDecisionTests testRemoteModelAliasIsRejectedBeforeSendingAPhoto]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.ModelDecisionTests testRunnerRejectionReportsUnsupportedAndNeverChangesModel]' started.
+Test Case '-[TextureStudioTests.ModelDecisionTests testRunnerRejectionReportsUnsupportedAndNeverChangesModel]' passed (0.110 seconds).
+Test Case '-[TextureStudioTests.ModelDecisionTests testValidatedLocalDecisionRunsWithoutHardwareAdmissionCheck]' started.
+Test Case '-[TextureStudioTests.ModelDecisionTests testValidatedLocalDecisionRunsWithoutHardwareAdmissionCheck]' passed (0.005 seconds).
+Test Case '-[TextureStudioTests.ModelDecisionTests testWrongModelAndUnknownActionsAreRejected]' started.
+Test Case '-[TextureStudioTests.ModelDecisionTests testWrongModelAndUnknownActionsAreRejected]' passed (0.004 seconds).
+Test Suite 'ModelDecisionTests' passed at 2026-10-09 23:13:11.902.
+	 Executed 13 tests, with 0 failures (0 unexpected) in 0.302 (0.306) seconds
+Test Suite 'ModelManagerTests' started at 2026-10-09 23:13:11.903.
+Test Case '-[TextureStudioTests.ModelManagerTests testAmbiguousOutputRequiresChoiceAndPersistsChoice]' started.
+Test Case '-[TextureStudioTests.ModelManagerTests testAmbiguousOutputRequiresChoiceAndPersistsChoice]' passed (0.010 seconds).
+Test Case '-[TextureStudioTests.ModelManagerTests testCancellationLeavesNoManagedModelOrPartialArtifacts]' started.
+Test Case '-[TextureStudioTests.ModelManagerTests testCancellationLeavesNoManagedModelOrPartialArtifacts]' passed (0.041 seconds).
+Test Case '-[TextureStudioTests.ModelManagerTests testCatalogContainsOnlyDeveloperCoreML]' started.
+Test Case '-[TextureStudioTests.ModelManagerTests testCatalogContainsOnlyDeveloperCoreML]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.ModelManagerTests testChecksumFailureDoesNotPublishAndRetrySucceeds]' started.
+Test Case '-[TextureStudioTests.ModelManagerTests testChecksumFailureDoesNotPublishAndRetrySucceeds]' passed (0.058 seconds).
+Test Case '-[TextureStudioTests.ModelManagerTests testCoreMLValidationFailureDoesNotPublish]' started.
+Test Case '-[TextureStudioTests.ModelManagerTests testCoreMLValidationFailureDoesNotPublish]' passed (0.027 seconds).
+Test Case '-[TextureStudioTests.ModelManagerTests testExternalModelIsUnlinkedAndMovedPathCanBeReconnected]' started.
+Test Case '-[TextureStudioTests.ModelManagerTests testExternalModelIsUnlinkedAndMovedPathCanBeReconnected]' passed (0.112 seconds).
+Test Case '-[TextureStudioTests.ModelManagerTests testManagedDirectorySymlinkCannotDeleteItsExternalTarget]' started.
+Test Case '-[TextureStudioTests.ModelManagerTests testManagedDirectorySymlinkCannotDeleteItsExternalTarget]' passed (0.007 seconds).
+Test Case '-[TextureStudioTests.ModelManagerTests testManagedDownloadRemovalPreservesUnrelatedFiles]' started.
+Test Case '-[TextureStudioTests.ModelManagerTests testManagedDownloadRemovalPreservesUnrelatedFiles]' passed (0.039 seconds).
+Test Case '-[TextureStudioTests.ModelManagerTests testMovedManagedModelCanReconnectWithoutRedownloadOrDeletingIt]' started.
+Test Case '-[TextureStudioTests.ModelManagerTests testMovedManagedModelCanReconnectWithoutRedownloadOrDeletingIt]' passed (0.121 seconds).
+Test Case '-[TextureStudioTests.ModelManagerTests testOpeningLibraryNeverDeletesUnknownModelFiles]' started.
+Test Case '-[TextureStudioTests.ModelManagerTests testOpeningLibraryNeverDeletesUnknownModelFiles]' passed (0.005 seconds).
+Test Case '-[TextureStudioTests.ModelManagerTests testRawFloat16ImageDecodingKeepsNativeValuesWithRowPadding]' started.
+Test Case '-[TextureStudioTests.ModelManagerTests testRawFloat16ImageDecodingKeepsNativeValuesWithRowPadding]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.ModelManagerTests testRawTensorDecodingHonorsStridesAndKeepsValues]' started.
+Test Case '-[TextureStudioTests.ModelManagerTests testRawTensorDecodingHonorsStridesAndKeepsValues]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.ModelManagerTests testTamperedManagedRecordCannotDeleteExternalModel]' started.
+Test Case '-[TextureStudioTests.ModelManagerTests testTamperedManagedRecordCannotDeleteExternalModel]' passed (0.005 seconds).
+Test Suite 'ModelManagerTests' passed at 2026-10-09 23:13:12.339.
+	 Executed 13 tests, with 0 failures (0 unexpected) in 0.430 (0.437) seconds
+Test Suite 'NativeAuxiliaryExporterTests' started at 2026-10-09 23:13:12.340.
+Test Case '-[TextureStudioTests.NativeAuxiliaryExporterTests testCancelledStartDoesNotReadSourceOrPublishFolder]' started.
+Test Case '-[TextureStudioTests.NativeAuxiliaryExporterTests testCancelledStartDoesNotReadSourceOrPublishFolder]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.NativeAuxiliaryExporterTests testFloat32SpecialBitPatternsSurvivePaddingRemovalAndNPY]' started.
+Test Case '-[TextureStudioTests.NativeAuxiliaryExporterTests testFloat32SpecialBitPatternsSurvivePaddingRemovalAndNPY]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeAuxiliaryExporterTests testHalfPrecisionAndIntegerCodesAreNeverConverted]' started.
+Test Case '-[TextureStudioTests.NativeAuxiliaryExporterTests testHalfPrecisionAndIntegerCodesAreNeverConverted]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeAuxiliaryExporterTests testInvalidSourceDoesNotPublishOrLeaveStagingArtifacts]' started.
+Test Case '-[TextureStudioTests.NativeAuxiliaryExporterTests testInvalidSourceDoesNotPublishOrLeaveStagingArtifacts]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.NativeAuxiliaryExporterTests testNativeExportIsTransactionalAndLeavesSourceUntouched]' started.
+Test Case '-[TextureStudioTests.NativeAuxiliaryExporterTests testNativeExportIsTransactionalAndLeavesSourceUntouched]' passed (0.017 seconds).
+Test Case '-[TextureStudioTests.NativeAuxiliaryExporterTests testUnknownFormatsRemainOpaqueAndMalformedKnownBuffersAreRejected]' started.
+Test Case '-[TextureStudioTests.NativeAuxiliaryExporterTests testUnknownFormatsRemainOpaqueAndMalformedKnownBuffersAreRejected]' passed (0.001 seconds).
+Test Suite 'NativeAuxiliaryExporterTests' passed at 2026-10-09 23:13:12.365.
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.023 (0.025) seconds
+Test Suite 'NativeHuggingFaceServiceTests' started at 2026-10-09 23:13:12.365.
+Test Case '-[TextureStudioTests.NativeHuggingFaceServiceTests testAccountUsesDirectAuthenticatedAPIWithoutWorker]' started.
+Test Case '-[TextureStudioTests.NativeHuggingFaceServiceTests testAccountUsesDirectAuthenticatedAPIWithoutWorker]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeHuggingFaceServiceTests testCancelledAccountCannotPublishSuccessfulIgnoredCancellationResponse]' started.
+Test Case '-[TextureStudioTests.NativeHuggingFaceServiceTests testCancelledAccountCannotPublishSuccessfulIgnoredCancellationResponse]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeHuggingFaceServiceTests testCancelledInventoryCannotPublishIgnoredCancellationResponse]' started.
+Test Case '-[TextureStudioTests.NativeHuggingFaceServiceTests testCancelledInventoryCannotPublishIgnoredCancellationResponse]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeHuggingFaceServiceTests testCredentialDiscoveryUsesEnvironmentOrNativeKeychain]' started.
+Test Case '-[TextureStudioTests.NativeHuggingFaceServiceTests testCredentialDiscoveryUsesEnvironmentOrNativeKeychain]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeHuggingFaceServiceTests testDiscoveryMergesSavedAndRemoteModelsAndRetainsCatalogOnFailure]' started.
+Test Case '-[TextureStudioTests.NativeHuggingFaceServiceTests testDiscoveryMergesSavedAndRemoteModelsAndRetainsCatalogOnFailure]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.NativeHuggingFaceServiceTests testExplicitTransportCancellationIsNeverReportedAsMissingCredentials]' started.
+Test Case '-[TextureStudioTests.NativeHuggingFaceServiceTests testExplicitTransportCancellationIsNeverReportedAsMissingCredentials]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeHuggingFaceServiceTests testMissingTokenNeverStartsNetworkDiscovery]' started.
+Test Case '-[TextureStudioTests.NativeHuggingFaceServiceTests testMissingTokenNeverStartsNetworkDiscovery]' passed (0.001 seconds).
+Test Suite 'NativeHuggingFaceServiceTests' passed at 2026-10-09 23:13:12.375.
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.008 (0.010) seconds
+Test Suite 'NativeMaterialDatasetTests' started at 2026-10-09 23:13:12.375.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testCancellationBeforeNativeCommandDoesNotCreateDataset]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testCancellationBeforeNativeCommandDoesNotCreateDataset]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testCancelledParallelPreparationJoinsWritersAndRemovesOnlyItsStage]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testCancelledParallelPreparationJoinsWritersAndRemovesOnlyItsStage]' passed (5.042 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testCancellingSourceScanStopsAndJoinsReadersBeforeReturning]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testCancellingSourceScanStopsAndJoinsReadersBeforeReturning]' passed (0.024 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testColorProfilesStayInPNGAndLegacyMetadataCompactsWithoutChangingReviewBinding]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testColorProfilesStayInPNGAndLegacyMetadataCompactsWithoutChangingReviewBinding]' passed (0.473 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testCurrentSourceInventoryRefreshIsStableAcrossRepeatedReads]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testCurrentSourceInventoryRefreshIsStableAcrossRepeatedReads]' passed (0.050 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testFailedParallelDecodePreservesSourcesAndNeverPublishesPartialDataset]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testFailedParallelDecodePreservesSourcesAndNeverPublishesPartialDataset]' passed (1.122 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testIndependentPNGFixturesDecodeAllFiltersAndAdam7WithoutChangingCodes]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testIndependentPNGFixturesDecodeAllFiltersAndAdam7WithoutChangingCodes]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testLargeSourcePreparationBudgetIncludesMappedInputAndAllRetainedCrops]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testLargeSourcePreparationBudgetIncludesMappedInputAndAllRetainedCrops]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testModelBoundaryUsesPlanarFloatCodesAndKeepsIntegerSourceUntouched]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testModelBoundaryUsesPlanarFloatCodesAndKeepsIntegerSourceUntouched]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testNativeCreateEditConflictAndOriginalPreservation]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testNativeCreateEditConflictAndOriginalPreservation]' passed (0.007 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testNativeImportPrepareCleanupAndMissingSourceLifecycleKeepsOriginalCodes]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testNativeImportPrepareCleanupAndMissingSourceLifecycleKeepsOriginalCodes]' passed (0.533 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testNativePNGRejectsAmbiguousHeadersAndUnsupportedTransparency]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testNativePNGRejectsAmbiguousHeadersAndUnsupportedTransparency]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testNativeReadReconstructsSharedCropPlansAndRejectsPathEscape]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testNativeReadReconstructsSharedCropPlansAndRejectsPathEscape]' passed (0.356 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testParallelFolderScanPreservesNativeDimensionsVariantsAndImportProof]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testParallelFolderScanPreservesNativeDimensionsVariantsAndImportProof]' passed (0.147 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testParallelPreparationKeepsOrderedMetadataAndExactCropBytes]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testParallelPreparationKeepsOrderedMetadataAndExactCropBytes]' passed (2.853 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPNGNormalConventionChangesOnlyGreenIntegerCodes]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPNGNormalConventionChangesOnlyGreenIntegerCodes]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPNGPreservesNativeChannelsAndCodesThroughExactCrop]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPNGPreservesNativeChannelsAndCodesThroughExactCrop]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPNGRejectsChecksumChangesAndIncompleteStreams]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPNGRejectsChecksumChangesAndIncompleteStreams]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPreparationCommandRespectsUserWorkerLimit]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPreparationCommandRespectsUserWorkerLimit]' passed (1.789 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPreparationExportsOnlySelectedTargetAndDoesNotReadUnrelatedMaps]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPreparationExportsOnlySelectedTargetAndDoesNotReadUnrelatedMaps]' passed (1.078 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPreparationKeepsByteIdenticalColorVariantsAtDistinctPaths]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPreparationKeepsByteIdenticalColorVariantsAtDistinctPaths]' passed (0.724 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPreparationWorkersRespectCPUsAndWorkingMemory]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPreparationWorkersRespectCPUsAndWorkingMemory]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPreparedReuseSkipsUnchangedFileChecksumsAndDetectsChangedBytes]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testPreparedReuseSkipsUnchangedFileChecksumsAndDetectsChangedBytes]' passed (0.708 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testSourceScanReadsConcurrentlyPreservesOrderAndIsolatesCorruptFiles]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testSourceScanReadsConcurrentlyPreservesOrderAndIsolatesCorruptFiles]' passed (0.005 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testSourceScanWorkersRespectCPUAndMappedFileMemory]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testSourceScanWorkersRespectCPUAndMappedFileMemory]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testStagedMetadataJournalRejectsCorruptionAndRecoversAlreadyPublishedReplacement]' started.
+Test Case '-[TextureStudioTests.NativeMaterialDatasetTests testStagedMetadataJournalRejectsCorruptionAndRecoversAlreadyPublishedReplacement]' passed (0.006 seconds).
+Test Suite 'NativeMaterialDatasetTests' passed at 2026-10-09 23:13:27.308.
+	 Executed 26 tests, with 0 failures (0 unexpected) in 14.925 (14.932) seconds
+Test Suite 'NativeMaterialModelTests' started at 2026-10-09 23:13:27.308.
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testBothTrainingScopesUpdateAllLayersIncludingDecoderUpsamplingAtRank64]' started.
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testBothTrainingScopesUpdateAllLayersIncludingDecoderUpsamplingAtRank64]' passed (125.729 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testBoundedStagesMatchWholeGraphAndReuseOnlyUnchangedFeatures]' started.
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testBoundedStagesMatchWholeGraphAndReuseOnlyUnchangedFeatures]' passed (35.279 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testCachedProgramDoesNotRetainOwningModel]' started.
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testCachedProgramDoesNotRetainOwningModel]' passed (0.187 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testCapacityAdmissionRejectsBroadLegacyAdaptersBeforeGraphAllocation]' started.
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testCapacityAdmissionRejectsBroadLegacyAdaptersBeforeGraphAllocation]' passed (0.022 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testCheckpointedReverseMatchesMonolithicAdamForEveryFactorOverTwoSteps]' started.
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testCheckpointedReverseMatchesMonolithicAdamForEveryFactorOverTwoSteps]' passed (311.860 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testCompleteNativeGraphPreservesRectangleAndPredictsAllMapShapes]' started.
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testCompleteNativeGraphPreservesRectangleAndPredictsAllMapShapes]' passed (97.111 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testGraphResultCompactionPreservesStridedLogicalOrderAndFloat32Bits]' started.
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testGraphResultCompactionPreservesStridedLogicalOrderAndFloat32Bits]' passed (0.005 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testGraphResultsFollowRequestedTensorIdentitiesWithEqualShapes]' started.
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testGraphResultsFollowRequestedTensorIdentitiesWithEqualShapes]' passed (0.007 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testLoRAGradientAdamUpdateAndLossAreRealOnFullOperationSequence]' started.
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testLoRAGradientAdamUpdateAndLossAreRealOnFullOperationSequence]' passed (68.463 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testMalformedAdapterDimensionsFailBeforeGraphCompilation]' started.
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testMalformedAdapterDimensionsFailBeforeGraphCompilation]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testNearestNeighborUpsamplingPreservesFloatBitsAndSumsFourGradientCopies]' started.
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testNearestNeighborUpsamplingPreservesFloatBitsAndSumsFourGradientCopies]' passed (0.010 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testPinnedLayoutMatchesPublishedCheckpointTensorDescriptors]' started.
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testPinnedLayoutMatchesPublishedCheckpointTensorDescriptors]' passed (0.008 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testRejectsAlteredPixelGridAndMissingLearnedLayer]' started.
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testRejectsAlteredPixelGridAndMissingLearnedLayer]' passed (0.021 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testValidationDoesNotConstructAutodiffOrRequireAdapters]' started.
+Test Case '-[TextureStudioTests.NativeMaterialModelTests testValidationDoesNotConstructAutodiffOrRequireAdapters]' passed (34.593 seconds).
+Test Suite 'NativeMaterialModelTests' passed at 2026-10-09 23:24:40.608.
+	 Executed 14 tests, with 0 failures (0 unexpected) in 673.297 (673.301) seconds
+Test Suite 'NativeMaterialPackageTests' started at 2026-10-09 23:24:40.609.
+Test Case '-[TextureStudioTests.NativeMaterialPackageTests testPackageCarriesAllLicensesAndPreservesUnchangedSnapshotExactly]' started.
+Test Case '-[TextureStudioTests.NativeMaterialPackageTests testPackageCarriesAllLicensesAndPreservesUnchangedSnapshotExactly]' passed (0.043 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialPackageTests testRejectsChangedSidecarUnlistedFileMissingNoticeAndMismatchedFullPartner]' started.
+Test Case '-[TextureStudioTests.NativeMaterialPackageTests testRejectsChangedSidecarUnlistedFileMissingNoticeAndMismatchedFullPartner]' passed (0.063 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialPackageTests testWeightedMixtureMatchesSumOfNumericAdapterDeltasAndRejectsDifferentBase]' started.
+Test Case '-[TextureStudioTests.NativeMaterialPackageTests testWeightedMixtureMatchesSumOfNumericAdapterDeltasAndRejectsDifferentBase]' passed (0.002 seconds).
+Test Suite 'NativeMaterialPackageTests' passed at 2026-10-09 23:24:40.718.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.109 (0.109) seconds
+Test Suite 'NativeMaterialTrainerTests' started at 2026-10-09 23:24:40.718.
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testAbortBeforeTrainingDoesNotCreateOutput]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testAbortBeforeTrainingDoesNotCreateOutput]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testAbortFromFinalCheckpointEventKeepsCheckpointAndPreventsExport]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testAbortFromFinalCheckpointEventKeepsCheckpointAndPreventsExport]' passed (36.584 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testAllRequestedUpdatesRemainCompletedWhenLastStepCrossesDeadline]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testAllRequestedUpdatesRemainCompletedWhenLastStepCrossesDeadline]' passed (35.456 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testControlKeepsSnapshotSaveAndAbortSemanticsIndependent]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testControlKeepsSnapshotSaveAndAbortSemanticsIndependent]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testEXRStoresEveryFloat32BitAndTopLeftChannelWithoutNormalization]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testEXRStoresEveryFloat32BitAndTopLeftChannelWithoutNormalization]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testProductionExactGridTrainingResourceRegression]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testProductionExactGridTrainingResourceRegression]' skipped (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testRealTrainerUpdatesValidatesSnapshotsAndStopsWithCompleteNativePackage]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testRealTrainerUpdatesValidatesSnapshotsAndStopsWithCompleteNativePackage]' passed (33.897 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testStopDuringNumericStepFinishesItAndAbortDiscardsUnfinishedStep]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testStopDuringNumericStepFinishesItAndAbortDiscardsUnfinishedStep]' passed (68.197 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testTimeLimitAfterBaselineStartsNoUpdateAndSavesUnchangedCheckpoint]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testTimeLimitAfterBaselineStartsNoUpdateAndSavesUnchangedCheckpoint]' passed (33.570 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testTimeLimitDuringUpdateFinishesCurrentStepAndReportsDuration]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testTimeLimitDuringUpdateFinishesCurrentStepAndReportsDuration]' passed (36.419 seconds).
+Test Suite 'NativeMaterialTrainerTests' passed at 2026-10-09 23:28:44.849.
+	 Executed 10 tests, with 1 test skipped and 0 failures (0 unexpected) in 244.128 (244.131) seconds
+Test Suite 'NativeMaterialTransferTests' started at 2026-10-09 23:28:44.849.
+Test Case '-[TextureStudioTests.NativeMaterialTransferTests testBoundedMockDownloadChecksEveryDigestBeforePublishingOrReusingPackage]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTransferTests testBoundedMockDownloadChecksEveryDigestBeforePublishingOrReusingPackage]' passed (0.035 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialTransferTests testHTTPSBasicLFSUploadPublishesOnlyVerifiedFilesAndRegistersExactCommit]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTransferTests testHTTPSBasicLFSUploadPublishesOnlyVerifiedFilesAndRegistersExactCommit]' passed (0.130 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialTransferTests testMultipartLFSStreamsOriginalBytesAndRequiresAllReceipts]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTransferTests testMultipartLFSStreamsOriginalBytesAndRequiresAllReceipts]' passed (0.143 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialTransferTests testRejectsInsecureLFSURLDuplicateInventoryAndVisibilityMismatchBeforeCommit]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTransferTests testRejectsInsecureLFSURLDuplicateInventoryAndVisibilityMismatchBeforeCommit]' passed (0.170 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialTransferTests testStreamingSizeGateAndRedirectProtectionWithoutStartingNetworkTask]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTransferTests testStreamingSizeGateAndRedirectProtectionWithoutStartingNetworkTask]' passed (0.002 seconds).
+Test Suite 'NativeMaterialTransferTests' passed at 2026-10-09 23:28:45.331.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.479 (0.481) seconds
+Test Suite 'NativePNGTests' started at 2026-10-09 23:28:45.331.
+Test Case '-[TextureStudioTests.NativePNGTests testCroppedNormalComplementsOnlyGreenAtBothPrecisions]' started.
+Test Case '-[TextureStudioTests.NativePNGTests testCroppedNormalComplementsOnlyGreenAtBothPrecisions]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.NativePNGTests testEveryFilterAndAdam7PreserveEightAndSixteenBitIntegerChannels]' started.
+Test Case '-[TextureStudioTests.NativePNGTests testEveryFilterAndAdam7PreserveEightAndSixteenBitIntegerChannels]' passed (0.027 seconds).
+Test Case '-[TextureStudioTests.NativePNGTests testInvalidStorageAndUnknownFiltersFailBeforeUnsafeBufferAccess]' started.
+Test Case '-[TextureStudioTests.NativePNGTests testInvalidStorageAndUnknownFiltersFailBeforeUnsafeBufferAccess]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativePNGTests testNativeOperationsHonorTaskCancellation]' started.
+Test Case '-[TextureStudioTests.NativePNGTests testNativeOperationsHonorTaskCancellation]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativePNGTests testPlanarModelSamplesKeepExactFloatConversionAndRejectInvalidScalarOrAlpha]' started.
+Test Case '-[TextureStudioTests.NativePNGTests testPlanarModelSamplesKeepExactFloatConversionAndRejectInvalidScalarOrAlpha]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativePNGTests testStreamingCropRejectsCorruptionTruncationAndOutOfGridRegions]' started.
+Test Case '-[TextureStudioTests.NativePNGTests testStreamingCropRejectsCorruptionTruncationAndOutOfGridRegions]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativePNGTests testStreamingCropsMatchEveryFilterAndAdam7AtNativePrecision]' started.
+Test Case '-[TextureStudioTests.NativePNGTests testStreamingCropsMatchEveryFilterAndAdam7AtNativePrecision]' passed (0.051 seconds).
+Test Suite 'NativePNGTests' passed at 2026-10-09 23:28:45.416.
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.083 (0.085) seconds
+Test Suite 'NativeSafetensorsTests' started at 2026-10-09 23:28:45.416.
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testAllFloatingPointBitsRemainExact]' started.
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testAllFloatingPointBitsRemainExact]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testCancelledCheckpointInspectionDoesNotReadMissingFile]' started.
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testCancelledCheckpointInspectionDoesNotReadMissingFile]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testDuplicateKeysIncludingEscapedNamesAreRejected]' started.
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testDuplicateKeysIncludingEscapedNamesAreRejected]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testFullCheckpointInspectionAndImmutableSnapshot]' started.
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testFullCheckpointInspectionAndImmutableSnapshot]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testInvalidRangesDimensionsAndDtypesAreRejected]' started.
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testInvalidRangesDimensionsAndDtypesAreRejected]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testLoRAInspectionChecksIdentitiesShapesTargetsAndPrecision]' started.
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testLoRAInspectionChecksIdentitiesShapesTargetsAndPrecision]' passed (0.003 seconds).
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testMalformedNativeMaterialConfigurationIsRejected]' started.
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testMalformedNativeMaterialConfigurationIsRejected]' passed (0.004 seconds).
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testNativeWriterRoundTripsExactBitsAndPublishesAtomically]' started.
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testNativeWriterRoundTripsExactBitsAndPublishesAtomically]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testNonfiniteFloatEncodingsAreRejectedWithoutChangingBits]' started.
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testNonfiniteFloatEncodingsAreRejectedWithoutChangingBits]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testScalarAndEmptyTensorsAndTrailingHeaderPadding]' started.
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testScalarAndEmptyTensorsAndTrailingHeaderPadding]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testTruncationAndIncorrectSelectedHashAreRejected]' started.
+Test Case '-[TextureStudioTests.NativeSafetensorsTests testTruncationAndIncorrectSelectedHashAreRejected]' passed (0.001 seconds).
+Test Suite 'NativeSafetensorsTests' passed at 2026-10-09 23:28:45.437.
+	 Executed 11 tests, with 0 failures (0 unexpected) in 0.018 (0.020) seconds
+Test Suite 'NativeTorchCheckpointTests' started at 2026-10-09 23:28:45.437.
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testCancelledImportDoesNotParseOrReturnWeights]' started.
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testCancelledImportDoesNotParseOrReturnWeights]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testChannelLastAndContiguousSuffixViewsKeepEveryOriginalWord]' started.
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testChannelLastAndContiguousSuffixViewsKeepEveryOriginalWord]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testDeflatedZIPTensorViewGathersStridedOriginalStorageCodes]' started.
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testDeflatedZIPTensorViewGathersStridedOriginalStorageCodes]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testEmptyTensorRetainsShapeAndNoFabricatedBytes]' started.
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testEmptyTensorRetainsShapeAndNoFabricatedBytes]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testRejectsArbitraryPickleGlobalsAndStorageViewOutsideBounds]' started.
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testRejectsArbitraryPickleGlobalsAndStorageViewOutsideBounds]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testRejectsChangedChecksumExpectedDigestAndTruncatedArchive]' started.
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testRejectsChangedChecksumExpectedDigestAndTruncatedArchive]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testRejectsDuplicateStateKeysAndArchiveTraversal]' started.
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testRejectsDuplicateStateKeysAndArchiveTraversal]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testStoredStateDictionaryPreservesFloatAndIntegerBitsAndModuleMetadata]' started.
+Test Case '-[TextureStudioTests.NativeTorchCheckpointTests testStoredStateDictionaryPreservesFloatAndIntegerBitsAndModuleMetadata]' passed (0.001 seconds).
+Test Suite 'NativeTorchCheckpointTests' passed at 2026-10-09 23:28:45.445.
+	 Executed 8 tests, with 0 failures (0 unexpected) in 0.007 (0.008) seconds
+Test Suite 'NativeWorkbenchRoutingTests' started at 2026-10-09 23:28:45.445.
+Test Case '-[TextureStudioTests.NativeWorkbenchRoutingTests testCheckpointLibraryInspectionRunsNatively]' started.
+Test Case '-[TextureStudioTests.NativeWorkbenchRoutingTests testCheckpointLibraryInspectionRunsNatively]' passed (0.108 seconds).
+Test Case '-[TextureStudioTests.NativeWorkbenchRoutingTests testDatasetAndCapabilityWorkflowsRunNatively]' started.
+Test Case '-[TextureStudioTests.NativeWorkbenchRoutingTests testDatasetAndCapabilityWorkflowsRunNatively]' passed (0.014 seconds).
+Test Suite 'NativeWorkbenchRoutingTests' passed at 2026-10-09 23:28:45.568.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.122 (0.123) seconds
+Test Suite 'NumericFieldTests' started at 2026-10-09 23:28:45.569.
+Test Case '-[TextureStudioTests.NumericFieldTests testAdapterWeightsRetainSignedUnboundedValues]' started.
+Test Case '-[TextureStudioTests.NumericFieldTests testAdapterWeightsRetainSignedUnboundedValues]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NumericFieldTests testDecimalCommaAndWhitespaceCanBeEnteredDirectly]' started.
+Test Case '-[TextureStudioTests.NumericFieldTests testDecimalCommaAndWhitespaceCanBeEnteredDirectly]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NumericFieldTests testExternalResetReplacesIncompleteFocusedDraftAndOptionalFocalLength]' started.
+Test Case '-[TextureStudioTests.NumericFieldTests testExternalResetReplacesIncompleteFocusedDraftAndOptionalFocalLength]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NumericFieldTests testIncompleteAndNonfiniteDraftsDoNotBecomeSettings]' started.
+Test Case '-[TextureStudioTests.NumericFieldTests testIncompleteAndNonfiniteDraftsDoNotBecomeSettings]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NumericFieldTests testSliderChangeWhileTextFieldIsFocusedReplacesOldDraftBeforeSubmit]' started.
+Test Case '-[TextureStudioTests.NumericFieldTests testSliderChangeWhileTextFieldIsFocusedReplacesOldDraftBeforeSubmit]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NumericFieldTests testSmallPhysicalValuesAndScientificNotationKeepPrecision]' started.
+Test Case '-[TextureStudioTests.NumericFieldTests testSmallPhysicalValuesAndScientificNotationKeepPrecision]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.NumericFieldTests testTypingQuickCheckIntervalAcceptsWholeValueAndBoundaries]' started.
+Test Case '-[TextureStudioTests.NumericFieldTests testTypingQuickCheckIntervalAcceptsWholeValueAndBoundaries]' passed (0.001 seconds).
+Test Suite 'NumericFieldTests' passed at 2026-10-09 23:28:45.576.
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.005 (0.007) seconds
+Test Suite 'NumericStatisticsTests' started at 2026-10-09 23:28:45.576.
+Test Case '-[TextureStudioTests.NumericStatisticsTests testAccelerateOrderingMatchesScalarStatisticsAndPreservesSourceWords]' started.
+Test Case '-[TextureStudioTests.NumericStatisticsTests testAccelerateOrderingMatchesScalarStatisticsAndPreservesSourceWords]' passed (0.029 seconds).
+Test Case '-[TextureStudioTests.NumericStatisticsTests testEmptyAndSingletonArrays]' started.
+Test Case '-[TextureStudioTests.NumericStatisticsTests testEmptyAndSingletonArrays]' passed (0.001 seconds).
+Test Suite 'NumericStatisticsTests' passed at 2026-10-09 23:28:45.606.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 0.030 (0.030) seconds
+Test Suite 'PhotoEvidenceTests' started at 2026-10-09 23:28:45.606.
+Test Case '-[TextureStudioTests.PhotoEvidenceTests testExposureAndColorDifferencesAreCompensated]' started.
+Test Case '-[TextureStudioTests.PhotoEvidenceTests testExposureAndColorDifferencesAreCompensated]' passed (0.090 seconds).
+Test Case '-[TextureStudioTests.PhotoEvidenceTests testTexturelessViewDoesNotInventRegistrationEvidence]' started.
+Test Case '-[TextureStudioTests.PhotoEvidenceTests testTexturelessViewDoesNotInventRegistrationEvidence]' passed (0.038 seconds).
+Test Case '-[TextureStudioTests.PhotoEvidenceTests testTransparentCompanionHoleNeverReceivesBlendWeight]' started.
+Test Case '-[TextureStudioTests.PhotoEvidenceTests testTransparentCompanionHoleNeverReceivesBlendWeight]' passed (0.089 seconds).
+Test Case '-[TextureStudioTests.PhotoEvidenceTests testUnrelatedSurfaceCannotContribute]' started.
+Test Case '-[TextureStudioTests.PhotoEvidenceTests testUnrelatedSurfaceCannotContribute]' passed (0.073 seconds).
+Test Suite 'PhotoEvidenceTests' passed at 2026-10-09 23:28:45.897.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.290 (0.291) seconds
+Test Suite 'PreparationSettingsControlTests' started at 2026-10-09 23:28:45.897.
+Test Case '-[TextureStudioTests.PreparationSettingsControlTests testActualSettingsStepperChangesAndPersistsWorkerCount]' started.
+Test Case '-[TextureStudioTests.PreparationSettingsControlTests testActualSettingsStepperChangesAndPersistsWorkerCount]' passed (0.152 seconds).
+Test Suite 'PreparationSettingsControlTests' passed at 2026-10-09 23:28:46.050.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.152 (0.152) seconds
+Test Suite 'ReviewIdentityTests' started at 2026-10-09 23:28:46.050.
+Test Case '-[TextureStudioTests.ReviewIdentityTests testDeclaredReviewRolesIdentifyExactTrainingRunsAndRealReferences]' started.
+Test Case '-[TextureStudioTests.ReviewIdentityTests testDeclaredReviewRolesIdentifyExactTrainingRunsAndRealReferences]' passed (0.005 seconds).
+Test Case '-[TextureStudioTests.ReviewIdentityTests testExplicitRawReferencePathWinsOverAnEightBitPreview]' started.
+Test Case '-[TextureStudioTests.ReviewIdentityTests testExplicitRawReferencePathWinsOverAnEightBitPreview]' passed (0.003 seconds).
+Test Case '-[TextureStudioTests.ReviewIdentityTests testLongExportNamesKeepCheckpointIdentitySuffix]' started.
+Test Case '-[TextureStudioTests.ReviewIdentityTests testLongExportNamesKeepCheckpointIdentitySuffix]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.ReviewIdentityTests testNormalCropConventionSurvivesSavedReviewWithoutGlobalTarget]' started.
+Test Case '-[TextureStudioTests.ReviewIdentityTests testNormalCropConventionSurvivesSavedReviewWithoutGlobalTarget]' passed (0.004 seconds).
+Test Case '-[TextureStudioTests.ReviewIdentityTests testReferenceOmittedFromVariantsIsRecoveredOnlyFromAnExplicitMaterialPath]' started.
+Test Case '-[TextureStudioTests.ReviewIdentityTests testReferenceOmittedFromVariantsIsRecoveredOnlyFromAnExplicitMaterialPath]' passed (0.003 seconds).
+Test Case '-[TextureStudioTests.ReviewIdentityTests testSavedCheckpointRunWithUnderscoresDoesNotAccumulateDuplicateLabels]' started.
+Test Case '-[TextureStudioTests.ReviewIdentityTests testSavedCheckpointRunWithUnderscoresDoesNotAccumulateDuplicateLabels]' passed (0.005 seconds).
+Test Case '-[TextureStudioTests.ReviewIdentityTests testSavedReviewRetainsStructuredProvenanceAndOriginalBytes]' started.
+Test Case '-[TextureStudioTests.ReviewIdentityTests testSavedReviewRetainsStructuredProvenanceAndOriginalBytes]' passed (0.004 seconds).
+Test Case '-[TextureStudioTests.ReviewIdentityTests testSourceReferenceProvenanceAndFullOriginalActionSurviveSavingWithoutChangingFiles]' started.
+Test Case '-[TextureStudioTests.ReviewIdentityTests testSourceReferenceProvenanceAndFullOriginalActionSurviveSavingWithoutChangingFiles]' passed (0.009 seconds).
+Test Case '-[TextureStudioTests.ReviewIdentityTests testTrainingReviewRestoresExactGridAndSavesSourceTransforms]' started.
+Test Case '-[TextureStudioTests.ReviewIdentityTests testTrainingReviewRestoresExactGridAndSavesSourceTransforms]' passed (0.003 seconds).
+Test Case '-[TextureStudioTests.ReviewIdentityTests testUnknownNamesNeverInferAnArchitectureOrPredictionRole]' started.
+Test Case '-[TextureStudioTests.ReviewIdentityTests testUnknownNamesNeverInferAnArchitectureOrPredictionRole]' passed (0.002 seconds).
+Test Suite 'ReviewIdentityTests' passed at 2026-10-09 23:28:46.094.
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.041 (0.044) seconds
+Test Suite 'ReviewLayoutTests' started at 2026-10-09 23:28:46.094.
+Test Case '-[TextureStudioTests.ReviewLayoutTests testFourNativeImagePanesRetainSpaceForTheirModelHeaders]' started.
+Test Case '-[TextureStudioTests.ReviewLayoutTests testFourNativeImagePanesRetainSpaceForTheirModelHeaders]' passed (0.354 seconds).
+Test Suite 'ReviewLayoutTests' passed at 2026-10-09 23:28:46.449.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.354 (0.354) seconds
+Test Suite 'SpatialFusionTests' started at 2026-10-09 23:28:46.449.
+Test Case '-[TextureStudioTests.SpatialFusionTests testVisionFusesSameSurfaceAtDifferentResolutionExposureAndColor]' started.
+Test Case '-[TextureStudioTests.SpatialFusionTests testVisionFusesSameSurfaceAtDifferentResolutionExposureAndColor]' passed (0.717 seconds).
+Test Case '-[TextureStudioTests.SpatialFusionTests testVisionRegistersTranslationAndKeepsUncoveredEdgesExactlyPrimary]' started.
+Test Case '-[TextureStudioTests.SpatialFusionTests testVisionRegistersTranslationAndKeepsUncoveredEdgesExactlyPrimary]' passed (0.698 seconds).
+Test Case '-[TextureStudioTests.SpatialFusionTests testVisionRejectsUnrelatedSurfaceAndKeepsEveryPrimaryPixel]' started.
+Test Case '-[TextureStudioTests.SpatialFusionTests testVisionRejectsUnrelatedSurfaceAndKeepsEveryPrimaryPixel]' passed (0.682 seconds).
+Test Suite 'SpatialFusionTests' passed at 2026-10-09 23:28:48.546.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 2.096 (2.097) seconds
+Test Suite 'StudioWorkflowTests' started at 2026-10-09 23:28:48.546.
+Test Case '-[TextureStudioTests.StudioWorkflowTests testNativeMaterialIsReusedByInspectionExportAndPrecisionChanges]' started.
+Test Case '-[TextureStudioTests.StudioWorkflowTests testNativeMaterialIsReusedByInspectionExportAndPrecisionChanges]' passed (7.559 seconds).
+Test Case '-[TextureStudioTests.StudioWorkflowTests testStudioChoicesSurviveImportAndRelaunchWithoutSavingRecipe]' started.
+Test Case '-[TextureStudioTests.StudioWorkflowTests testStudioChoicesSurviveImportAndRelaunchWithoutSavingRecipe]' passed (0.043 seconds).
+Test Suite 'StudioWorkflowTests' passed at 2026-10-09 23:28:56.149.
+	 Executed 2 tests, with 0 failures (0 unexpected) in 7.602 (7.602) seconds
+Test Suite 'TrainingPreparationTests' started at 2026-10-09 23:28:56.149.
+Test Case '-[TextureStudioTests.TrainingPreparationTests testAbortCancelsPendingStopWithoutLoadingOrUploadingAnAdapter]' started.
+Test Case '-[TextureStudioTests.TrainingPreparationTests testAbortCancelsPendingStopWithoutLoadingOrUploadingAnAdapter]' passed (0.017 seconds).
+Test Case '-[TextureStudioTests.TrainingPreparationTests testAbortDuringDatasetPreparationPreventsTrainingFromLaunching]' started.
+Test Case '-[TextureStudioTests.TrainingPreparationTests testAbortDuringDatasetPreparationPreventsTrainingFromLaunching]' passed (0.017 seconds).
+Test Case '-[TextureStudioTests.TrainingPreparationTests testCheckpointRequestKeepsTrainingActiveAndRegistersSavedModel]' started.
+Test Case '-[TextureStudioTests.TrainingPreparationTests testCheckpointRequestKeepsTrainingActiveAndRegistersSavedModel]' passed (0.018 seconds).
+Test Case '-[TextureStudioTests.TrainingPreparationTests testExternallyDrivenTrainingStopAbortButtons]' started.
+Test Case '-[TextureStudioTests.TrainingPreparationTests testExternallyDrivenTrainingStopAbortButtons]' skipped (0.102 seconds).
+Test Case '-[TextureStudioTests.TrainingPreparationTests testLegacyPreparationWithUnusedMapsMustBeRegeneratedForSelectedTarget]' started.
+Test Case '-[TextureStudioTests.TrainingPreparationTests testLegacyPreparationWithUnusedMapsMustBeRegeneratedForSelectedTarget]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.TrainingPreparationTests testMismatchedMapGridCannotBecomeTrainingInput]' started.
+Test Case '-[TextureStudioTests.TrainingPreparationTests testMismatchedMapGridCannotBecomeTrainingInput]' passed (0.020 seconds).
+Test Case '-[TextureStudioTests.TrainingPreparationTests testMissingOnlyRemovalNeverRemovesExistingSource]' started.
+Test Case '-[TextureStudioTests.TrainingPreparationTests testMissingOnlyRemovalNeverRemovesExistingSource]' passed (0.014 seconds).
+Test Case '-[TextureStudioTests.TrainingPreparationTests testPreparationReportsParallelProgressAndIgnoresEventsAfterStopping]' started.
+Test Case '-[TextureStudioTests.TrainingPreparationTests testPreparationReportsParallelProgressAndIgnoresEventsAfterStopping]' passed (0.020 seconds).
+Test Case '-[TextureStudioTests.TrainingPreparationTests testPreparationUsesSupportedNativeCropGrid]' started.
+Test Case '-[TextureStudioTests.TrainingPreparationTests testPreparationUsesSupportedNativeCropGrid]' passed (0.020 seconds).
+Test Case '-[TextureStudioTests.TrainingPreparationTests testSaveRequestDuringModelSetupAbortsWithoutLoadingAnAdapter]' started.
+Test Case '-[TextureStudioTests.TrainingPreparationTests testSaveRequestDuringModelSetupAbortsWithoutLoadingAnAdapter]' passed (0.023 seconds).
+Test Case '-[TextureStudioTests.TrainingPreparationTests testSelectedCenterCropNeedsNoHeldOutMaterialToBeReady]' started.
+Test Case '-[TextureStudioTests.TrainingPreparationTests testSelectedCenterCropNeedsNoHeldOutMaterialToBeReady]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.TrainingPreparationTests testStopFinalizesOnlyAfterTrainingStartsAndAllowsFinalAdapterResult]' started.
+Test Case '-[TextureStudioTests.TrainingPreparationTests testStopFinalizesOnlyAfterTrainingStartsAndAllowsFinalAdapterResult]' passed (0.023 seconds).
+Test Case '-[TextureStudioTests.TrainingPreparationTests testTimeLimitedTrainingReportsPartialSavedCountsAndCleansPreparation]' started.
+Test Case '-[TextureStudioTests.TrainingPreparationTests testTimeLimitedTrainingReportsPartialSavedCountsAndCleansPreparation]' passed (0.023 seconds).
+Test Case '-[TextureStudioTests.TrainingPreparationTests testTrainingDispatchesExactGridThenPurgesStagingAndReconnectsSources]' started.
+Test Case '-[TextureStudioTests.TrainingPreparationTests testTrainingDispatchesExactGridThenPurgesStagingAndReconnectsSources]' passed (0.016 seconds).
+Test Suite 'TrainingPreparationTests' passed at 2026-10-09 23:28:56.471.
+	 Executed 14 tests, with 1 test skipped and 0 failures (0 unexpected) in 0.317 (0.322) seconds
+Test Suite 'WorkbenchComparisonTests' started at 2026-10-09 23:28:56.471.
+Test Case '-[TextureStudioTests.WorkbenchComparisonTests testComparisonReconstructsTrainingGridAndRetainsOnlyOriginalReferences]' started.
+Test Case '-[TextureStudioTests.WorkbenchComparisonTests testComparisonReconstructsTrainingGridAndRetainsOnlyOriginalReferences]' passed (0.022 seconds).
+Test Case '-[TextureStudioTests.WorkbenchComparisonTests testComparisonUsesSelectedSamplesVerifiedFullSourceAndKeepsCropCoordinates]' started.
+Test Case '-[TextureStudioTests.WorkbenchComparisonTests testComparisonUsesSelectedSamplesVerifiedFullSourceAndKeepsCropCoordinates]' passed (0.020 seconds).
+Test Case '-[TextureStudioTests.WorkbenchComparisonTests testDisablingBaseStillRequiresTwoMatchingCheckpoints]' started.
+Test Case '-[TextureStudioTests.WorkbenchComparisonTests testDisablingBaseStillRequiresTwoMatchingCheckpoints]' passed (0.110 seconds).
+Test Case '-[TextureStudioTests.WorkbenchComparisonTests testEverySelectedCheckpointIsInitiallyVisibleAndSourceCanBeEnabled]' started.
+Test Case '-[TextureStudioTests.WorkbenchComparisonTests testEverySelectedCheckpointIsInitiallyVisibleAndSourceCanBeEnabled]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.WorkbenchComparisonTests testOneCheckpointComparesWithHonestBaseAndLabelsSampleAndReference]' started.
+Test Case '-[TextureStudioTests.WorkbenchComparisonTests testOneCheckpointComparesWithHonestBaseAndLabelsSampleAndReference]' passed (0.024 seconds).
+Test Suite 'WorkbenchComparisonTests' passed at 2026-10-09 23:28:56.653.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.179 (0.181) seconds
+Test Suite 'WorkbenchInteractionTests' started at 2026-10-09 23:28:56.653.
+Test Case '-[TextureStudioTests.WorkbenchInteractionTests testAlreadyOpenTrainerQueuesAndUsesExactRequestedCheckpoint]' started.
+Test Case '-[TextureStudioTests.WorkbenchInteractionTests testAlreadyOpenTrainerQueuesAndUsesExactRequestedCheckpoint]' passed (0.025 seconds).
+Test Case '-[TextureStudioTests.WorkbenchInteractionTests testComparisonUsesSelectedDiffuseVariantWhenPrimaryInputIsAbsent]' started.
+Test Case '-[TextureStudioTests.WorkbenchInteractionTests testComparisonUsesSelectedDiffuseVariantWhenPrimaryInputIsAbsent]' passed (0.005 seconds).
+Test Case '-[TextureStudioTests.WorkbenchInteractionTests testDeveloperAutoUploadKeepsVisibilityPrivateUnlessChosen]' started.
+Test Case '-[TextureStudioTests.WorkbenchInteractionTests testDeveloperAutoUploadKeepsVisibilityPrivateUnlessChosen]' passed (0.007 seconds).
+Test Case '-[TextureStudioTests.WorkbenchInteractionTests testHandoffRejectsCheckpointWhoseBytesChanged]' started.
+Test Case '-[TextureStudioTests.WorkbenchInteractionTests testHandoffRejectsCheckpointWhoseBytesChanged]' passed (0.010 seconds).
+Test Case '-[TextureStudioTests.WorkbenchInteractionTests testLibraryRefinementAdoptsTheExactCheckpointAndOpensTrainer]' started.
+Test Case '-[TextureStudioTests.WorkbenchInteractionTests testLibraryRefinementAdoptsTheExactCheckpointAndOpensTrainer]' passed (0.004 seconds).
+Test Case '-[TextureStudioTests.WorkbenchInteractionTests testOpeningMapsStartsACleanReviewSession]' started.
+Test Case '-[TextureStudioTests.WorkbenchInteractionTests testOpeningMapsStartsACleanReviewSession]' passed (0.003 seconds).
+Test Case '-[TextureStudioTests.WorkbenchInteractionTests testSavedDecisionsRestoreWithoutManuallyReopeningTheSavedFile]' started.
+Test Case '-[TextureStudioTests.WorkbenchInteractionTests testSavedDecisionsRestoreWithoutManuallyReopeningTheSavedFile]' passed (0.005 seconds).
+Test Suite 'WorkbenchInteractionTests' passed at 2026-10-09 23:28:56.715.
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.060 (0.062) seconds
+Test Suite 'WorkbenchPreferencesTests' started at 2026-10-09 23:28:56.715.
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testCapabilityDiscoveryPreservesSupportedResolutionSelection]' started.
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testCapabilityDiscoveryPreservesSupportedResolutionSelection]' passed (0.109 seconds).
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testFormAndComparisonChoicesSaveWithoutStartingWorkerOrClosingWindow]' started.
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testFormAndComparisonChoicesSaveWithoutStartingWorkerOrClosingWindow]' passed (0.022 seconds).
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testPartialTrainingPreferencesKeepSupportedChoices]' started.
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testPartialTrainingPreferencesKeepSupportedChoices]' passed (0.006 seconds).
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testPreparationWorkersAdaptToFewerAvailableCores]' started.
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testPreparationWorkersAdaptToFewerAvailableCores]' passed (0.007 seconds).
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testPreparationWorkersDefaultToAvailableCoresAndSaveImmediately]' started.
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testPreparationWorkersDefaultToAvailableCoresAndSaveImmediately]' passed (0.010 seconds).
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testReopeningOnSmallerMacPreservesSettingsWithoutMemoryAdmissionAdaptation]' started.
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testReopeningOnSmallerMacPreservesSettingsWithoutMemoryAdmissionAdaptation]' passed (0.005 seconds).
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testRestoreKeepsSelectedCropAndCheckpointInsteadOfLastLoadedRow]' started.
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testRestoreKeepsSelectedCropAndCheckpointInsteadOfLastLoadedRow]' passed (0.015 seconds).
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testRuntimeAndUploadEditsSaveImmediately]' started.
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testRuntimeAndUploadEditsSaveImmediately]' passed (0.005 seconds).
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testStudioPreferencesRoundTripAndMissingFieldsKeepDefaultsAvailable]' started.
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testStudioPreferencesRoundTripAndMissingFieldsKeepDefaultsAvailable]' passed (0.003 seconds).
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testValidDatasetCanRunBeforeCapabilityDiscovery]' started.
+Test Case '-[TextureStudioTests.WorkbenchPreferencesTests testValidDatasetCanRunBeforeCapabilityDiscovery]' passed (0.004 seconds).
+Test Suite 'WorkbenchPreferencesTests' passed at 2026-10-09 23:28:56.905.
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.185 (0.190) seconds
+Test Suite 'WorkbenchReviewTests' started at 2026-10-09 23:28:56.905.
+Test Case '-[TextureStudioTests.WorkbenchReviewTests testLearnedHeightEXRMaterializationPreservesOrientationAndRawValues]' started.
+Test Case '-[TextureStudioTests.WorkbenchReviewTests testLearnedHeightEXRMaterializationPreservesOrientationAndRawValues]' passed (0.013 seconds).
+Test Case '-[TextureStudioTests.WorkbenchReviewTests testNativeEventLogKeepsUnicodeAndFinalCheckpointEvent]' started.
+Test Case '-[TextureStudioTests.WorkbenchReviewTests testNativeEventLogKeepsUnicodeAndFinalCheckpointEvent]' passed (0.002 seconds).
+Test Case '-[TextureStudioTests.WorkbenchReviewTests testNativeLifecycleCancelsPendingSaveAndReleasesOperation]' started.
+Test Case '-[TextureStudioTests.WorkbenchReviewTests testNativeLifecycleCancelsPendingSaveAndReleasesOperation]' passed (0.103 seconds).
+Test Case '-[TextureStudioTests.WorkbenchReviewTests testRuntimeReconnectKeepsExactSelectedCheckpointAndAdditionalMetadata]' started.
+Test Case '-[TextureStudioTests.WorkbenchReviewTests testRuntimeReconnectKeepsExactSelectedCheckpointAndAdditionalMetadata]' passed (0.004 seconds).
+Test Case '-[TextureStudioTests.WorkbenchReviewTests testRuntimeRefreshNeverCreatesOrRepairsAnUnselectedCorruptRegistry]' started.
+Test Case '-[TextureStudioTests.WorkbenchReviewTests testRuntimeRefreshNeverCreatesOrRepairsAnUnselectedCorruptRegistry]' passed (0.002 seconds).
+Test Suite 'WorkbenchReviewTests' passed at 2026-10-09 23:28:57.032.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.124 (0.126) seconds
+Test Suite 'WorkbenchTests' started at 2026-10-09 23:28:57.032.
+Test Case '-[TextureStudioTests.WorkbenchTests testMaterialCheckpointRecipeIsAnExplicitSource]' started.
+Test Case '-[TextureStudioTests.WorkbenchTests testMaterialCheckpointRecipeIsAnExplicitSource]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.WorkbenchTests testMaterialHeadHeightKeepsAmplitudeAndOutOfRangeSamples]' started.
+Test Case '-[TextureStudioTests.WorkbenchTests testMaterialHeadHeightKeepsAmplitudeAndOutOfRangeSamples]' passed (0.059 seconds).
+Test Case '-[TextureStudioTests.WorkbenchTests testProtocolBindsSelectedDatasetAndCheckpoint]' started.
+Test Case '-[TextureStudioTests.WorkbenchTests testProtocolBindsSelectedDatasetAndCheckpoint]' passed (0.001 seconds).
+Test Case '-[TextureStudioTests.WorkbenchTests testReviewRemembersSampleAndCandidateOnlyInsideTheirOwnManifest]' started.
+Test Case '-[TextureStudioTests.WorkbenchTests testReviewRemembersSampleAndCandidateOnlyInsideTheirOwnManifest]' passed (0.009 seconds).
+Test Case '-[TextureStudioTests.WorkbenchTests testSavedReviewsReopenDecisionsAndExactMapPaths]' started.
+Test Case '-[TextureStudioTests.WorkbenchTests testSavedReviewsReopenDecisionsAndExactMapPaths]' passed (0.003 seconds).
+Test Case '-[TextureStudioTests.WorkbenchTests testStudioInferenceDiffuseRetainsSixteenBitColorAndExactGrid]' started.
+Test Case '-[TextureStudioTests.WorkbenchTests testStudioInferenceDiffuseRetainsSixteenBitColorAndExactGrid]' passed (0.013 seconds).
+Test Suite 'WorkbenchTests' passed at 2026-10-09 23:28:57.119.
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.085 (0.087) seconds
+Test Suite 'WorkspaceTests' started at 2026-10-09 23:28:57.120.
+Test Case '-[TextureStudioTests.WorkspaceTests testAdviserCannotEnableBrightnessGeometry]' started.
+Test Case '-[TextureStudioTests.WorkspaceTests testAdviserCannotEnableBrightnessGeometry]' passed (0.011 seconds).
+Test Case '-[TextureStudioTests.WorkspaceTests testCancelledImportPreservesPreviousDocumentWithoutError]' started.
+Test Case '-[TextureStudioTests.WorkspaceTests testCancelledImportPreservesPreviousDocumentWithoutError]' passed (0.017 seconds).
+Test Case '-[TextureStudioTests.WorkspaceTests testDefaultUsesFlatSurfaceAndCustomCoreMLIsOptional]' started.
+Test Case '-[TextureStudioTests.WorkspaceTests testDefaultUsesFlatSurfaceAndCustomCoreMLIsOptional]' passed (0.011 seconds).
+Test Case '-[TextureStudioTests.WorkspaceTests testOpeningRecipeClearsOtherPhotosReviewAndExportState]' started.
+Test Case '-[TextureStudioTests.WorkspaceTests testOpeningRecipeClearsOtherPhotosReviewAndExportState]' passed (0.035 seconds).
+Test Suite 'WorkspaceTests' passed at 2026-10-09 23:28:57.195.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.074 (0.075) seconds
+Test Suite 'TextureStudioTests.xctest' passed at 2026-10-09 23:28:57.195.
+	 Executed 295 tests, with 3 tests skipped and 0 failures (0 unexpected) in 953.265 (953.375) seconds
+Test Suite 'All tests' passed at 2026-10-09 23:28:57.196.
+	 Executed 295 tests, with 3 tests skipped and 0 failures (0 unexpected) in 953.265 (953.376) seconds
+** TEST SUCCEEDED **

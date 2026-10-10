@@ -218,7 +218,76 @@ final class NativeMaterialModel: @unchecked Sendable {
         return fused
     }
 
+    /// Keeps compiled code and compact immutable features, while every execution
+    /// owns a fresh symbolic graph. MPSGraph retains workspace until graph death.
     final class Program {
+        let width: Int, height: Int, target: String
+        let frozenStageCount: Int
+        private(set) var optimizerPrepared = false
+        private let baseWeights: [String: NativeTensor]
+        private let layers: [String: AdapterLayer]
+        private let architecture: Architecture
+        private let stagesEnabled: Bool
+        private let checkpointByteLimit: UInt64?
+        private let packages: NativeGraphPackageCache
+        private var features = NativeProgramFeatureCache()
+        private var checkpointNames: [String]?
+        typealias Execution = GraphProgram.Execution
+
+        init(model: NativeMaterialModel, width: Int, height: Int, target: String, staged: Bool = true, checkpointByteLimit: UInt64? = nil) throws {
+            guard ["height", "roughness", "normal"].contains(target), width >= 64, height >= 64,
+                  width % 64 == 0, height % 64 == 0 else { throw StudioError("Unsupported native material grid or target.") }
+            self.width = width; self.height = height; self.target = target
+            baseWeights = model.baseWeights; layers = model.layers; architecture = model.architecture
+            stagesEnabled = staged
+            let capacity = MachineResources.current.maximumTrainingBytes
+            // Spend only half the estimated spare capacity on checkpoints,
+            // leaving the rest for transient stage and compiler allocations.
+            // Frozen features retain their separate 2 GiB storage limit.
+            let workingBytes = NativeMaterialTrainer.estimatedWorkingBytes(model: model, size: max(width, height))
+            let spareBytes = capacity > workingBytes ? capacity - workingBytes : 0
+            let defaultCheckpointBytes = min(UInt64(6 * 1_073_741_824), min(capacity / 8, spareBytes / 2))
+            self.checkpointByteLimit = checkpointByteLimit ?? defaultCheckpointBytes
+            packages = try NativeGraphPackageCache()
+            frozenStageCount = try autoreleasepool {
+                try GraphProgram(baseWeights: model.baseWeights, layers: model.layers, architecture: model.architecture,
+                    adapters: model.adapterWeights, width: width, height: height, target: target, staged: staged, checkpointByteLimit: checkpointByteLimit).frozenStageCount
+            }
+        }
+        func execute(rgb: [Float], adapters: [String: NativeTensor], reference: [Float]? = nil,
+                     learningRate: Float? = nil, step: Int = 1, optimizerState: [String: NativeTensor] = [:],
+                     featureKey: String? = nil, checkCancellation: () throws -> Void = { try Task.checkCancellation() },
+                     onStage: (Int, Int) -> Void = { _, _ in }) throws -> Execution {
+            try checkCancellation()
+            return try autoreleasepool {
+                let engine = try GraphProgram(baseWeights: baseWeights, layers: layers, architecture: architecture,
+                    adapters: adapters, width: width, height: height, target: target, staged: stagesEnabled,
+                    packageCache: stagesEnabled ? packages : nil, checkpointByteLimit: checkpointByteLimit, checkpointNames: checkpointNames)
+                try engine.restoreFeatures(features)
+                // Transfer ownership so an evicted feature is released during
+                // execution instead of remaining in the wrapper's old cache.
+                features = NativeProgramFeatureCache()
+                defer {
+                    features = engine.savedFeatures()
+                    checkpointNames = engine.savedCheckpointNames
+                    optimizerPrepared = optimizerPrepared || engine.optimizerPrepared
+                }
+                return try engine.execute(rgb: rgb, adapters: adapters, reference: reference, learningRate: learningRate,
+                    step: step, optimizerState: optimizerState, featureKey: featureKey,
+                    checkCancellation: checkCancellation, onStage: onStage)
+            }
+        }
+    }
+
+    final class GraphProgram {
+        private let packageCache: NativeGraphPackageCache?
+        private var packageCompiler: GraphProgram?
+        private var compilerJobs = 0
+        private var compilerRetainedBytes: UInt64 = 0
+        private var checkpointNames: [String]?
+        fileprivate var savedCheckpointNames: [String]? { checkpointNames }
+        private var generatorAnchor: MPSGraphTensor?
+        private let checkpointByteLimit: UInt64?
         let graph = MPSGraph()
         let width: Int, height: Int, target: String
         let input: MPSGraphTensor
@@ -228,9 +297,10 @@ final class NativeMaterialModel: @unchecked Sendable {
         private let baseWeights: [String: NativeTensor]
         private let layers: [String: AdapterLayer]
         private let architecture: Architecture
-        private let freezesForTraining: Bool
-        private var optimizationProgram: Program?
         private var constants: [String: MPSGraphTensor] = [:]
+        private var auxiliaryFeeds: [MPSGraphTensor: NativeTensor] = [:]
+        private var immutableData: [MPSGraphTensor: MPSGraphTensorData]?
+        private var maskLabels: [String: MPSGraphTensor] = [:]
         private(set) var targetInput: MPSGraphTensor?
         private(set) var loss: MPSGraphTensor?
         private(set) var valueLoss: MPSGraphTensor?
@@ -242,24 +312,33 @@ final class NativeMaterialModel: @unchecked Sendable {
         private var optimizerStep: MPSGraphTensor?
         private var executableCache: [String: MPSGraphExecutable] = [:]
         private var frozenStages: [[(source: MPSGraphTensor, feed: MPSGraphTensor)]] = []
-        var frozenStageCount: Int { frozenStages.count + (optimizationProgram?.frozenStageCount ?? 0) }
-        var optimizerPrepared: Bool { learningRate != nil || optimizationProgram?.optimizerPrepared == true }
-        convenience init(model: NativeMaterialModel, width: Int, height: Int, target: String) throws {
-            try self.init(baseWeights: model.baseWeights, layers: model.layers, architecture: model.architecture,
-                adapters: model.adapterWeights, width: width, height: height, target: target, freezesForTraining: false)
+        private let stagesEnabled: Bool
+        private var dependencies: [MPSGraphTensor: Set<MPSGraphTensor>] = [:]
+        private var featureCache: [String: [MPSGraphTensor: MPSGraphTensorData]] = [:]
+        private var featureOrder: [String] = []
+        private var featureBytes: UInt64 = 0
+        private var finalLayerOnly: Bool {
+            !layers.isEmpty && layers.keys.allSatisfy { $0 == "ups.\(["normal": 1, "roughness": 2, "height": 3][target]!).model.10" }
         }
-        private init(baseWeights: [String: NativeTensor], layers: [String: AdapterLayer], architecture: Architecture,
-                     adapters: [String: NativeTensor], width: Int, height: Int, target: String, freezesForTraining: Bool) throws {
+        var frozenStageCount: Int { frozenStages.count }
+        var optimizerPrepared: Bool { learningRate != nil }
+        convenience init(model: NativeMaterialModel, width: Int, height: Int, target: String, staged: Bool = true, checkpointByteLimit: UInt64? = nil) throws {
+            try self.init(baseWeights: model.baseWeights, layers: model.layers, architecture: model.architecture,
+                adapters: model.adapterWeights, width: width, height: height, target: target, staged: staged, checkpointByteLimit: checkpointByteLimit)
+        }
+        fileprivate init(baseWeights: [String: NativeTensor], layers: [String: AdapterLayer], architecture: Architecture,
+                     adapters: [String: NativeTensor], width: Int, height: Int, target: String, staged: Bool = true,
+                     packageCache: NativeGraphPackageCache? = nil, checkpointByteLimit: UInt64? = nil, checkpointNames: [String]? = nil) throws {
             guard ["height", "roughness", "normal"].contains(target), width >= 64, height >= 64,
                   width % 64 == 0, height % 64 == 0 else { throw StudioError("Unsupported native material grid or target.") }
-            // Swift dictionaries/Data share immutable storage. The lazy
-            // optimizer graph neither copies the base bytes nor retains the
-            // owning model, which would form a cycle with its program cache.
+            // Share immutable base storage without retaining the model that
+            // owns this program, avoiding a cycle through the program cache.
             self.baseWeights = baseWeights; self.layers = layers; self.architecture = architecture
-            self.freezesForTraining = freezesForTraining
+            self.stagesEnabled = staged; self.packageCache = packageCache; self.checkpointByteLimit = checkpointByteLimit; self.checkpointNames = checkpointNames
             self.width = width; self.height = height; self.target = target
             input = graph.placeholder(shape: [1, 3, height, width].ns, dataType: .float32, name: "native_rgb")
-            for (name, tensor) in adapters {
+            for name in adapters.keys.sorted() {
+                let tensor = adapters[name]!
                 parameters[name] = tensor
                 parameterFeeds[name] = graph.placeholder(shape: tensor.shape.ns, dataType: .float32, name: name)
             }
@@ -282,7 +361,10 @@ final class NativeMaterialModel: @unchecked Sendable {
             if let value = constants[name] { return value }
             guard let weight = baseWeights[name], required == nil || weight.shape == required else { throw StudioError("Material model tensor missing or shape differs: \(name)") }
             let dtype: MPSDataType = weight.dtype == "I64" ? .int64 : weight.dtype == "I32" ? .int32 : .float32
-            var value = graph.constant(weight.bytes, shape: weight.shape.ns, dataType: dtype)
+            // Immutable weights are feeds, avoiding repeated serialization and
+            // constant folding of the entire base during every stage compile.
+            var value = graph.placeholder(shape: weight.shape.ns, dataType: dtype, name: name)
+            auxiliaryFeeds[value] = weight
             if name.hasSuffix(".weight"), let spec = layers[String(name.dropLast(7))] {
                 let layer = String(name.dropLast(7))
                 guard let a = parameterFeeds[layer + ".lora_A"], let b = parameterFeeds[layer + ".lora_B"] else { throw StudioError("Missing material LoRA factors.") }
@@ -312,6 +394,23 @@ final class NativeMaterialModel: @unchecked Sendable {
             else if baseWeights[name + ".bias"] != nil { result = add(result, try tensor(name + ".bias", shape: [weight.shape[0]])) }
             return result
         }
+        private func linearGeluBoundary(_ value: MPSGraphTensor, _ name: String) throws -> MPSGraphTensor {
+            if stagesEnabled, layers[name] != nil {
+                let preactivation = boundary(try linear(value, name))
+                let index = frozenStages.count
+                let result = boundary(gelu(preactivation))
+                geluStageInputs[index] = preactivation
+                return result
+            }
+            let preactivation = try linear(value, name)
+            let index = frozenStages.count
+            let result = boundary(gelu(preactivation))
+            if stagesEnabled, layers[name] == nil {
+                immutableLinearGeluStages[index] = ImmutableLinearGelu(input: value, preactivation: preactivation,
+                    weights: try tensor(name + ".weight"))
+            }
+            return result
+        }
         private func norm(_ value: MPSGraphTensor, _ name: String, epsilon: Double) throws -> MPSGraphTensor {
             let axis = shape(value).count - 1, channels = shape(value).last!
             let mean = graph.mean(of: value, axes: [NSNumber(value: axis)], name: nil)
@@ -325,13 +424,19 @@ final class NativeMaterialModel: @unchecked Sendable {
         private func leaky(_ value: MPSGraphTensor) -> MPSGraphTensor { graph.leakyReLU(with: value, alpha: 0.2, name: nil) }
         private func convNeXt(_ value: MPSGraphTensor, _ prefix: String) throws -> MPSGraphTensor {
             let channels = shape(value)[1]
-            var x = permute(try conv(value, prefix + ".dwconv", groups: channels), [0, 2, 3, 1])
-            x = try norm(x, prefix + ".norm", epsilon: 1e-6)
-            x = gelu(try linear(x, prefix + ".pwconv1"))
+            var x = boundary(permute(try conv(value, prefix + ".dwconv", groups: channels), [0, 2, 3, 1]))
+            x = boundary(try norm(x, prefix + ".norm", epsilon: 1e-6))
+            x = try linearGeluBoundary(x, prefix + ".pwconv1")
             let energy = graph.squareRoot(with: graph.reductionSum(with: mul(x, x), axes: [1, 2], name: nil), name: nil)
-            let normalized = div(energy, add(graph.mean(of: energy, axes: [3], name: nil), c(1e-6)))
-            x = add(add(mul(try tensor(prefix + ".grn.gamma", shape: [1, 1, 1, channels * 4]), mul(x, normalized)), try tensor(prefix + ".grn.beta", shape: [1, 1, 1, channels * 4])), x)
-            x = try linear(x, prefix + ".pwconv2")
+            let normalized = boundary(div(energy, add(graph.mean(of: energy, axes: [3], name: nil), c(1e-6))))
+            let scaled = boundary(mul(x, normalized))
+            let weighted = boundary(mul(try tensor(prefix + ".grn.gamma", shape: [1, 1, 1, channels * 4]), scaled))
+            let grnInput = x
+            let grnSource = add(add(weighted, try tensor(prefix + ".grn.beta", shape: [1, 1, 1, channels * 4])), grnInput)
+            let grnStage = frozenStages.count
+            x = boundary(grnSource)
+            if stagesEnabled { sameShapeResidualOperands[grnStage] = [weighted, grnInput] }
+            x = boundary(try linear(x, prefix + ".pwconv2"))
             x = mul(x, try tensor(prefix + ".gamma", shape: [channels]))
             return add(value, permute(x, [0, 3, 1, 2]))
         }
@@ -353,7 +458,7 @@ final class NativeMaterialModel: @unchecked Sendable {
             var x = shifted ? roll(roll(value, axis: 1, shift: -4), axis: 2, shift: -4) : value
             x = windows(x)
             let bias = cat([try tensor(prefix + ".msa.q_bias", shape: [channels]), graph.constant(0, shape: [channels].ns, dataType: .float32), try tensor(prefix + ".msa.v_bias", shape: [channels])], 0)
-            let qkv = permute(reshape(try linear(x, prefix + ".msa.embedding_layer", explicitBias: bias), [-1, 64, 3, heads, channels / heads]), [2, 0, 3, 1, 4])
+            let qkv = boundary(permute(reshape(try linear(x, prefix + ".msa.embedding_layer", explicitBias: bias), [-1, 64, 3, heads, channels / heads]), [2, 0, 3, 1, 4]))
             let q = reshape(slice(qkv, 0, 0, 1), [-1, heads, 64, channels / heads])
             let k = reshape(slice(qkv, 0, 1, 1), [-1, heads, 64, channels / heads])
             let v = reshape(slice(qkv, 0, 2, 1), [-1, heads, 64, channels / heads])
@@ -371,34 +476,46 @@ final class NativeMaterialModel: @unchecked Sendable {
             let relative = mul(c(16), graph.sigmoid(with: permute(reshape(biasTable, [64, 64, heads]), [2, 0, 1]), name: nil))
             attention = add(attention, relative)
             if shifted {
-                // Region IDs are 1 scalar per token, avoiding a large CPU mask.
-                var labels = [Float](repeating: 0, count: h * w)
-                for y in 0..<h { for x in 0..<w {
-                    let ry = y < h - 8 ? 0 : y < h - 4 ? 1 : 2
-                    let rx = x < w - 8 ? 0 : x < w - 4 ? 1 : 2
-                    labels[y * w + x] = Float(ry * 3 + rx)
-                } }
-                let maskTokens = reshape(windows(graph.constant(labels.withUnsafeBytes { Data($0) }, shape: [1, h, w, 1].ns, dataType: .float32)), [-1, 64])
+                // A constant here makes MPSGraph fold a windowCount×64×64
+                // attention mask for EVERY unused block before graph pruning.
+                // Feed the exact compact labels so masks exist only at runtime
+                // for the current stage, with identical attention semantics.
+                let maskKey = "\(h)x\(w)"
+                let labelsTensor: MPSGraphTensor
+                if let known = maskLabels[maskKey] { labelsTensor = known }
+                else {
+                    var labels = [Float](repeating: 0, count: h * w)
+                    for y in 0..<h { for x in 0..<w {
+                        let ry = y < h - 8 ? 0 : y < h - 4 ? 1 : 2
+                        let rx = x < w - 8 ? 0 : x < w - 4 ? 1 : 2
+                        labels[y * w + x] = Float(ry * 3 + rx)
+                    } }
+                    labelsTensor = graph.placeholder(shape: [1, h, w, 1].ns, dataType: .float32, name: "shifted_mask_labels_" + maskKey)
+                    auxiliaryFeeds[labelsTensor] = .floats(labels, shape: [1, h, w, 1])
+                    maskLabels[maskKey] = labelsTensor
+                }
+                let maskTokens = reshape(windows(labelsTensor), [-1, 64])
                 let difference = sub(reshape(maskTokens, [-1, 64, 1]), reshape(maskTokens, [-1, 1, 64]))
                 let mask = graph.select(predicate: graph.notEqual(difference, c(0), name: nil), trueTensor: c(-100), falseTensor: c(0), name: nil)
                 attention = add(attention, reshape(mask, [-1, 1, 64, 64]))
             }
-            attention = graph.softMax(with: attention, axis: -1, name: nil)
+            attention = boundary(graph.softMax(with: attention, axis: -1, name: nil))
             x = reshape(permute(graph.matrixMultiplication(primary: attention, secondary: v, name: nil), [0, 2, 1, 3]), [-1, 64, channels])
             x = try linear(x, prefix + ".msa.linear")
             x = reverseWindows(x, height: h, width: w)
             if shifted { x = roll(roll(x, axis: 1, shift: 4), axis: 2, shift: 4) }
-            x = add(value, try norm(x, prefix + ".ln1", epsilon: 1e-5))
-            let mlp = try linear(gelu(try linear(x, prefix + ".mlp.0")), prefix + ".mlp.2")
+            x = boundary(add(value, try norm(x, prefix + ".ln1", epsilon: 1e-5)))
+            let hidden = try linearGeluBoundary(x, prefix + ".mlp.0")
+            let mlp = boundary(try linear(hidden, prefix + ".mlp.2"))
             return add(x, try norm(mlp, prefix + ".ln2", epsilon: 1e-5))
         }
         private func block(_ value: MPSGraphTensor, _ prefix: String, shifted: Bool) throws -> MPSGraphTensor {
             try Task.checkCancellation()
-            let mixed = try conv(value, prefix + ".conv1_1", padding: 0), half = shape(value)[1] / 2
-            let convolution = try convNeXt(slice(mixed, 1, 0, half), prefix + ".conv_block")
+            let mixed = boundary(try conv(value, prefix + ".conv1_1", padding: 0)), half = shape(value)[1] / 2
+            let convolution = boundary(try convNeXt(slice(mixed, 1, 0, half), prefix + ".conv_block"))
             // Preserve upstream transpose(1,3), including the exchanged H/W.
-            let transformer = try swin(permute(slice(mixed, 1, half, half), [0, 3, 2, 1]), prefix + ".trans_block", shifted: shifted)
-            return add(value, try conv(cat([convolution, permute(transformer, [0, 3, 2, 1])], 1), prefix + ".conv1_2", padding: 0))
+            let transformer = boundary(try swin(permute(slice(mixed, 1, half, half), [0, 3, 2, 1]), prefix + ".trans_block", shifted: shifted))
+            return boundary(add(value, try conv(cat([convolution, permute(transformer, [0, 3, 2, 1])], 1), prefix + ".conv1_2", padding: 0)))
         }
         private func up2(_ value: MPSGraphTensor) -> MPSGraphTensor {
             NativeGraphExecution.nearestNeighbor2(value, graph: graph)
@@ -409,7 +526,7 @@ final class NativeMaterialModel: @unchecked Sendable {
                 let prefix = "gen.m_dec_\(branch).m_up\(level)"
                 x = add(x, skips[level - 1])
                 x = leaky(try conv(up2(x), prefix + ".0.up.1"))
-                x = leaky(try conv(x, prefix + ".0.up.3"))
+                x = boundary(leaky(try conv(x, prefix + ".0.up.3")))
                 for i in 0..<architecture.decoderBlocks {
                     x = try block(x, prefix + ".\(i + 1)", shifted: i % 2 == 1)
                 }
@@ -422,85 +539,233 @@ final class NativeMaterialModel: @unchecked Sendable {
             let x3 = leaky(try conv(cat([value, x1, x2], 1), prefix + ".conv3.0"))
             let x4 = add(leaky(try conv(cat([value, x1, x2, x3], 1), prefix + ".conv4.0")), x2)
             let x5 = try conv(cat([value, x1, x2, x3, x4], 1), prefix + ".conv5.0")
-            return add(value, mul(x5, c(0.2)))
+            return boundary(add(value, mul(x5, c(0.2))))
         }
         private func build(_ value: MPSGraphTensor) throws -> MPSGraphTensor {
             let specification = architecture
             let branch = ["normal": 1, "roughness": 2, "height": 3][target]!
-            let adaptingGenerator = layers.keys.contains { $0.hasPrefix("gen.") }
-            var initial = try conv(value, "gen.m_head")
+            let initial = boundary(try conv(value, "gen.m_head"))
             var x = initial, skips: [MPSGraphTensor] = []
             for level in 1...3 {
                 let prefix = "gen.m_enc.m_down\(level)"
                 for i in 0..<specification.encoderBlocks { x = try block(x, prefix + ".\(i)", shifted: i % 2 == 1) }
-                x = try conv(x, prefix + ".\(specification.encoderBlocks)", stride: 2, padding: 0)
+                x = boundary(try conv(x, prefix + ".\(specification.encoderBlocks)", stride: 2, padding: 0))
                 skips.append(x)
             }
             for i in 0..<specification.encoderBlocks { x = try block(x, "gen.m_body.\(i)", shifted: i % 2 == 1) }
-            // Frozen features cross a GPU tensor boundary. MPSGraph has no
-            // public stopGradient API; a new placeholder disconnects only the
-            // weights known to contain no adapters, without CPU readback.
-            let encoderFrozen = freezesForTraining && adaptingGenerator && !layers.keys.contains {
-                $0.hasPrefix("gen.m_head") || $0.hasPrefix("gen.m_enc.") || $0.hasPrefix("gen.m_body.")
-            }
-            if encoderFrozen {
-                let features = freeze([initial] + skips + [x], name: "frozen_encoder")
-                initial = features[0]; skips = Array(features[1...3]); x = features[4]
-            }
-            var decoded = try (0..<4).map { try decode(x, skips, $0) }
-            if encoderFrozen {
-                let frozen = (0..<4).filter { index in
-                    !layers.keys.contains { $0.hasPrefix("gen.m_dec_\(index).") }
-                }
-                if !frozen.isEmpty {
-                    let features = freeze(frozen.map { decoded[$0] }, name: "frozen_decoders")
-                    for (offset, index) in frozen.enumerated() { decoded[index] = features[offset] }
-                }
-            }
+            let decoded = try (0..<4).map { try decode(x, skips, $0) }
             let concatenated = cat(decoded, 1)
-            x = try conv(concatenated, "gen.m_fuse.0")
+            x = boundary(try conv(concatenated, "gen.m_fuse.0"))
             for i in 0..<specification.fusionBlocks { x = try block(x, "gen.m_fuse.\(i + 1)", shifted: i % 2 == 1) }
-            x = add(try conv(x, "gen.m_fuse.\(specification.fusionBlocks + 1)"), concatenated)
+            let fusionInput = x
+            let fusionName = "gen.m_fuse.\(specification.fusionBlocks + 1)"
+            let fusionSource = add(try conv(fusionInput, fusionName), concatenated)
+            let fusionStage = frozenStages.count
+            x = boundary(fusionSource)
+            if stagesEnabled, layers[fusionName] == nil, let weight = baseWeights[fusionName + ".weight"] {
+                let descriptor = MPSGraphConvolution2DOpDescriptor(strideInX: 1, strideInY: 1,
+                    dilationRateInX: 1, dilationRateInY: 1, groups: 1,
+                    paddingLeft: weight.shape[3] / 2, paddingRight: weight.shape[3] / 2,
+                    paddingTop: weight.shape[2] / 2, paddingBottom: weight.shape[2] / 2,
+                    paddingStyle: .explicit, dataLayout: .NCHW, weightsLayout: .OIHW)!
+                frozenFusionResiduals[fusionStage] = FrozenFusionResidual(input: fusionInput,
+                    residualOperands: decoded, weights: try tensor(fusionName + ".weight"), descriptor: descriptor)
+            }
             let generator = try (0..<4).map { branch in
-                try conv(add(slice(x, 1, branch * specification.dim, specification.dim), initial), "gen.m_tail_\(branch).0")
+                let branchStage = frozenStages.count
+                let branchInput = boundary(add(slice(x, 1, branch * specification.dim, specification.dim), initial))
+                if stagesEnabled {
+                    tailSliceResiduals[branchStage] = TailSliceResidual(input: x, residual: initial,
+                        start: branch * specification.dim, length: specification.dim)
+                }
+                let name = "gen.m_tail_\(branch).0", convolutionStage = frozenStages.count
+                let result = boundary(try conv(branchInput, name))
+                if stagesEnabled, layers[name] == nil, let weight = baseWeights[name + ".weight"] {
+                    let descriptor = MPSGraphConvolution2DOpDescriptor(strideInX: 1, strideInY: 1,
+                        dilationRateInX: 1, dilationRateInY: 1, groups: 1,
+                        paddingLeft: weight.shape[3] / 2, paddingRight: weight.shape[3] / 2,
+                        paddingTop: weight.shape[2] / 2, paddingBottom: weight.shape[2] / 2,
+                        paddingStyle: .explicit, dataLayout: .NCHW, weightsLayout: .OIHW)!
+                    frozenFusionResiduals[convolutionStage] = FrozenFusionResidual(input: branchInput,
+                        residualOperands: [], weights: try tensor(name + ".weight"), descriptor: descriptor)
+                }
+                return result
             }
-            var generatorFeatures = cat(generator, 1)
-            if freezesForTraining && !adaptingGenerator && !layers.isEmpty {
-                generatorFeatures = freeze([generatorFeatures], name: "frozen_generator")[0]
-            }
+            let generatorStage = frozenStages.count
+            let generatorFeatures = boundary(cat(generator, 1))
+            if stagesEnabled { tailConcatOperands[generatorStage] = generator }
+            generatorAnchor = generatorFeatures
             x = cat([value, generatorFeatures], 1)
             let prefix = "ups.\(branch).model"
-            x = try conv(x, prefix + ".0")
+            x = boundary(try conv(x, prefix + ".0"))
             let residual = x
             for i in 0..<specification.rrdbBlocks {
                 let input = x
                 for r in 1...3 { x = try rdb(x, prefix + ".1.sub.\(i).RDB\(r)") }
-                x = add(input, mul(x, c(0.2)))
+                x = boundary(add(input, mul(x, c(0.2))))
             }
-            x = add(residual, try conv(x, prefix + ".1.sub.\(specification.rrdbBlocks)"))
+            x = boundary(add(residual, try conv(x, prefix + ".1.sub.\(specification.rrdbBlocks)")))
             // .2 and .5 are the two original nearest2 upsamplers, omitted.
-            for index in [3, 6, 8] { x = leaky(try conv(x, prefix + ".\(index)")) }
+            for index in [3, 6, 8] { x = boundary(leaky(try conv(x, prefix + ".\(index)"))) }
             return try conv(x, prefix + ".10")
         }
+        // Boundaries retain the complete native grid and exact forward map.
+        // Reverse-stage VJPs carry gradients across all adapted boundaries.
+        private func boundary(_ value: MPSGraphTensor) -> MPSGraphTensor {
+            if !stagesEnabled { return value }
+            return freeze([value], name: "native_stage_\(frozenStages.count)")[0]
+        }
+        private func requiredFeeds(_ targets: [MPSGraphTensor]) -> Set<MPSGraphTensor> {
+            func visit(_ tensor: MPSGraphTensor) -> Set<MPSGraphTensor> {
+                if let known = dependencies[tensor] { return known }
+                let inputs = tensor.operation.inputTensors
+                let result = inputs.isEmpty ? Set([tensor]) : inputs.reduce(into: Set<MPSGraphTensor>()) { $0.formUnion(visit($1)) }
+                dependencies[tensor] = result
+                return result
+            }
+            return targets.reduce(into: Set<MPSGraphTensor>()) { $0.formUnion(visit($1)) }
+        }
         private func freeze(_ sources: [MPSGraphTensor], name: String) -> [MPSGraphTensor] {
-            let stage = sources.enumerated().map { index, source in
+            let outputs = sources.enumerated().map { index, source in
                 (source: source, feed: graph.placeholder(shape: source.shape, dataType: .float32, name: "\(name)_\(index)"))
             }
-            frozenStages.append(stage)
-            return stage.map(\.feed)
+            frozenStages.append(outputs)
+            return outputs.map(\.feed)
+        }
+        fileprivate func restoreFeatures(_ saved: NativeProgramFeatureCache) throws {
+            var named: [String: MPSGraphTensor] = [:]
+            for tensor in graph.placeholderTensors {
+                guard named.updateValue(tensor, forKey: tensor.operation.name) == nil else {
+                    throw StudioError("Native feature placeholders lack unique identities.")
+                }
+            }
+            featureCache = try saved.values.mapValues { values in
+                var restored: [MPSGraphTensor: MPSGraphTensorData] = [:]
+                for (name, data) in values {
+                    guard let tensor = named[name], tensor.shape?.map(\.intValue) == data.shape.map(\.intValue), tensor.dataType == data.dataType else {
+                        throw StudioError("Native cached feature metadata changed: \(name).")
+                    }
+                    restored[tensor] = data
+                }
+                return restored
+            }
+            featureOrder = saved.order; featureBytes = saved.bytes
+        }
+        fileprivate func savedFeatures() -> NativeProgramFeatureCache {
+            NativeProgramFeatureCache(values: featureCache.mapValues { values in
+                Dictionary(uniqueKeysWithValues: values.map { ($0.key.operation.name, $0.value) })
+            }, order: featureOrder, bytes: featureBytes)
+        }
+        private func executeData(key: String, feeds: [MPSGraphTensor: MPSGraphTensorData], targets: [MPSGraphTensor],
+                                 checkCancellation: () throws -> Void) throws -> [MPSGraphTensorData] {
+            if let packageCache {
+                return try NativeGraphExecution.runPackaged(graph, feeds: feeds, targets: targets, key: key, packages: packageCache, compile: {
+                    try self.compilePackage(key: key, feeds: feeds, packages: packageCache)
+                }, checkCancellation: checkCancellation)
+            }
+            return try NativeGraphExecution.runData(graph, feeds: feeds, targets: targets, cache: &executableCache,
+                                                    checkCancellation: checkCancellation)
+        }
+        /// Keep compiler arenas in a disposable owner, bounded to eight jobs
+        /// or 512 MiB of new allocation plus one job. The execution graph only
+        /// owns metadata, and this owner is released before any new batch.
+        private func compilePackage(key: String, feeds: [MPSGraphTensor: MPSGraphTensorData], packages: NativeGraphPackageCache) throws -> NativeGraphPackageCache.Entry {
+            try autoreleasepool {
+                if packageCompiler == nil {
+                    compilerRetainedBytes = 0
+                    packageCompiler = try GraphProgram(baseWeights: baseWeights, layers: layers, architecture: architecture,
+                        adapters: parameters, width: width, height: height, target: target, staged: stagesEnabled)
+                    compilerJobs = 0
+                }
+                let owner = packageCompiler!
+                let targets = try owner.compilationTargets(key: key)
+                let needed = owner.requiredFeeds(targets)
+                var current: [String: MPSGraphTensorData] = [:]
+                for (tensor, data) in feeds {
+                    guard current.updateValue(data, forKey: tensor.operation.name) == nil else {
+                        throw StudioError("Native compilation feeds lack unique identities.")
+                    }
+                }
+                var rebound: [MPSGraphTensor: MPSGraphTensorData] = [:]
+                for tensor in needed where !tensor.operation.name.isEmpty {
+                    if let data = current[tensor.operation.name] {
+                        guard tensor.shape?.map(\.intValue) == data.shape.map(\.intValue), tensor.dataType == data.dataType else {
+                            throw StudioError("Native disposable compiler feed changed storage: \(tensor.operation.name).")
+                        }
+                        rebound[tensor] = data
+                    } else if owner.graph.placeholderTensors.contains(tensor) {
+                        throw StudioError("Native disposable compiler lost a required feed: \(tensor.operation.name).")
+                    }
+                }
+                let before = UInt64(MTLCreateSystemDefaultDevice()?.currentAllocatedSize ?? 0)
+                let entry = try NativeGraphExecution.compilePackage(owner.graph, feeds: rebound, targets: targets, key: key, packages: packages)
+                let after = UInt64(MTLCreateSystemDefaultDevice()?.currentAllocatedSize ?? 0)
+                compilerRetainedBytes += after > before ? after - before : 0
+                compilerJobs += 1
+                if compilerJobs >= 8 || compilerRetainedBytes >= 512 * 1_048_576 {
+                    packageCompiler = nil
+                    compilerJobs = 0
+                }
+                return entry
+            }
+        }
+        private func compilationTargets(key: String) throws -> [MPSGraphTensor] {
+            if key.hasPrefix("forward-"), let index = Int(key.dropFirst("forward-".count)), frozenStages.indices.contains(index) {
+                return frozenStages[index].map(\.source)
+            }
+            if key == "final-output" { return [output!] }
+            if key == "final-loss" {
+                try prepareLoss()
+                return [output!, loss!, valueLoss!, gradientLoss!]
+            }
+            if key == "optimizer" {
+                try prepareOptimizer(external: true)
+                return optimizerOutputs.keys.sorted().map { optimizerOutputs[$0]! }
+            }
+            if key == "reverse-loss" {
+                try prepareReverse(onlyJob: key)
+                guard let lossReverse else { throw StudioError("Native compiler omitted loss derivatives.") }
+                return lossReverse.derivatives
+            }
+            if key.hasPrefix("reverse-"), let index = Int(key.dropFirst("reverse-".count)) {
+                try prepareReverse(onlyJob: key)
+                guard let reverse = reverseStages[index] else { throw StudioError("Native compiler omitted stage derivatives.") }
+                return reverse.derivatives
+            }
+            throw StudioError("Unknown native disposable compilation phase: \(key).")
+        }
+        private func executeValues(key: String, feeds: [MPSGraphTensor: MPSGraphTensorData], targets: [MPSGraphTensor],
+                                   checkCancellation: () throws -> Void) throws -> [[Float]] {
+            try executeData(key: key, feeds: feeds, targets: targets, checkCancellation: checkCancellation).map { try NativeGraphExecution.tensor($0).floatValues() }
+        }
+        private func immutableFeeds() throws -> [MPSGraphTensor: MPSGraphTensorData] {
+            if let immutableData { return immutableData }
+            var data: [MPSGraphTensor: MPSGraphTensorData] = [:]
+            for (feed, value) in auxiliaryFeeds { data[feed] = try NativeGraphExecution.tensorData(value) }
+            immutableData = data
+            return data
         }
         struct Execution { let output: [Float]; let loss: Float?, valueLoss: Float?, gradientLoss: Float?; let updated: [String: NativeTensor]; let optimizerState: [String: NativeTensor] }
         func execute(rgb: [Float], adapters: [String: NativeTensor], reference: [Float]? = nil,
-                     learningRate: Float? = nil, step: Int = 1, optimizerState: [String: NativeTensor] = [:]) throws -> Execution {
-            if reference != nil, learningRate != nil, !freezesForTraining {
-                if optimizationProgram == nil {
-                    optimizationProgram = try Program(baseWeights: baseWeights, layers: layers, architecture: architecture,
-                        adapters: parameters, width: width, height: height, target: target, freezesForTraining: true)
-                }
-                return try optimizationProgram!.execute(rgb: rgb, adapters: adapters, reference: reference,
-                    learningRate: learningRate, step: step, optimizerState: optimizerState)
+                     learningRate: Float? = nil, step: Int = 1, optimizerState: [String: NativeTensor] = [:],
+                     featureKey: String? = nil, checkCancellation: () throws -> Void = { try Task.checkCancellation() },
+                     onStage: (Int, Int) -> Void = { _, _ in }) throws -> Execution {
+            try checkCancellation()
+            return try autoreleasepool {
+                try executePooled(rgb: rgb, adapters: adapters, reference: reference, learningRate: learningRate,
+                    step: step, optimizerState: optimizerState, featureKey: featureKey,
+                    checkCancellation: checkCancellation, onStage: onStage)
             }
-            var feeds: [MPSGraphTensor: MPSGraphTensorData] = [:]
+        }
+        private func executePooled(rgb: [Float], adapters: [String: NativeTensor], reference: [Float]?,
+                     learningRate: Float?, step: Int, optimizerState: [String: NativeTensor], featureKey: String?,
+                     checkCancellation: () throws -> Void, onStage: (Int, Int) -> Void) throws -> Execution {
+            if let reference, let learningRate, stagesEnabled {
+                return try executeCheckpointed(rgb: rgb, adapters: adapters, reference: reference,
+                    learningRate: learningRate, step: step, optimizerState: optimizerState,
+                    featureKey: featureKey, checkCancellation: checkCancellation, onStage: onStage)
+            }
+            var feeds = try immutableFeeds()
             feeds[input] = try NativeGraphExecution.tensorData(.floats(rgb, shape: [1, 3, height, width]))
             for (name, placeholder) in parameterFeeds { feeds[placeholder] = try NativeGraphExecution.tensorData(adapters[name]!) }
             var targets = [output!]
@@ -525,11 +790,47 @@ final class NativeMaterialModel: @unchecked Sendable {
                 ordered = optimizerOutputs.keys.sorted()
                 targets += ordered.map { optimizerOutputs[$0]! }
             }
-            for stage in frozenStages {
-                let data = try NativeGraphExecution.runData(graph, feeds: feeds, targets: stage.map(\.source), cache: &executableCache)
-                for (index, feature) in stage.enumerated() { feeds[feature.feed] = data[index] }
+            let finalFeeds = requiredFeeds(targets)
+            let stageNeeds = frozenStages.map { requiredFeeds($0.map(\.source)) }
+            let cacheKey = finalLayerOnly ? featureKey : nil
+            if let cacheKey, let cached = featureCache[cacheKey] {
+                feeds.merge(cached) { _, new in new }
+                featureOrder.removeAll { $0 == cacheKey }; featureOrder.append(cacheKey)
+            } else {
+                // Drop each intermediate immediately after its final consumer.
+                // Keeping every previous stage feed recreates the RAM runaway.
+                var remaining = finalFeeds
+                var neededAfter = [Set<MPSGraphTensor>](repeating: [], count: frozenStages.count)
+                for i in frozenStages.indices.reversed() { neededAfter[i] = remaining; remaining.formUnion(stageNeeds[i]) }
+                for (i, stage) in frozenStages.enumerated() {
+                    try checkCancellation()
+                    let needed = stageNeeds[i]
+                    let data = try autoreleasepool {
+                        try executeData(key: "forward-\(i)", feeds: feeds.filter { needed.contains($0.key) }, targets: stage.map(\.source),
+                                        checkCancellation: checkCancellation)
+                    }
+                    for (index, feature) in stage.enumerated() { feeds[feature.feed] = data[index] }
+                    feeds = feeds.filter { neededAfter[i].contains($0.key) }
+                    onStage(i + 1, frozenStages.count)
+                }
+                if let cacheKey {
+                    let frozen = Set(frozenStages.flatMap { $0.map(\.feed) })
+                    let features = feeds.filter { frozen.contains($0.key) && finalFeeds.contains($0.key) }
+                    let bytes = features.values.reduce(UInt64(0)) { $0 + UInt64($1.shape.reduce(4) { $0 * $1.intValue }) }
+                    let budget = min(UInt64(2 * 1_073_741_824), MachineResources.current.maximumTrainingBytes / 16)
+                    while featureBytes + bytes > budget, let oldest = featureOrder.first {
+                        if let removed = featureCache.removeValue(forKey: oldest) {
+                            featureBytes -= removed.values.reduce(UInt64(0)) { $0 + UInt64($1.shape.reduce(4) { $0 * $1.intValue }) }
+                        }
+                        featureOrder.removeFirst()
+                    }
+                    if bytes <= budget { featureCache[cacheKey] = features; featureOrder.append(cacheKey); featureBytes += bytes }
+                }
             }
-            let result = try NativeGraphExecution.run(graph, feeds: feeds, targets: targets, cache: &executableCache)
+            try checkCancellation()
+            let result = try executeValues(key: reference == nil ? "final-output" : "final-loss", feeds: feeds.filter { finalFeeds.contains($0.key) }, targets: targets,
+                                           checkCancellation: checkCancellation)
+            try checkCancellation()
             guard result[0].allSatisfy(\.isFinite), reference == nil || result[1][0].isFinite else { throw StudioError("Material model produced nonfinite values; weights remain untouched.") }
             var updated: [String: NativeTensor] = [:], state: [String: NativeTensor] = [:]
             if optimize {
@@ -541,6 +842,493 @@ final class NativeMaterialModel: @unchecked Sendable {
                 }
             }
             return Execution(output: result[0], loss: reference == nil ? nil : result[1][0], valueLoss: reference == nil ? nil : result[2][0], gradientLoss: reference == nil ? nil : result[3][0], updated: updated, optimizerState: state)
+        }
+        private struct ReverseStage {
+            let key: String
+            let seeds: [MPSGraphTensor]
+            let inputs: [MPSGraphTensor]
+            let derivatives: [MPSGraphTensor]
+            let needs: Set<MPSGraphTensor>
+        }
+        // Explicit construction metadata for known same-shaped additions.
+        // No operation-name inspection or source activation is needed for dy.
+        private struct ImmutableLinearGelu {
+            let input: MPSGraphTensor
+            let preactivation: MPSGraphTensor
+            let weights: MPSGraphTensor
+        }
+        private var immutableLinearGeluStages: [Int: ImmutableLinearGelu] = [:]
+        private var geluStageInputs: [Int: MPSGraphTensor] = [:]
+        private struct TailSliceResidual {
+            let input: MPSGraphTensor
+            let residual: MPSGraphTensor
+            let start: Int
+            let length: Int
+        }
+        private var tailSliceResiduals: [Int: TailSliceResidual] = [:]
+        private var tailConcatOperands: [Int: [MPSGraphTensor]] = [:]
+        private var sameShapeResidualOperands: [Int: [MPSGraphTensor]] = [:]
+        private struct FrozenFusionResidual {
+            let input: MPSGraphTensor
+            let residualOperands: [MPSGraphTensor]
+            let weights: MPSGraphTensor
+            let descriptor: MPSGraphConvolution2DOpDescriptor
+        }
+        private var frozenFusionResiduals: [Int: FrozenFusionResidual] = [:]
+        private var reverseStages: [Int: ReverseStage] = [:]
+        private var lossReverse: ReverseStage?
+        private var activeFeatures = Set<MPSGraphTensor>()
+        private var activeStages = Set<Int>()
+        private var producers: [MPSGraphTensor: Int] = [:]
+
+
+        /// Reverse-mode differentiation at graph boundaries, with the complete
+        /// native map loss. The VJP seed carries gradients through every chosen
+        /// adapter, including residual/skip paths. Checkpoint tensors live in a
+        /// bounded RAM pool; a missing checkpoint is recomputed from immutable
+        /// pre-update weights. No activation files or swap-backed spill cache.
+        private func prepareReverse(onlyJob: String? = nil) throws {
+            if let onlyJob {
+                if onlyJob == "reverse-loss", lossReverse != nil { return }
+                if onlyJob.hasPrefix("reverse-"), let index = Int(onlyJob.dropFirst("reverse-".count)), reverseStages[index] != nil { return }
+            } else if lossReverse != nil { return }
+            try prepareLoss()
+            let parameterSet = Set(parameterFeeds.values)
+            for (index, stage) in frozenStages.enumerated() {
+                for item in stage { producers[item.feed] = index }
+                let needs = requiredFeeds(stage.map(\.source))
+                if !needs.isDisjoint(with: parameterSet.union(activeFeatures)) {
+                    activeStages.insert(index); activeFeatures.formUnion(stage.map(\.feed))
+                }
+            }
+            let differentiable = parameterSet.union(activeFeatures)
+            func reverse(_ sources: [MPSGraphTensor], key: String, scalarLoss: MPSGraphTensor? = nil) throws -> ReverseStage {
+                let needs = requiredFeeds(sources)
+                let inputs = needs.intersection(differentiable).sorted { $0.operation.name < $1.operation.name }
+                var seeds: [MPSGraphTensor] = []
+                var objective = scalarLoss
+                if objective == nil {
+                    var terms: [MPSGraphTensor] = []
+                    for (index, source) in sources.enumerated() {
+                        let seed = graph.placeholder(shape: source.shape, dataType: .float32, name: key + "_seed_\(index)")
+                        seeds.append(seed)
+                        terms.append(graph.reductionSum(with: mul(source, seed), axes: Array(0..<shape(source).count).ns, name: nil))
+                    }
+                    objective = terms.dropFirst().reduce(terms[0]) { add($0, $1) }
+                }
+                try Task.checkCancellation()
+                if key.hasPrefix("reverse-"), let index = Int(key.dropFirst("reverse-".count)),
+                   let tail = tailSliceResiduals[index], sources.count == 1, seeds.count == 1,
+                   Set(inputs) == Set([tail.input, tail.residual]).intersection(differentiable),
+                   needs.intersection(parameterSet).isEmpty,
+                   shape(tail.input).count == 4, shape(sources[0]).count == 4,
+                   shape(tail.residual) == shape(sources[0]),
+                   shape(sources[0])[1] == tail.length, tail.start >= 0,
+                   tail.start + tail.length <= shape(tail.input)[1],
+                   [0, 2, 3].allSatisfy({ shape(tail.input)[$0] == shape(sources[0])[$0] }) {
+                    // A fixed channel slice scatters dy into the original channels;
+                    // the same-shaped initial-feature addition passes dy unchanged.
+                    let derivatives = inputs.map { input -> MPSGraphTensor in
+                        if input == tail.residual { return seeds[0] }
+                        return graph.padTensor(seeds[0], with: .constant,
+                            leftPadding: [0, tail.start, 0, 0].ns,
+                            rightPadding: [0, shape(tail.input)[1] - tail.start - tail.length, 0, 0].ns,
+                            constantValue: 0, name: nil)
+                    }
+                    return ReverseStage(key: key, seeds: seeds, inputs: inputs, derivatives: derivatives,
+                        needs: requiredFeeds(derivatives).subtracting(Set(seeds)))
+                }
+                if key.hasPrefix("reverse-"), let index = Int(key.dropFirst("reverse-".count)),
+                   let operands = tailConcatOperands[index], sources.count == 1, seeds.count == 1,
+                   Set(operands).count == operands.count,
+                   Set(inputs) == Set(operands).intersection(differentiable),
+                   shape(sources[0]).count == 4,
+                   operands.allSatisfy({ operand in shape(operand).count == 4 && [0, 2, 3].allSatisfy { axis in shape(operand)[axis] == shape(sources[0])[axis] } }),
+                   operands.reduce(0, { $0 + shape($1)[1] }) == shape(sources[0])[1] {
+                    // The channel concatenation VJP is one exact slice per input.
+                    var results: [MPSGraphTensor: MPSGraphTensor] = [:], start = 0
+                    for operand in operands {
+                        let length = shape(operand)[1]
+                        if inputs.contains(operand) { results[operand] = slice(seeds[0], 1, start, length) }
+                        start += length
+                    }
+                    let derivatives = inputs.map { results[$0]! }
+                    return ReverseStage(key: key, seeds: seeds, inputs: inputs, derivatives: derivatives,
+                        needs: requiredFeeds(derivatives).subtracting(Set(seeds)))
+                }
+                if key.hasPrefix("reverse-"), let index = Int(key.dropFirst("reverse-".count)),
+                   let input = geluStageInputs[index], sources.count == 1, seeds.count == 1,
+                   inputs.count == 1, inputs[0] == input, shape(input) == shape(sources[0]),
+                   needs.intersection(parameterSet).isEmpty {
+                    // Reverse the exact erf GELU constructor: (z * 0.5) *
+                    // (1 + erf(z / sqrt(2))). Every operand has the same shape.
+                    let scaled = mul(input, c(1 / sqrt(2)))
+                    let half = mul(input, c(0.5))
+                    let first = mul(mul(seeds[0], add(c(1), graph.erf(with: scaled, name: nil))), c(0.5))
+                    let gaussian = graph.exponent(with: sub(c(0), mul(scaled, scaled)), name: nil)
+                    let erfDerivative = mul(c(2 / sqrt(Double.pi)), gaussian)
+                    let second = mul(mul(mul(seeds[0], half), erfDerivative), c(1 / sqrt(2)))
+                    let derivative = add(first, second)
+                    return ReverseStage(key: key, seeds: seeds, inputs: inputs, derivatives: [derivative],
+                        needs: requiredFeeds([derivative]).subtracting(Set(seeds)))
+                }
+                if key.hasPrefix("reverse-"), let index = Int(key.dropFirst("reverse-".count)),
+                   let linear = immutableLinearGeluStages[index], sources.count == 1, seeds.count == 1,
+                   inputs.count == 1, inputs[0] == linear.input, needs.intersection(parameterSet).isEmpty,
+                   shape(linear.weights).count == 2, shape(linear.input).last == shape(linear.weights)[1],
+                   shape(sources[0]).last == shape(linear.weights)[0],
+                   shape(linear.preactivation) == shape(sources[0]),
+                   Array(shape(linear.input).dropLast()) == Array(shape(sources[0]).dropLast()) {
+                    // y = GELU(x W^T + frozen bias); dx = (dy GELU'(z)) W.
+                    // Registration comes only from this exact forward constructor.
+                    let scaled = mul(linear.preactivation, c(1 / sqrt(2)))
+                    let half = mul(linear.preactivation, c(0.5))
+                    let first = mul(mul(seeds[0], add(c(1), graph.erf(with: scaled, name: nil))), c(0.5))
+                    let gaussian = graph.exponent(with: sub(c(0), mul(scaled, scaled)), name: nil)
+                    let erfDerivative = mul(c(2 / sqrt(Double.pi)), gaussian)
+                    let second = mul(mul(mul(seeds[0], half), erfDerivative), c(1 / sqrt(2)))
+                    let derivative = graph.matrixMultiplication(primary: add(first, second), secondary: linear.weights, name: nil)
+                    return ReverseStage(key: key, seeds: seeds, inputs: inputs, derivatives: [derivative],
+                        needs: requiredFeeds([derivative]).subtracting(Set(seeds)))
+                }
+                if key.hasPrefix("reverse-"), let index = Int(key.dropFirst("reverse-".count)),
+                   let operands = sameShapeResidualOperands[index], sources.count == 1, seeds.count == 1,
+                   Set(operands).count == operands.count, Set(inputs) == Set(operands),
+                   operands.allSatisfy({ shape($0) == shape(sources[0]) }) {
+                    // d((a + frozenBias) + b)/da = dy and db = dy. Exact
+                    // dimensions prove that neither derivative needs reduction.
+                    return ReverseStage(key: key, seeds: seeds, inputs: inputs,
+                        derivatives: inputs.map { _ in seeds[0] }, needs: [])
+                }
+                if key.hasPrefix("reverse-"), let index = Int(key.dropFirst("reverse-".count)),
+                   let fusion = frozenFusionResiduals[index], sources.count == 1, seeds.count == 1,
+                   Set(inputs) == Set([fusion.input] + fusion.residualOperands).intersection(differentiable),
+                   needs.intersection(parameterSet).isEmpty {
+                    // The immutable convolution's data derivative needs dy and
+                    // weights. Concat's residual derivative slices dy channels.
+                    // Static output dimensions replace primal shape scaffolding.
+                    var results: [MPSGraphTensor: MPSGraphTensor] = [:]
+                    if inputs.contains(fusion.input) {
+                        results[fusion.input] = graph.convolution2DDataGradient(seeds[0], weights: fusion.weights,
+                            outputShape: fusion.input.shape!, forwardConvolutionDescriptor: fusion.descriptor, name: nil)
+                    }
+                    var channel = 0
+                    for operand in fusion.residualOperands {
+                        let count = shape(operand)[1]
+                        if inputs.contains(operand) {
+                            let derivative = slice(seeds[0], 1, channel, count)
+                            if let existing = results[operand] { results[operand] = add(existing, derivative) }
+                            else { results[operand] = derivative }
+                        }
+                        channel += count
+                    }
+                    let ordered = try inputs.map { input -> MPSGraphTensor in
+                        guard let result = results[input] else { throw StudioError("Frozen fusion lost an active derivative.") }
+                        return result
+                    }
+                    return ReverseStage(key: key, seeds: seeds, inputs: inputs, derivatives: ordered,
+                        needs: requiredFeeds(ordered).subtracting(Set(seeds)))
+                }
+                let derivatives = graph.gradients(of: objective!, with: inputs, name: "stage_vjp")
+                let orderedDerivatives = try inputs.map { input -> MPSGraphTensor in
+                    guard let derivative = derivatives[input] else { throw StudioError("Native stage lost a required training derivative.") }
+                    return derivative
+                }
+                // Replay only values actually consumed by the derivative graph.
+                // Inputs still describe every differentiated source dependency,
+                // including constant derivatives that require no activation.
+                let derivativeNeeds = requiredFeeds(orderedDerivatives).subtracting(Set(seeds))
+                return ReverseStage(key: key, seeds: seeds, inputs: inputs,
+                    derivatives: orderedDerivatives, needs: derivativeNeeds)
+            }
+            if onlyJob == nil || onlyJob == "reverse-loss" { lossReverse = try reverse([loss!], key: "reverse-loss", scalarLoss: loss) }
+            for index in activeStages.sorted() where onlyJob == nil || onlyJob == "reverse-\(index)" {
+                reverseStages[index] = try reverse(frozenStages[index].map(\.source), key: "reverse-\(index)")
+            }
+            if onlyJob == nil { try prepareOptimizer(external: true) }
+        }
+        private func sum(_ a: MPSGraphTensorData, _ b: MPSGraphTensorData, checkCancellation: () throws -> Void) throws -> MPSGraphTensorData {
+            let key = "adjoint-sum-" + a.shape.map { String($0.intValue) }.joined(separator: ",")
+            let graph = MPSGraph()
+            let lhs = graph.placeholder(shape: a.shape, dataType: .float32, name: "lhs")
+            let rhs = graph.placeholder(shape: a.shape, dataType: .float32, name: "rhs")
+            let output = graph.addition(lhs, rhs, name: nil)
+            if let packageCache {
+                return try NativeGraphExecution.runPackaged(graph, feeds: [lhs: a, rhs: b], targets: [output], key: key, packages: packageCache, compile: {
+                    try autoreleasepool {
+                        let owner = MPSGraph()
+                        let x = owner.placeholder(shape: a.shape, dataType: .float32, name: "lhs")
+                        let y = owner.placeholder(shape: b.shape, dataType: .float32, name: "rhs")
+                        let result = owner.addition(x, y, name: nil)
+                        return try NativeGraphExecution.compilePackage(owner, feeds: [x: a, y: b], targets: [result], key: key, packages: packageCache)
+                    }
+                }, checkCancellation: checkCancellation)[0]
+            }
+            var cache: [String: MPSGraphExecutable] = [:]
+            return try NativeGraphExecution.runData(graph, feeds: [lhs: a, rhs: b], targets: [output], cache: &cache,
+                                                    checkCancellation: checkCancellation)[0]
+        }
+        /// Pick a fixed set of RAM checkpoints once per Program. A generator
+        /// output checkpoint prevents every RRDB VJP from replaying the entire
+        /// adapted generator. Remaining checkpoints minimize exact replay work
+        /// per byte over the dependency DAG, within the same hard byte cap.
+        private func checkpointAnchors(candidates: [MPSGraphTensor], budget: UInt64,
+                    stageNeeds: [Set<MPSGraphTensor>], finalNeeds: Set<MPSGraphTensor>,
+                    frozenRoots: Set<MPSGraphTensor>, checkCancellation: () throws -> Void) throws -> Set<MPSGraphTensor> {
+            func bytes(_ tensor: MPSGraphTensor) -> UInt64 { UInt64(shape(tensor).reduce(4, *)) }
+            let byName = Dictionary(uniqueKeysWithValues: candidates.map { ($0.operation.name, $0) })
+            if let checkpointNames {
+                guard Set(checkpointNames).count == checkpointNames.count else { throw StudioError("Native checkpoint plan has duplicate boundaries.") }
+                let restored = try checkpointNames.map { name -> MPSGraphTensor in
+                    guard let tensor = byName[name] else { throw StudioError("Native checkpoint boundary changed: \(name).") }
+                    return tensor
+                }
+                guard restored.reduce(UInt64(0), { $0 + bytes($1) }) <= budget else { throw StudioError("Native checkpoint plan exceeds its RAM limit.") }
+                return Set(restored)
+            }
+            func save(_ anchors: Set<MPSGraphTensor>) -> Set<MPSGraphTensor> {
+                checkpointNames = anchors.map { $0.operation.name }.sorted()
+                return anchors
+            }
+            if budget == 0 { return save([]) }
+            let totalBytes = candidates.reduce(UInt64(0)) { $0 + bytes($1) }
+            if totalBytes <= budget { return save(Set(candidates)) }
+            let interval = max(1, Int(totalBytes / budget + (totalBytes % budget == 0 ? 0 : 1)))
+            var original = Set<MPSGraphTensor>(), originalBytes: UInt64 = 0
+            for (index, feed) in candidates.enumerated() where index % interval == 0 {
+                if originalBytes + bytes(feed) <= budget { original.insert(feed); originalBytes += bytes(feed) }
+            }
+            // Every current cut has one output. Preserve the previous safe
+            // policy if future cuts expose multiple independent outputs.
+            guard frozenStages.allSatisfy({ $0.count == 1 }) else { return save(original) }
+            let integerNeeds = stageNeeds.map { needs in needs.compactMap { producers[$0] }.sorted() }
+            let integerFinalNeeds = finalNeeds.compactMap { producers[$0] }.sorted()
+            let frozenIndices = Set(frozenRoots.map { producers[$0]! })
+            let reverseOrder = activeStages.sorted().reversed()
+            func replayCount(_ anchors: Set<MPSGraphTensor>) -> Int {
+                var available = [Bool](repeating: false, count: frozenStages.count)
+                for feed in anchors { available[producers[feed]!] = true }
+                for index in frozenIndices { available[index] = true }
+                func replay(_ needs: [Int]) -> Int {
+                    var visited = [Bool](repeating: false, count: frozenStages.count), count = 0
+                    func collect(_ index: Int) {
+                        if visited[index] || available[index] { return }
+                        visited[index] = true; count += 1
+                        for dependency in integerNeeds[index] { collect(dependency) }
+                    }
+                    for index in needs { collect(index) }
+                    return count
+                }
+                var count = replay(integerFinalNeeds)
+                for index in reverseOrder {
+                    count += replay(integerNeeds[index])
+                    available[index] = false
+                }
+                return count
+            }
+            var chosen = Set<MPSGraphTensor>(), chosenBytes: UInt64 = 0
+            if let generatorAnchor, candidates.contains(generatorAnchor), bytes(generatorAnchor) <= budget {
+                chosen.insert(generatorAnchor); chosenBytes += bytes(generatorAnchor)
+            }
+            while true {
+                try checkCancellation()
+                let previous = replayCount(chosen)
+                var best: (feed: MPSGraphTensor, saved: Int, size: UInt64)?
+                for feed in candidates {
+                    let size = bytes(feed)
+                    guard !chosen.contains(feed), chosenBytes + size <= budget else { continue }
+                    var proposal = chosen; proposal.insert(feed)
+                    let saved = previous - replayCount(proposal)
+                    guard saved > 0 else { continue }
+                    if best == nil || Double(saved) / Double(size) > Double(best!.saved) / Double(best!.size) { best = (feed, saved, size) }
+                }
+                guard let best else { break }
+                chosen.insert(best.feed); chosenBytes += best.size
+            }
+            return save(replayCount(chosen) < replayCount(original) ? chosen : original)
+        }
+        private func executeCheckpointed(rgb: [Float], adapters: [String: NativeTensor], reference: [Float],
+                    learningRate: Float, step: Int, optimizerState: [String: NativeTensor], featureKey: String?,
+                    checkCancellation: () throws -> Void, onStage: (Int, Int) -> Void) throws -> Execution {
+            guard learningRate.isFinite, learningRate > 0, reference.count == width * height * (target == "normal" ? 3 : 1),
+                  reference.allSatisfy(\.isFinite) else { throw StudioError("Invalid native training target or learning rate.") }
+            try prepareReverse()
+            let stageNeeds = frozenStages.map { requiredFeeds($0.map(\.source)) }
+            let finalTargets = [output!, loss!, valueLoss!, gradientLoss!]
+            let finalNeeds = requiredFeeds(finalTargets)
+            var base = try immutableFeeds()
+            base[input] = try NativeGraphExecution.tensorData(.floats(rgb, shape: [1, 3, height, width]))
+            base[targetInput!] = try NativeGraphExecution.tensorData(.floats(reference, shape: shape(output)))
+            for (name, feed) in parameterFeeds { base[feed] = try NativeGraphExecution.tensorData(adapters[name]!) }
+            let parameterNames = Dictionary(uniqueKeysWithValues: parameterFeeds.map { ($0.value, $0.key) })
+            let boundarySet = Set(producers.keys)
+            let backwardNeeds = activeStages.reduce(into: finalNeeds) { $0.formUnion(stageNeeds[$1]) }
+            let frozenRoots = backwardNeeds.intersection(boundarySet).subtracting(activeFeatures)
+            var checkpoints: [MPSGraphTensor: NativeTensor] = [:]
+            var frozenValues: [MPSGraphTensor: MPSGraphTensorData] = [:]
+            // Keep cuts that reduce replay most within the fixed RAM budget.
+            let candidates = frozenStages.flatMap { $0.map(\.feed) }.filter { activeFeatures.contains($0) && backwardNeeds.contains($0) }
+            let checkpointBudget = min(checkpointByteLimit ?? UInt64(2 * 1_073_741_824), MachineResources.current.maximumTrainingBytes / 8)
+            let anchorSet = try checkpointAnchors(candidates: candidates, budget: checkpointBudget, stageNeeds: stageNeeds,
+                finalNeeds: finalNeeds, frozenRoots: frozenRoots, checkCancellation: checkCancellation)
+            var feeds = base
+            let frozenCacheHit: Bool
+            if let featureKey, let cached = featureCache[featureKey], frozenRoots.isSubset(of: Set(cached.keys)) {
+                frozenValues = cached; feeds.merge(cached) { _, new in new }; frozenCacheHit = true
+            } else { frozenCacheHit = false }
+            var remaining = finalNeeds
+            var neededAfter = [Set<MPSGraphTensor>](repeating: [], count: frozenStages.count)
+            for i in frozenStages.indices.reversed() { neededAfter[i] = remaining; remaining.formUnion(stageNeeds[i]) }
+            for (index, stage) in frozenStages.enumerated() {
+                try checkCancellation()
+                let data: [MPSGraphTensorData]
+                if !activeStages.contains(index), frozenCacheHit {
+                    // Cached frozen roots are the exact terminal features of
+                    // the parameter-free prefix; no decoder/adapter is skipped.
+                    continue
+                } else {
+                    data = try autoreleasepool {
+                        try executeData(key: "forward-\(index)", feeds: feeds.filter { stageNeeds[index].contains($0.key) }, targets: stage.map(\.source),
+                                        checkCancellation: checkCancellation)
+                    }
+                }
+                for (offset, item) in stage.enumerated() {
+                    feeds[item.feed] = data[offset]
+                    if anchorSet.contains(item.feed) { checkpoints[item.feed] = try NativeGraphExecution.tensor(data[offset]) }
+                    if frozenRoots.contains(item.feed) { frozenValues[item.feed] = data[offset] }
+                }
+                feeds = feeds.filter { neededAfter[index].contains($0.key) }
+                onStage(index + 1, frozenStages.count)
+            }
+            if let featureKey, !frozenValues.isEmpty, featureCache[featureKey] == nil {
+                let bytes = frozenValues.values.reduce(UInt64(0)) { $0 + UInt64($1.shape.reduce(4) { $0 * $1.intValue }) }
+                let budget = min(UInt64(2 * 1_073_741_824), MachineResources.current.maximumTrainingBytes / 16)
+                while featureBytes + bytes > budget, let oldest = featureOrder.first {
+                    if let removed = featureCache.removeValue(forKey: oldest) {
+                        featureBytes -= removed.values.reduce(UInt64(0)) { $0 + UInt64($1.shape.reduce(4) { $0 * $1.intValue }) }
+                    }
+                    featureOrder.removeFirst()
+                }
+                if bytes <= budget { featureCache[featureKey] = frozenValues; featureOrder.append(featureKey); featureBytes += bytes }
+            }
+            let result = try executeValues(key: "final-loss", feeds: feeds.filter { finalNeeds.contains($0.key) }, targets: finalTargets,
+                                           checkCancellation: checkCancellation)
+            guard result[0].allSatisfy(\.isFinite), result[1][0].isFinite else { throw StudioError("Material model produced nonfinite values.") }
+            feeds.removeAll()
+            var adjoints: [MPSGraphTensor: MPSGraphTensorData] = [:]
+            var parameterGradients: [String: NativeTensor] = [:]
+            func replayInputs(_ needs: Set<MPSGraphTensor>) throws -> [MPSGraphTensor: MPSGraphTensorData] {
+                var replay = Set<Int>(), visited = Set<MPSGraphTensor>()
+                func collect(_ tensor: MPSGraphTensor) throws {
+                    guard visited.insert(tensor).inserted else { return }
+                    if base[tensor] != nil || frozenValues[tensor] != nil || checkpoints[tensor] != nil { return }
+                    guard let index = producers[tensor] else { throw StudioError("Native checkpoint dependency is unavailable.") }
+                    if replay.insert(index).inserted {
+                        for dependency in stageNeeds[index] where boundarySet.contains(dependency) || base[dependency] != nil {
+                            try collect(dependency)
+                        }
+                    }
+                }
+                let required = needs.filter { boundarySet.contains($0) || base[$0] != nil }
+                for tensor in required { try collect(tensor) }
+                let order = replay.sorted()
+                var remaining = required
+                var neededAfter = [Set<MPSGraphTensor>](repeating: [], count: order.count)
+                for position in order.indices.reversed() {
+                    neededAfter[position] = remaining
+                    remaining.formUnion(stageNeeds[order[position]])
+                }
+                var live: [MPSGraphTensor: MPSGraphTensorData] = [:]
+                func value(_ tensor: MPSGraphTensor) throws -> MPSGraphTensorData {
+                    if let value = live[tensor] ?? base[tensor] ?? frozenValues[tensor] { return value }
+                    if let checkpoint = checkpoints[tensor] {
+                        let data = try NativeGraphExecution.tensorData(checkpoint)
+                        live[tensor] = data
+                        return data
+                    }
+                    throw StudioError("Native replay lost a required boundary value.")
+                }
+                // Replay each ancestor once in forward order. A size-limited
+                // recursive memo can forget a shared residual ancestor while
+                // its siblings are being resolved and repeat whole prefixes.
+                // Last-consumer release bounds storage without that repetition.
+                for (position, index) in order.enumerated() {
+                    try checkCancellation()
+                    var inputs: [MPSGraphTensor: MPSGraphTensorData] = [:]
+                    for dependency in stageNeeds[index] where boundarySet.contains(dependency) || base[dependency] != nil {
+                        inputs[dependency] = try value(dependency)
+                    }
+                    let data = try autoreleasepool {
+                        try executeData(key: "forward-\(index)", feeds: inputs, targets: frozenStages[index].map(\.source),
+                                        checkCancellation: checkCancellation)
+                    }
+                    for (offset, item) in frozenStages[index].enumerated() { live[item.feed] = data[offset] }
+                    live = live.filter { neededAfter[position].contains($0.key) }
+                }
+                var inputs: [MPSGraphTensor: MPSGraphTensorData] = [:]
+                for tensor in required { inputs[tensor] = try value(tensor) }
+                return inputs
+            }
+            func backward(_ plan: ReverseStage, seeds: [MPSGraphTensorData]) throws {
+                try checkCancellation()
+                var inputs = try replayInputs(plan.needs)
+                for (index, seed) in seeds.enumerated() { inputs[plan.seeds[index]] = seed }
+                let data = try autoreleasepool {
+                    try executeData(key: plan.key, feeds: inputs, targets: plan.derivatives, checkCancellation: checkCancellation)
+                }
+                for (index, input) in plan.inputs.enumerated() {
+                    if let name = parameterNames[input] {
+                        let value = try NativeGraphExecution.tensor(data[index])
+                        if let old = parameterGradients[name] {
+                            let a = try old.floatValues(), b = try value.floatValues()
+                            parameterGradients[name] = .floats(zip(a, b).map(+), shape: old.shape)
+                        } else { parameterGradients[name] = value }
+                    } else if let old = adjoints[input] { adjoints[input] = try sum(old, data[index], checkCancellation: checkCancellation) }
+                    else { adjoints[input] = data[index] }
+                }
+            }
+            try backward(lossReverse!, seeds: [])
+            for index in activeStages.sorted().reversed() {
+                let stage = frozenStages[index]
+                let seeds = stage.map { adjoints[$0.feed] }
+                if seeds.allSatisfy({ $0 == nil }) { continue }
+                let completeSeeds = try stage.enumerated().map { offset, item in
+                    try seeds[offset] ?? NativeGraphExecution.tensorData(.floats([Float](repeating: 0, count: shape(item.source).reduce(1, *)), shape: shape(item.source)))
+                }
+                for item in stage { adjoints.removeValue(forKey: item.feed) }
+                try autoreleasepool { try backward(reverseStages[index]!, seeds: completeSeeds) }
+                // Reverse consumers are finished; discarded anchors cannot be
+                // needed by a later (earlier-in-forward-order) VJP.
+                for item in stage { checkpoints.removeValue(forKey: item.feed) }
+                onStage(frozenStages.count - index, frozenStages.count)
+            }
+            try checkCancellation()
+            for name in parameterFeeds.keys {
+                guard let gradient = parameterGradients[name], try gradient.floatValues().allSatisfy(\.isFinite) else {
+                    throw StudioError("Native training returned a missing or nonfinite adapter gradient.")
+                }
+                base[gradients[name]!] = try NativeGraphExecution.tensorData(gradient)
+            }
+            base[self.learningRate!] = try NativeGraphExecution.tensorData(.floats([learningRate], shape: []))
+            base[optimizerStep!] = try NativeGraphExecution.tensorData(.floats([Float(step)], shape: []))
+            for (key, feed) in optimizerFeeds {
+                let name = String(key.dropLast(2))
+                let value = optimizerState[key] ?? .floats([Float](repeating: 0, count: adapters[name]!.shape.reduce(1, *)), shape: adapters[name]!.shape)
+                base[feed] = try NativeGraphExecution.tensorData(value)
+            }
+            let ordered = optimizerOutputs.keys.sorted()
+            let optimizerTargets = ordered.map { optimizerOutputs[$0]! }, optimizerNeeds = requiredFeeds(ordered.map { optimizerOutputs[$0]! })
+            let updates = try executeValues(key: "optimizer", feeds: base.filter { optimizerNeeds.contains($0.key) }, targets: optimizerTargets,
+                                            checkCancellation: checkCancellation)
+            var updated: [String: NativeTensor] = [:], state: [String: NativeTensor] = [:]
+            for (index, key) in ordered.enumerated() {
+                guard updates[index].allSatisfy(\.isFinite) else { throw StudioError("Native optimizer returned nonfinite weights.") }
+                let name = key.hasSuffix(".m") || key.hasSuffix(".v") ? String(key.dropLast(2)) : key
+                let value = NativeTensor.floats(updates[index], shape: adapters[name]!.shape)
+                if name == key { updated[key] = value } else { state[key] = value }
+            }
+            try checkCancellation()
+            return Execution(output: result[0], loss: result[1][0], valueLoss: result[2][0], gradientLoss: result[3][0], updated: updated, optimizerState: state)
         }
         private func prepareLoss() throws {
             if targetInput != nil { return }
@@ -558,15 +1346,20 @@ final class NativeMaterialModel: @unchecked Sendable {
             } }
             valueLoss = absolute; gradientLoss = detail; loss = add(absolute, mul(detail, c(4)))
         }
-        private func prepareOptimizer() throws {
+        private func prepareOptimizer(external: Bool = false) throws {
             if optimizerPrepared { return }
             guard !parameterFeeds.isEmpty else { throw StudioError("Native training needs recorded material LoRA layers.") }
             try prepareLoss()
             let allParameters = parameterFeeds.keys.sorted()
-            let derivative = graph.gradients(of: loss!, with: allParameters.map { parameterFeeds[$0]! }, name: "material_lora_gradients")
+            let derivative = external ? [:] : graph.gradients(of: loss!, with: allParameters.map { parameterFeeds[$0]! }, name: "material_lora_gradients")
             var normSquared = c(0)
             for key in allParameters {
-                guard let gradient = derivative[parameterFeeds[key]!] else { throw StudioError("Material graph could not differentiate adapter \(key).") }
+                let gradient: MPSGraphTensor
+                if external { gradient = graph.placeholder(shape: parameterFeeds[key]!.shape, dataType: .float32, name: key + ".gradient") }
+                else {
+                    guard let value = derivative[parameterFeeds[key]!] else { throw StudioError("Material graph could not differentiate adapter \(key).") }
+                    gradient = value
+                }
                 gradients[key] = gradient
                 normSquared = add(normSquared, graph.reductionSum(with: mul(gradient, gradient), axes: Array(0..<shape(gradient).count).ns, name: nil))
             }
@@ -593,7 +1386,77 @@ final class NativeMaterialModel: @unchecked Sendable {
     }
 }
 
+private struct NativeProgramFeatureCache {
+    var values: [String: [String: MPSGraphTensorData]] = [:]
+    var order: [String] = []
+    var bytes: UInt64 = 0
+}
+
+/// Stores only compiled code and value metadata. No symbolic graph, tensor,
+/// executable, activation, or optimizer state survives in this cache.
+private final class NativeGraphPackageCache {
+    struct Entry {
+        let url: URL
+        let inputNames: [String]
+        let inputShapes: [[Int]]
+        let inputTypes: [MPSDataType]
+        let requestedIndices: [Int]
+        let outputShapes: [[Int]]
+        let outputTypes: [MPSDataType]
+        let bytes: UInt64
+    }
+    private let root: URL
+    private var entries: [String: Entry] = [:]
+    private var order: [String] = []
+    private var bytes: UInt64 = 0
+    private let maximumBytes: UInt64 = 1 << 30
+    init() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("NativeTrainingPrograms-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
+    deinit { try? FileManager.default.removeItem(at: root) }
+    func entry(for key: String) -> Entry? {
+        guard let value = entries[key] else { return nil }
+        order.removeAll { $0 == key }; order.append(key)
+        return value
+    }
+    func packageURL() -> URL { root.appendingPathComponent(UUID().uuidString + ".mpsgraphpackage", isDirectory: true) }
+    func insert(key: String, url: URL, inputNames: [String], inputShapes: [[Int]], inputTypes: [MPSDataType], requestedIndices: [Int], outputShapes: [[Int]], outputTypes: [MPSDataType]) throws -> Entry {
+        guard let files = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]) else {
+            throw StudioError("Compiled native training program was not saved.")
+        }
+        var size: UInt64 = 0
+        for case let file as URL in files {
+            let values = try file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            if values.isRegularFile == true { size += UInt64(values.fileSize ?? 0) }
+        }
+        guard size > 0, size <= maximumBytes else {
+            try? FileManager.default.removeItem(at: url)
+            throw StudioError("A compiled native training program exceeds its bounded code cache.")
+        }
+        while bytes + size > maximumBytes, let oldest = order.first {
+            order.removeFirst()
+            if let removed = entries.removeValue(forKey: oldest) {
+                bytes -= removed.bytes
+                try FileManager.default.removeItem(at: removed.url)
+            }
+        }
+        let entry = Entry(url: url, inputNames: inputNames, inputShapes: inputShapes, inputTypes: inputTypes,
+            requestedIndices: requestedIndices, outputShapes: outputShapes, outputTypes: outputTypes, bytes: size)
+        entries[key] = entry; order.append(key); bytes += size
+        return entry
+    }
+}
+
 enum NativeGraphExecution {
+    // A requested value may serve several derivatives. Compile its storage
+    // once, then reconstruct each requested slot from the stable index map.
+    private static func uniqueTargets(_ targets: [MPSGraphTensor]) -> [MPSGraphTensor] {
+        var seen = Set<MPSGraphTensor>()
+        return targets.filter { seen.insert($0).inserted }
+    }
+    private static let device = MTLCreateSystemDefaultDevice()
+    private static let queue = device?.makeCommandQueue()
     static func nearestNeighbor2(_ value: MPSGraphTensor, graph: MPSGraph) -> MPSGraphTensor {
         let shape = value.shape!.map(\.intValue)
         let expanded = graph.reshape(value, shape: [shape[0], shape[1], shape[2], 1, shape[3], 1].ns, name: nil)
@@ -605,8 +1468,9 @@ enum NativeGraphExecution {
         return graph.reshape(samples, shape: [shape[0], shape[1], shape[2] * 2, shape[3] * 2].ns, name: nil)
     }
     static func tensorData(_ value: NativeTensor) throws -> MPSGraphTensorData {
-        guard let device = MTLCreateSystemDefaultDevice() else { throw StudioError("Metal is unavailable for native material inference.") }
-        return MPSGraphTensorData(device: MPSGraphDevice(mtlDevice: device), data: value.bytes, shape: value.shape.ns, dataType: .float32)
+        guard let device else { throw StudioError("Metal is unavailable for native material inference.") }
+        let dtype: MPSDataType = value.dtype == "I64" ? .int64 : value.dtype == "I32" ? .int32 : .float32
+        return MPSGraphTensorData(device: MPSGraphDevice(mtlDevice: device), data: value.bytes, shape: value.shape.ns, dataType: dtype)
     }
     static func run(_ graph: MPSGraph, feeds: [MPSGraphTensor: MPSGraphTensorData], targets: [MPSGraphTensor]) throws -> [[Float]] {
         var cache: [String: MPSGraphExecutable] = [:]
@@ -621,32 +1485,230 @@ enum NativeGraphExecution {
             return values
         }
     }
-    /// Retains frozen intermediate features on the GPU between graph stages.
-    static func runData(_ graph: MPSGraph, feeds: [MPSGraphTensor: MPSGraphTensorData], targets: [MPSGraphTensor], cache: inout [String: MPSGraphExecutable]) throws -> [MPSGraphTensorData] {
+    static func tensor(_ value: MPSGraphTensorData) throws -> NativeTensor {
+        let shape = value.shape.map(\.intValue)
+        var bytes = Data(count: shape.reduce(4, *))
+        bytes.withUnsafeMutableBytes { value.mpsndarray().readBytes($0.baseAddress!, strideBytes: nil) }
+        return NativeTensor(dtype: "F32", shape: shape, bytes: bytes)
+    }
+    /// Loads bounded compiled code by an explicit phase/stage identity. Feeds
+    /// are rebound only by unique explicit placeholder names from a cold graph.
+    fileprivate static func runPackaged(_ graph: MPSGraph, feeds: [MPSGraphTensor: MPSGraphTensorData], targets: [MPSGraphTensor], key: String, packages: NativeGraphPackageCache,
+                                       compile: (() throws -> NativeGraphPackageCache.Entry)? = nil,
+                                       checkCancellation: () throws -> Void = { try Task.checkCancellation() }) throws -> [MPSGraphTensorData] {
         try Task.checkCancellation()
-        guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else { throw StudioError("Metal is unavailable for native material computation.") }
+        try checkCancellation()
+        guard let device, let queue else { throw StudioError("Metal is unavailable for native material computation.") }
+        var named: [String: MPSGraphTensorData] = [:]
+        for (tensor, data) in feeds {
+            let name = tensor.operation.name
+            guard !name.isEmpty, named.updateValue(data, forKey: name) == nil,
+                  tensor.shape?.map(\.intValue) == data.shape.map(\.intValue), tensor.dataType == data.dataType else {
+                throw StudioError("Native compiled program feeds lack unique, exact placeholder identities.")
+            }
+        }
+        let entry: NativeGraphPackageCache.Entry
+        if let existing = packages.entry(for: key) { entry = existing }
+        else {
+            if let compile { entry = try compile() }
+            else { entry = try autoreleasepool { try compilePackage(graph, feeds: feeds, targets: targets, key: key, packages: packages) } }
+        }
+        // A synchronous compiler cannot be interrupted. Honor Abort before
+        // its completed package can start another allocation or GPU run.
+        try Task.checkCancellation()
+        try checkCancellation()
+        guard targets.count == entry.requestedIndices.count,
+              targets.map({ $0.shape!.map(\.intValue) }) == entry.outputShapes,
+              targets.map(\.dataType) == entry.outputTypes else {
+            throw StudioError("Native compiled program result metadata changed for \(key).")
+        }
+        let inputs = try entry.inputNames.enumerated().map { index, name -> MPSGraphTensorData in
+            guard let data = named[name], data.shape.map(\.intValue) == entry.inputShapes[index], data.dataType == entry.inputTypes[index] else {
+                throw StudioError("Native compiled program input metadata changed for \(key): \(name).")
+            }
+            return data
+        }
+        guard UInt64(device.currentAllocatedSize) <= MachineResources.current.maximumTrainingBytes else {
+            throw StudioError("Native training exceeded this Mac's safe Metal working budget; stopped before another stage allocation.")
+        }
+        let executable = MPSGraphExecutable(package: entry.url, descriptor: compilationDescriptor())
+        try Task.checkCancellation()
+        try checkCancellation()
+        // Package executables need not expose tensor identities. Reconstruct
+        // every compiled output slot from the saved requested-index mapping.
+        guard let lastIndex = entry.requestedIndices.max(), lastIndex >= 0, lastIndex < entry.requestedIndices.count else {
+            throw StudioError("Native compiled program has invalid result order for \(key).")
+        }
+        var outputShapes = [[Int]?](repeating: nil, count: lastIndex + 1)
+        var outputTypes = [MPSDataType?](repeating: nil, count: lastIndex + 1)
+        for (index, compiledIndex) in entry.requestedIndices.enumerated() {
+            guard outputShapes.indices.contains(compiledIndex) else { throw StudioError("Native compiled program has invalid result order for \(key).") }
+            if let existing = outputShapes[compiledIndex] {
+                guard existing == entry.outputShapes[index], outputTypes[compiledIndex] == entry.outputTypes[index] else {
+                    throw StudioError("Native compiled program has conflicting result metadata for \(key).")
+                }
+            }
+            outputShapes[compiledIndex] = entry.outputShapes[index]; outputTypes[compiledIndex] = entry.outputTypes[index]
+        }
+        guard outputShapes.allSatisfy({ $0 != nil }), outputTypes.allSatisfy({ $0 != nil }) else {
+            throw StudioError("Native compiled program omitted output storage metadata for \(key).")
+        }
+        let results = try runWithCompactOutputs(executable, inputs: inputs, shapes: outputShapes.map { $0! },
+                                                types: outputTypes.map { $0! }, device: device, queue: queue,
+                                                checkCancellation: checkCancellation)
+        let requested = try entry.requestedIndices.enumerated().map { index, compiledIndex -> MPSGraphTensorData in
+            guard results.indices.contains(compiledIndex) else { throw StudioError("Native compiled program returned incomplete results.") }
+            let result = results[compiledIndex]
+            guard result.shape.map(\.intValue) == entry.outputShapes[index], result.dataType == entry.outputTypes[index] else {
+                throw StudioError("Native compiled program changed result storage for \(key).")
+            }
+            return result
+        }
+        return requested
+    }
+    fileprivate static func compilePackage(_ graph: MPSGraph, feeds: [MPSGraphTensor: MPSGraphTensorData], targets: [MPSGraphTensor], key: String, packages: NativeGraphPackageCache) throws -> NativeGraphPackageCache.Entry {
+        try Task.checkCancellation()
+        guard let device else { throw StudioError("Metal is unavailable for native material computation.") }
+        let descriptor = compilationDescriptor()
+        let shaped = feeds.mapValues { MPSGraphShapedType(shape: $0.shape, dataType: $0.dataType) }
+        let original = graph.compile(with: MPSGraphDevice(mtlDevice: device), feeds: shaped,
+            targetTensors: uniqueTargets(targets), targetOperations: nil, compilationDescriptor: descriptor)
+        try Task.checkCancellation()
+        guard let inputs = original.feedTensors, let compiledTargets = original.targetTensors,
+              Set(inputs.map { $0.operation.name }).count == inputs.count else {
+            throw StudioError("Native compiled program has ambiguous input or output identities.")
+        }
+        let indices = try targets.map { tensor -> Int in
+            guard let index = compiledTargets.firstIndex(of: tensor) else {
+                throw StudioError("Native compiled program omitted a requested result.")
+            }
+            return index
+        }
+        guard Set(indices) == Set(compiledTargets.indices) else {
+            throw StudioError("Native compiled program has unregistered output storage for \(key).")
+        }
+        let url = packages.packageURL()
+        original.serialize(package: url, descriptor: nil)
+        return try packages.insert(key: key, url: url,
+            inputNames: inputs.map { $0.operation.name }, inputShapes: inputs.map { $0.shape!.map(\.intValue) }, inputTypes: inputs.map(\.dataType),
+            requestedIndices: indices, outputShapes: targets.map { $0.shape!.map(\.intValue) }, outputTypes: targets.map(\.dataType))
+    }
+    private static func compilationDescriptor() -> MPSGraphCompilationDescriptor {
+        let descriptor = MPSGraphCompilationDescriptor()
+        descriptor.reducedPrecisionFastMath = .none
+        descriptor.optimizationLevel = .level0
+        descriptor.waitForCompilationCompletion = true
+        return descriptor
+    }
+    /// Execute directly into caller-owned logical buffers. Default outputs
+    /// can retain graph scratch storage; exporting them afterward duplicates
+    /// every whole-grid result while that arena is still alive.
+    private static func runWithCompactOutputs(_ executable: MPSGraphExecutable, inputs: [MPSGraphTensorData],
+                                              shapes: [[Int]], types: [MPSDataType], device: MTLDevice,
+                                              queue: MTLCommandQueue, checkCancellation: () throws -> Void) throws -> [MPSGraphTensorData] {
+        try Task.checkCancellation()
+        try checkCancellation()
+        guard shapes.count == types.count else { throw StudioError("Native graph output metadata is incomplete.") }
+        let buffers = try zip(shapes, types).map { shape, type -> MTLBuffer in
+            try checkCancellation()
+            guard type == .float32 else { throw StudioError("Native graph results must remain Float32.") }
+            let bytes = try shape.reduce(4) { count, dimension in
+                let product = count.multipliedReportingOverflow(by: dimension)
+                guard dimension > 0, !product.overflow else { throw StudioError("Native graph output dimensions exceed addressable storage.") }
+                return product.partialValue
+            }
+            guard let buffer = device.makeBuffer(length: bytes, options: .storageModeShared) else {
+                throw StudioError("Could not allocate compact native graph output storage.")
+            }
+            return buffer
+        }
+        let provided = buffers.enumerated().map { MPSGraphTensorData($0.element, shape: shapes[$0.offset].ns, dataType: types[$0.offset]) }
+        let descriptor = MPSGraphExecutableExecutionDescriptor()
+        descriptor.waitUntilCompleted = true
+        executable.options = .synchronizeResults
+        try Task.checkCancellation()
+        try checkCancellation()
+        let results = executable.run(with: queue, inputs: inputs, results: provided, executionDescriptor: descriptor)
+        try Task.checkCancellation()
+        try checkCancellation()
+        guard results.count == provided.count else { throw StudioError("Native graph returned incomplete output storage.") }
+        var independent = results
+        var copy: MTLCommandBuffer?
+        for (index, result) in results.enumerated() {
+            try checkCancellation()
+            guard result.shape.map(\.intValue) == shapes[index], result.dataType == types[index] else {
+                throw StudioError("Native graph changed compact output shape or precision.")
+            }
+            if result === provided[index], result.mpsndarray().parent == nil { continue }
+            // Some compiled read-only views return an input alias instead of
+            // the supplied result. Compact only those exceptional slots into
+            // their already allocated logical buffers, preserving strides.
+            if copy == nil { copy = queue.makeCommandBuffer() }
+            guard let copy else { throw StudioError("Could not copy an aliased native graph output.") }
+            result.mpsndarray().exportData(with: copy, to: buffers[index], destinationDataType: .float32, offset: 0, rowStrides: nil)
+            independent[index] = MPSGraphTensorData(buffers[index], shape: shapes[index].ns, dataType: types[index])
+        }
+        if let copy {
+            copy.commit(); copy.waitUntilCompleted()
+            if let error = copy.error { throw StudioError("Native graph output copy failed: \(error.localizedDescription)") }
+        }
+        try Task.checkCancellation()
+        try checkCancellation()
+        guard independent.allSatisfy({ $0.mpsndarray().parent == nil }) else {
+            throw StudioError("Native graph retained aliased compact output storage.")
+        }
+        return independent
+    }
+    /// Returns compact, independent buffers: MPSGraph results can be views of
+    /// its entire scratch arena, which must not survive with a boundary tensor.
+    static func runData(_ graph: MPSGraph, feeds: [MPSGraphTensor: MPSGraphTensorData], targets: [MPSGraphTensor], cache: inout [String: MPSGraphExecutable],
+                        checkCancellation: () throws -> Void = { try Task.checkCancellation() }) throws -> [MPSGraphTensorData] {
+        try Task.checkCancellation()
+        try checkCancellation()
+        guard let device, let queue else { throw StudioError("Metal is unavailable for native material computation.") }
         let key = targets.map { String(describing: ObjectIdentifier($0)) }.joined(separator: "|")
         let executable: MPSGraphExecutable
         if let existing = cache[key] { executable = existing }
         else {
+            // Each executable retains a Metal scratch arena. Keeping one for
+            // every whole-grid block consumes >100 GiB at just 1K. Compact
+            // mask feeds make recompilation cheap; retain only the current
+            // stage so arenas can be freed before compiling the next stage.
+            cache.removeAll(keepingCapacity: true)
             let descriptor = MPSGraphCompilationDescriptor()
             descriptor.reducedPrecisionFastMath = .none
+            // Metal-only Float32 execution. Level1 also tries ANE placement
+            // for tiny adapter/optimizer subgraphs, which cannot accept FP32.
+            descriptor.optimizationLevel = .level0
+            descriptor.waitForCompilationCompletion = true
             let shaped = Dictionary(uniqueKeysWithValues: feeds.map { ($0.key, MPSGraphShapedType(shape: $0.value.shape, dataType: $0.value.dataType)) })
-            executable = graph.compile(with: MPSGraphDevice(mtlDevice: device), feeds: shaped, targetTensors: targets, targetOperations: nil, compilationDescriptor: descriptor)
+            executable = graph.compile(with: MPSGraphDevice(mtlDevice: device), feeds: shaped, targetTensors: uniqueTargets(targets), targetOperations: nil, compilationDescriptor: descriptor)
             cache[key] = executable
         }
-        let executionInputs = executable.feedTensors!.map { feeds[$0]! }
-        let result = executable.run(with: queue, inputs: executionInputs, results: nil, executionDescriptor: nil)
         try Task.checkCancellation()
-        guard let compiledTargets = executable.targetTensors, compiledTargets.count == result.count else {
+        try checkCancellation()
+        guard UInt64(device.currentAllocatedSize) <= MachineResources.current.maximumTrainingBytes else {
+            cache.removeAll()
+            throw StudioError("Native training exceeded this Mac's safe Metal working budget; stopped before another stage allocation.")
+        }
+        guard let feedTensors = executable.feedTensors, let compiledTargets = executable.targetTensors,
+              compiledTargets.allSatisfy({ $0.shape != nil }) else {
             throw StudioError("Native material graph returned incomplete result identities.")
         }
+        let executionInputs = try feedTensors.map { tensor -> MPSGraphTensorData in
+            guard let value = feeds[tensor] else { throw StudioError("Native material graph omitted a required input.") }
+            return value
+        }
+        let result = try runWithCompactOutputs(executable, inputs: executionInputs, shapes: compiledTargets.map { $0.shape!.map(\.intValue) },
+                                               types: compiledTargets.map(\.dataType), device: device, queue: queue,
+                                               checkCancellation: checkCancellation)
         var byTensor: [MPSGraphTensor: MPSGraphTensorData] = [:]
         for (index, tensor) in compiledTargets.enumerated() { byTensor[tensor] = result[index] }
-        return try targets.map { tensor in
+        let requested = try targets.map { tensor -> MPSGraphTensorData in
             guard let value = byTensor[tensor] else { throw StudioError("Native material graph omitted a requested result.") }
             return value
         }
+        return requested
     }
 }
 

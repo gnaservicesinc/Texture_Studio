@@ -402,6 +402,10 @@ struct WorkbenchTrainingCapabilities: Decodable, Sendable {
 struct WorkbenchTrainingResponse: Decodable, Sendable {
     let checkpointPath: String
     let packagePath: String?
+    let status: String?
+    let stoppedReason: String?
+    let completedUpdates: Int?
+    let requestedUpdates: Int?
 }
 struct WorkbenchAdapterWeight: Identifiable {
     let id = UUID()

@@ -106,6 +106,7 @@ final class WorkbenchStore {
 
     var samples: [WorkbenchSample] { dataset?.samples ?? [] }
     var canStopAndSave: Bool { isTraining && hasTrainingStarted && !isStopping }
+    var canAbort: Bool { isBusy && (!isStopping || isSavingTraining) }
     var selectedSample: WorkbenchSample? { samples.first { $0.id == selectedSampleId } }
     var selectedMaterialId: String? { dataset?.materials.first { $0.samples.contains { $0.id == selectedSampleId } }?.materialId }
     var selectedMaterialName: String? {
@@ -671,7 +672,16 @@ final class WorkbenchStore {
                 try await self.loadCheckpoint(URL(fileURLWithPath: result.checkpointPath))
                 self.lastPackageURL = result.packagePath.map { URL(fileURLWithPath: $0) }
                 self.lastPackageCheckpointId = self.selectedCheckpointId
-                self.activity = self.isSavingTraining ? "Stopped and saved material LoRA." : "Training finished. Review the material maps before using this model."
+                if result.stoppedReason == "time_limit" {
+                    let counts = result.completedUpdates.flatMap { completed in
+                        result.requestedUpdates.map { " Saved \(completed.formatted()) of \($0.formatted()) updates." }
+                    } ?? " Saved the completed updates."
+                    self.activity = "Training time limit reached." + counts
+                } else if self.isSavingTraining || result.status == "stopped" {
+                    self.activity = "Stopped and saved material LoRA."
+                } else {
+                    self.activity = "Training finished. Review the material maps before using this model."
+                }
                 try await self.cleanupTrainingDataset(prepared)
                 if publishAfterTraining && !self.isStopping {
                     let account = try WorkbenchResult.decode(HuggingFaceAccountResponse.self, output: await self.worker(["hub-account"]))
@@ -754,7 +764,12 @@ final class WorkbenchStore {
     }
 
     func stop() {
-        guard isBusy else { return }
+        if isTraining { stopAndSave() }
+        else { abort() }
+    }
+
+    func abort() {
+        guard canAbort else { return }
         isStopping = true
         isSavingTraining = false
         activity = isTraining ? (hasTrainingStarted ? "Aborting training…" : "Aborting training setup…") : "Stopping the operation…"
@@ -763,7 +778,10 @@ final class WorkbenchStore {
     }
 
     func stopAndSave() {
-        guard canStopAndSave else { stop(); return }
+        guard canStopAndSave else {
+            if !isStopping { abort() }
+            return
+        }
         isStopping = true
         isSavingTraining = true
         activity = "Finishing the current update and saving the material LoRA…"
@@ -798,6 +816,15 @@ final class WorkbenchStore {
             case "training_started":
                 hasTrainingStarted = true
                 if !isStopping { activity = "Training material LoRA…" }
+            case "training_stopped":
+                guard event["stopped_reason"] as? String == "time_limit", !isStopping else { continue }
+                isStopping = true
+                isSavingTraining = true
+                activity = "Training time limit reached. Validating and saving completed updates…"
+            case "feature_progress":
+                guard !isStopping, let completed = event["completed"] as? Int,
+                      let total = event["total"] as? Int, total > 0 else { continue }
+                activity = "Computing native \(event["phase"] as? String ?? "training") features: \(completed)/\(total) stages…"
             case "checkpoint_saved":
                 if let checkpoint = try? WorkbenchResult.decode(WorkbenchCheckpoint.self, output: line) {
                     if !checkpoints.contains(where: { $0.id == checkpoint.id }) { checkpoints.append(checkpoint) }
@@ -1032,7 +1059,7 @@ final class WorkbenchStore {
             }
             catch {
                 if Task.isCancelled || error is CancellationError {
-                    activity = "Operation stopped. See the log and output folder."
+                    activity = training ? "Training aborted. Previously saved checkpoints are kept." : "Operation stopped. See the log and output folder."
                 } else { self.error = error.localizedDescription; activity = "Operation stopped. See the error and log." }
             }
         }

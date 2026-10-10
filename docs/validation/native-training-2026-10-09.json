@@ -1,0 +1,437 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-10-10T03:27:33.930196+00:00",
+  "status": "pending",
+  "implementation": {
+    "git_commit": "aa6d94588ccacda9a42b8505f10d311b75100795",
+    "worktree_dirty": true,
+    "source_files": [
+      {
+        "path": "src/TextureStudio/Services/NativeMaterialModel.swift",
+        "sha256": "55d47ba2db7d6a4c3458cfb3c6ed1ce7777ba4a3d0e1b95560047517e2a1c64b"
+      },
+      {
+        "path": "src/TextureStudio/Services/NativeMaterialTrainer.swift",
+        "sha256": "6faca8655cd27a048877d22f416d035a6a6899b20be24a122595660b12987d5b"
+      },
+      {
+        "path": "src/TextureStudio/Services/NativeMaterialDatasetService.swift",
+        "sha256": "2b42002e30e873f82b6acac81009ca8d1c7abd44911846469487d6c7a3a755d3"
+      },
+      {
+        "path": "src/TextureStudio/Tests/NativeMaterialTrainerTests.swift",
+        "sha256": "b2edc1c057f869a31cd7178bfadbaf01782173c6a75c16d65a76c25b1235beec"
+      }
+    ],
+    "patch_sha256": null,
+    "app_version": "0.9.13",
+    "app_build": "107"
+  },
+  "machine": {
+    "hardware": "Apple M2 Max",
+    "os": "macOS 27.2",
+    "architecture": "arm64",
+    "physical_memory_bytes": 68719476736
+  },
+  "strict_proof": {
+    "status": "passed",
+    "artifacts": [
+      {
+        "path": "docs/validation/native-training-strict-proof-2026-10-09.log",
+        "sha256": "560d5c22513a13914b928722508fb71b38751df19230efa3085ebd0d6fca7b7a"
+      }
+    ],
+    "tested_source_sha256": "f107db160d423b18290f17ff2b69e087cea9a37748374a1ee76733e219588356",
+    "binary_sha256": "7c17247cda90b9224bcb1aed2fbe1a532a43cee57831803e1c57406cde3fa8b3",
+    "scopes": [
+      "final-map",
+      "map-decoder"
+    ],
+    "checkpoint_budgets_bytes": [
+      0,
+      524288
+    ],
+    "updates_per_case": 2,
+    "cases_completed": 4,
+    "tolerances": {
+      "factor_moment_max_scaled": 0.003,
+      "subnormal_floor_multiplier": 16,
+      "output_loss_absolute": 2e-06
+    },
+    "comparisons_passed": true,
+    "failure_reason": null,
+    "note": "The proof binary was compiled from the candidate model hash above before the default checkpoint policy changed. It tests explicit zero/512 KiB budgets and the same integrated gradient math; it is not a production checkpoint-policy or full-size resource measurement. The current source hash is recorded separately under implementation."
+  },
+  "native_suite": {
+    "status": "passed",
+    "artifacts": [
+      {
+        "path": "docs/validation/native-training-suite-2026-10-09.log",
+        "sha256": "f071bf9d41e761c18b308299be7126d3c4b66787d8c6ba0ef4a9b04c8eddbeb4"
+      }
+    ],
+    "command": "make test-native",
+    "configuration": "Debug",
+    "executed": 295,
+    "skipped": 3,
+    "failures": 0,
+    "elapsed_seconds": 953.376,
+    "failure_reason": null
+  },
+  "final_validation_abort": {
+    "status": "passed",
+    "test_name": "NativeMaterialTrainerTests/testAbortFromFinalValidationPreventsCheckpointAndExport",
+    "artifacts": [
+      {
+        "path": "docs/validation/native-training-abort-boundaries-2026-10-09.log",
+        "sha256": "41c7460339e3dc13ffb52e44383f99cd321c0217f1a210cffafb74530f84bdf1"
+      }
+    ],
+    "note": "Focused Release run passed all three tests in 125.056 seconds: Abort from final validation prevents checkpoint/export; Abort after checkpoint publication retains that checkpoint and prevents export; Stop completes its active numeric update while Abort discards an unfinished update."
+  },
+  "production_runs": [
+    {
+      "size": 1024,
+      "status": "pending"
+    },
+    {
+      "size": 2048,
+      "status": "pending"
+    }
+  ],
+  "prior_measurements": [
+    {
+      "relationship_to_current_code": "prior_code",
+      "implementation_source_sha256": null,
+      "source_hash_status": "unavailable",
+      "artifacts": [
+        {
+          "path": "out/native-training-regression/run-F9DD3FC5-7EC1-4CD8-AFF1-E481A1AFBA66/training-1024.json",
+          "sha256": "e3f62a8da42c3e100d1437b9dc6cf580d63b39d4305b5cb62c9cb3233e73dac2"
+        }
+      ],
+      "report": {
+        "size": 1024,
+        "elapsed_seconds": 583.714485333,
+        "base_sha256": "3f25b03e950c6199b53a3e1581296831e71555e1928ad209232b757f75153b7d",
+        "scope": "map-decoder",
+        "rank": 64,
+        "alpha": 16,
+        "completed_updates": 6,
+        "requested_updates": 6,
+        "status": "completed",
+        "training_pair_count": 2,
+        "updates_per_map": 3,
+        "max_minutes": 90,
+        "source_pairs": [
+          {
+            "input": "/opt/ipde/sources_mats/white_stucco_02/white_stucco_02_diff_2k.png",
+            "material_id": "white_stucco_02",
+            "target": "/opt/ipde/sources_mats/white_stucco_02/white_stucco_02_disp_2k.png"
+          },
+          {
+            "input": "/opt/ipde/sources_mats/red_brick/red_brick_diff_2k.png",
+            "material_id": "red_brick",
+            "target": "/opt/ipde/sources_mats/red_brick/red_brick_disp_2k.png"
+          }
+        ],
+        "source_sha256": [
+          "c1d34a64fa62b613e62d24a81c20e9d1f612e555525a1476742fea6b98e563ac",
+          "1ff58140eb77ad6fd1350f30952eae6625a66041317e6c99ab64faf42d4ca82d",
+          "4b814528cb900a65e2a2600254a06326d2966a6188b325283fdf74891e7e1f04",
+          "733166c31b1b7ba4fc772247edf3527a83f20d4d14d2571ab1674f0dfd28e12a"
+        ],
+        "training_input_sha256": [
+          "84b7ffed5186981429b053922c8557f401b278a7ef09ad9060ea2f144ff3b2f5",
+          "4b7c77113277f0cefdd368cdae95d2dae6d5f425d5fb3d5679889cf8f24c08b3"
+        ],
+        "measurement_scope": "Real learned base, exact native pixels, distinct real training materials in repeated shuffled passes and the first pair repeated for validation; numeric execution and resource regression, not material quality.",
+        "resource_measurement_scope": "RSS and physical-footprint peaks are process lifetime high-water marks; Metal peak is sampled for this run. Later sizes may include an earlier process peak.",
+        "resources": {
+          "benchmark_resource_abort_limit_bytes": 61847529062,
+          "benchmark_resource_abort_requested": false,
+          "current_metal_allocation_bytes": 3834675200,
+          "current_physical_footprint_bytes": 2205387992,
+          "current_resident_bytes": 2471690240,
+          "initial_system_swap_used_bytes": 668467200,
+          "initial_volume_available_capacity_bytes": 55647133696,
+          "metal_recommended_working_set_bytes": 55662788608,
+          "metal_sample_interval_ms": 100,
+          "physical_memory_bytes": 68719476736,
+          "process_maximum_rss_bytes": 10438098944,
+          "process_peak_physical_footprint_bytes": 25366373040,
+          "sampled_peak_metal_allocation_bytes": 16777412608,
+          "storage_measurement_scope": "Swap is system-wide and available capacity is volume-wide. Deltas can include activity outside this training process.",
+          "system_swap_used_bytes": 668467200,
+          "system_swap_used_delta_bytes": 0,
+          "volume_available_capacity_bytes": 56997515264,
+          "volume_available_capacity_delta_bytes": 1350381568,
+          "volume_measurement_path": "/opt/ipde/ipde/out/native-training-regression/run-F9DD3FC5-7EC1-4CD8-AFF1-E481A1AFBA66"
+        },
+        "run": {
+          "baseline_validation": {
+            "event": "validation",
+            "mae": 0.10059083998203278,
+            "pool_count": 1,
+            "reference": "Teacher/source agreement, not measured material accuracy",
+            "sample_count": 1,
+            "samples": [
+              {
+                "mae": 0.10059083998203278,
+                "sample_id": "validation"
+              }
+            ],
+            "scope": "full",
+            "status": "checked",
+            "step": 0
+          },
+          "checkpoint_path": "/opt/ipde/ipde/out/native-training-regression/run-F9DD3FC5-7EC1-4CD8-AFF1-E481A1AFBA66/trained-1024/export/adapter.safetensors",
+          "checkpoints": [
+            {
+              "architecture": "pbrnxt-native-v1",
+              "base": {
+                "architecture": "pbrnxt-native-v1",
+                "name": "PBRnxt material mapping",
+                "sha256": "3f25b03e950c6199b53a3e1581296831e71555e1928ad209232b757f75153b7d"
+              },
+              "checkpoint_path": "/opt/ipde/ipde/out/native-training-regression/run-F9DD3FC5-7EC1-4CD8-AFF1-E481A1AFBA66/trained-1024/checkpoint-step-00000006.safetensors",
+              "compatible": true,
+              "refinement_policy": "native_material_lora",
+              "schema": "texture-studio-material-lora-v1",
+              "scope": "map-decoder",
+              "sha256": "e06cc94a7f338632e1302d7c99c69c1d86d11d51127c69c97561f1e563140dfb",
+              "step": 6,
+              "supports_studio_inference": true,
+              "supports_training_warm_start": true,
+              "target": "height",
+              "training_size": 1024,
+              "validation": {
+                "event": "validation",
+                "mae": 0.09887733310461044,
+                "pool_count": 1,
+                "reference": "Teacher/source agreement, not measured material accuracy",
+                "sample_count": 1,
+                "samples": [
+                  {
+                    "mae": 0.09887733310461044,
+                    "sample_id": "validation"
+                  }
+                ],
+                "scope": "full",
+                "status": "checked",
+                "step": 6
+              },
+              "variant": "lora"
+            }
+          ],
+          "completed_updates": 6,
+          "dataset_manifest_sha256": "3cde1d22a9b825a111e1804f5853b765b78d84bfececddf47a210f73edeca34f",
+          "elapsed_training_seconds": 582.450639166,
+          "final_validation": {
+            "event": "validation",
+            "mae": 0.09887733310461044,
+            "pool_count": 1,
+            "reference": "Teacher/source agreement, not measured material accuracy",
+            "sample_count": 1,
+            "samples": [
+              {
+                "mae": 0.09887733310461044,
+                "sample_id": "validation"
+              }
+            ],
+            "scope": "full",
+            "status": "checked",
+            "step": 6
+          },
+          "image_padding": false,
+          "image_resizing": false,
+          "last_checkpoint": "/opt/ipde/ipde/out/native-training-regression/run-F9DD3FC5-7EC1-4CD8-AFF1-E481A1AFBA66/trained-1024/checkpoint-step-00000006.safetensors",
+          "max_minutes": 90,
+          "native_dimensions": [
+            1024,
+            1024
+          ],
+          "package_path": "/opt/ipde/ipde/out/native-training-regression/run-F9DD3FC5-7EC1-4CD8-AFF1-E481A1AFBA66/trained-1024/export",
+          "requested_updates": 6,
+          "runtime": "Apple MPSGraph Float32",
+          "status": "completed",
+          "time_limit_policy": "Do not start an update after the deadline. The clock starts after setup; baseline validation, an active update, and final validation and saving finish before returning.",
+          "training_performed": true,
+          "updates_per_map": 3,
+          "validation_history": [
+            {
+              "event": "validation",
+              "mae": 0.10059083998203278,
+              "pool_count": 1,
+              "reference": "Teacher/source agreement, not measured material accuracy",
+              "sample_count": 1,
+              "samples": [
+                {
+                  "mae": 0.10059083998203278,
+                  "sample_id": "validation"
+                }
+              ],
+              "scope": "full",
+              "status": "checked",
+              "step": 0
+            },
+            {
+              "event": "validation",
+              "mae": 0.09887733310461044,
+              "pool_count": 1,
+              "reference": "Teacher/source agreement, not measured material accuracy",
+              "sample_count": 1,
+              "samples": [
+                {
+                  "mae": 0.09887733310461044,
+                  "sample_id": "validation"
+                }
+              ],
+              "scope": "full",
+              "status": "checked",
+              "step": 6
+            }
+          ]
+        }
+      },
+      "update_events": [
+        {
+          "event": "update",
+          "step": 1,
+          "sample_id": "train-white_stucco_02",
+          "native_dimensions": [
+            1024,
+            1024
+          ],
+          "update_duration_seconds": 137.1675335,
+          "elapsed_seconds": 230.16400387500107,
+          "elapsed_training_seconds": 229.190155041,
+          "total": 0.27933233976364136,
+          "value_l1": 0.10059083998203278,
+          "detail_l1": 0.04468537122011185
+        },
+        {
+          "event": "update",
+          "step": 2,
+          "sample_id": "train-red_brick",
+          "native_dimensions": [
+            1024,
+            1024
+          ],
+          "update_duration_seconds": 71.250410125,
+          "elapsed_seconds": 301.414774249999,
+          "elapsed_training_seconds": 300.440974541,
+          "total": 0.2725875973701477,
+          "value_l1": 0.17465686798095703,
+          "detail_l1": 0.02448268234729767
+        },
+        {
+          "event": "update",
+          "step": 3,
+          "sample_id": "train-white_stucco_02",
+          "native_dimensions": [
+            1024,
+            1024
+          ],
+          "update_duration_seconds": 69.931273042,
+          "elapsed_seconds": 371.34638495833497,
+          "elapsed_training_seconds": 370.372577291,
+          "total": 0.2787019908428192,
+          "value_l1": 0.09996743500232697,
+          "detail_l1": 0.04468363896012306
+        },
+        {
+          "event": "update",
+          "step": 4,
+          "sample_id": "train-red_brick",
+          "native_dimensions": [
+            1024,
+            1024
+          ],
+          "update_duration_seconds": 68.325846375,
+          "elapsed_seconds": 439.6725739166686,
+          "elapsed_training_seconds": 438.69876425,
+          "total": 0.2724822759628296,
+          "value_l1": 0.1745782196521759,
+          "detail_l1": 0.024476010352373123
+        },
+        {
+          "event": "update",
+          "step": 5,
+          "sample_id": "train-red_brick",
+          "native_dimensions": [
+            1024,
+            1024
+          ],
+          "update_duration_seconds": 59.879530292,
+          "elapsed_seconds": 499.5524836666664,
+          "elapsed_training_seconds": 498.578675416,
+          "total": 0.2724290192127228,
+          "value_l1": 0.17453984916210175,
+          "detail_l1": 0.024472294375300407
+        },
+        {
+          "event": "update",
+          "step": 6,
+          "sample_id": "train-white_stucco_02",
+          "native_dimensions": [
+            1024,
+            1024
+          ],
+          "update_duration_seconds": 68.448028584,
+          "elapsed_seconds": 568.000872749999,
+          "elapsed_training_seconds": 567.027071041,
+          "total": 0.2778792381286621,
+          "value_l1": 0.09915531426668167,
+          "detail_l1": 0.04468098282814026
+        }
+      ],
+      "validation_events": [
+        {
+          "elapsed_seconds": 92.99611470833406,
+          "elapsed_training_seconds": 92.022333625,
+          "event": "validation",
+          "mae": 0.10059083998203278,
+          "pool_count": 1,
+          "reference": "Teacher/source agreement, not measured material accuracy",
+          "sample_count": 1,
+          "samples": [
+            {
+              "mae": 0.10059083998203278,
+              "sample_id": "validation"
+            }
+          ],
+          "scope": "full",
+          "status": "checked",
+          "step": 0
+        },
+        {
+          "elapsed_seconds": 583.0086455833334,
+          "elapsed_training_seconds": 582.034875083,
+          "event": "validation",
+          "mae": 0.09887733310461044,
+          "pool_count": 1,
+          "reference": "Teacher/source agreement, not measured material accuracy",
+          "sample_count": 1,
+          "samples": [
+            {
+              "mae": 0.09887733310461044,
+              "sample_id": "validation"
+            }
+          ],
+          "scope": "full",
+          "status": "checked",
+          "step": 6
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "The prior F9DD3FC5 1K run predates the latest linear/GELU and generator-tail cuts and revised checkpoint policy. Its implementation source hash was not captured in that report and is unavailable; do not attribute its timings or resource peaks to current code.",
+    "Current-code 1K and 2K six-update production benchmarks remain pending. Prefer the 1K measurement first; run one GPU test process at a time.",
+    "Strict proof uses a small fixture and explicit checkpoint budgets; it does not establish full-size throughput or memory use.",
+    "The production validation pair repeats the first training material. Six updates measure numerical execution and resources, not the complete Mat3 base-model training schedule or resulting material quality.",
+    "Physical footprint includes unified GPU memory; do not sum it with sampled Metal allocation. Swap is system-wide and available volume capacity is volume-wide.",
+    "The full native suite used the current model but predates the two final-validation Abort checks. Those trainer-only changes passed the separate three-test focused Release run."
+  ]
+}

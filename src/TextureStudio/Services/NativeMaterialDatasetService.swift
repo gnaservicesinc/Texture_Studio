@@ -576,6 +576,116 @@ enum NativeMaterialDatasetService {
         guard stat(path.path, &state) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         return ["size": Int64(state.st_size), "mtime_ns": Int64(state.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(state.st_mtimespec.tv_nsec), "ctime_ns": Int64(state.st_ctimespec.tv_sec) * 1_000_000_000 + Int64(state.st_ctimespec.tv_nsec)]
     }
+    /// Bound simultaneously mapped source bytes as well as CPU use. A scan
+    /// retains compact metadata only; it never decodes full-resolution pixels.
+    static func sourceScanWorkerCount(fileCount: Int, largestFileBytes: UInt64, resources: MachineResources) -> Int {
+        guard fileCount > 0 else { return 0 }
+        let budget = max(1, min(resources.practicalBytes / 8, 2 * MachineResources.gibibyte))
+        let estimated = largestFileBytes.addingReportingOverflow(16 * 1_048_576)
+        let footprint = max(1, estimated.overflow ? UInt64.max : estimated.partialValue)
+        let memoryWorkers = max(1, Int(min(8, budget / footprint)))
+        return min(fileCount, 8, max(1, resources.availableProcessorCount - 2), memoryWorkers)
+    }
+    private final class SourceScanQueue: @unchecked Sendable {
+        private let lock = NSLock()
+        private var next = 0
+        private var cancelled = false
+        private var results: [Result<Data, Error>?]
+        init(count: Int) { results = Array(repeating: nil, count: count) }
+        func take() -> Int? {
+            lock.withLock {
+                guard !cancelled, next < results.count else { return nil }
+                defer { next += 1 }; return next
+            }
+        }
+        func finish(_ result: Result<Data, Error>, at index: Int) { lock.withLock { results[index] = result } }
+        func cancel() { lock.withLock { cancelled = true } }
+        var isCancelled: Bool { lock.withLock { cancelled } }
+        func completed() throws -> [Result<Data, Error>] {
+            try lock.withLock {
+                guard !cancelled else { throw CancellationError() }
+                guard results.allSatisfy({ $0 != nil }) else { throw StudioError("Source scan workers did not finish their inventory.") }
+                return results.map { $0! }
+            }
+        }
+    }
+    /// Workers own Swift cancellation contexts, including the PNG chunk loop.
+    /// A corrupt file is reported independently; cancelling waits for all
+    /// readers to stop before returning or publishing an import preview.
+    static func scanSourceFiles(_ paths: [URL], maximumWorkers: Int,
+                                inspect: @escaping @Sendable (URL) throws -> Data) throws -> [Result<Data, Error>] {
+        try Task.checkCancellation()
+        guard !paths.isEmpty else { return [] }
+        if maximumWorkers <= 1 || paths.count == 1 {
+            return try paths.map { path in
+                try Task.checkCancellation()
+                do {
+                    let data = try autoreleasepool { try inspect(path) }
+                    try Task.checkCancellation()
+                    return .success(data)
+                } catch is CancellationError { throw CancellationError() }
+                catch { return .failure(error) }
+            }
+        }
+        let queue = SourceScanQueue(count: paths.count), completion = DispatchGroup()
+        let workers = (0..<min(paths.count, max(1, maximumWorkers))).map { _ -> Task<Void, Never> in
+            completion.enter()
+            return Task.detached(priority: .userInitiated) {
+                defer { completion.leave() }
+                while let index = queue.take() {
+                    do {
+                        try Task.checkCancellation()
+                        let data = try autoreleasepool { try inspect(paths[index]) }
+                        try Task.checkCancellation()
+                        queue.finish(.success(data), at: index)
+                    } catch is CancellationError { queue.cancel(); return }
+                    catch { queue.finish(.failure(error), at: index) }
+                }
+            }
+        }
+        while completion.wait(timeout: .now() + .milliseconds(20)) == .timedOut {
+            if Task.isCancelled || queue.isCancelled { queue.cancel(); workers.forEach { $0.cancel() } }
+        }
+        try Task.checkCancellation()
+        return try queue.completed()
+    }
+    private static func sourceSummaries(_ paths: [URL], cached: [String: Object],
+                                        manifests: [String: [URL]] = [:]) throws -> [String: Result<Object, Error>] {
+        let unique = Array(Set(paths.map { $0.resolvingSymlinksInPath().standardizedFileURL })).sorted { $0.path < $1.path }
+        var compactCache: [String: Data] = [:]
+        for path in unique { if let prior = cached[path.path] { compactCache[path.path] = try jsonData(prior) } }
+        let largest = unique.reduce(UInt64(0)) { max($0, UInt64(max(0, (try? fileState($1)["size"] as? Int64) ?? 0))) }
+        let savedCache = compactCache
+        let results = try scanSourceFiles(unique, maximumWorkers: sourceScanWorkerCount(fileCount: unique.count,
+                largestFileBytes: largest, resources: .current)) { path in
+            let prior: Object? = try savedCache[path.path].flatMap { try JSONSerialization.jsonObject(with: $0) as? Object }
+            var summary = try sourceSummary(path, cached: prior)
+            let expected = publishedMD5Candidates(path, source: summary, manifests: manifests[path.deletingLastPathComponent().path] ?? [])
+            if !expected.isEmpty {
+                // Cached license evidence was verified against these same
+                // immutable bytes. New evidence is audited in this worker,
+                // rather than serially rereading every provider PNG later.
+                if summary["provider"] as? String == "Poly Haven", let verified = summary["published_md5"] as? String,
+                   expected.contains(verified.lowercased()) { summary["scan_verified_md5"] = verified.lowercased() }
+                else { summary["scan_verified_md5"] = try publishedMD5(path) }
+            }
+            return try jsonData(summary)
+        }
+        var summaries: [String: Result<Object, Error>] = [:]
+        for (path, result) in zip(unique, results) {
+            summaries[path.path] = result.flatMap { bytes in
+                Result {
+                    guard let summary = try JSONSerialization.jsonObject(with: bytes) as? Object else { throw StudioError("Invalid original map summary.") }
+                    return summary
+                }
+            }
+        }
+        return summaries
+    }
+    private static func scannedSummary(_ resolvedPath: URL, summaries: [String: Result<Object, Error>]) throws -> Object {
+        guard let result = summaries[resolvedPath.path] else { throw StudioError("Original map location changed while scanning. Scan it again.") }
+        return try result.get()
+    }
     private static func sourceSummary(_ requested: URL, cached: Object? = nil) throws -> Object {
         try Task.checkCancellation()
         let path = requested.resolvingSymlinksInPath().standardizedFileURL, before = try fileState(path)
@@ -588,12 +698,41 @@ enum NativeMaterialDatasetService {
         result["filename"] = path.lastPathComponent; result["file_bytes"] = after["size"]; result["source_stat"] = after
         return result
     }
-    private static func matchesPublishedMD5(_ url: URL, expected: String?) throws -> Bool {
-        guard let expected else { return false }
+    private static func publishedMD5(_ url: URL) throws -> String {
         // Provider download audits sometimes require MD5. Compute it only for
         // that audit, without persisting a second checksum on every map.
+        try Task.checkCancellation()
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
-        return Insecure.MD5.hash(data: data).map { String(format: "%02x", $0) }.joined() == expected.lowercased()
+        return Insecure.MD5.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+    private static func sourceManifest(_ path: URL) -> Object? {
+        guard let values = try? path.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey]),
+              values.isSymbolicLink != true, (values.fileSize ?? Int.max) <= 16 * 1024 * 1024 else { return nil }
+        return try? object(path)
+    }
+    private static func publishedMD5Candidates(_ path: URL, source: Object, manifests: [URL]) -> Set<String> {
+        guard !manifests.isEmpty, let (asset, _, label) = parsedProvider(path.lastPathComponent),
+              let sourceBytes = source["file_bytes"] as? NSNumber else { return [] }
+        var family = identifier(asset)
+        if family.hasSuffix("_" + label) { family = String(family.dropLast(label.count + 1)) }
+        var expected = Set<String>()
+        for manifestPath in manifests {
+            guard let manifest = sourceManifest(manifestPath), manifest["material_id"] as? String == family,
+                  (manifest["resolution"] as? String)?.lowercased() == label, manifest["provider"] as? String == "Poly Haven",
+                  manifest["license"] as? String == "CC0-1.0", let api = manifest["api"] as? Object,
+                  api["api_url"] as? String == "https://api.polyhaven.com/files/" + family else { continue }
+            for (role, downloaded) in manifest["downloaded_maps"] as? [String: Object] ?? [:] {
+                guard URL(fileURLWithPath: downloaded["path"] as? String ?? "").lastPathComponent == source["filename"] as? String,
+                      downloaded["sha256"] as? String == source["file_sha256"] as? String,
+                      (downloaded["bytes"] as? NSNumber)?.int64Value == sourceBytes.int64Value,
+                      let published = (manifest["maps"] as? [String: Object])?[role],
+                      (published["published_bytes"] as? NSNumber)?.int64Value == sourceBytes.int64Value,
+                      (published["url"] as? String)?.hasPrefix("https://dl.polyhaven.org/file/ph-assets/Textures/png/") == true,
+                      let md5 = published["published_md5"] as? String else { continue }
+                expected.insert(md5.lowercased())
+            }
+        }
+        return expected
     }
     private static func identifier(_ value: String) -> String {
         let ascii = value.decomposedStringWithCompatibilityMapping.unicodeScalars.filter { $0.value < 128 }.map(String.init).joined().lowercased()
@@ -601,14 +740,15 @@ enum NativeMaterialDatasetService {
         return cleaned.isEmpty ? "material_" + hash(Data(value.utf8)).prefix(16) : cleaned
     }
     private static func encoding(_ role: String, source: Object) -> String { role != "input" ? "linear_data" : source["png_gamma"] as? Double == 1 && source["srgb_rendering_intent"] == nil ? "linear" : "source_srgb_assumed" }
-    private static func sourceMaterial(_ name: String, paths: [String: URL], convention: String = "opengl") throws -> Object {
+    private static func sourceMaterial(_ name: String, paths: [String: URL], convention: String = "opengl",
+                                       summaries: [String: Result<Object, Error>]? = nil) throws -> Object {
         let name = try checkedName(name)
         guard paths["input"] != nil, ["height", "roughness", "normal"].contains(where: { paths[$0] != nil }) else { throw StudioError("Choose an input map and at least one height, normal or roughness map.") }
         let family = identifier(name)
         var maps: [String: Object] = [:], dimensions: [Int]?
         for role in paths.keys.sorted() {
             let path = paths[role]!.resolvingSymlinksInPath().standardizedFileURL
-            var source = try sourceSummary(path)
+            var source = try summaries.map { try scannedSummary(path, summaries: $0) } ?? sourceSummary(path)
             guard !["input", "normal"].contains(role) || [3, 4].contains(source["channels"] as? Int ?? 0) else { throw StudioError("Color and normal maps must contain native RGB or RGBA channels.") }
             let actual = [source["width"] as? Int ?? 0, source["height"] as? Int ?? 0]
             if let dimensions, dimensions != actual { throw StudioError("All maps must have exactly matching native dimensions; no resizing is applied.") }
@@ -708,11 +848,14 @@ enum NativeMaterialDatasetService {
         if let failed { throw failed }
         return result.sorted { ($0[0] as? String ?? "") < ($1[0] as? String ?? "") }
     }
-    private static func parsedProvider(_ filename: String) -> (String, String, String)? {
+    private static let providerFilenameExpressions: [NSRegularExpression] = {
         let known = #"nor_gl|nor_dx|disp_gl|rough_ao|translucent|(?:diffuse|diff|color|col|albedo)(?:_?\d+)?|coll\d+|displacement|roughness|disp|rough|anisotropy_rotation|anisotropy_strength|spec_ior|spec|bump|metal|ao|arm"#
         let patterns = ["^(.+?)_(" + known + #")_(\d+k)(?: \(\d+\))?\.png$"#, #"^([A-Za-z][A-Za-z0-9]*)_([1248]K)-PNG_(Color|Displacement|NormalGL|NormalDX|Roughness)\.png$"#]
-        for (offset, pattern) in patterns.enumerated() {
-            guard let expression = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]), let match = expression.firstMatch(in: filename, range: NSRange(filename.startIndex..., in: filename)) else { continue }
+        return patterns.map { try! NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
+    }()
+    private static func parsedProvider(_ filename: String) -> (String, String, String)? {
+        for (offset, expression) in providerFilenameExpressions.enumerated() {
+            guard let match = expression.firstMatch(in: filename, range: NSRange(filename.startIndex..., in: filename)) else { continue }
             let fields = (1...3).map { String(filename[Range(match.range(at: $0), in: filename)!]).lowercased() }
             if offset == 1 { return (fields[0], ["color": "diff", "displacement": "disp", "normalgl": "nor_gl", "normaldx": "nor_dx", "roughness": "rough"][fields[2]]!, fields[1]) }
             return (fields[0], fields[1].hasPrefix("coll") ? "col_" + fields[1].dropFirst(4) : fields[1], fields[2])
@@ -724,18 +867,20 @@ enum NativeMaterialDatasetService {
         return ["disp": "height", "disp_gl": "height", "displacement": "height", "nor_gl": "normal", "nor_dx": "normal", "rough": "roughness", "roughness": "roughness"][suffix]
     }
 
-    private static func discover(_ folder: URL, dataset: URL, records: [Record] = []) throws -> ([Object], [String]) {
+    private static func discover(_ folder: URL, dataset: URL, records: [Record] = [], inventoriedFiles: [URL]? = nil) throws -> ([Object], [String]) {
         var cache: [String: Object] = [:]
         for record in records { for source in sources(record.sample) { if let path = source["path"] as? String { cache[path] = source } } }
         if FileManager.default.fileExists(atPath: folder.appendingPathComponent("dataset.json").path) {
             guard folder != dataset else { throw StudioError("This dataset is already open. Choose another folder to import.") }
             return try locked(folder) {
                 let index = try object(folder.appendingPathComponent("dataset.json")), imported = try readRecords(folder, index: index)
+                let paths = imported.flatMap { sources($0.sample).compactMap { ($0["path"] as? String).map { URL(fileURLWithPath: $0) } } }
+                let summaries = try sourceSummaries(paths, cached: cache)
                 let materials: [Object] = try imported.map { record in
                     var maps: [String: Object] = [:]
                     for (role, details) in record.sample["map_metadata"] as? [String: Object] ?? [:] {
                         guard ["input", "height", "roughness", "normal"].contains(role), var source = details["source"] as? Object, let path = source["path"] as? String else { continue }
-                        let actual = try sourceSummary(URL(fileURLWithPath: path), cached: cache[path])
+                        let actual = try scannedSummary(URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL, summaries: summaries)
                         guard actual["file_sha256"] as? String == source["file_sha256"] as? String else { throw StudioError("Imported original source changed since registration.") }
                         source.merge(actual) { _, new in new }; maps[role] = source
                     }
@@ -743,7 +888,7 @@ enum NativeMaterialDatasetService {
                     var variants: [Object] = []
                     for detail in record.sample["input_variants"] as? [Object] ?? [] {
                         guard var source = detail["source"] as? Object, let path = source["path"] as? String else { continue }
-                        let actual = try sourceSummary(URL(fileURLWithPath: path), cached: cache[path])
+                        let actual = try scannedSummary(URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL, summaries: summaries)
                         guard actual["file_sha256"] as? String == source["file_sha256"] as? String else { throw StudioError("Imported original color changed since registration.") }
                         source.merge(actual) { _, new in new }; source["variant_id"] = detail["variant_id"] ?? "color_default"; variants.append(source)
                     }
@@ -753,15 +898,30 @@ enum NativeMaterialDatasetService {
                 return (materials, [])
             }
         }
-        let files = try inventory(folder, dataset: dataset).compactMap { ($0[0] as? String).map { URL(fileURLWithPath: $0) } }
+        let files = try inventoriedFiles ?? inventory(folder, dataset: dataset).compactMap { ($0[0] as? String).map { URL(fileURLWithPath: $0) } }
         var warnings: [String] = [], groups: [String: Object] = [:]
-        let directories = Set(files.map { $0.deletingLastPathComponent() }).sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        let aliases: [String: String] = ["input": "input", "color": "input", "colour": "input", "albedo": "input", "basecolor": "input", "base_color": "input", "diffuse": "input", "height": "height", "displacement": "height", "disp": "height", "roughness": "roughness", "rough": "roughness", "normal": "normal", "normalgl": "normal", "normal_gl": "normal", "normaldx": "normal", "normal_dx": "normal"]
+        let byDirectory = Dictionary(grouping: files) { $0.deletingLastPathComponent() }
+        let directories = byDirectory.keys.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        let recognized = directories.flatMap { directory -> [URL] in
+            let local = byDirectory[directory]!
+            if local.contains(where: { parsedProvider($0.lastPathComponent) != nil }) {
+                return local.filter { parsedProvider($0.lastPathComponent).flatMap { providerRole($0.1) } != nil }
+            }
+            return local.filter { aliases[$0.deletingPathExtension().lastPathComponent.lowercased()] != nil }
+        }
+        var manifestFiles: [String: [URL]] = [:]
+        for directory in directories where byDirectory[directory]!.contains(where: { parsedProvider($0.lastPathComponent) != nil }) {
+            let paths = ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey, .isSymbolicLinkKey])) ?? [])
+                .filter { $0.lastPathComponent.hasPrefix("material-source") && $0.pathExtension.lowercased() == "json" }
+            manifestFiles[directory.resolvingSymlinksInPath().standardizedFileURL.path] = paths
+        }
+        let summaries = try sourceSummaries(recognized, cached: cache, manifests: manifestFiles)
         for directory in directories {
             try Task.checkCancellation()
-            let local = files.filter { $0.deletingLastPathComponent() == directory }.sorted { $0.lastPathComponent.lowercased() < $1.lastPathComponent.lowercased() }
+            let local = byDirectory[directory]!.sorted { $0.lastPathComponent.lowercased() < $1.lastPathComponent.lowercased() }
             let provider = local.contains { parsedProvider($0.lastPathComponent) != nil }
             if !provider {
-                let aliases: [String: String] = ["input": "input", "color": "input", "colour": "input", "albedo": "input", "basecolor": "input", "base_color": "input", "diffuse": "input", "height": "height", "displacement": "height", "disp": "height", "roughness": "roughness", "rough": "roughness", "normal": "normal", "normalgl": "normal", "normal_gl": "normal", "normaldx": "normal", "normal_dx": "normal"]
                 var paths: [String: URL] = [:], ambiguous = false, convention = "opengl"
                 for path in local { if let role = aliases[path.deletingPathExtension().lastPathComponent.lowercased()] {
                     if paths[role] != nil { warnings.append("Skipped \(directory.lastPathComponent): multiple \(role) maps need explicit selection."); ambiguous = true }
@@ -769,13 +929,14 @@ enum NativeMaterialDatasetService {
                     if role == "normal", path.deletingPathExtension().lastPathComponent.lowercased().contains("dx") { convention = "directx" }
                 } }
                 if !ambiguous, paths["input"] != nil, ["height", "normal", "roughness"].contains(where: { paths[$0] != nil }) {
-                    do { let material = try sourceMaterial(directory.lastPathComponent, paths: paths, convention: convention); groups["manual:" + directory.path] = material }
+                    do { let material = try sourceMaterial(directory.lastPathComponent, paths: paths, convention: convention, summaries: summaries); groups["manual:" + directory.path] = material }
+                    catch is CancellationError { throw CancellationError() }
                     catch { warnings.append("Skipped \(directory.lastPathComponent): \(error.localizedDescription)") }
                 }
                 continue
             }
-            let manifests: [(URL, Object)] = ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey, .isSymbolicLinkKey])) ?? []).filter { $0.lastPathComponent.hasPrefix("material-source") && $0.pathExtension.lowercased() == "json" }.compactMap { path in
-                guard let values = try? path.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey]), values.isSymbolicLink != true, (values.fileSize ?? Int.max) <= 16 * 1024 * 1024, let value = try? object(path) else { return nil }; return (path, value)
+            let manifests: [(URL, Object)] = (manifestFiles[directory.resolvingSymlinksInPath().standardizedFileURL.path] ?? []).compactMap { path in
+                guard let value = sourceManifest(path) else { return nil }; return (path, value)
             }
             for path in local {
                 guard let (asset, suffix, label) = parsedProvider(path.lastPathComponent), let role = providerRole(suffix) else { continue }
@@ -783,12 +944,14 @@ enum NativeMaterialDatasetService {
                 if family.hasSuffix("_" + label) { family = String(family.dropLast(label.count + 1)) }
                 let resolved = path.resolvingSymlinksInPath().standardizedFileURL
                 var source: Object
-                do { source = try sourceSummary(resolved, cached: cache[resolved.path]) }
+                do { source = try scannedSummary(resolved, summaries: summaries) }
+                catch is CancellationError { throw CancellationError() }
                 catch { warnings.append("Skipped \(path.path): \(error.localizedDescription)"); continue }
+                let verifiedMD5 = source.removeValue(forKey: "scan_verified_md5") as? String
                 source["path"] = resolved.path; source["suffix"] = suffix; source["resolution_label"] = label; source["source_family_id"] = family; source["asset_family_id"] = family
                 for (manifestPath, manifest) in manifests where manifest["material_id"] as? String == family && (manifest["resolution"] as? String)?.lowercased() == label {
                     for (downloadRole, downloaded) in manifest["downloaded_maps"] as? [String: Object] ?? [:] where URL(fileURLWithPath: downloaded["path"] as? String ?? "").lastPathComponent == path.lastPathComponent && downloaded["sha256"] as? String == source["file_sha256"] as? String && downloaded["bytes"] as? Int == source["file_bytes"] as? Int {
-                        if manifest["provider"] as? String == "Poly Haven", manifest["license"] as? String == "CC0-1.0", let api = manifest["api"] as? Object, api["api_url"] as? String == "https://api.polyhaven.com/files/" + family, let published = (manifest["maps"] as? [String: Object])?[downloadRole], published["published_bytes"] as? Int == source["file_bytes"] as? Int, try matchesPublishedMD5(resolved, expected: published["published_md5"] as? String), (published["url"] as? String)?.hasPrefix("https://dl.polyhaven.org/file/ph-assets/Textures/png/") == true {
+                        if manifest["provider"] as? String == "Poly Haven", manifest["license"] as? String == "CC0-1.0", let api = manifest["api"] as? Object, api["api_url"] as? String == "https://api.polyhaven.com/files/" + family, let published = (manifest["maps"] as? [String: Object])?[downloadRole], published["published_bytes"] as? Int == source["file_bytes"] as? Int, let verifiedMD5, verifiedMD5 == (published["published_md5"] as? String)?.lowercased(), (published["url"] as? String)?.hasPrefix("https://dl.polyhaven.org/file/ph-assets/Textures/png/") == true {
                             source.merge(["provider": "Poly Haven", "asset_id": family, "asset_url": "https://polyhaven.com/a/" + family, "license": "CC0-1.0", "license_url": "https://polyhaven.com/license", "license_basis": "Current full source SHA256 and byte count match the verified official download manifest", "published_url": published["url"]!, "published_md5": published["published_md5"]!, "published_bytes": published["published_bytes"]!, "published_api_url": api["api_url"]!, "published_audit_timestamp_utc": manifest["completed_utc"] ?? NSNull(), "published_manifest_path": manifestPath.path]) { _, new in new }
                         }
                         if manifest["provider"] as? String == "ambientCG", let auditPath = manifest["package_audit_path"] as? String,
@@ -875,7 +1038,8 @@ enum NativeMaterialDatasetService {
     private static func scan(_ root: URL, index: Object, records: [Record], options: [String: String]) throws -> Object {
         guard let requested = options["--folder"], let planPath = options["--plan"] else { throw StudioError("Choose a folder and preview path.") }
         let folder = URL(fileURLWithPath: requested).resolvingSymlinksInPath().standardizedFileURL, before = try inventory(folder, dataset: root)
-        let (materials, discoveredWarnings) = try discover(folder, dataset: root, records: records)
+        let files = before.compactMap { ($0[0] as? String).map { URL(fileURLWithPath: $0) } }
+        let (materials, discoveredWarnings) = try discover(folder, dataset: root, records: records, inventoriedFiles: files)
         guard NSArray(array: before).isEqual(to: try inventory(folder, dataset: root)) else { throw StudioError("Original folder changed while scanning. Scan it again.") }
         var identities = Set(records.map { sourceIdentity($0.sample) }), names = Set(records.compactMap { $0.sample["material_id"] as? String }), accepted: [Object] = [], warnings = discoveredWarnings, duplicates = 0
         for material in materials {

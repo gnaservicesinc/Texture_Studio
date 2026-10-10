@@ -6,6 +6,111 @@ import XCTest
 
 @MainActor
 final class NativeMaterialDatasetTests: XCTestCase {
+    func testSourceScanWorkersRespectCPUAndMappedFileMemory() {
+        let gib = MachineResources.gibibyte
+        let resources = MachineResources(physicalBytes: 16 * gib, availableProcessorCount: 12)
+        XCTAssertEqual(NativeMaterialDatasetService.sourceScanWorkerCount(fileCount: 20, largestFileBytes: 1, resources: resources), 8)
+        XCTAssertEqual(NativeMaterialDatasetService.sourceScanWorkerCount(fileCount: 3, largestFileBytes: 1, resources: resources), 3)
+        XCTAssertEqual(NativeMaterialDatasetService.sourceScanWorkerCount(fileCount: 20, largestFileBytes: 256 * 1_048_576, resources: resources), 5)
+        XCTAssertEqual(NativeMaterialDatasetService.sourceScanWorkerCount(fileCount: 20, largestFileBytes: UInt64.max, resources: resources), 1)
+        XCTAssertEqual(NativeMaterialDatasetService.sourceScanWorkerCount(fileCount: 0, largestFileBytes: 0, resources: resources), 0)
+        let singleCPU = MachineResources(physicalBytes: 16 * gib, availableProcessorCount: 1)
+        XCTAssertEqual(NativeMaterialDatasetService.sourceScanWorkerCount(fileCount: 20, largestFileBytes: 1, resources: singleCPU), 1)
+    }
+
+    func testSourceScanReadsConcurrentlyPreservesOrderAndIsolatesCorruptFiles() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        var paths: [URL] = [], originals: [Data] = []
+        for number in 0..<6 {
+            let path = root.appendingPathComponent("map-\(number).png")
+            let png = NativePNG(header: .init(width: 32, height: 32, bits: 8, channels: 3, color: 2, interlace: 0),
+                                pixels: Data(repeating: UInt8(number), count: 32 * 32 * 3), colorChunks: [])
+            var bytes = try png.encoded(); if number == 3 { bytes[29] ^= 1 }
+            try bytes.write(to: path); paths.append(path); originals.append(bytes)
+        }
+        let inputPaths = paths, probe = SourceScanProbe()
+        let results = try await Task.detached {
+            try NativeMaterialDatasetService.scanSourceFiles(inputPaths, maximumWorkers: 2) { path in
+                try probe.begin(requireConcurrentReaders: 2)
+                defer { probe.end() }
+                let bytes = try Data(contentsOf: path)
+                _ = try NativePNG.sourceMetadata(bytes)
+                return bytes
+            }
+        }.value
+        XCTAssertEqual(probe.peakReaders, 2, "Two files must actually be inspected at the same time")
+        XCTAssertEqual(probe.activeReaders, 0)
+        XCTAssertEqual(probe.totalReaders, paths.count)
+        XCTAssertEqual(results.count, paths.count)
+        for (offset, result) in results.enumerated() {
+            if offset == 3 { XCTAssertThrowsError(try result.get()) }
+            else { XCTAssertEqual(try result.get(), originals[offset], "Completion order must not change file identity") }
+            XCTAssertEqual(try Data(contentsOf: paths[offset]), originals[offset])
+        }
+    }
+
+    func testCancellingSourceScanStopsAndJoinsReadersBeforeReturning() async throws {
+        let paths = (0..<20).map { URL(fileURLWithPath: "/source-\($0).png") }, probe = SourceScanProbe()
+        let task = Task.detached {
+            try NativeMaterialDatasetService.scanSourceFiles(paths, maximumWorkers: 2) { _ in
+                try probe.begin(requireConcurrentReaders: 2)
+                defer { probe.end() }
+                while true { try Task.checkCancellation(); Thread.sleep(forTimeInterval: 0.001) }
+            }
+        }
+        XCTAssertTrue(probe.waitForReaders(2))
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Cancelled scans must not return a partial inventory") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(probe.totalReaders, 2, "Cancellation must stop scheduling the remaining files")
+        XCTAssertEqual(probe.activeReaders, 0, "The command must join every reader before returning")
+    }
+
+    func testParallelFolderScanPreservesNativeDimensionsVariantsAndImportProof() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: false)
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Parallel scan", "--training-size", "256"])
+        let rgb = try NativePNG(header: .init(width: 512, height: 512, bits: 8, channels: 3, color: 2, interlace: 0),
+                                pixels: Data(repeating: 127, count: 512 * 512 * 3), colorChunks: []).encoded()
+        let scalar = try NativePNG(header: .init(width: 512, height: 512, bits: 16, channels: 1, color: 0, interlace: 0),
+                                   pixels: Data(repeating: 73, count: 512 * 512 * 2), colorChunks: []).encoded()
+        for name in ["brick_diff_1k.png", "brick_diff2_1k.png", "brick_nor_dx_1k.png", "brick_nor_gl_1k.png"] {
+            try rgb.write(to: sources.appendingPathComponent(name))
+        }
+        try scalar.write(to: sources.appendingPathComponent("brick_disp_1k.png"))
+        try Data([1, 2, 3]).write(to: sources.appendingPathComponent("unrelated.png"))
+        let inputName = "brick_diff_1k.png"
+        let inputSHA = SHA256.hash(data: rgb).map { String(format: "%02x", $0) }.joined()
+        let inputMD5 = Insecure.MD5.hash(data: rgb).map { String(format: "%02x", $0) }.joined()
+        let provider: [String: Any] = ["material_id": "brick", "resolution": "1k", "provider": "Poly Haven", "license": "CC0-1.0",
+            "api": ["api_url": "https://api.polyhaven.com/files/brick"], "completed_utc": "2026-10-09T00:00:00Z",
+            "downloaded_maps": ["diff": ["path": sources.appendingPathComponent(inputName).path, "sha256": inputSHA, "bytes": rgb.count]],
+            "maps": ["diff": ["published_md5": inputMD5, "published_bytes": rgb.count,
+                              "url": "https://dl.polyhaven.org/file/ph-assets/Textures/png/1k/" + inputName]]]
+        try JSONSerialization.data(withJSONObject: provider).write(to: sources.appendingPathComponent("material-source.json"))
+        let firstPlan = root.appendingPathComponent("first.json"), secondPlan = root.appendingPathComponent("second.json")
+        let first = try await output(["scan-folder", "--dataset", dataset.path, "--folder", sources.path, "--plan", firstPlan.path])
+        let second = try await output(["scan-folder", "--dataset", dataset.path, "--folder", sources.path, "--plan", secondPlan.path])
+        XCTAssertEqual(first["added_material_count"] as? Int, 1)
+        XCTAssertEqual(first["ignored_file_count"] as? Int, 1)
+        XCTAssertEqual(first["plan_sha256"] as? String, second["plan_sha256"] as? String, "Parallel scans must produce deterministic previews")
+        let plan = try object(firstPlan), material = try XCTUnwrap((plan["materials"] as? [[String: Any]])?.first)
+        XCTAssertEqual(material["common_pixel_dimensions"] as? [Int], [512, 512], "Actual pixels remain authoritative even when filenames say 1k")
+        XCTAssertEqual((material["input_variants"] as? [[String: Any]])?.count, 2)
+        let maps = try XCTUnwrap(material["maps"] as? [String: [String: Any]])
+        XCTAssertEqual(maps["normal"]?["suffix"] as? String, "nor_gl")
+        XCTAssertEqual(maps["input"]?["provider"] as? String, "Poly Haven")
+        XCTAssertEqual(maps["input"]?["published_md5"] as? String, inputMD5)
+        XCTAssertFalse(String(decoding: try Data(contentsOf: firstPlan), as: UTF8.self).contains("scan_verified_md5"),
+                       "Temporary audit results must not leak into durable source metadata")
+        let imported = try await output(["import-folder", "--dataset", dataset.path, "--folder", sources.path,
+                                        "--plan", firstPlan.path, "--expected-plan-sha256", try XCTUnwrap(first["plan_sha256"] as? String)])
+        XCTAssertEqual(imported["added_material_count"] as? Int, 1)
+        XCTAssertEqual(try Data(contentsOf: sources.appendingPathComponent("brick_disp_1k.png")), scalar)
+        XCTAssertEqual(try Data(contentsOf: sources.appendingPathComponent("brick_diff_1k.png")), rgb)
+    }
+
     func testPreparationWorkersRespectCPUsAndWorkingMemory() throws {
         let gib = MachineResources.gibibyte
         let policy = NativeMaterialDatasetService.PreparationPolicy(resources: .init(physicalBytes: 8 * gib), processorCount: 12)
@@ -657,4 +762,27 @@ private final class PreparationEventRecorder: @unchecked Sendable {
     func objects() throws -> [[String: Any]] {
         try lock.withLock { try values.map { try JSONSerialization.jsonObject(with: Data($0.utf8)) as! [String: Any] } }
     }
+}
+
+private final class SourceScanProbe: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var active = 0, peak = 0, total = 0
+    func begin(requireConcurrentReaders: Int) throws {
+        condition.lock(); defer { condition.unlock() }
+        active += 1; total += 1; peak = max(peak, active); condition.broadcast()
+        let deadline = Date().addingTimeInterval(5)
+        while total < requireConcurrentReaders {
+            if !condition.wait(until: deadline) { active -= 1; throw StudioError("Source scan did not inspect files concurrently.") }
+        }
+    }
+    func end() { condition.lock(); active -= 1; condition.broadcast(); condition.unlock() }
+    func waitForReaders(_ minimum: Int) -> Bool {
+        condition.lock(); defer { condition.unlock() }
+        let deadline = Date().addingTimeInterval(5)
+        while total < minimum { if !condition.wait(until: deadline) { return false } }
+        return true
+    }
+    var activeReaders: Int { condition.lock(); defer { condition.unlock() }; return active }
+    var peakReaders: Int { condition.lock(); defer { condition.unlock() }; return peak }
+    var totalReaders: Int { condition.lock(); defer { condition.unlock() }; return total }
 }

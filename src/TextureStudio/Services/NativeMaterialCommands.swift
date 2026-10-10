@@ -18,7 +18,7 @@ enum NativeMaterialCommands {
         case "capabilities":
             let scope = value("--scope") ?? "final-map"
             guard ["final-map", "map-decoder"].contains(scope) else { throw StudioError("Unsupported material training scope.") }
-            return try NativeMaterialTransfer.json(["training_sizes": [256,512,1024,2048,4096], "inference_sizes": [256,512,1024,2048,4096,8192], "targets": ["height","roughness","normal"], "scope": scope, "image_size_matches_training_size": true, "hidden_encoder_resize": false, "memory_admission_enabled": false])
+            return try NativeMaterialTransfer.json(["training_sizes": [256,512,1024,2048,4096], "inference_sizes": [256,512,1024,2048,4096,8192], "targets": ["height","roughness","normal"], "scope": scope, "image_size_matches_training_size": true, "hidden_encoder_resize": false, "memory_admission_enabled": true])
         case "hub-account": return try await NativeHuggingFaceService().accountJSON()
         case "hub-models": return try await NativeHuggingFaceService().modelsJSON()
         case "train", "refine", "infer": return try await NativeMaterialTrainer.run(arguments: arguments, onEvent: onEvent, control: control)

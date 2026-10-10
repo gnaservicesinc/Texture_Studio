@@ -140,16 +140,27 @@ struct TrainingWorkbenchView: View {
 struct WorkbenchStopButtons: View {
     @Bindable var store: WorkbenchStore
     var body: some View {
-        Button(store.isStopping && !store.isSavingTraining ? "Stopping…" : "Stop") { store.stop() }
-            .disabled(store.isStopping && !store.isSavingTraining)
-            .help("Abort immediately. Checkpoints already saved on disk are kept.")
-        if store.hasTrainingStarted || store.isSavingTraining {
+        if store.isTraining {
+            Button(store.isSavingTraining ? "Stopping…" : "Stop", systemImage: "stop.fill") { store.stop() }
+                .disabled(!store.canStopAndSave)
+                .accessibilityIdentifier("training.stop")
+                .help(store.hasTrainingStarted || store.isSavingTraining
+                    ? "Finish the current update, validate, and save the material LoRA. Abort remains available while saving."
+                    : "Available once training starts. Use Abort to cancel dataset preparation or model setup.")
+            Button(role: .destructive) { store.abort() } label: {
+                Label(store.isStopping && !store.isSavingTraining ? "Aborting…" : "Abort", systemImage: "xmark.octagon.fill")
+            }
+                .disabled(!store.canAbort)
+                .accessibilityIdentifier("training.abort")
+                .help("Cancel setup or training without a final save. Previously saved checkpoints are kept.")
             Button(store.isCheckpointPending ? "Checkpoint Queued…" : "Save Checkpoint Now") { store.saveCheckpointNow() }
                 .disabled(!store.canStopAndSave || store.isCheckpointPending)
+                .accessibilityIdentifier("training.save-checkpoint")
                 .help("Run full validation, save a checkpoint, and continue training.")
-            Button(store.isSavingTraining ? "Saving…" : "Stop and Save") { store.stopAndSave() }
-                .disabled(!store.canStopAndSave)
-                .help("Finish the current update and save the material LoRA.")
+        } else {
+            Button(store.isStopping ? "Stopping…" : "Stop") { store.stop() }
+                .disabled(!store.canAbort)
+                .help("Cancel the current operation.")
         }
     }
 }

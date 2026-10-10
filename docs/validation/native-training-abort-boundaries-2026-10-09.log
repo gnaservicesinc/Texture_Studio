@@ -1,0 +1,20 @@
+Focused Release XCTest results.
+Original full log SHA-256: f2f154e778c0646fbcb882f2118c4bde7d9a46e46b9df60edd0253abc0f512a1
+Trainer SHA-256: 6faca8655cd27a048877d22f416d035a6a6899b20be24a122595660b12987d5b
+
+Test Suite 'Selected tests' started at 2026-10-09 23:29:14.308.
+Test Suite 'TextureStudioTests.xctest' started at 2026-10-09 23:29:14.309.
+Test Suite 'NativeMaterialTrainerTests' started at 2026-10-09 23:29:14.309.
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testAbortFromFinalCheckpointEventKeepsCheckpointAndPreventsExport]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testAbortFromFinalCheckpointEventKeepsCheckpointAndPreventsExport]' passed (31.145 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testAbortFromFinalValidationPreventsCheckpointAndExport]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testAbortFromFinalValidationPreventsCheckpointAndExport]' passed (31.102 seconds).
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testStopDuringNumericStepFinishesItAndAbortDiscardsUnfinishedStep]' started.
+Test Case '-[TextureStudioTests.NativeMaterialTrainerTests testStopDuringNumericStepFinishesItAndAbortDiscardsUnfinishedStep]' passed (62.806 seconds).
+Test Suite 'NativeMaterialTrainerTests' passed at 2026-10-09 23:31:19.364.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 125.054 (125.055) seconds
+Test Suite 'TextureStudioTests.xctest' passed at 2026-10-09 23:31:19.364.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 125.054 (125.055) seconds
+Test Suite 'Selected tests' passed at 2026-10-09 23:31:19.364.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 125.054 (125.056) seconds
+** TEST EXECUTE SUCCEEDED **
