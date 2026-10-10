@@ -95,7 +95,10 @@ actor ReviewImageLoader {
         }
         let display: CIImage
         if numeric {
-            let gain = min(32, max(1, contrast)), offset = min(1, max(0, midpoint)) * (1 - gain)
+            guard contrast.isFinite, contrast > 0, midpoint.isFinite, (0...1).contains(midpoint) else {
+                throw StudioError("Display contrast must be positive and finite, and midpoint must be from 0 to 1.")
+            }
+            let gain = contrast, offset = midpoint * (1 - gain)
             display = source.applyingFilter("CIColorMatrix", parameters: [
                 "inputRVector": CIVector(x: gain, y: 0, z: 0, w: 0),
                 "inputGVector": CIVector(x: 0, y: gain, z: 0, w: 0),

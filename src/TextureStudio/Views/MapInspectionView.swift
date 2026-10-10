@@ -30,9 +30,9 @@ import SwiftUI
         displayContrast = 1; displayMidpoint = 0.5
         normalizedCenter = CGPoint(x: 0.5, y: 0.5)
         if let displayPreferenceKey, let stored = preferences?.dictionary(forKey: displayPreferenceKey) {
-            if let value = stored["zoom"] as? Double, value.isFinite { zoom = min(32, max(0.02, value)) }
+            if let value = stored["zoom"] as? Double, value.isFinite, value > 0 { zoom = value }
             fitToView = stored["fit"] as? Bool ?? false
-            if let value = stored["contrast"] as? Double, value.isFinite { displayContrast = min(32, max(1, value)) }
+            if let value = stored["contrast"] as? Double, value.isFinite, value > 0 { displayContrast = value }
             if let value = stored["midpoint"] as? Double, value.isFinite { displayMidpoint = min(1, max(0, value)) }
         }
     }
@@ -44,8 +44,8 @@ import SwiftUI
     func setActualSize() { zoom = 1; fitToView = false }
     func fit() { normalizedCenter = CGPoint(x: 0.5, y: 0.5); fitToView = true }
     func setZoom(_ value: CGFloat) {
-        guard value.isFinite else { return }
-        zoom = min(32, max(0.02, value)); fitToView = false
+        guard value.isFinite, value > 0 else { return }
+        zoom = value; fitToView = false
     }
     func pan(dx: CGFloat, dy: CGFloat) {
         guard dx.isFinite, dy.isFinite else { return }

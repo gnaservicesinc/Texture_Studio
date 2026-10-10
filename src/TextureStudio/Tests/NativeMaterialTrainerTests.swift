@@ -5,6 +5,72 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeMaterialTrainerTests: XCTestCase {
+    func testQuickCheckCadenceAcceptsZeroAndHasNoArbitraryMaximum() throws {
+        for value in [0, 1, Int.max] {
+            let options = try NativeMaterialTrainer.Options(["train", "--dataset", "/dataset", "--output", "/output",
+                "--validation-every", String(value)])
+            XCTAssertEqual(options.validationEvery, value)
+        }
+        for value in ["-1", "invalid"] {
+            XCTAssertThrowsError(try NativeMaterialTrainer.Options(["train", "--dataset", "/dataset", "--output", "/output",
+                "--validation-every", value]))
+        }
+    }
+
+    func testQuickChecksUseDatasetCropCountAndZeroDisablesThem() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        // A count larger than the old hard-coded three proves saved dataset
+        // settings drive runtime selection. Both zero settings disable cadence.
+        for (index, configuration) in [(0, (every: 0, quick: 4)), (1, (every: 1, quick: 0)), (2, (every: 1, quick: 4))] {
+            let dataset = root.appendingPathComponent("dataset-\(index)")
+            let output = root.appendingPathComponent("output-\(index)")
+            try datasetFixture(dataset, validationCount: 5, quickCount: configuration.quick)
+            let model = try trainerModel(), events = Recorder()
+            let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
+                "--size", "256", "--updates-per-map", "1", "--validation-every", String(configuration.every),
+                "--max-minutes", String(Double.greatestFiniteMagnitude)])
+            _ = try await Task.detached { try NativeMaterialTrainer.train(options, onEvent: events.append, control: .init(), model: model) }.value
+            let quick = events.events.filter { $0["event"] as? String == "validation" && $0["scope"] as? String == "quick" }
+            if configuration.every == 0 || configuration.quick == 0 { XCTAssertTrue(quick.isEmpty) }
+            else {
+                XCTAssertEqual(quick.count, 1)
+                XCTAssertEqual(quick.first?["sample_count"] as? Int, 4)
+            }
+            let started = try XCTUnwrap(events.events.first { $0["event"] as? String == "update_started" })
+            XCTAssertEqual(started["current_update"] as? Int, 1)
+            XCTAssertEqual(started["completed_updates"] as? Int, 0)
+            XCTAssertEqual(started["requested_updates"] as? Int, 1)
+            XCTAssertEqual(started["epoch"] as? Int, 1)
+            XCTAssertEqual(started["total_epochs"] as? Int, 1)
+            XCTAssertEqual(started["sample_position"] as? Int, 1)
+            let numeric = events.events.filter { $0["event"] as? String == "operation_progress" && $0["phase"] as? String == "training" }
+            XCTAssertTrue(numeric.contains { $0["operation"] as? String == "Forward pass" })
+            XCTAssertTrue(numeric.contains { $0["operation"] as? String == "Computing loss gradients" },
+                "The fixture's final layer receives backward gradients through the loss stage.")
+            XCTAssertTrue(numeric.contains { $0["operation"] as? String == "Applying optimizer update" })
+            let export = try XCTUnwrap(events.events.first { $0["event"] as? String == "export_started" })
+            XCTAssertEqual(export["completed_updates"] as? Int, 1)
+            XCTAssertEqual(export["workflow_phase"] as? Int, 4)
+            XCTAssertEqual(events.events.last?["event"] as? String, "training_completed")
+        }
+    }
+
+    func testDisabledValidationDoesNotRunValidationOrEmitAnEmptyCropWarning() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("output")
+        try datasetFixture(dataset, validationEnabled: false)
+        let model = try trainerModel(), events = Recorder()
+        let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
+            "--size", "256", "--updates-per-map", "1", "--validation-every", "1"])
+        let text = try await Task.detached { try NativeMaterialTrainer.train(options, onEvent: events.append, control: .init(), model: model) }.value
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        XCTAssertEqual((result["baseline_validation"] as? [String: Any])?["status"] as? String, "disabled")
+        XCTAssertFalse(events.events.contains { ($0["event"] as? String ?? "").hasPrefix("validation") })
+        XCTAssertEqual(events.updates, 1)
+    }
+
     func testControlKeepsSnapshotSaveAndAbortSemanticsIndependent() throws {
         let control = NativeMaterialTrainingControl()
         XCTAssertFalse(control.consumeCheckpoint()); XCTAssertFalse(control.shouldStopAndSave)
@@ -589,26 +655,31 @@ final class NativeMaterialTrainerTests: XCTestCase {
         return try NativeMaterialModel(baseWeights: original.baseWeights, adapterWeights: original.adapterWeights,
             layers: original.layers, configuration: configuration, baseSHA256: String(repeating: "a", count: 64), architecture: .test)
     }
-    private func datasetFixture(_ root: URL, trainingInputCode: UInt8 = 127) throws {
+    private func datasetFixture(_ root: URL, trainingInputCode: UInt8 = 127, validationCount: Int = 1,
+                                validationEnabled: Bool = true, quickCount: Int = 4) throws {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         var entries: [[String: Any]] = []
-        for split in ["train", "validation"] {
-            let folder = root.appendingPathComponent("samples/" + split)
+        let identities = [(id: "train", split: "train")] + (0..<validationCount).map {
+            (id: validationCount == 1 ? "validation" : "validation-\($0)", split: "validation")
+        }
+        for (id, split) in identities {
+            let folder = root.appendingPathComponent("samples/" + id)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let input = try NativePNG(header: .init(width: 256, height: 256, bits: 8, channels: 3, color: 2, interlace: 0),
                 pixels: Data(repeating: split == "train" ? trainingInputCode : 127, count: 256 * 256 * 3), colorChunks: []).encoded()
             let target = try NativePNG(header: .init(width: 256, height: 256, bits: 16, channels: 1, color: 0, interlace: 0),
                 pixels: Data(repeating: 128, count: 256 * 256 * 2), colorChunks: []).encoded()
             try input.write(to: folder.appendingPathComponent("diffuse.png")); try target.write(to: folder.appendingPathComponent("height.png"))
-            let entry: [String: Any] = ["sample_id": split, "material_id": split, "status": "approved", "split": split, "path": "samples/" + split]
+            let entry: [String: Any] = ["sample_id": id, "material_id": id, "status": "approved", "split": split, "path": "samples/" + id]
             entries.append(entry)
-            let sample: [String: Any] = ["sample_id": split, "material_id": split, "status": "approved", "split": split,
+            let sample: [String: Any] = ["sample_id": id, "material_id": id, "status": "approved", "split": split,
                 "sample_pixel_dimensions": [256, 256], "maps": ["input": "diffuse.png", "height": "height.png"],
                 "map_metadata": ["input": ["filename": "diffuse.png", "encoding": "srgb", "sample_sha256": NativeMaterialTrainer.checksum(input)],
                     "height": ["filename": "height.png", "sample_sha256": NativeMaterialTrainer.checksum(target)]]]
             try JSONSerialization.data(withJSONObject: sample).write(to: folder.appendingPathComponent("sample.json"))
         }
-        try JSONSerialization.data(withJSONObject: ["schema_version": 2, "samples": entries]).write(to: root.appendingPathComponent("dataset.json"))
+        try JSONSerialization.data(withJSONObject: ["schema_version": 2, "samples": entries,
+            "validation": ["enabled": validationEnabled, "quick_count": quickCount]]).write(to: root.appendingPathComponent("dataset.json"))
     }
     private func temporary() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("native-training-test-" + UUID().uuidString)

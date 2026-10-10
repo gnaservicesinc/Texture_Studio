@@ -92,12 +92,12 @@ struct MaterialTrainingHandoff: Codable, Sendable {
         guard ["height", "roughness", "normal"].contains(training.target),
               ["final-map", "map-decoder"].contains(training.scope),
               [256, 512, 1024, 2048].contains(training.size), training.useWarmStart,
-              (1...10_000).contains(training.updatesPerCrop),
-              training.maxMinutes.isFinite, (1...240).contains(training.maxMinutes),
-              (1...64).contains(training.loraRank),
-              training.loraAlpha.isFinite, (0.01...128).contains(training.loraAlpha),
-              (1...10_000).contains(training.validationEvery),
-              (0...100_000).contains(training.checkpointEvery),
+              training.updatesPerCrop > 0,
+              training.maxMinutes.isFinite, training.maxMinutes > 0,
+              training.loraRank > 0,
+              training.loraAlpha.isFinite, training.loraAlpha > 0,
+              training.validationEvery >= 0,
+              training.checkpointEvery >= 0,
               sampleID?.isEmpty != true, inputVariantID?.isEmpty != true else {
             throw StudioError("The Trainer handoff contains unsupported training settings.")
         }

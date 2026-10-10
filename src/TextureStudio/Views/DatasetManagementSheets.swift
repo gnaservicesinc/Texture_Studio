@@ -261,11 +261,11 @@ struct DatasetValidationControls: View {
             Toggle("Generate separate validation crops", isOn: $settings.enabled)
             NumericField("Maximum subject percentage", value: $settings.percent, in: 0...100, unit: "%")
                 .disabled(!settings.enabled)
-            NumericField("Maximum validation crops", value: $settings.maxCrops, in: 0...10_000, unit: "crops")
+            NumericField("Maximum validation crops", value: $settings.maxCrops, atLeast: 0, unit: "crops")
                 .disabled(!settings.enabled)
-            NumericField("Crops per quick check", value: $settings.quickCount, in: 1...100, unit: "crops")
+            NumericField("Crops per quick check", value: $settings.quickCount, atLeast: 0, unit: "crops")
                 .disabled(!settings.enabled)
-            Text("At most one different crop per subject folder. Prefer the unused 8K corner; another corner may overlap training pixels. All targets use the same folders and crops. Quick checks run during training; checkpoint saves and final exports check the entire configured pool. Zero maximum crops uses the percentage limit.")
+            Text("At most one different crop per subject folder. Prefer the unused 8K corner; another corner may overlap training pixels. All targets use the same folders and crops. Quick checks run during training; checkpoint saves and final exports check the entire configured pool. Zero maximum crops uses the percentage limit. Zero crops per quick check disables quick checks.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -319,12 +319,10 @@ struct DatasetPlanSummary: View {
                         DatasetTargetSourceIssues(target: target, plan: targetPlan)
                     }
                 }
-                if count(plan) == 0 {
-                    Text("No validation crops at these settings. Raise the percentage or use sources larger than the selected crop size.")
-                        .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                if count(plan) > 0 {
+                    Text("These check learning on known materials. Review novel images after training to judge generalization.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("These check learning on known materials. Review novel images after training to judge generalization.")
-                    .font(.caption).foregroundStyle(.secondary)
             }.padding(.vertical, 6)
         }
     }

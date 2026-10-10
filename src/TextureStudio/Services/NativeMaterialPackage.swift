@@ -195,7 +195,7 @@ enum NativeMaterialPackage {
         func layers(_ config: [String: Any]) throws -> [String: NativeMaterialModel.AdapterLayer] {
             guard let value = config["layers"] else { throw StudioError("Missing adapter layers.") }
             let decoded = try JSONDecoder().decode([String: NativeMaterialModel.AdapterLayer].self, from: JSONSerialization.data(withJSONObject: value))
-            guard !decoded.isEmpty, decoded.values.allSatisfy({ [2, 4].contains($0.weightShape.count) && $0.weightShape.allSatisfy { $0 > 0 } && $0.rank > 0 && $0.rank <= 4096 && $0.alpha.isFinite && $0.alpha > 0 }) else { throw StudioError("Invalid adapter layer specification.") }
+            guard !decoded.isEmpty, decoded.values.allSatisfy({ [2, 4].contains($0.weightShape.count) && $0.weightShape.allSatisfy { $0 > 0 } && $0.rank > 0 && $0.alpha.isFinite && $0.alpha > 0 }) else { throw StudioError("Invalid adapter layer specification.") }
             return decoded
         }
         var configuration = try adapterConfiguration(first.0)
@@ -225,8 +225,9 @@ enum NativeMaterialPackage {
             let outgoing = specs[name]!.weightShape[0]
             var rank = 0
             for (_, layers, _) in decoded {
-                guard layers[name]!.rank <= 4096 - rank else { throw StudioError("The combined adapter rank is too large.") }
-                rank += layers[name]!.rank
+                let sum = rank.addingReportingOverflow(layers[name]!.rank)
+                guard !sum.overflow else { throw StudioError("The combined adapter rank overflows its integer representation.") }
+                rank = sum.partialValue
             }
             let aCount = rank.multipliedReportingOverflow(by: incoming), bCount = outgoing.multipliedReportingOverflow(by: rank)
             guard !aCount.overflow, !bCount.overflow, aCount.partialValue <= 268_435_456, bCount.partialValue <= 268_435_456 else { throw StudioError("The combined adapter exceeds the format budget.") }

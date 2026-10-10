@@ -7,7 +7,8 @@ struct TrainingWorkbenchView: View {
     @AppStorage(StudioPreferences.developerModeKey, store: StudioPreferences.defaults) private var developerMode = false
 
     var body: some View {
-        HSplitView {
+        VStack(spacing: 0) {
+          HSplitView {
             Form {
                 Section("Training data") {
                     HStack {
@@ -64,24 +65,24 @@ struct TrainingWorkbenchView: View {
                             Text("Choose a starting checkpoint before training.").font(.caption).foregroundStyle(.secondary)
                         }
                     }
-                    NumericField("Updates per map", value: $store.training.updatesPerCrop, in: 1...10_000, unit: "updates")
-                    NumericField("Time limit", value: $store.training.maxMinutes, in: 1...240, unit: "minutes")
+                    NumericField("Updates per map", value: $store.training.updatesPerCrop, atLeast: 1, unit: "updates")
+                    NumericField("Time limit", value: $store.training.maxMinutes, greaterThan: 0, unit: "minutes")
                     Text(developerMode ? "Exports a full fused safetensors checkpoint and a separate LoRA. Upload to Hugging Face from Saved Models." : "Exports a separate safetensors LoRA for refining your material base.")
                         .font(.caption).foregroundStyle(.secondary)
                     if let issue = store.trainingConfigurationIssue {
                         Text(issue).font(.caption).foregroundStyle(.secondary)
                     }
-                    Button("Train Material", systemImage: "play.fill") { store.startTraining() }
-                        .buttonStyle(.borderedProminent).disabled(store.isBusy || store.trainingConfigurationIssue != nil)
                 }.disabled(store.isBusy)
                 Section("Validation & checkpoints") {
                     if let validation = store.dataset?.validation {
-                        Text(validation.enabled ? "Up to \(validation.quickCount) crops per quick check; full \(validation.percent.formatted())% pool when saving." : "Validation is disabled in Dataset Info.")
+                        Text(validation.enabled ? (validation.quickCount == 0 ? "Quick checks are off. The configured validation pool is checked when saving." : "Up to \(validation.quickCount) crops per quick check; the configured validation pool is checked when saving.") : "Validation is off in Dataset Info.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    NumericField("Quick check every", value: $store.training.validationEvery, in: 1...10_000, unit: "updates")
-                    NumericField("Save checkpoint every", value: $store.training.checkpointEvery, in: 0...100_000, unit: "updates")
-                    Text("Set checkpoint updates to 0 to save on request and at final export. Every saved checkpoint runs full validation. Save Checkpoint Now finishes the current update and continues training after saving.")
+                    NumericField("Quick check every", value: $store.training.validationEvery, atLeast: 0, unit: "updates")
+                    Text("0 turns off periodic quick checks.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    NumericField("Save checkpoint every", value: $store.training.checkpointEvery, atLeast: 0, unit: "updates")
+                    Text("0 saves on request and at final export. Saving checks the full validation pool when validation is enabled. Save Checkpoint Now finishes the current update, saves, and continues training.")
                         .font(.caption).foregroundStyle(.secondary)
                 }.disabled(store.isBusy)
                 if developerMode {
@@ -102,11 +103,10 @@ struct TrainingWorkbenchView: View {
                             } ?? "After training: upload when a saved Hugging Face login is available. Set the repository and visibility above.")
                                 .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                         }
-                        NumericField("LoRA rank", value: $store.training.loraRank, in: 1...64)
-                        NumericField("LoRA alpha", value: $store.training.loraAlpha, in: 0.01...128)
+                        NumericField("LoRA rank", value: $store.training.loraRank, atLeast: 1)
+                        NumericField("LoRA alpha", value: $store.training.loraAlpha, greaterThan: 0)
                     }.disabled(store.isBusy)
                 }
-                Section { Button("Saved Models & Export…") { showCheckpoints = true } }
             }.formStyle(.grouped).frame(minWidth: 380, idealWidth: 440, maxWidth: 520)
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
@@ -116,9 +116,7 @@ struct TrainingWorkbenchView: View {
                         ProgressView().controlSize(.small)
                     }
                 }
-                if store.isBusy {
-                    HStack { WorkbenchStopButtons(store: store) }
-                }
+                if let progress = store.trainingProgress { TrainingProgressView(progress: progress) }
                 ScrollView {
                     Text(store.logText.isEmpty ? "Training and dataset preparation progress appears here." : store.logText)
                         .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
@@ -132,6 +130,20 @@ struct TrainingWorkbenchView: View {
                     if let log = store.lastLogURL { Button("Show Log") { NSWorkspace.shared.activateFileViewerSelecting([log]) } }
                 }
             }.padding(20).frame(minWidth: 420)
+          }
+          Divider()
+          HStack(spacing: 12) {
+              Button("Saved Models & Export…") { showCheckpoints = true }
+              Spacer()
+              if store.isBusy { WorkbenchStopButtons(store: store) }
+              Button("Train Material", systemImage: "play.fill") { store.startTraining() }
+                  .buttonStyle(.borderedProminent)
+                  .disabled(store.isBusy || store.trainingConfigurationIssue != nil)
+                  .accessibilityIdentifier("training.start")
+          }
+          .padding(.horizontal, 20).padding(.vertical, 12)
+          .accessibilityElement(children: .contain)
+          .accessibilityIdentifier("training.actions")
         }
         .sheet(isPresented: $showCheckpoints) { CheckpointLibraryView(store: store).frame(minWidth: 780, minHeight: 560) }
     }
@@ -141,11 +153,15 @@ struct WorkbenchStopButtons: View {
     @Bindable var store: WorkbenchStore
     var body: some View {
         if store.isTraining {
-            Button(store.isSavingTraining ? "Stopping…" : "Stop", systemImage: "stop.fill") { store.stop() }
+            Button(store.isCheckpointPending ? "Checkpoint Queued…" : "Save Checkpoint Now") { store.saveCheckpointNow() }
+                .disabled(!store.canStopAndSave || store.isCheckpointPending)
+                .accessibilityIdentifier("training.save-checkpoint")
+                .help("Run full validation when enabled, save a checkpoint, and continue training.")
+            Button(store.isSavingTraining ? "Stopping & Saving…" : "Stop & Save", systemImage: "stop.fill") { store.stop() }
                 .disabled(!store.canStopAndSave)
                 .accessibilityIdentifier("training.stop")
                 .help(store.hasTrainingStarted || store.isSavingTraining
-                    ? "Finish the current update, validate, and save the material LoRA. Abort remains available while saving."
+                    ? "Finish the current update, validate when enabled, and save the material LoRA. Abort remains available while saving."
                     : "Available once training starts. Use Abort to cancel dataset preparation or model setup.")
             Button(role: .destructive) { store.abort() } label: {
                 Label(store.isStopping && !store.isSavingTraining ? "Aborting…" : "Abort", systemImage: "xmark.octagon.fill")
@@ -153,10 +169,6 @@ struct WorkbenchStopButtons: View {
                 .disabled(!store.canAbort)
                 .accessibilityIdentifier("training.abort")
                 .help("Cancel setup or training without a final save. Previously saved checkpoints are kept.")
-            Button(store.isCheckpointPending ? "Checkpoint Queued…" : "Save Checkpoint Now") { store.saveCheckpointNow() }
-                .disabled(!store.canStopAndSave || store.isCheckpointPending)
-                .accessibilityIdentifier("training.save-checkpoint")
-                .help("Run full validation, save a checkpoint, and continue training.")
         } else {
             Button(store.isStopping ? "Stopping…" : "Stop") { store.stop() }
                 .disabled(!store.canAbort)

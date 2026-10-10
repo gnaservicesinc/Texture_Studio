@@ -22,18 +22,20 @@ final class EngineTests: XCTestCase {
     }
 
     func testUserExampleAndExtremeTransformsLeaveNoBlankCropCorners() throws {
-        for angles in [(7.93,0.0,0.22),(-40.0,20.0,15.0),(0.0,0.0,45.0)] {
+        for angles in [(7.93,0.0,0.22),(-40.0,20.0,15.0),(0.0,0.0,45.0),(70.0,0.0,450.0)] {
             let polygon = try TextureGeometry.projectedCorners(width:1024,height:1024,
                 xDegrees:angles.0,yDegrees:angles.1,zDegrees:angles.2,focalPixels:1800)
             let crop = try TextureGeometry.maximumCrop(in:polygon)
             XCTAssertEqual(crop.width,crop.height,accuracy:1e-7)
             try assertValid(crop,in:polygon,inset:1.5)
-            let framed = try TextureGeometry.framedCrop(crop,scale:0.5,offsetX:1,offsetY:-1)
-            XCTAssertGreaterThanOrEqual(framed.minX,crop.minX-1e-7)
-            XCTAssertGreaterThanOrEqual(framed.minY,crop.minY-1e-7)
-            XCTAssertLessThanOrEqual(framed.maxX,crop.maxX+1e-7)
-            XCTAssertLessThanOrEqual(framed.maxY,crop.maxY+1e-7)
-            try assertValid(framed,in:polygon,inset:1.5)
+            for scale in [0.5, 0.01] {
+                let framed = try TextureGeometry.framedCrop(crop,scale:scale,offsetX:1,offsetY:-1)
+                XCTAssertGreaterThanOrEqual(framed.minX,crop.minX-1e-7)
+                XCTAssertGreaterThanOrEqual(framed.minY,crop.minY-1e-7)
+                XCTAssertLessThanOrEqual(framed.maxX,crop.maxX+1e-7)
+                XCTAssertLessThanOrEqual(framed.maxY,crop.maxY+1e-7)
+                try assertValid(framed,in:polygon,inset:1.5)
+            }
         }
     }
 

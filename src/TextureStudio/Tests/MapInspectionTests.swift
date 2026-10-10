@@ -129,7 +129,7 @@ final class MapInspectionTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: source), bytes)
     }
 
-    @MainActor func testReviewDisplayChoicesSurviveReopeningAndClampInvalidStoredValues() throws {
+    @MainActor func testReviewDisplayChoicesSurviveReopeningWithoutInventedCaps() throws {
         let name = "MapInspectionPreferences-\(UUID().uuidString)"
         let preferences = try XCTUnwrap(UserDefaults(suiteName: name))
         defer { preferences.removePersistentDomain(forName: name) }
@@ -146,10 +146,17 @@ final class MapInspectionTests: XCTestCase {
         reopened.fit()
         XCTAssertTrue(InspectionViewport(preferences: preferences, preferenceKey: context).fitToView)
         preferences.set(["zoom": -20, "contrast": 99, "midpoint": -1], forKey: context)
-        let clamped = InspectionViewport(preferences: preferences, preferenceKey: context)
-        XCTAssertEqual(clamped.zoom, 0.02)
-        XCTAssertEqual(clamped.displayContrast, 32)
-        XCTAssertEqual(clamped.displayMidpoint, 0)
+        let restored = InspectionViewport(preferences: preferences, preferenceKey: context)
+        XCTAssertEqual(restored.zoom, 1, "An invalid zoom uses the neutral default.")
+        XCTAssertEqual(restored.displayContrast, 99, "Valid contrast must not be silently capped.")
+        XCTAssertEqual(restored.displayMidpoint, 0)
+        for zoom in [0.001, 100.0] {
+            restored.setZoom(zoom)
+            restored.displayContrast = zoom
+            let reopened = InspectionViewport(preferences: preferences, preferenceKey: context)
+            XCTAssertEqual(reopened.zoom, zoom)
+            XCTAssertEqual(reopened.displayContrast, zoom)
+        }
     }
 
     @MainActor func testDisplaySettingsStayWithExactComparisonAndNewFullSourceStartsNeutral() throws {
@@ -250,14 +257,17 @@ final class MapInspectionTests: XCTestCase {
         try FloatEXRWriter.write(image, to: source, context: context, color: true)
         let original = try Data(contentsOf: source)
         let loaded = try await ReviewImageLoader.shared.load(source, numeric: true)
-        let contrast = try await ReviewImageLoader.shared.load(source, numeric: true, contrast: 32, midpoint: 0.5,
+        let contrast = try await ReviewImageLoader.shared.load(source, numeric: true, contrast: 128, midpoint: 0.5,
             expectedSHA256: loaded.sourceSHA256)
         XCTAssertEqual(loaded.pixelWidth, 2)
         XCTAssertEqual(loaded.pixelHeight, 1)
         XCTAssertEqual(loaded.storageDescription, "32-bit float EXR")
         XCTAssertEqual(contrast.sourceSHA256, loaded.sourceSHA256)
         let codes = rgbaCodes(contrast.image)
-        XCTAssertGreaterThan(Int(codes[4]) - Int(codes[0]), 5, "Sub-8-bit detail must be amplified before display conversion")
+        XCTAssertGreaterThan(Int(codes[4]) - Int(codes[0]), 20, "Contrast above 32 must be applied before display conversion, without a hidden cap.")
+        let compressed = try await ReviewImageLoader.shared.load(source, numeric: true, contrast: 0.5, midpoint: 0,
+            expectedSHA256: loaded.sourceSHA256)
+        XCTAssertLessThan(rgbaCodes(compressed.image)[0], 70, "Contrast below one must remain a valid display choice.")
         XCTAssertEqual(try Data(contentsOf: source), original)
         let copy = directory.appendingPathComponent("copy.exr")
         try ReviewImageLoader.exportOriginal(source, expectedSHA256: loaded.sourceSHA256, to: copy)
@@ -289,6 +299,10 @@ final class MapInspectionTests: XCTestCase {
         XCTAssertEqual(viewport.normalizedCenter, CGPoint(x: 1, y: 0))
         viewport.setZoom(.nan)
         XCTAssertTrue(viewport.zoom.isFinite)
+        viewport.setZoom(100)
+        XCTAssertEqual(viewport.zoom, 100)
+        viewport.setZoom(0)
+        XCTAssertEqual(viewport.zoom, 100, "Zero zoom would have no visible scale and must retain the last valid value.")
     }
 
     @MainActor func testReferenceAndAllExplicitModelCandidatesAreInitiallyVisible() {

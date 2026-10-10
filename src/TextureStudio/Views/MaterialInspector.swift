@@ -33,11 +33,11 @@ struct MaterialInspector: View {
                 }
             }
             Section("Straighten & crop") {
-                DoubleControl(title: "Tilt X", value: $workspace.settings.rotationX, range: -45...45, suffix: "°")
+                DoubleControl(title: "Tilt X", value: $workspace.settings.rotationX, range: -70...70, suffix: "°")
                     .help("Straighten a surface that tilts away vertically. Empty edges are cropped automatically.")
-                DoubleControl(title: "Tilt Y", value: $workspace.settings.rotationY, range: -45...45, suffix: "°")
+                DoubleControl(title: "Tilt Y", value: $workspace.settings.rotationY, range: -70...70, suffix: "°")
                     .help("Straighten a surface that tilts away horizontally. Empty edges are cropped automatically.")
-                DoubleControl(title: "Rotate Z", value: $workspace.settings.rotationZ, range: -45...45, suffix: "°")
+                DoubleControl(title: "Rotate Z", value: $workspace.settings.rotationZ, range: -180...180, suffix: "°", enforcesSliderRange: false)
                     .help("Rotate within the photo to level horizontal or vertical surface features.")
                 DoubleControl(title: "Lens correction", value: $workspace.settings.lensDistortion, range: -0.15...0.15)
                     .help("Correct barrel or pincushion curvature. Leave at zero if straight features already look straight.")
@@ -47,7 +47,7 @@ struct MaterialInspector: View {
                 }
                 Text("Leave focal length blank to use the photo's camera information.")
                     .font(.caption).foregroundStyle(.secondary)
-                DoubleControl(title: "Crop scale", value: $workspace.settings.cropScale, range: 0.2...1)
+                DoubleControl(title: "Crop scale", value: $workspace.settings.cropScale, range: 0.2...1, entryRange: 0...1, greaterThan: 0)
                 DoubleControl(title: "Crop horizontal", value: $workspace.settings.cropOffsetX, range: -1...1)
                 DoubleControl(title: "Crop vertical", value: $workspace.settings.cropOffsetY, range: -1...1)
                 Text("The crop stays inside the transformed photo. Smaller crops let you choose a tighter surface area.")
@@ -61,7 +61,7 @@ struct MaterialInspector: View {
             }
             Section("Balance the photo") {
                 FloatControl(title: "Lighting balance", value: $workspace.settings.lightingStrength, range: 0...1)
-                FloatControl(title: "Lighting scale", value: $workspace.settings.lightingRadius, range: 0.01...0.5)
+                FloatControl(title: "Lighting scale", value: $workspace.settings.lightingRadius, range: 0...1)
                 Text("Registered companion views can reduce capture noise while retaining source detail. The photo is never passed through a smoothing denoiser.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("Broad illumination is reduced while retaining photo detail. Clipped highlights and hidden shadow detail need review.")
@@ -180,15 +180,22 @@ struct DoubleControl: View {
     @Binding var value: Double
     let range: ClosedRange<Double>
     var suffix = ""
+    var enforcesSliderRange = true
+    var entryRange: ClosedRange<Double>? = nil
+    var greaterThan: Double? = nil
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(title)
                 Spacer()
-                NumericTextField(title: title, value: $value, in: range).frame(width: 120)
+                NumericTextField(title: title, value: $value, in: entryRange ?? (enforcesSliderRange ? range : nil),
+                                 greaterThan: greaterThan).frame(width: 120)
                 if !suffix.isEmpty { Text(suffix).foregroundStyle(.secondary) }
             }
-            Slider(value: $value, in: range).labelsHidden().accessibilityLabel(title)
+            // The thumb uses the suggested slider range without replacing a
+            // valid number typed outside it. Only a slider action writes back.
+            Slider(value: Binding(get: { min(range.upperBound, max(range.lowerBound, value)) }, set: { value = $0 }), in: range)
+                .labelsHidden().accessibilityLabel(title)
         }
     }
 }

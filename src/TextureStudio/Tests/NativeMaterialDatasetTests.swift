@@ -831,6 +831,37 @@ final class NativeMaterialDatasetTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: dataset.appendingPathComponent("dataset.json")), bytes)
         XCTAssertEqual(try Data(contentsOf: dataset.appendingPathComponent("original.png")), Data([1, 2, 3]))
     }
+    func testValidationCropCountsPersistZeroAndValuesBeyondFormerUICaps() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset")
+        let created = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Validation preferences",
+            "--validation-enabled", "no", "--validation-percent", "0", "--validation-max-crops", "0", "--validation-quick-count", "0"])
+        let disabled = try XCTUnwrap(created["validation"] as? [String: Any])
+        XCTAssertEqual(disabled["enabled"] as? Bool, false)
+        XCTAssertEqual(disabled["percent"] as? Double, 0)
+        XCTAssertEqual(disabled["max_crops"] as? Int, 0)
+        XCTAssertEqual(disabled["quick_count"] as? Int, 0)
+
+        for count in [100_001, Int.max, 0] {
+            _ = try await output(["edit-dataset", "--dataset", dataset.path, "--validation-enabled", "yes",
+                "--validation-max-crops", String(count), "--validation-quick-count", String(count)])
+            let reopened = try await output(["dataset", "--dataset", dataset.path])
+            let settings = try XCTUnwrap(reopened["validation"] as? [String: Any])
+            XCTAssertEqual(settings["max_crops"] as? Int, count)
+            XCTAssertEqual(settings["quick_count"] as? Int, count)
+        }
+        let acceptedBytes = try Data(contentsOf: dataset.appendingPathComponent("dataset.json"))
+        for field in ["--validation-max-crops", "--validation-quick-count"] {
+            do {
+                _ = try await output(["edit-dataset", "--dataset", dataset.path, field, "-1"])
+                XCTFail("Negative crop counts are outside the action's range.")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("nonnegative crop counts"))
+            }
+            XCTAssertEqual(try Data(contentsOf: dataset.appendingPathComponent("dataset.json")), acceptedBytes)
+        }
+    }
+
     func testNativeReadReconstructsSharedCropPlansAndRejectsPathEscape() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let dataset = root.appendingPathComponent("Dataset")

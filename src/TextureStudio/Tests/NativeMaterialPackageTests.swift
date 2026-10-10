@@ -5,6 +5,55 @@ import XCTest
 
 @MainActor
 final class NativeMaterialPackageTests: XCTestCase {
+    func testRanksAbove4096LoadExportInspectAndCombineWithoutGraphAllocation() throws {
+        let fixture = try NativeMaterialPackageFixture()
+        defer { fixture.remove() }
+        let baseURL = fixture.root.appendingPathComponent("base.safetensors")
+        try NativeSafetensors.write(tensors: [fixture.layer + ".weight": .floats([7, 8], shape: [1, 2])],
+            metadata: [:], to: baseURL)
+        let model = try NativeMaterialModel.load(checkpointURL: nil, baseURL: baseURL,
+            target: "height", rank: 4097, alpha: 4097, training: true)
+        XCTAssertEqual(model.layers[fixture.layer]?.rank, 4097)
+        XCTAssertEqual(model.adapterWeights[fixture.layer + ".lora_A"]?.shape, [4097, 2])
+        XCTAssertEqual(model.adapterWeights[fixture.layer + ".lora_B"]?.shape, [1, 4097])
+        let output = fixture.root.appendingPathComponent("Large Rank")
+        let config = try model.checkpointConfiguration(size: 256, step: 4)
+        _ = try NativeMaterialPackage.export(model: model, configuration: config, to: output, developer: false)
+        let adapterURL = output.appendingPathComponent("adapter.safetensors")
+        XCTAssertNoThrow(try NativeMaterialCheckpoint.inspect(at: adapterURL))
+        XCTAssertNoThrow(try NativeMaterialPackage.verify(output))
+        let reloaded = try NativeMaterialModel.load(checkpointURL: adapterURL, baseURL: baseURL, target: "height")
+        XCTAssertEqual(reloaded.layers[fixture.layer]?.rank, 4097)
+        let snapshot = try NativeSafetensors(contentsOf: adapterURL)
+        let (combinedConfig, tensors) = try NativeMaterialPackage.combine([(snapshot, 0.5), (snapshot, 0.5)])
+        let specs = try JSONDecoder().decode([String: NativeMaterialModel.AdapterLayer].self,
+            from: JSONSerialization.data(withJSONObject: combinedConfig["layers"]!))
+        XCTAssertEqual(specs[fixture.layer]?.rank, 8194)
+        XCTAssertEqual(tensors[fixture.layer + ".lora_A"]?.shape, [8194, 2])
+        XCTAssertEqual(tensors[fixture.layer + ".lora_B"]?.shape, [1, 8194])
+        let combined = try NativeMaterialModel(baseWeights: model.baseWeights, adapterWeights: tensors, layers: specs,
+            configuration: combinedConfig, baseSHA256: model.baseSHA256)
+        let combinedOutput = fixture.root.appendingPathComponent("Combined Large Rank")
+        _ = try NativeMaterialPackage.export(model: combined, configuration: combinedConfig, to: combinedOutput, developer: false)
+        XCTAssertNoThrow(try NativeMaterialCheckpoint.inspect(at: combinedOutput.appendingPathComponent("adapter.safetensors")))
+        XCTAssertNoThrow(try NativeMaterialPackage.verify(combinedOutput))
+    }
+
+    func testCombinedRankOverflowFailsBeforeAllocatingFactors() throws {
+        let fixture = try NativeMaterialPackageFixture()
+        defer { fixture.remove() }
+        var config = fixture.configuration
+        config["layers"] = [fixture.layer: ["weight_shape": [1, 2], "rank": Int.max, "alpha": 1]]
+        let tensors: [String: NativeTensor] = [fixture.layer + ".lora_A": .floats([1, 2], shape: [1, 2]),
+            fixture.layer + ".lora_B": .floats([3], shape: [1, 1])]
+        let extreme = try NativeSafetensors(bytes: NativeSafetensors.encoded(tensors: tensors,
+            metadata: ["configuration": NativeMaterialTransfer.json(config)]))
+        let ordinary = try fixture.adapter()
+        XCTAssertThrowsError(try NativeMaterialPackage.combine([(extreme, 1), (ordinary, 1)])) { error in
+            XCTAssertTrue(error.localizedDescription.contains("rank overflows"))
+        }
+    }
+
     func testPackageCarriesAllLicensesAndPreservesUnchangedSnapshotExactly() async throws {
         let fixture = try NativeMaterialPackageFixture()
         defer { fixture.remove() }

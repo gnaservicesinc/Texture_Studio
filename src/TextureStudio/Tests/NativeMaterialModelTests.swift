@@ -384,7 +384,7 @@ final class NativeMaterialModelTests: XCTestCase {
         XCTAssertThrowsError(try NativeMaterialModel(baseWeights: base, adapterWeights: extra, layers: layers, baseSHA256: "fixture"))
         var wrongType = factors; wrongType[name + ".lora_B"] = .init(dtype: "I32", shape: [1, 1], bytes: Data(repeating: 0, count: 4))
         XCTAssertThrowsError(try NativeMaterialModel(baseWeights: base, adapterWeights: wrongType, layers: layers, baseSHA256: "fixture"))
-        for rank in [0, 4097, Int.max] {
+        for rank in [0, Int.max] {
             let invalid = [name: NativeMaterialModel.AdapterLayer(weightShape: [1, 2], rank: rank, alpha: 1)]
             XCTAssertThrowsError(try NativeMaterialModel(baseWeights: base, adapterWeights: factors, layers: invalid, baseSHA256: "fixture"))
         }

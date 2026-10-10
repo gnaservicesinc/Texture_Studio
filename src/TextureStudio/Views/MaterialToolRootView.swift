@@ -179,13 +179,13 @@ struct MaterialToolRootView: View {
                 DisclosureGroup("Prepare test diffuse") {
                     HStack(alignment: .top, spacing: 20) {
                         VStack {
-                            DoubleControl(title: "Tilt X", value: $store.testPhotoSettings.rotationX, range: -45...45, suffix: "°")
-                            DoubleControl(title: "Tilt Y", value: $store.testPhotoSettings.rotationY, range: -45...45, suffix: "°")
-                            DoubleControl(title: "Rotate", value: $store.testPhotoSettings.rotationZ, range: -45...45, suffix: "°")
+                            DoubleControl(title: "Tilt X", value: $store.testPhotoSettings.rotationX, range: -70...70, suffix: "°")
+                            DoubleControl(title: "Tilt Y", value: $store.testPhotoSettings.rotationY, range: -70...70, suffix: "°")
+                            DoubleControl(title: "Rotate", value: $store.testPhotoSettings.rotationZ, range: -180...180, suffix: "°", enforcesSliderRange: false)
                         }
                         VStack {
                             FloatControl(title: "Lighting balance", value: $store.testPhotoSettings.lightingStrength, range: 0...1)
-                            FloatControl(title: "Lighting scale", value: $store.testPhotoSettings.lightingRadius, range: 0.01...0.5)
+                            FloatControl(title: "Lighting scale", value: $store.testPhotoSettings.lightingRadius, range: 0...1)
                             Text("The shared Studio pipeline prepares one diffuse map at the selected grid. Inspect it alongside predictions before rating the result.")
                                 .font(.caption).foregroundStyle(.secondary)
                         }

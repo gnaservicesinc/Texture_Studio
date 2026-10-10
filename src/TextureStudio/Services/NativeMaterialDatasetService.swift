@@ -1910,10 +1910,10 @@ enum NativeMaterialDatasetService {
         settings.merge(value ?? [:]) { _, new in new }
         guard let enabled = settings["enabled"] as? NSNumber, CFGetTypeID(enabled) == CFBooleanGetTypeID(),
               let percent = settings["percent"] as? NSNumber, CFGetTypeID(percent) != CFBooleanGetTypeID(), percent.doubleValue.isFinite, (0...100).contains(percent.doubleValue),
-              let max = settings["max_crops"] as? NSNumber, CFGetTypeID(max) != CFBooleanGetTypeID(), max.doubleValue >= 0, max.doubleValue.rounded() == max.doubleValue,
-              let quick = settings["quick_count"] as? NSNumber, CFGetTypeID(quick) != CFBooleanGetTypeID(), quick.doubleValue >= 1, quick.doubleValue.rounded() == quick.doubleValue,
-              let folders = settings["folders"] as? Object, folders.values.allSatisfy({ ($0 as? NSNumber).map { CFGetTypeID($0) == CFBooleanGetTypeID() } ?? false }) else { throw StudioError("Validation needs an enabled flag, a percentage from 0 to 100, a nonnegative crop limit and at least one quick crop.") }
-        settings["enabled"] = enabled.boolValue; settings["percent"] = percent.doubleValue; settings["max_crops"] = max.intValue; settings["quick_count"] = quick.intValue
+              let max = settings["max_crops"] as? NSNumber, CFGetTypeID(max) != CFBooleanGetTypeID(), let maxCount = settings["max_crops"] as? Int, maxCount >= 0,
+              let quick = settings["quick_count"] as? NSNumber, CFGetTypeID(quick) != CFBooleanGetTypeID(), let quickCount = settings["quick_count"] as? Int, quickCount >= 0,
+              let folders = settings["folders"] as? Object, folders.values.allSatisfy({ ($0 as? NSNumber).map { CFGetTypeID($0) == CFBooleanGetTypeID() } ?? false }) else { throw StudioError("Validation needs an enabled flag, a percentage from 0 to 100 and nonnegative crop counts.") }
+        settings["enabled"] = enabled.boolValue; settings["percent"] = percent.doubleValue; settings["max_crops"] = maxCount; settings["quick_count"] = quickCount
         return settings
     }
     private static func editedValidation(_ previous: Object, options: [String: String]) throws -> Object {

@@ -2,14 +2,13 @@ import XCTest
 @testable import TextureStudio
 
 final class NumericFieldTests: XCTestCase {
-    func testTypingQuickCheckIntervalAcceptsWholeValueAndBoundaries() {
-        XCTAssertEqual(NumericTextEditing.value(from: "10000", in: 1...10_000), 10_000)
-        XCTAssertEqual(NumericTextEditing.value(from: "1", in: 1...10_000), 1)
-        XCTAssertNil(NumericTextEditing.value(from: "0", in: 1...10_000))
-        XCTAssertNil(NumericTextEditing.value(from: "10001", in: 1...10_000))
-        XCTAssertNil(NumericTextEditing.value(from: "1.5", in: 1...10_000))
-        XCTAssertEqual(NumericTextEditing.value(from: "0", in: 0...100_000), 0,
-                       "Zero retains the on-request checkpoint setting.")
+    func testTypingNonnegativeCountsAcceptsZeroAndHasNoInventedCap() {
+        for text in ["0", "1", "101", "10001", "100001", String(Int.max)] {
+            XCTAssertEqual(NumericTextEditing.value(from: text, atLeast: 0), Int(text),
+                           "Quick checks, crop limits and checkpoint intervals accept every representable nonnegative count.")
+        }
+        XCTAssertNil(NumericTextEditing.value(from: "-1", atLeast: 0))
+        XCTAssertNil(NumericTextEditing.value(from: "1.5", atLeast: 0))
     }
 
     func testSmallPhysicalValuesAndScientificNotationKeepPrecision() throws {

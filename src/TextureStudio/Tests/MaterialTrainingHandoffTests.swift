@@ -33,12 +33,27 @@ final class MaterialTrainingHandoffTests: XCTestCase {
             case "checkpointSHA256": payload[mutation] = "changed"
             default:
                 var training = try XCTUnwrap(payload[mutation] as? [String: Any])
-                training["validationEvery"] = 0
+                training["validationEvery"] = -1
                 payload[mutation] = training
             }
             try JSONSerialization.data(withJSONObject: payload).write(to: document)
             XCTAssertThrowsError(try MaterialTrainingHandoff.read(from: document), mutation)
         }
+    }
+
+    func testHandoffPreservesDisabledQuickChecksAndUncappedTrainingSettings() throws {
+        var training = options()
+        training.validationEvery = 0
+        training.checkpointEvery = 200_000
+        training.updatesPerCrop = 50_000
+        training.maxMinutes = 720
+        training.loraRank = 128
+        training.loraAlpha = 256
+        let handoff = try MaterialTrainingHandoff(checkpoint: checkpoint(), dataset: nil, training: training,
+                                                  sampleID: nil, inputVariantID: nil)
+        let document = try handoff.writeTemporary()
+        defer { _ = try? handoff.discardTemporaryFile(at: document) }
+        XCTAssertEqual(try MaterialTrainingHandoff.read(from: document).training, training)
     }
 
     func testTemporaryCleanupKeepsSavedCopiesAndUnrelatedFiles() throws {

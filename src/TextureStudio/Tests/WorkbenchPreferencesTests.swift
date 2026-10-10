@@ -169,6 +169,23 @@ final class WorkbenchPreferencesTests: XCTestCase {
         XCTAssertTrue(restored.comparisonIncludesBase)
     }
 
+    func testReopeningPreservesZeroQuickChecksAndValuesBeyondFormerUICaps() throws {
+        let fixture = try PreferencesFixture()
+        defer { fixture.remove() }
+        let first = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
+        first.training.validationEvery = 0
+        first.training.checkpointEvery = 200_000
+        first.training.updatesPerCrop = 50_000
+        first.training.maxMinutes = 720
+        first.training.loraRank = 128
+        first.training.loraAlpha = 256
+        XCTAssertEqual(WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources).training, first.training)
+        first.training.validationEvery = Int.max
+        first.training.maxMinutes = 0.1
+        first.training.loraAlpha = 0.001
+        XCTAssertEqual(WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources).training, first.training)
+    }
+
     func testReopeningOnSmallerMacPreservesSettingsWithoutMemoryAdmissionAdaptation() throws {
         let fixture = try PreferencesFixture()
         defer { fixture.remove() }

@@ -70,6 +70,7 @@ final class WorkbenchStore {
     private(set) var isSavingTraining = false
     private(set) var isCheckpointPending = false
     private(set) var validationSummary = ""
+    private(set) var trainingProgress: WorkbenchTrainingProgress?
     @ObservationIgnored private var trainingEventBuffer = ""
     private(set) var isPreparingDataset = false
     var datasetPreparationSummary = ""
@@ -669,6 +670,8 @@ final class WorkbenchStore {
             self.isResumingTraining = checkpoint != nil
             do {
                 let result = try WorkbenchResult.decode(WorkbenchTrainingResponse.self, output: await self.worker(args))
+                self.trainingProgress?.finish(state: result.status == "stopped" ? .stopped : .completed,
+                    completed: result.completedUpdates, total: result.requestedUpdates)
                 try await self.loadCheckpoint(URL(fileURLWithPath: result.checkpointPath))
                 self.lastPackageURL = result.packagePath.map { URL(fileURLWithPath: $0) }
                 self.lastPackageCheckpointId = self.selectedCheckpointId
@@ -803,6 +806,10 @@ final class WorkbenchStore {
             guard let data = line.data(using: .utf8),
                   let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let kind = event["event"] as? String else { continue }
+            if isTraining {
+                if trainingProgress == nil { trainingProgress = WorkbenchTrainingProgress() }
+                trainingProgress?.consume(event)
+            }
             if kind == "source_recovery_progress" {
                 if isBusy, !isStopping, let message = event["message"] as? String { activity = message }
                 continue
@@ -825,10 +832,11 @@ final class WorkbenchStore {
                 isStopping = true
                 isSavingTraining = true
                 activity = "Training time limit reached. Validating and saving completed updates…"
-            case "feature_progress":
-                guard !isStopping, let completed = event["completed"] as? Int,
-                      let total = event["total"] as? Int, total > 0 else { continue }
-                activity = "Computing native \(event["phase"] as? String ?? "training") features: \(completed)/\(total) stages…"
+            case "training_setup", "update_started", "operation_progress", "update", "validation_started", "validation_sample", "checkpoint_started", "export_started":
+                if let progress = trainingProgress {
+                    activity = [progress.currentUpdateSummary, progress.operationDetail.isEmpty ? nil : progress.operationDetail,
+                        progress.operationLabel, progress.stageSummary].compactMap { $0 }.joined(separator: " · ")
+                }
             case "checkpoint_saved":
                 if let checkpoint = try? WorkbenchResult.decode(WorkbenchCheckpoint.self, output: line) {
                     if !checkpoints.contains(where: { $0.id == checkpoint.id }) { checkpoints.append(checkpoint) }
@@ -841,7 +849,7 @@ final class WorkbenchStore {
                 let pool = event["pool_count"] as? Int ?? 0
                 if let error = event["mae"] as? Double {
                     validationSummary = "\(event["scope"] as? String == "full" ? "Full validation" : "Quick check"): \(count)/\(pool) crops · error \(error.formatted(.number.precision(.fractionLength(6))))"
-                } else { validationSummary = "No validation crops are available for this run." }
+                } else { validationSummary = "" }
             default: break
             }
         }
@@ -1042,6 +1050,7 @@ final class WorkbenchStore {
         isCheckpointPending = false; validationSummary = ""
         isBusy = true; isTraining = training; isStopping = false; hasTrainingStarted = false; isSavingTraining = false
         error = nil; activity = label; logText = ""; trainingEventBuffer = ""
+        trainingProgress = training ? WorkbenchTrainingProgress() : nil
         task = Task {
             defer {
                 isBusy = false; isTraining = false; isResumingTraining = false; isStopping = false
@@ -1063,8 +1072,12 @@ final class WorkbenchStore {
             }
             catch {
                 if Task.isCancelled || error is CancellationError {
+                    if training { trainingProgress?.finish(state: .aborted) }
                     activity = training ? "Training aborted. Previously saved checkpoints are kept." : "Operation stopped. See the log and output folder."
-                } else { self.error = error.localizedDescription; activity = "Operation stopped. See the error and log." }
+                } else {
+                    if training { trainingProgress?.finish(state: .failed) }
+                    self.error = error.localizedDescription; activity = "Operation stopped. See the error and log."
+                }
             }
         }
     }

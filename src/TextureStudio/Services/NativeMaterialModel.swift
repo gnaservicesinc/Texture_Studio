@@ -65,7 +65,7 @@ final class NativeMaterialModel: @unchecked Sendable {
         for (name, layer) in layers {
             guard let weight = baseWeights[name + ".weight"], weight.dtype == "F32",
                   [2, 4].contains(weight.shape.count), weight.shape == layer.weightShape,
-                  !name.contains(".dwconv."), layer.rank > 0, layer.rank <= 4096,
+                  !name.contains(".dwconv."), layer.rank > 0,
                   layer.alpha.isFinite, layer.alpha > 0 else {
                 throw StudioError("Material adapter layer differs from its exact base weight: \(name)")
             }
@@ -117,7 +117,7 @@ final class NativeMaterialModel: @unchecked Sendable {
             configuration = ["base": ["sha256": digest, "architecture": "pbrnxt-native-v1", "name": "PBRnxt material mapping"], "step": 0]
         }
         if training && specs.isEmpty {
-            guard rank > 0, rank <= 4096, alpha.isFinite, alpha > 0, ["final-map", "map-decoder"].contains(scope),
+            guard rank > 0, alpha.isFinite, alpha > 0, ["final-map", "map-decoder"].contains(scope),
                   let branch = ["normal": 1, "roughness": 2, "height": 3][target] else { throw StudioError("Invalid material adapter parameters.") }
             let prefixes = ["ups.\(branch)."] + (scope == "map-decoder" ? ["gen.m_dec_\(branch).", "gen.m_tail_\(branch)."] : [])
             var random = NativeMaterialRandom(seed: seed)
@@ -257,13 +257,16 @@ final class NativeMaterialModel: @unchecked Sendable {
         func execute(rgb: [Float], adapters: [String: NativeTensor], reference: [Float]? = nil,
                      learningRate: Float? = nil, step: Int = 1, optimizerState: [String: NativeTensor] = [:],
                      featureKey: String? = nil, checkCancellation: () throws -> Void = { try Task.checkCancellation() },
-                     onStage: (Int, Int) -> Void = { _, _ in }) throws -> Execution {
+                     onStage: (Int, Int) -> Void = { _, _ in },
+                     onOperation: (String, Int, Int) -> Void = { _, _, _ in }) throws -> Execution {
             try checkCancellation()
             return try autoreleasepool {
+                onOperation("Building model execution graph", 0, 1)
                 let engine = try GraphProgram(baseWeights: baseWeights, layers: layers, architecture: architecture,
                     adapters: adapters, width: width, height: height, target: target, staged: stagesEnabled,
                     packageCache: stagesEnabled ? packages : nil, checkpointByteLimit: checkpointByteLimit, checkpointNames: checkpointNames)
                 try engine.restoreFeatures(features)
+                onOperation("Building model execution graph", 1, 1)
                 // Transfer ownership so an evicted feature is released during
                 // execution instead of remaining in the wrapper's old cache.
                 features = NativeProgramFeatureCache()
@@ -274,7 +277,7 @@ final class NativeMaterialModel: @unchecked Sendable {
                 }
                 return try engine.execute(rgb: rgb, adapters: adapters, reference: reference, learningRate: learningRate,
                     step: step, optimizerState: optimizerState, featureKey: featureKey,
-                    checkCancellation: checkCancellation, onStage: onStage)
+                    checkCancellation: checkCancellation, onStage: onStage, onOperation: onOperation)
             }
         }
     }
@@ -749,21 +752,23 @@ final class NativeMaterialModel: @unchecked Sendable {
         func execute(rgb: [Float], adapters: [String: NativeTensor], reference: [Float]? = nil,
                      learningRate: Float? = nil, step: Int = 1, optimizerState: [String: NativeTensor] = [:],
                      featureKey: String? = nil, checkCancellation: () throws -> Void = { try Task.checkCancellation() },
-                     onStage: (Int, Int) -> Void = { _, _ in }) throws -> Execution {
+                     onStage: (Int, Int) -> Void = { _, _ in },
+                     onOperation: (String, Int, Int) -> Void = { _, _, _ in }) throws -> Execution {
             try checkCancellation()
             return try autoreleasepool {
                 try executePooled(rgb: rgb, adapters: adapters, reference: reference, learningRate: learningRate,
                     step: step, optimizerState: optimizerState, featureKey: featureKey,
-                    checkCancellation: checkCancellation, onStage: onStage)
+                    checkCancellation: checkCancellation, onStage: onStage, onOperation: onOperation)
             }
         }
         private func executePooled(rgb: [Float], adapters: [String: NativeTensor], reference: [Float]?,
                      learningRate: Float?, step: Int, optimizerState: [String: NativeTensor], featureKey: String?,
-                     checkCancellation: () throws -> Void, onStage: (Int, Int) -> Void) throws -> Execution {
+                     checkCancellation: () throws -> Void, onStage: (Int, Int) -> Void,
+                    onOperation: (String, Int, Int) -> Void) throws -> Execution {
             if let reference, let learningRate, stagesEnabled {
                 return try executeCheckpointed(rgb: rgb, adapters: adapters, reference: reference,
                     learningRate: learningRate, step: step, optimizerState: optimizerState,
-                    featureKey: featureKey, checkCancellation: checkCancellation, onStage: onStage)
+                    featureKey: featureKey, checkCancellation: checkCancellation, onStage: onStage, onOperation: onOperation)
             }
             var feeds = try immutableFeeds()
             feeds[input] = try NativeGraphExecution.tensorData(.floats(rgb, shape: [1, 3, height, width]))
@@ -794,6 +799,7 @@ final class NativeMaterialModel: @unchecked Sendable {
             let stageNeeds = frozenStages.map { requiredFeeds($0.map(\.source)) }
             let cacheKey = finalLayerOnly ? featureKey : nil
             if let cacheKey, let cached = featureCache[cacheKey] {
+                onOperation("Reusing cached forward features", frozenStages.count, frozenStages.count)
                 feeds.merge(cached) { _, new in new }
                 featureOrder.removeAll { $0 == cacheKey }; featureOrder.append(cacheKey)
             } else {
@@ -804,6 +810,7 @@ final class NativeMaterialModel: @unchecked Sendable {
                 for i in frozenStages.indices.reversed() { neededAfter[i] = remaining; remaining.formUnion(stageNeeds[i]) }
                 for (i, stage) in frozenStages.enumerated() {
                     try checkCancellation()
+                    onOperation("Forward pass", i, frozenStages.count)
                     let needed = stageNeeds[i]
                     let data = try autoreleasepool {
                         try executeData(key: "forward-\(i)", feeds: feeds.filter { needed.contains($0.key) }, targets: stage.map(\.source),
@@ -812,6 +819,7 @@ final class NativeMaterialModel: @unchecked Sendable {
                     for (index, feature) in stage.enumerated() { feeds[feature.feed] = data[index] }
                     feeds = feeds.filter { neededAfter[i].contains($0.key) }
                     onStage(i + 1, frozenStages.count)
+                    onOperation("Forward pass", i + 1, frozenStages.count)
                 }
                 if let cacheKey {
                     let frozen = Set(frozenStages.flatMap { $0.map(\.feed) })
@@ -828,9 +836,11 @@ final class NativeMaterialModel: @unchecked Sendable {
                 }
             }
             try checkCancellation()
+            onOperation(optimize ? "Computing loss and applying optimizer" : "Computing prediction and loss", 0, 1)
             let result = try executeValues(key: reference == nil ? "final-output" : "final-loss", feeds: feeds.filter { finalFeeds.contains($0.key) }, targets: targets,
                                            checkCancellation: checkCancellation)
             try checkCancellation()
+            onOperation(optimize ? "Computing loss and applying optimizer" : "Computing prediction and loss", 1, 1)
             guard result[0].allSatisfy(\.isFinite), reference == nil || result[1][0].isFinite else { throw StudioError("Material model produced nonfinite values; weights remain untouched.") }
             var updated: [String: NativeTensor] = [:], state: [String: NativeTensor] = [:]
             if optimize {
@@ -1149,10 +1159,13 @@ final class NativeMaterialModel: @unchecked Sendable {
         }
         private func executeCheckpointed(rgb: [Float], adapters: [String: NativeTensor], reference: [Float],
                     learningRate: Float, step: Int, optimizerState: [String: NativeTensor], featureKey: String?,
-                    checkCancellation: () throws -> Void, onStage: (Int, Int) -> Void) throws -> Execution {
+                    checkCancellation: () throws -> Void, onStage: (Int, Int) -> Void,
+                    onOperation: (String, Int, Int) -> Void) throws -> Execution {
             guard learningRate.isFinite, learningRate > 0, reference.count == width * height * (target == "normal" ? 3 : 1),
                   reference.allSatisfy(\.isFinite) else { throw StudioError("Invalid native training target or learning rate.") }
+            onOperation("Preparing backward graph", 0, 1)
             try prepareReverse()
+            onOperation("Preparing backward graph", 1, 1)
             let stageNeeds = frozenStages.map { requiredFeeds($0.map(\.source)) }
             let finalTargets = [output!, loss!, valueLoss!, gradientLoss!]
             let finalNeeds = requiredFeeds(finalTargets)
@@ -1181,10 +1194,12 @@ final class NativeMaterialModel: @unchecked Sendable {
             for i in frozenStages.indices.reversed() { neededAfter[i] = remaining; remaining.formUnion(stageNeeds[i]) }
             for (index, stage) in frozenStages.enumerated() {
                 try checkCancellation()
+                onOperation("Forward pass", index, frozenStages.count)
                 let data: [MPSGraphTensorData]
                 if !activeStages.contains(index), frozenCacheHit {
                     // Cached frozen roots are the exact terminal features of
                     // the parameter-free prefix; no decoder/adapter is skipped.
+                    onOperation("Forward pass (cached features)", index + 1, frozenStages.count)
                     continue
                 } else {
                     data = try autoreleasepool {
@@ -1199,6 +1214,7 @@ final class NativeMaterialModel: @unchecked Sendable {
                 }
                 feeds = feeds.filter { neededAfter[index].contains($0.key) }
                 onStage(index + 1, frozenStages.count)
+                onOperation("Forward pass", index + 1, frozenStages.count)
             }
             if let featureKey, !frozenValues.isEmpty, featureCache[featureKey] == nil {
                 let bytes = frozenValues.values.reduce(UInt64(0)) { $0 + UInt64($1.shape.reduce(4) { $0 * $1.intValue }) }
@@ -1211,12 +1227,16 @@ final class NativeMaterialModel: @unchecked Sendable {
                 }
                 if bytes <= budget { featureCache[featureKey] = frozenValues; featureOrder.append(featureKey); featureBytes += bytes }
             }
+            onOperation("Computing training loss", 0, 1)
             let result = try executeValues(key: "final-loss", feeds: feeds.filter { finalNeeds.contains($0.key) }, targets: finalTargets,
                                            checkCancellation: checkCancellation)
             guard result[0].allSatisfy(\.isFinite), result[1][0].isFinite else { throw StudioError("Material model produced nonfinite values.") }
+            onOperation("Computing training loss", 1, 1)
             feeds.removeAll()
             var adjoints: [MPSGraphTensor: MPSGraphTensorData] = [:]
             var parameterGradients: [String: NativeTensor] = [:]
+            let reverseOrder = activeStages.sorted().reversed()
+            var reversePosition = 0
             func replayInputs(_ needs: Set<MPSGraphTensor>) throws -> [MPSGraphTensor: MPSGraphTensorData] {
                 var replay = Set<Int>(), visited = Set<MPSGraphTensor>()
                 func collect(_ tensor: MPSGraphTensor) throws {
@@ -1254,6 +1274,8 @@ final class NativeMaterialModel: @unchecked Sendable {
                 // Last-consumer release bounds storage without that repetition.
                 for (position, index) in order.enumerated() {
                     try checkCancellation()
+                    let backwardLabel = reversePosition == 0 ? "Loss gradients" : "Backward pass \(reversePosition)/\(reverseOrder.count)"
+                    onOperation(backwardLabel + " · recomputing inputs", position, order.count)
                     var inputs: [MPSGraphTensor: MPSGraphTensorData] = [:]
                     for dependency in stageNeeds[index] where boundarySet.contains(dependency) || base[dependency] != nil {
                         inputs[dependency] = try value(dependency)
@@ -1264,6 +1286,7 @@ final class NativeMaterialModel: @unchecked Sendable {
                     }
                     for (offset, item) in frozenStages[index].enumerated() { live[item.feed] = data[offset] }
                     live = live.filter { neededAfter[position].contains($0.key) }
+                    onOperation(backwardLabel + " · recomputing inputs", position + 1, order.count)
                 }
                 var inputs: [MPSGraphTensor: MPSGraphTensorData] = [:]
                 for tensor in required { inputs[tensor] = try value(tensor) }
@@ -1287,8 +1310,12 @@ final class NativeMaterialModel: @unchecked Sendable {
                     else { adjoints[input] = data[index] }
                 }
             }
+            onOperation("Computing loss gradients", 0, 1)
             try backward(lossReverse!, seeds: [])
-            for index in activeStages.sorted().reversed() {
+            onOperation("Computing loss gradients", 1, 1)
+            for index in reverseOrder {
+                reversePosition += 1
+                onOperation("Backward pass", reversePosition - 1, reverseOrder.count)
                 let stage = frozenStages[index]
                 let seeds = stage.map { adjoints[$0.feed] }
                 if seeds.allSatisfy({ $0 == nil }) { continue }
@@ -1301,6 +1328,7 @@ final class NativeMaterialModel: @unchecked Sendable {
                 // needed by a later (earlier-in-forward-order) VJP.
                 for item in stage { checkpoints.removeValue(forKey: item.feed) }
                 onStage(frozenStages.count - index, frozenStages.count)
+                onOperation("Backward pass", reversePosition, reverseOrder.count)
             }
             try checkCancellation()
             for name in parameterFeeds.keys {
@@ -1318,8 +1346,10 @@ final class NativeMaterialModel: @unchecked Sendable {
             }
             let ordered = optimizerOutputs.keys.sorted()
             let optimizerTargets = ordered.map { optimizerOutputs[$0]! }, optimizerNeeds = requiredFeeds(ordered.map { optimizerOutputs[$0]! })
+            onOperation("Applying optimizer update", 0, 1)
             let updates = try executeValues(key: "optimizer", feeds: base.filter { optimizerNeeds.contains($0.key) }, targets: optimizerTargets,
                                             checkCancellation: checkCancellation)
+            onOperation("Applying optimizer update", 1, 1)
             var updated: [String: NativeTensor] = [:], state: [String: NativeTensor] = [:]
             for (index, key) in ordered.enumerated() {
                 guard updates[index].allSatisfy(\.isFinite) else { throw StudioError("Native optimizer returned nonfinite weights.") }

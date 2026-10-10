@@ -57,7 +57,7 @@ enum NativeMaterialTrainer {
             learningRate = Float(value("--learning-rate") ?? "0.00001") ?? .nan
             updatesPerMap = Int(value("--updates-per-map") ?? "100") ?? 0
             maxMinutes = Double(value("--max-minutes") ?? "30") ?? .nan
-            validationEvery = Int(value("--validation-every") ?? "20") ?? 0
+            validationEvery = Int(value("--validation-every") ?? "20") ?? -1
             checkpointEvery = Int(value("--checkpoint-every") ?? "0") ?? -1
             seed = UInt64(value("--seed") ?? "17") ?? 17
             materials = arguments.indices.filter { arguments[$0] == "--material" && arguments.indices.contains($0 + 1) }.map { arguments[$0 + 1] }
@@ -65,7 +65,7 @@ enum NativeMaterialTrainer {
             baseline = arguments.contains("--baseline"); developerMode = arguments.contains("--developer-mode")
             guard size >= 256, size <= 8192, size % 64 == 0, rank > 0, alpha.isFinite, alpha > 0,
                   learningRate.isFinite, learningRate > 0, updatesPerMap > 0, maxMinutes.isFinite, maxMinutes > 0,
-                  validationEvery > 0, checkpointEvery >= 0 else { throw StudioError("Material training sizes, rates and update counts are invalid.") }
+                  validationEvery >= 0, checkpointEvery >= 0 else { throw StudioError("Material training sizes, rates and update counts are invalid.") }
             guard command == "infer" ? image != nil : dataset != nil else { throw StudioError("The native material operation needs its input image or dataset.") }
         }
     }
@@ -103,6 +103,14 @@ enum NativeMaterialTrainer {
     static func train(_ options: Options, onEvent: Event, control: NativeMaterialTrainingControl, model suppliedModel: NativeMaterialModel? = nil,
                       now: @Sendable () -> ContinuousClock.Instant = { .now }) throws -> String {
         try control.check()
+        func setup(_ label: String, step: Int, requested: Int? = nil, maps: Int? = nil) throws {
+            var event: [String: Any] = ["event": "training_setup", "operation": label,
+                "completed": step - 1, "total": 3, "updates_per_map": options.updatesPerMap]
+            if let requested { event["requested_updates"] = requested }
+            if let maps { event["training_map_count"] = maps }
+            onEvent(try json(event) + "\n")
+        }
+        try setup("Reading and verifying dataset", step: 1)
         let dataset = options.dataset!
         var directories = [dataset]
         let manifestBytes = try Data(contentsOf: dataset.appendingPathComponent("dataset.json"))
@@ -115,7 +123,11 @@ enum NativeMaterialTrainer {
         let locks = try directories.sorted { $0.path < $1.path }.map(DatasetReadLock.init)
         defer { locks.forEach { $0.close() } }
         let descriptors = try NativeMaterialDatasetService.trainingSamples(datasetURL: dataset, size: options.size, target: options.target, materials: options.materials)
-        let training = descriptors.filter { $0.split == "train" }, validation = descriptors.filter { $0.split == "validation" }
+        let settings = manifest?["validation"] as? [String: Any] ?? [:]
+        let validationEnabled = settings["enabled"] as? Bool ?? true
+        let quickCount = max(0, settings["quick_count"] as? Int ?? 4)
+        let training = descriptors.filter { $0.split == "train" }
+        let validation = validationEnabled ? descriptors.filter { $0.split == "validation" } : []
         guard !training.isEmpty else { throw StudioError("The selected native dataset has no included training maps.") }
         let requested = training.count.multipliedReportingOverflow(by: options.updatesPerMap)
         guard !requested.overflow else { throw StudioError("The requested training update count is too large.") }
@@ -124,15 +136,18 @@ enum NativeMaterialTrainer {
         guard checksum(try Data(contentsOf: dataset.appendingPathComponent("dataset.json"))) == sourceHash else {
             throw StudioError("The prepared dataset changed before native training obtained its read locks.")
         }
+        try setup("Loading material model", step: 2, requested: requestedUpdates, maps: training.count)
         let model = try suppliedModel ?? NativeMaterialModel.load(checkpointURL: options.checkpoint, expectedSHA256: options.expectedSHA256,
             baseURL: options.base, target: options.target, scope: options.scope, rank: options.rank, alpha: options.alpha, training: true, seed: options.seed)
         try admitTraining(model: model, size: options.size)
+        try setup("Preparing model execution graph", step: 3)
         let program = try model.program(width: options.size, height: options.size, target: options.target)
         try control.check()
         guard !FileManager.default.fileExists(atPath: options.output.path) else { throw StudioError("Choose a new training output directory.") }
         try FileManager.default.createDirectory(at: options.output, withIntermediateDirectories: true)
         let started = now()
         var completed = 0, random = NativeMaterialRandom(seed: options.seed)
+        var currentEpoch = 0, activeUpdate = false, workflowPhase = 3
         let initialStep = model.configuration["step"] as? Int ?? 0
         var optimizer: [String: NativeTensor] = [:], checkpoints: [[String: Any]] = [], history: [[String: Any]] = []
         var lastSavedStep = -1, lastValidation: [String: Any] = [:]
@@ -142,7 +157,7 @@ enum NativeMaterialTrainer {
             return Double(components.seconds) + Double(components.attoseconds) / 1e18
         }
         func elapsedSeconds() -> Double { seconds(started.duration(to: now())) }
-        func timeLimitReached() -> Bool { started.duration(to: now()) >= .seconds(options.maxMinutes * 60) }
+        func timeLimitReached() -> Bool { elapsedSeconds() / 60 >= options.maxMinutes }
         func stoppedReason() -> String? {
             if control.shouldStopAndSave { return "user_stop" }
             return completed < requestedUpdates && timeLimitReached() ? "time_limit" : nil
@@ -150,6 +165,14 @@ enum NativeMaterialTrainer {
         func emit(_ event: [String: Any]) throws {
             var event = event
             event["elapsed_training_seconds"] = elapsedSeconds()
+            event["completed_updates"] = completed
+            event["requested_updates"] = requestedUpdates
+            event["current_update"] = activeUpdate ? completed + 1 : completed
+            event["initial_step"] = initialStep
+            event["checkpoint_step"] = initialStep + completed
+            event["epoch"] = currentEpoch
+            event["total_epochs"] = options.updatesPerMap
+            event["workflow_phase"] = workflowPhase
             let line = try json(event) + "\n"; onEvent(line)
         }
         func pair(_ descriptor: NativeMaterialDatasetService.TrainingSample) throws -> ([Float], [Float]) {
@@ -165,10 +188,17 @@ enum NativeMaterialTrainer {
             let reference = try target.modelFloatSamples(role: options.target, normalConvention: descriptor.targetConvention)
             return (rgb, reference)
         }
-        func check(full: Bool) throws -> [String: Any] {
+        func check(full: Bool, context: String) throws -> [String: Any] {
             var errors: [[String: Any]] = [], sum = Double(0)
-            let selected = full ? validation : Array(validation.prefix(3))
-            for sample in selected {
+            let selected = full ? validation : Array(validation.prefix(quickCount))
+            if !selected.isEmpty {
+                try emit(["event": "validation_started", "scope": full ? "full" : "quick", "context": context,
+                    "sample_count": selected.count, "pool_count": validation.count])
+            }
+            for (position, sample) in selected.enumerated() {
+                try emit(["event": "validation_sample", "scope": full ? "full" : "quick", "context": context,
+                    "sample_id": sample.id, "sample_position": position + 1, "sample_total": selected.count,
+                    "operation": "Loading validation maps"])
                 let mae = try autoreleasepool {
                     let data = try pair(sample)
                     let result = try program.execute(rgb: data.0, adapters: model.adapterWeights, reference: data.1,
@@ -176,23 +206,28 @@ enum NativeMaterialTrainer {
                             if done == 1 || done % 10 == 0 || done == total {
                                 try? emit(["event": "feature_progress", "phase": "validation", "sample_id": sample.id, "completed": done, "total": total])
                             }
+                        }, onOperation: { operation, done, total in
+                            try? emit(["event": "operation_progress", "phase": "validation", "operation": operation,
+                                "completed": done, "total": total])
                         })
                     return Double(result.valueLoss!)
                 }
                 errors.append(["sample_id": sample.id, "mae": mae]); sum += mae
             }
-            let result: [String: Any] = ["event": "validation", "status": errors.isEmpty ? "unavailable" : "checked",
-                "scope": full ? "full" : "quick", "sample_count": errors.count, "pool_count": validation.count,
+            let result: [String: Any] = ["event": "validation", "status": !validationEnabled ? "disabled" : errors.isEmpty ? "unavailable" : "checked",
+                "scope": full ? "full" : "quick", "context": context, "sample_count": errors.count, "pool_count": validation.count,
                 "mae": errors.isEmpty ? NSNull() : sum / Double(errors.count), "samples": errors,
                 "step": initialStep + completed, "reference": "Teacher/source agreement, not measured material accuracy"]
             history.append(result); if history.count > 200 { history.removeFirst() }
-            try emit(result)
+            if !errors.isEmpty { try emit(result) }
             return result
         }
-        func save() throws -> URL {
+        func save(final: Bool = false) throws -> URL {
+            if final { workflowPhase = 4 }
             if lastSavedStep == completed { return options.output.appendingPathComponent(String(format: "checkpoint-step-%08d.safetensors", initialStep + completed)) }
-            lastValidation = try check(full: true)
+            lastValidation = try check(full: true, context: final ? "final" : "checkpoint")
             try control.check()
+            try emit(["event": "checkpoint_started", "operation": "Writing checkpoint", "final": final])
             let config = try model.checkpointConfiguration(size: options.size, step: initialStep + completed, validation: lastValidation)
             let configText = try json(config)
             let destination = options.output.appendingPathComponent(String(format: "checkpoint-step-%08d.safetensors", initialStep + completed))
@@ -208,16 +243,22 @@ enum NativeMaterialTrainer {
         do {
             try emit(["event": "training_started", "runtime": "Apple MPSGraph", "precision": "Float32", "training_size": options.size,
                 "execution": "bounded-native-stages-v1", "stage_count": program.frozenStageCount,
-                "requested_updates": requestedUpdates, "updates_per_map": options.updatesPerMap, "max_minutes": options.maxMinutes])
-            let baseline = try check(full: true)
-            for _ in 0..<options.updatesPerMap {
+                "requested_updates": requestedUpdates, "updates_per_map": options.updatesPerMap,
+                "training_map_count": training.count, "validation_map_count": validation.count,
+                "quick_count": quickCount, "validation_every": options.validationEvery, "max_minutes": options.maxMinutes])
+            let baseline = try check(full: true, context: "baseline")
+            for epoch in 0..<options.updatesPerMap {
+                currentEpoch = epoch + 1
                 var order = Array(training.indices); random.shuffle(&order)
-                for index in order {
+                for (position, index) in order.enumerated() {
                     try control.check()
                     // A deadline schedules no new update. A step already in
                     // progress finishes before the validated final save.
                     if control.shouldStopAndSave || timeLimitReached() { break }
                     let sample = training[index]
+                    activeUpdate = true
+                    try emit(["event": "update_started", "sample_id": sample.id, "sample_position": position + 1,
+                        "sample_total": training.count, "operation": "Loading training maps"])
                     let updateStarted = now()
                     let update = try autoreleasepool {
                         let data = try pair(sample)
@@ -227,18 +268,23 @@ enum NativeMaterialTrainer {
                                 if done == 1 || done % 10 == 0 || done == total {
                                     try? emit(["event": "feature_progress", "phase": "training", "sample_id": sample.id, "completed": done, "total": total])
                                 }
+                            }, onOperation: { operation, done, total in
+                                try? emit(["event": "operation_progress", "phase": "training", "operation": operation,
+                                    "completed": done, "total": total])
                             })
                     }
                     try control.check()
                     model.updateAdapters(update.updated); optimizer = update.optimizerState
                     completed += 1
+                    activeUpdate = false
                     try emit(["event": "update", "step": initialStep + completed, "sample_id": sample.id,
                         "value_l1": update.valueLoss!, "detail_l1": update.gradientLoss!, "total": update.loss!,
                         "native_dimensions": [options.size, options.size],
                         "update_duration_seconds": seconds(updateStarted.duration(to: now()))])
                     if control.shouldStopAndSave || timeLimitReached() { break }
                     if control.consumeCheckpoint() || options.checkpointEvery > 0 && completed % options.checkpointEvery == 0 { _ = try save() }
-                    else if completed % options.validationEvery == 0 { _ = try check(full: false) }
+                    else if options.validationEvery > 0, quickCount > 0, !validation.isEmpty,
+                            completed % options.validationEvery == 0 { _ = try check(full: false, context: "periodic") }
                     if control.shouldStopAndSave || timeLimitReached() { break }
                 }
                 if control.shouldStopAndSave || timeLimitReached() { break }
@@ -248,8 +294,9 @@ enum NativeMaterialTrainer {
                 try emit(["event": "training_stopped", "stopped_reason": reason,
                     "completed_updates": completed, "requested_updates": requestedUpdates, "max_minutes": options.maxMinutes])
             }
-            let checkpoint = try save()
+            let checkpoint = try save(final: true)
             try control.check()
+            try emit(["event": "export_started", "operation": "Exporting material model", "developer_mode": options.developerMode])
             let export = options.output.appendingPathComponent("export")
             let configuration = try model.checkpointConfiguration(size: options.size, step: initialStep + completed, validation: lastValidation)
             guard !FileManager.default.fileExists(atPath: export.path) else { throw StudioError("Choose a new model export directory.") }
@@ -272,6 +319,7 @@ enum NativeMaterialTrainer {
                 "image_padding": false, "image_resizing": false, "runtime": "Apple MPSGraph Float32"]
             if let reason { result["stopped_reason"] = reason }
             try writeJSON(result, to: options.output.appendingPathComponent("run.json"))
+            try emit(["event": "training_completed", "status": reason == nil ? "completed" : "stopped"])
             return try json(result)
         } catch {
             if error is CancellationError, let ownedExport { try? FileManager.default.removeItem(at: ownedExport) }

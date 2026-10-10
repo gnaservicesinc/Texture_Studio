@@ -320,12 +320,12 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
         if !["height", "roughness", "normal"].contains(result.target) { result.target = "height" }
         if !["final-map", "map-decoder"].contains(result.scope) { result.scope = "final-map" }
         if ![256, 512, 1024, 2048].contains(result.size) { result.size = 1024 }
-        result.loraRank = min(64, max(1, result.loraRank))
-        result.loraAlpha = result.loraAlpha.isFinite ? min(128, max(0.01, result.loraAlpha)) : 8
-        result.validationEvery = min(10000, max(1, result.validationEvery))
-        result.checkpointEvery = min(100000, max(0, result.checkpointEvery))
-        result.updatesPerCrop = min(10_000, max(1, result.updatesPerCrop))
-        result.maxMinutes = result.maxMinutes.isFinite ? min(240, max(1, result.maxMinutes)) : 30
+        result.loraRank = max(1, result.loraRank)
+        result.loraAlpha = result.loraAlpha.isFinite && result.loraAlpha > 0 ? result.loraAlpha : 8
+        result.validationEvery = max(0, result.validationEvery)
+        result.checkpointEvery = max(0, result.checkpointEvery)
+        result.updatesPerCrop = max(1, result.updatesPerCrop)
+        result.maxMinutes = result.maxMinutes.isFinite && result.maxMinutes > 0 ? result.maxMinutes : 30
         return result
     }
 }

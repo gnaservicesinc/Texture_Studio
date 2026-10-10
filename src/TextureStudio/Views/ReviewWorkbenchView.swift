@@ -232,7 +232,7 @@ struct ReviewWorkbenchView: View {
                 Text("Zoom").font(.caption)
                 NumericTextField(title: "Zoom percent", value: Binding(
                     get: { Double(viewport.zoom) * 100 },
-                    set: { viewport.setZoom(CGFloat($0 / 100)) }), in: 2...3200)
+                    set: { viewport.setZoom(CGFloat($0 / 100)) }), greaterThan: 0)
                     .frame(width: 85)
                 Text(viewport.fitToView ? "% manual · Fit active" : "% · linked pan")
                     .font(.caption).foregroundStyle(.secondary)
@@ -253,7 +253,7 @@ struct ReviewWorkbenchView: View {
             .safeAreaInset(edge: .bottom, spacing: 8) {
                 if visibleCandidates.contains(where: \.numeric) {
                     HStack {
-                        DoubleControl(title: "Display contrast", value: $viewport.displayContrast, range: 1...32, suffix: "×")
+                        DoubleControl(title: "Display contrast", value: $viewport.displayContrast, range: 1...32, suffix: "×", enforcesSliderRange: false, greaterThan: 0)
                             .frame(maxWidth: 220)
                         DoubleControl(title: "Midpoint", value: $viewport.displayMidpoint, range: 0...1)
                             .frame(maxWidth: 200)
