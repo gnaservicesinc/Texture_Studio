@@ -293,8 +293,13 @@ struct DatasetPlanSummary: View {
                     .font(.callout).monospacedDigit()
                 Text("Validation limit: \(limit(plan)) folders. \(plan.validationCandidateCount ?? 0) folders can supply a different crop at this size. Existing training crops stay in training.")
                     .font(.caption).foregroundStyle(.secondary)
-                if let count = plan.undersizedSourceSetCount, count > 0 {
-                    Text("\(count) \(count == 1 ? "source set is" : "source sets are") too small at this resolution and will remain available for inspection.")
+                if let count = plan.smallerAlternateSourceSetCount, count > 0 {
+                    Text("\(count) smaller \(count == 1 ? "source set is" : "source sets are") kept for inspection. Larger versions in the same material folder fit this training resolution.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                if let total = plan.undersizedSourceSetCount, total > (plan.smallerAlternateSourceSetCount ?? 0) {
+                    let count = total - (plan.smallerAlternateSourceSetCount ?? 0)
+                    Text("\(count) \(count == 1 ? "source set imports" : "source sets import") for inspection and \(count == 1 ? "is" : "are") skipped for training at this resolution.")
                         .font(.caption).foregroundStyle(.secondary)
                     ForEach(plan.sourceIssues.filter { $0.code == "undersized" }) { issue in
                         VStack(alignment: .leading, spacing: 4) {
@@ -328,6 +333,7 @@ struct DatasetPlanSummary: View {
 private struct DatasetTargetSourceIssues: View {
     let target: String
     let plan: WorkbenchDatasetPlan
+    @State private var showOptionalMapDetails = false
     private var title: String { target == "height" ? "Displacement" : target.capitalized }
     private var issues: [WorkbenchImportSourceIssue] {
         plan.sourceIssues.filter { $0.target == target }
@@ -347,12 +353,15 @@ private struct DatasetTargetSourceIssues: View {
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 if !missingMaps.isEmpty {
-                    Text("\(title): \(missingMaps.count) \(missingMaps.count == 1 ? "source set has" : "source sets have") no map")
-                        .font(.callout.bold())
-                    Text("Skipped for \(title.lowercased()) training. Other available surface maps remain usable for their own targets.")
+                    DisclosureGroup(isExpanded: $showOptionalMapDetails) {
+                        ForEach(missingMaps) { issue in sourceDetails(issue, sourceLabel: "Diffuse source") }
+                    } label: {
+                        Label("\(missingMaps.count) \(missingMaps.count == 1 ? "source set imports" : "source sets import") without \(title.lowercased())", systemImage: "info.circle")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    Text("Their supported maps remain available for training. \(title) training uses the source sets with a supported \(title.lowercased()) map.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    ForEach(missingMaps) { issue in sourceDetails(issue, sourceLabel: "Diffuse source") }
                 }
                 if !unsupportedMaps.isEmpty {
                     Label("\(title) training requirements", systemImage: "exclamationmark.triangle")

@@ -126,6 +126,7 @@ struct WorkbenchDatasetPlan: Decodable, Sendable {
     let excludedCount: Int
     let unavailableTargetCount: Int
     let undersizedSourceSetCount: Int?
+    var smallerAlternateSourceSetCount: Int? = nil
     var regionalFamilies: [String] = []
     var subjectCount: Int? = nil
     var sharedValidationCount: Int? = nil
@@ -138,7 +139,7 @@ struct WorkbenchDatasetPlan: Decodable, Sendable {
 extension WorkbenchDatasetPlan {
     private enum CodingKeys: String, CodingKey {
         case size, cropCount, sourceSetCount, trainCount, validationCount, excludedCount, unavailableTargetCount
-        case undersizedSourceSetCount, regionalFamilies, subjectCount, sharedValidationCount, validationLimit
+        case undersizedSourceSetCount, smallerAlternateSourceSetCount, regionalFamilies, subjectCount, sharedValidationCount, validationLimit
         case validationCandidateCount, subjects, sourceIssues
     }
 
@@ -152,6 +153,7 @@ extension WorkbenchDatasetPlan {
                   excludedCount: try values.decode(Int.self, forKey: .excludedCount),
                   unavailableTargetCount: try values.decode(Int.self, forKey: .unavailableTargetCount),
                   undersizedSourceSetCount: try values.decodeIfPresent(Int.self, forKey: .undersizedSourceSetCount),
+                  smallerAlternateSourceSetCount: try values.decodeIfPresent(Int.self, forKey: .smallerAlternateSourceSetCount),
                   regionalFamilies: try values.decodeIfPresent([String].self, forKey: .regionalFamilies) ?? [],
                   subjectCount: try values.decodeIfPresent(Int.self, forKey: .subjectCount),
                   sharedValidationCount: try values.decodeIfPresent(Int.self, forKey: .sharedValidationCount),

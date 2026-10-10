@@ -387,8 +387,9 @@ enum NativeMaterialDatasetService {
                 switch attempt.result {
                 case .notPublished:
                     object["code"] = "not_published"
-                    object["reason"] = "Poly Haven does not publish a \(label) map for this source set. Excluded from \(label) training; its other maps remain usable."
+                    object["reason"] = "Poly Haven does not publish a \(label) map for this source set. Import continues with its available maps; only \(label) training skips this set."
                 case .failed(let reason):
+                    object["code"] = "recovery_failed"
                     object["reason"] = "\(label.capitalized) is unavailable: \(reason) Other maps remain usable; recovery will retry on the next scan."
                 default: break
                 }
@@ -500,7 +501,7 @@ enum NativeMaterialDatasetService {
     }
 
     private static func regionPlan(_ records: [Record], size: Int, reviews: Object, target: String, settings: Object) throws -> Object {
-        let materials = Dictionary(records.filter { !sources($0.sample).isEmpty && sources($0.sample).allSatisfy { min($0["width"] as? Int ?? 0, $0["height"] as? Int ?? 0) >= size } }.map { ($0.sample["material_id"] as? String ?? "", $0) }, uniquingKeysWith: { _, new in new })
+        let materials = Dictionary(records.filter { suppliesCrop($0.sample, size: size) }.map { ($0.sample["material_id"] as? String ?? "", $0) }, uniquingKeysWith: { _, new in new })
         var assignments: [String: Object] = [:], subjects: [String: Set<String>] = [:], occupied: [String: [[Double]]] = [:]
         func eligible(_ sample: Object) -> Bool {
             guard let map = (sample["map_metadata"] as? [String: Object])?[target] else { return false }
@@ -563,7 +564,7 @@ enum NativeMaterialDatasetService {
             subjectPlans[subject]?["selected"] = true; checks.insert(familyID(sample))
         }
         let values = Array(assignments.values)
-        return ["assignments": assignments, "subjects": subjectPlans.keys.sorted().compactMap { subjectPlans[$0] }, "size": size, "crop_count": values.filter { $0["split"] as? String == "train" }.count, "source_set_count": materials.count, "subject_count": subjects.count, "train_count": values.filter { $0["eligible"] as? Bool == true && $0["split"] as? String == "train" }.count, "validation_count": values.filter { $0["eligible"] as? Bool == true && $0["split"] as? String == "validation" }.count, "excluded_count": values.filter { ["excluded", "rejected"].contains($0["status"] as? String ?? "") }.count, "unavailable_target_count": values.filter { $0["target_available"] as? Bool == false }.count, "undersized_source_set_count": Set(records.compactMap { $0.sample["material_id"] as? String }).count - materials.count, "shared_validation_count": min(cap, ordered.count), "validation_limit": cap, "validation_candidate_count": candidates.count, "regional_families": checks.sorted(), "source_issues": planSourceIssues(records, size: size, target: target, assignments: assignments)]
+        return ["assignments": assignments, "subjects": subjectPlans.keys.sorted().compactMap { subjectPlans[$0] }, "size": size, "crop_count": values.filter { $0["split"] as? String == "train" }.count, "source_set_count": materials.count, "subject_count": subjects.count, "train_count": values.filter { $0["eligible"] as? Bool == true && $0["split"] as? String == "train" }.count, "validation_count": values.filter { $0["eligible"] as? Bool == true && $0["split"] as? String == "validation" }.count, "excluded_count": values.filter { ["excluded", "rejected"].contains($0["status"] as? String ?? "") }.count, "unavailable_target_count": values.filter { $0["target_available"] as? Bool == false }.count, "undersized_source_set_count": Set(records.compactMap { $0.sample["material_id"] as? String }).count - materials.count, "smaller_alternate_source_set_count": smallerAlternateMaterials(records, size: size).count, "shared_validation_count": min(cap, ordered.count), "validation_limit": cap, "validation_candidate_count": candidates.count, "regional_families": checks.sorted(), "source_issues": planSourceIssues(records, size: size, target: target, assignments: assignments)]
     }
     /// Region membership and validation selections are shared by all maps.
     /// Compute that geometry once, then adjust only target availability counts.
@@ -594,6 +595,7 @@ enum NativeMaterialDatasetService {
     private static func planSourceIssues(_ records: [Record], size: Int, target: String, assignments: [String: Object]) -> [Object] {
         let materials = Dictionary(records.map { ($0.sample["material_id"] as? String ?? "", $0.sample) }, uniquingKeysWith: { _, new in new })
         let byMaterial = Dictionary(grouping: assignments.values) { $0["material_id"] as? String ?? "" }
+        let smallerAlternates = smallerAlternateMaterials(records, size: size)
         let label = target == "height" ? "displacement" : target
         return materials.keys.sorted().compactMap { material -> Object? in
             let sample = materials[material]!, metadata = sample["map_metadata"] as? [String: Object] ?? [:]
@@ -601,16 +603,17 @@ enum NativeMaterialDatasetService {
             let crops = byMaterial[material] ?? []
             var issue: Object = ["material_id": material, "source_path": input["path"] ?? sample["source_directory"] ?? "", "target": target, "crop_count": crops.count]
             if crops.isEmpty {
+                guard !smallerAlternates.contains(material) else { return nil }
                 guard let source = sources(sample).first(where: { min($0["width"] as? Int ?? 0, $0["height"] as? Int ?? 0) < size }) else { return nil }
                 issue["source_path"] = source["path"] ?? issue["source_path"]
                 issue["target"] = NSNull(); issue["code"] = "undersized"
-                issue["reason"] = "Original map is \(source["width"] as? Int ?? 0) × \(source["height"] as? Int ?? 0) pixels; training at this resolution requires at least \(size) × \(size). Choose a smaller training resolution."
+                issue["reason"] = "Original map is \(source["width"] as? Int ?? 0) × \(source["height"] as? Int ?? 0) pixels. This set is imported for inspection and skipped for \(size) × \(size) training; other sets continue. To train this set, choose a smaller resolution."
                 return issue
             }
             guard crops.contains(where: { $0["target_available"] as? Bool == false }) else { return nil }
             guard let map = metadata[target] else {
                 issue["code"] = "missing_target"
-                issue["reason"] = "No \(label) map was found for this source set. Add a matching PNG map with the same pixel dimensions."
+                issue["reason"] = "This set has no \(label) map. Import continues with its available maps; only \(label) training skips this set. A matching PNG can be added later."
                 return issue
             }
             let source = map["source"] as? Object ?? [:]
@@ -625,6 +628,25 @@ enum NativeMaterialDatasetService {
             }
             return issue
         }
+    }
+    private static func suppliesCrop(_ sample: Object, size: Int) -> Bool {
+        let originals = sources(sample)
+        return !originals.isEmpty && originals.allSatisfy { min($0["width"] as? Int ?? 0, $0["height"] as? Int ?? 0) >= size }
+    }
+    /// Lower-resolution copies are ordinary alternatives when the same material
+    /// in the same subject folder has enough original pixels for this grid.
+    /// An unrelated large material must not hide a genuinely undersized set.
+    private static func smallerAlternateMaterials(_ records: [Record], size: Int) -> Set<String> {
+        var largerFamilies: [String: Set<String>] = [:]
+        for record in records where suppliesCrop(record.sample, size: size) {
+            largerFamilies[subjectID(record.sample), default: []].insert(familyID(record.sample))
+        }
+        return Set(records.compactMap { record in
+            let sample = record.sample
+            guard !suppliesCrop(sample, size: size),
+                  largerFamilies[subjectID(sample)]?.contains(familyID(sample)) == true else { return nil }
+            return sample["material_id"] as? String
+        })
     }
     private static func cropLayout(_ dimensions: [Int], size: Int) -> [(String, [Int])] {
         guard dimensions.count == 2, min(dimensions[0], dimensions[1]) >= size else { return [] }

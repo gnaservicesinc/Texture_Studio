@@ -365,7 +365,7 @@ final class NativeMaterialSourceRecoveryTests: XCTestCase {
         XCTAssertEqual(issues.count, 1)
         XCTAssertEqual(issues.first?["material_id"] as? String, "fabric_pattern_05_1k")
         XCTAssertEqual(issues.first?["code"] as? String, "not_published")
-        XCTAssertTrue((issues.first?["reason"] as? String)?.contains("other maps remain usable") == true)
+        XCTAssertTrue((issues.first?["reason"] as? String)?.contains("Import continues with its available maps") == true)
         _ = try await output(["import-folder", "--dataset", dataset.path, "--folder", sources.path, "--plan", planURL.path,
             "--expected-plan-sha256", try XCTUnwrap(preview["plan_sha256"] as? String)], recovery: recovery)
         let preparedHeight = try await output(["prepare-size", "--dataset", dataset.path, "--size", "256", "--target", "height"], recovery: recovery)
@@ -378,6 +378,61 @@ final class NativeMaterialSourceRecoveryTests: XCTestCase {
                        "An unpublished displacement must not prevent training on that material's normal map")
         XCTAssertFalse(FileManager.default.fileExists(atPath: sources.appendingPathComponent("fabric_pattern_05_disp_1k.png").path))
         _ = try await output(["cleanup-size", "--dataset", normalURL.path], recovery: recovery)
+    }
+
+    func testProviderMetadataFailureIsRetryableAndKeepsImportAndAvailableTargetsUsable() async throws {
+        let rgb = try rgbFixturePNG(), roughness = try fixturePNG(width: 1024, height: 1024, bits: 8)
+        let height = try fixturePNG(width: 1024, height: 1024)
+        let statusCodes: [Int?] = [nil, 503]
+        for statusCode in statusCodes {
+            let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+            let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Sources")
+            try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: false)
+            for asset in ["ribbed_corduroy", "brick_complete"] {
+                try rgb.write(to: sources.appendingPathComponent(asset + "_diff_1k.png"))
+                try rgb.write(to: sources.appendingPathComponent(asset + "_nor_gl_1k.png"))
+                try roughness.write(to: sources.appendingPathComponent(asset + "_rough_1k.png"))
+            }
+            try height.write(to: sources.appendingPathComponent("brick_complete_disp_1k.png"))
+            let probe = RecoveryTransportProbe()
+            let recovery = NativeMaterialSourceRecovery(transport: .init(fetchMetadata: { url in
+                await probe.recordMetadata()
+                guard let statusCode else { throw URLError(.notConnectedToInternet) }
+                return .init(data: Data("{}".utf8), statusCode: statusCode, url: url)
+            }, download: { _, _ in
+                XCTFail("Failed provider metadata must not start a map download")
+                throw URLError(.unsupportedURL)
+            }))
+            _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Retryable recovery", "--training-size", "256"], recovery: recovery)
+            let planURL = root.appendingPathComponent("preview.json")
+            let preview = try await output(["scan-folder", "--dataset", dataset.path, "--folder", sources.path, "--plan", planURL.path], recovery: recovery)
+            XCTAssertEqual(preview["added_material_count"] as? Int, 2)
+            let plans = try XCTUnwrap(preview["plans"] as? [String: [String: [String: Any]]])
+            let issues = try XCTUnwrap(plans["256"]?["height"]?["source_issues"] as? [[String: Any]])
+            XCTAssertEqual(issues.count, 1)
+            XCTAssertEqual(issues.first?["material_id"] as? String, "ribbed_corduroy_1k")
+            XCTAssertEqual(issues.first?["code"] as? String, "recovery_failed",
+                           "An offline or failed provider listing does not prove the map is unpublished")
+            let reason = try XCTUnwrap(issues.first?["reason"] as? String)
+            XCTAssertTrue(reason.contains("recovery will retry on the next scan"))
+            XCTAssertFalse(reason.contains("does not publish"))
+            XCTAssertEqual(plans["256"]?["normal"]?["train_count"] as? Int, 2)
+            XCTAssertEqual(plans["256"]?["roughness"]?["train_count"] as? Int, 2)
+            let imported = try await output(["import-folder", "--dataset", dataset.path, "--folder", sources.path, "--plan", planURL.path,
+                "--expected-plan-sha256", try XCTUnwrap(preview["plan_sha256"] as? String)], recovery: recovery)
+            XCTAssertEqual(imported["added_material_count"] as? Int, 2)
+            for (target, count) in [("normal", 2), ("roughness", 2), ("height", 1)] {
+                let prepared = try await output(["prepare-size", "--dataset", dataset.path, "--size", "256", "--target", target], recovery: recovery)
+                let preparedURL = URL(fileURLWithPath: try XCTUnwrap(prepared["dataset_path"] as? String))
+                XCTAssertEqual(try NativeMaterialDatasetService.trainingSamples(datasetURL: preparedURL, size: 256, target: target).count, count,
+                               "A failed recovery must skip only its missing target")
+                _ = try await output(["cleanup-size", "--dataset", preparedURL.path], recovery: recovery)
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: sources.appendingPathComponent("ribbed_corduroy_disp_1k.png").path))
+            let calls = await probe.counts()
+            XCTAssertGreaterThan(calls.metadata, 1, "Transient metadata failure must not be cached as an unpublished map")
+            XCTAssertEqual(calls.downloads, 0)
+        }
     }
 
     private func fixtureTransport(bytes: Data, target: String = "height", publishedRole: String? = nil,

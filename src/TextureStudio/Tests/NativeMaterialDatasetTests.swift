@@ -257,9 +257,11 @@ final class NativeMaterialDatasetTests: XCTestCase {
                 heightPaths[name] = map.path
             }
             try fixturePNG(width: 512, height: 512, bits: 8, channels: 1).write(to: folder.appendingPathComponent(name + "_rough_1k.png"))
+            try fixturePNG(width: 512, height: 512, bits: 8, channels: 3).write(to: folder.appendingPathComponent(name + "_nor_gl_1k.png"))
         }
+        let planURL = root.appendingPathComponent("preview.json")
         let preview = try await output(["scan-folder", "--dataset", dataset.path, "--folder", sources.path,
-                                        "--plan", root.appendingPathComponent("preview.json").path])
+                                        "--plan", planURL.path])
         XCTAssertEqual(preview["source_set_count"] as? Int, 3)
         XCTAssertEqual(preview["warnings"] as? [String], [], "Nominal filename resolutions must not become per-map warning spam")
         let targets = try XCTUnwrap((preview["plans"] as? [String: [String: [String: Any]]])?["256"])
@@ -275,6 +277,99 @@ final class NativeMaterialDatasetTests: XCTestCase {
         XCTAssertTrue(precisionReason.contains("8") && precisionReason.contains("16"))
         XCTAssertEqual(plan["train_count"] as? Int, 1)
         XCTAssertEqual(plan["unavailable_target_count"] as? Int, 2)
+        let imported = try await output(["import-folder", "--dataset", dataset.path, "--folder", sources.path,
+                                         "--plan", planURL.path, "--expected-plan-sha256", try XCTUnwrap(preview["plan_sha256"] as? String)])
+        XCTAssertEqual(imported["added_material_count"] as? Int, 3, "Missing optional targets must not prevent importing usable maps")
+        for (target, expectedIDs) in [("height", ["complete_1k_center"]),
+                                      ("roughness", ["complete_1k_center", "low_precision_1k_center", "missing_height_1k_center"]),
+                                      ("normal", ["complete_1k_center", "low_precision_1k_center", "missing_height_1k_center"])] {
+            let prepared = try await output(["prepare-size", "--dataset", dataset.path, "--size", "256", "--target", target])
+            let preparedURL = URL(fileURLWithPath: try XCTUnwrap(prepared["dataset_path"] as? String))
+            let descriptors = try NativeMaterialDatasetService.trainingSamples(datasetURL: preparedURL, size: 256, target: target)
+            XCTAssertEqual(Set(descriptors.map(\.id)), Set(expectedIDs), "Only the affected target may exclude a source set")
+            _ = try await output(["cleanup-size", "--dataset", preparedURL.path])
+        }
+    }
+
+    func testMixedResolutionImportSkipsSmallAlternatesAndKeepsTrueSizeDiagnostics() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Sources")
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Mixed resolutions", "--training-size", "256"])
+        var originals: [URL: Data] = [:]
+        let fixtures = [("Rock Face 04", "rock_face_04", "1k", 128),
+                        ("Rock Face 04", "rock_face_04", "2k", 256),
+                        ("Rock Face 04", "rock_face_04", "4k", 512),
+                        ("Small only", "small_only", "1k", 128),
+                        ("Small only", "unrelated", "2k", 256)]
+        for (directory, family, label, dimension) in fixtures {
+            let folder = sources.appendingPathComponent(directory)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            for (suffix, bits, channels) in [("diff", 8, 3), ("disp", 16, 1), ("rough", 8, 1), ("nor_gl", 8, 3)] {
+                let path = folder.appendingPathComponent("\(family)_\(suffix)_\(label).png")
+                let bytes = try fixturePNG(width: dimension, height: dimension, bits: bits, channels: channels)
+                try bytes.write(to: path); originals[path] = bytes
+            }
+        }
+        let planURL = root.appendingPathComponent("preview.json")
+        let preview = try await output(["scan-folder", "--dataset", dataset.path, "--folder", sources.path, "--plan", planURL.path])
+        XCTAssertEqual(preview["source_set_count"] as? Int, 5)
+        XCTAssertEqual(preview["warnings"] as? [String], [])
+        let plans = try XCTUnwrap((preview["plans"] as? [String: [String: [String: Any]]])?["256"])
+        for target in ["height", "roughness", "normal"] {
+            let plan = try XCTUnwrap(plans[target])
+            XCTAssertEqual(plan["train_count"] as? Int, 3)
+            XCTAssertEqual(plan["undersized_source_set_count"] as? Int, 2, "Both smaller originals remain represented in the inventory")
+            XCTAssertEqual(plan["smaller_alternate_source_set_count"] as? Int, 1)
+            let issues = try XCTUnwrap(plan["source_issues"] as? [[String: Any]])
+            XCTAssertEqual(issues.count, 1, "A usable sibling prevents a misleading small-alternate diagnostic")
+            let issue = try XCTUnwrap(issues.first)
+            XCTAssertEqual(issue["material_id"] as? String, "small_only_1k", "An unrelated family in the same folder cannot supply this material")
+            XCTAssertEqual(issue["code"] as? String, "undersized")
+            XCTAssertTrue(try XCTUnwrap(issue["reason"] as? String).contains("128 × 128"))
+        }
+        let imported = try await output(["import-folder", "--dataset", dataset.path, "--folder", sources.path, "--plan", planURL.path,
+                                         "--expected-plan-sha256", try XCTUnwrap(preview["plan_sha256"] as? String), "--training-size", "256"])
+        XCTAssertEqual(imported["added_material_count"] as? Int, 5, "The smaller originals must not fail or disappear during import")
+        let entries = try XCTUnwrap(try object(dataset.appendingPathComponent("dataset.json"))["samples"] as? [[String: Any]])
+        XCTAssertEqual(Set(entries.compactMap { $0["material_id"] as? String }),
+                       ["rock_face_04_1k", "rock_face_04_2k", "rock_face_04_4k", "small_only_1k", "unrelated_2k"])
+        for target in ["height", "roughness", "normal"] {
+            let prepared = try await output(["prepare-size", "--dataset", dataset.path, "--size", "256", "--target", target])
+            let preparedURL = URL(fileURLWithPath: try XCTUnwrap(prepared["dataset_path"] as? String))
+            let descriptors = try NativeMaterialDatasetService.trainingSamples(datasetURL: preparedURL, size: 256, target: target)
+            XCTAssertEqual(Set(descriptors.map(\.id)), ["rock_face_04_2k_full", "rock_face_04_4k_center", "unrelated_2k_full"])
+            for descriptor in descriptors {
+                XCTAssertEqual(try NativePNG.decode(Data(contentsOf: descriptor.inputURL)).header.width, 256)
+                XCTAssertEqual(try NativePNG.decode(Data(contentsOf: descriptor.targetURL)).header.height, 256)
+            }
+            _ = try await output(["cleanup-size", "--dataset", preparedURL.path])
+        }
+        for (path, bytes) in originals { XCTAssertEqual(try Data(contentsOf: path), bytes, "Import and preparation must preserve original pixels") }
+    }
+
+    func testLargerSiblingMissingTargetKeepsTargetExclusionInMixedResolutionPreview() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Rock Face 04")
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: false)
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Target availability", "--training-size", "256"])
+        for (label, dimension, suffix, bits, channels) in [("1k", 128, "diff", 8, 3), ("1k", 128, "disp", 16, 1),
+                                                          ("2k", 256, "diff", 8, 3), ("2k", 256, "rough", 8, 1)] {
+            try fixturePNG(width: dimension, height: dimension, bits: bits, channels: channels)
+                .write(to: sources.appendingPathComponent("rock_face_04_\(suffix)_\(label).png"))
+        }
+        let preview = try await output(["scan-folder", "--dataset", dataset.path, "--folder", sources.path,
+                                        "--plan", root.appendingPathComponent("preview.json").path])
+        let plans = try XCTUnwrap((preview["plans"] as? [String: [String: [String: Any]]])?["256"])
+        let height = try XCTUnwrap(plans["height"]), roughness = try XCTUnwrap(plans["roughness"])
+        XCTAssertEqual(height["train_count"] as? Int, 0, "Larger pixels do not supply a missing training target")
+        XCTAssertEqual(height["unavailable_target_count"] as? Int, 1)
+        XCTAssertEqual(height["smaller_alternate_source_set_count"] as? Int, 1)
+        let issues = try XCTUnwrap(height["source_issues"] as? [[String: Any]])
+        XCTAssertEqual(issues.count, 1)
+        XCTAssertEqual(issues.first?["material_id"] as? String, "rock_face_04_2k")
+        XCTAssertEqual(issues.first?["code"] as? String, "missing_target")
+        XCTAssertEqual(roughness["train_count"] as? Int, 1)
+        XCTAssertEqual((roughness["source_issues"] as? [[String: Any]])?.count, 0)
     }
 
     func testPreparationCommandRespectsUserWorkerLimit() async throws {

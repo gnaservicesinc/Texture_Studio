@@ -319,6 +319,7 @@ final class DatasetManagementTests: XCTestCase {
         let summary = try WorkbenchResult.decode(WorkbenchDatasetPlan.self,
             output: String(decoding: JSONSerialization.data(withJSONObject: plan), as: UTF8.self))
         XCTAssertTrue(summary.sourceIssues.isEmpty, "Older preview results must remain readable without source issues")
+        XCTAssertNil(summary.smallerAlternateSourceSetCount, "Older preview results must remain readable without alternate-size counts")
         store.dataset?.resolutionPlans = ["2048": ["height": summary, "roughness": summary, "normal": summary]]
         store.dataset?.trainingSize = 2048
         store.training.size = 2048
@@ -331,6 +332,7 @@ final class DatasetManagementTests: XCTestCase {
             ("fabric_pattern_07_4k", "Fabric Pattern 07/fabric_pattern_07_col_1_4k.png")
         ]
         var heightPlan = plan
+        heightPlan["smaller_alternate_source_set_count"] = 4
         heightPlan["unavailable_target_count"] = 4
         heightPlan["source_issues"] = missingSources.map { material, relativePath in
             ["material_id": material, "source_path": "/opt/ipde/sources_mats/\(relativePath)",
@@ -364,6 +366,7 @@ final class DatasetManagementTests: XCTestCase {
         XCTAssertEqual(decodedIssues.first?.target, "height")
         XCTAssertEqual(decodedIssues.first?.code, "not_published")
         XCTAssertEqual(decodedIssues.first?.cropCount, 1)
+        XCTAssertEqual(store.folderImport?.plans["2048"]?["height"]?.smallerAlternateSourceSetCount, 4)
         XCTAssertEqual(store.folderImport?.recoveredMapCount, 2)
         try await snapshotSheet(NewMaterialDatasetSheet(store: store), name: "new-dataset", size: NSSize(width: 660, height: 600))
         try await snapshotSheet(MaterialDatasetInfoSheet(store: store), name: "dataset-info", size: NSSize(width: 700, height: 700))
