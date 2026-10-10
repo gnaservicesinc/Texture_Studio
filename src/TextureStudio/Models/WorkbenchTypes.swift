@@ -132,6 +132,44 @@ struct WorkbenchDatasetPlan: Decodable, Sendable {
     var validationLimit: Int? = nil
     var validationCandidateCount: Int? = nil
     var subjects: [WorkbenchSubject]? = nil
+    var sourceIssues: [WorkbenchImportSourceIssue] = []
+}
+
+extension WorkbenchDatasetPlan {
+    private enum CodingKeys: String, CodingKey {
+        case size, cropCount, sourceSetCount, trainCount, validationCount, excludedCount, unavailableTargetCount
+        case undersizedSourceSetCount, regionalFamilies, subjectCount, sharedValidationCount, validationLimit
+        case validationCandidateCount, subjects, sourceIssues
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(size: try values.decode(Int.self, forKey: .size),
+                  cropCount: try values.decode(Int.self, forKey: .cropCount),
+                  sourceSetCount: try values.decode(Int.self, forKey: .sourceSetCount),
+                  trainCount: try values.decode(Int.self, forKey: .trainCount),
+                  validationCount: try values.decode(Int.self, forKey: .validationCount),
+                  excludedCount: try values.decode(Int.self, forKey: .excludedCount),
+                  unavailableTargetCount: try values.decode(Int.self, forKey: .unavailableTargetCount),
+                  undersizedSourceSetCount: try values.decodeIfPresent(Int.self, forKey: .undersizedSourceSetCount),
+                  regionalFamilies: try values.decodeIfPresent([String].self, forKey: .regionalFamilies) ?? [],
+                  subjectCount: try values.decodeIfPresent(Int.self, forKey: .subjectCount),
+                  sharedValidationCount: try values.decodeIfPresent(Int.self, forKey: .sharedValidationCount),
+                  validationLimit: try values.decodeIfPresent(Int.self, forKey: .validationLimit),
+                  validationCandidateCount: try values.decodeIfPresent(Int.self, forKey: .validationCandidateCount),
+                  subjects: try values.decodeIfPresent([WorkbenchSubject].self, forKey: .subjects),
+                  sourceIssues: try values.decodeIfPresent([WorkbenchImportSourceIssue].self, forKey: .sourceIssues) ?? [])
+    }
+}
+
+struct WorkbenchImportSourceIssue: Decodable, Identifiable, Sendable {
+    let materialId: String
+    let sourcePath: String
+    let target: String?
+    let code: String
+    let reason: String
+    let cropCount: Int
+    var id: String { [materialId, sourcePath, target ?? "", code].joined(separator: "|") }
 }
 
 struct WorkbenchValidationSettings: Codable, Equatable, Sendable {

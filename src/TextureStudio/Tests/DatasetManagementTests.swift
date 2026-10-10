@@ -313,23 +313,76 @@ final class DatasetManagementTests: XCTestCase {
         try await store.loadDataset(fixture.dataset)
         let plan: [String: Any] = ["size": 2048, "crop_count": 329, "source_set_count": 227,
             "train_count": 308, "validation_count": 21, "excluded_count": 0,
-            "unavailable_target_count": 0, "undersized_source_set_count": 4, "regional_families": []]
+            "unavailable_target_count": 0, "undersized_source_set_count": 4, "regional_families": [],
+            "subject_count": 121, "shared_validation_count": 2, "validation_limit": 2,
+            "validation_candidate_count": 121]
         let summary = try WorkbenchResult.decode(WorkbenchDatasetPlan.self,
             output: String(decoding: JSONSerialization.data(withJSONObject: plan), as: UTF8.self))
+        XCTAssertTrue(summary.sourceIssues.isEmpty, "Older preview results must remain readable without source issues")
         store.dataset?.resolutionPlans = ["2048": ["height": summary, "roughness": summary, "normal": summary]]
         store.dataset?.trainingSize = 2048
         store.training.size = 2048
         store.folderImportSize = 2048
         store.folderImportURL = URL(fileURLWithPath: "/opt/ipde/sources_mats")
+        let missingSources = [
+            ("fabric_pattern_05_2k", "Fabric Pattern 05/fabric_pattern_05_col_01_2k.png"),
+            ("fabric_pattern_05_4k", "Fabric Pattern 05/fabric_pattern_05_col_01_4k.png"),
+            ("fabric_pattern_07_2k", "Fabric Pattern 07/fabric_pattern_07_col_1_2k.png"),
+            ("fabric_pattern_07_4k", "Fabric Pattern 07/fabric_pattern_07_col_1_4k.png"),
+            ("granite_tile_04_4k", "Granite Tile 04/granite_tile_04_diff_4k.png"),
+            ("leather_red_03_4k", "Leather Red 03/leather_red_03_coll1_4k.png")
+        ]
+        var heightPlan = plan
+        heightPlan["unavailable_target_count"] = 7
+        heightPlan["source_issues"] = missingSources.map { material, relativePath in
+            ["material_id": material, "source_path": "/opt/ipde/sources_mats/\(relativePath)",
+             "target": "height", "code": "missing_target",
+             "reason": "No displacement map was found for this source set. Add a matching displacement PNG to this folder and scan again.",
+             "crop_count": 1] as [String: Any]
+        }
+        var roughnessPlan = plan
+        roughnessPlan["unavailable_target_count"] = 1
+        roughnessPlan["source_issues"] = [["material_id": "roughness_precision_4k",
+            "source_path": "/opt/ipde/sources_mats/roughness_precision/roughness_precision_rough_4k.png",
+            "target": "roughness", "code": "unavailable_target",
+            "reason": "This roughness map cannot be used for training. Choose a supported original map and scan again.",
+            "crop_count": 1] as [String: Any]]
+        let unusualPaths = [
+            "/opt/ipde/sources_mats/Granite Tile 04/granite_tile_04_rough_4k.txt",
+            "/opt/ipde/sources_mats/Leaves Forest Ground/leaves_forest_ground_disp_4k.txt",
+            "/opt/ipde/sources_mats/metal_plate/metal_plate_disp_4k.txt",
+            "/opt/ipde/sources_mats/forest_leaves_03/forest_leaves_03_nor_gl_4k.txt"
+        ]
         store.folderImport = try WorkbenchResult.decode(WorkbenchFolderImport.self, output: String(decoding: JSONSerialization.data(withJSONObject: [
             "folder_path": "/opt/ipde/sources_mats", "plan_path": "/tmp/preview.json", "plan_sha256": "proof",
             "index_sha256": "source-hash", "source_set_count": 231, "added_material_count": 231,
             "duplicate_material_count": 0, "ignored_file_count": 18,
-            "warnings": ["Rectangular sources retain their actual dimensions; no resizing is applied."],
-            "plans": ["2048": ["height": plan, "roughness": plan, "normal": plan]]]), as: UTF8.self))
+            "warnings": unusualPaths.map { "\($0): PNG content detected despite .txt extension; read as PNG." },
+            "plans": ["2048": ["height": heightPlan, "roughness": roughnessPlan, "normal": plan]]]), as: UTF8.self))
+        let decodedIssues = try XCTUnwrap(store.folderImport?.plans["2048"]?["height"]?.sourceIssues)
+        XCTAssertEqual(decodedIssues.count, missingSources.count)
+        XCTAssertEqual(decodedIssues.first?.materialId, missingSources.first?.0)
+        XCTAssertEqual(decodedIssues.first?.sourcePath, "/opt/ipde/sources_mats/Fabric Pattern 05/fabric_pattern_05_col_01_2k.png")
+        XCTAssertEqual(decodedIssues.first?.target, "height")
+        XCTAssertEqual(decodedIssues.first?.code, "missing_target")
+        XCTAssertEqual(decodedIssues.first?.cropCount, 1)
         try await snapshotSheet(NewMaterialDatasetSheet(store: store), name: "new-dataset", size: NSSize(width: 660, height: 600))
         try await snapshotSheet(MaterialDatasetInfoSheet(store: store), name: "dataset-info", size: NSSize(width: 700, height: 700))
-        try await snapshotSheet(ImportDatasetFolderSheet(store: store), name: "folder-import", size: NSSize(width: 780, height: 650))
+        try await snapshotSheet(ImportDatasetFolderSheet(store: store), name: "folder-import", size: NSSize(width: 780, height: 700))
+        var precisionPlan = plan
+        precisionPlan["unavailable_target_count"] = 1
+        precisionPlan["source_issues"] = [["material_id": "height_precision_4k",
+            "source_path": "/opt/ipde/sources_mats/height_precision/height_precision_disp_4k.png",
+            "target": "height", "code": "unsupported_precision",
+            "reason": "The displacement map is 8-bit; displacement training requires a 16-bit PNG. Choose a 16-bit original and scan again.",
+            "crop_count": 1] as [String: Any]]
+        let precisionSummary = try WorkbenchResult.decode(WorkbenchDatasetPlan.self,
+            output: String(decoding: JSONSerialization.data(withJSONObject: precisionPlan), as: UTF8.self))
+        try await snapshotSheet(VStack(alignment: .leading) {
+            DatasetPlanSummary(plans: ["height": precisionSummary])
+            Spacer()
+        }.padding(24).frame(width: 700, height: 600),
+                                name: "folder-target-precision", size: NSSize(width: 700, height: 600))
     }
 
     func testFolderScanRetainsResolutionEditsWithoutRepeatingScan() async throws {

@@ -293,14 +293,25 @@ struct DatasetPlanSummary: View {
                     .font(.callout).monospacedDigit()
                 Text("Validation limit: \(limit(plan)) folders. \(plan.validationCandidateCount ?? 0) folders can supply a different crop at this size. Existing training crops stay in training.")
                     .font(.caption).foregroundStyle(.secondary)
-                if (plan.undersizedSourceSetCount ?? 0) > 0 || plan.excludedCount > 0 {
-                    Text("\(plan.undersizedSourceSetCount ?? 0) source sets are too small; \(plan.excludedCount) crops are excluded.")
+                if let count = plan.undersizedSourceSetCount, count > 0 {
+                    Text("\(count) \(count == 1 ? "source set is" : "source sets are") too small at this resolution and will remain available for inspection.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ForEach(plan.sourceIssues.filter { $0.code == "undersized" }) { issue in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(issue.materialId).font(.callout.bold())
+                            Text(issue.reason).font(.callout)
+                            Text("Source file: \(issue.sourcePath)").font(.caption).foregroundStyle(.secondary)
+                        }.fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled).padding(.leading, 14)
+                    }
+                }
+                if plan.excludedCount > 0 {
+                    Text("\(plan.excludedCount) \(plan.excludedCount == 1 ? "crop is" : "crops are") excluded by review.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach(["height", "roughness", "normal"], id: \.self) { target in
                     if let targetPlan = plans[target], targetPlan.unavailableTargetCount > 0 {
-                        Text("\(target == "height" ? "Displacement" : target.capitalized): \(targetPlan.unavailableTargetCount) crops lack a supported target map.")
-                            .font(.caption).foregroundStyle(.orange)
+                        DatasetTargetSourceIssues(target: target, plan: targetPlan)
                     }
                 }
                 if count(plan) == 0 {
@@ -311,6 +322,36 @@ struct DatasetPlanSummary: View {
                     .font(.caption).foregroundStyle(.secondary)
             }.padding(.vertical, 6)
         }
+    }
+}
+
+private struct DatasetTargetSourceIssues: View {
+    let target: String
+    let plan: WorkbenchDatasetPlan
+    private var title: String { target == "height" ? "Displacement" : target.capitalized }
+    private var issues: [WorkbenchImportSourceIssue] {
+        plan.sourceIssues.filter { $0.target == target }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("\(title) maps needing attention", systemImage: "exclamationmark.triangle")
+                .font(.callout.bold()).foregroundStyle(.orange)
+            if issues.isEmpty {
+                Text("A \(title.lowercased()) map is unavailable. Scan the folder again to identify the affected source files.")
+                    .font(.callout).fixedSize(horizontal: false, vertical: true)
+            } else {
+                ForEach(issues) { issue in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(issue.materialId).font(.callout.bold())
+                        Text(issue.reason).font(.callout)
+                        Text("\(issue.code == "missing_target" ? "Diffuse source" : "Map file"): \(issue.sourcePath)")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled).padding(.leading, 14)
+                }
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
     }
 }
 
@@ -331,9 +372,11 @@ struct ImportDatasetFolderSheet: View {
                             .font(.headline)
                         if let plans = preview.plans[String(store.folderImportSize)] { DatasetPlanSummary(plans: plans) }
                         if !preview.warnings.isEmpty {
-                            DisclosureGroup("\(preview.warnings.count) source notices") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Source file details").font(.headline)
                                 ForEach(Array(preview.warnings.enumerated()), id: \.offset) { _, warning in
-                                    Text(warning).font(.caption).frame(maxWidth: .infinity, alignment: .leading)
+                                    Text(warning).font(.callout).frame(maxWidth: .infinity, alignment: .leading)
+                                        .fixedSize(horizontal: false, vertical: true)
                                         .textSelection(.enabled).padding(.vertical, 3)
                                 }
                             }
@@ -346,9 +389,9 @@ struct ImportDatasetFolderSheet: View {
                         Text("Scanning subfolders and verifying full-quality original maps. Large collections can take a minute. You can change resolution while this scan continues; no restart is needed.")
                             .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
-                    DatasetSheetOperationNotice(store: store)
                 }.padding(4)
             }
+            DatasetSheetOperationNotice(store: store)
             HStack {
                 Button("Choose Another Folder…") { store.importMaterialFolder() }.disabled(store.isBusy)
                 if store.error != nil || (!store.isBusy && store.folderImport == nil), let url = store.folderImportURL {
@@ -360,7 +403,7 @@ struct ImportDatasetFolderSheet: View {
                     .buttonStyle(.glassProminent).keyboardShortcut(.defaultAction)
                     .disabled(store.isBusy || (store.folderImport?.addedMaterialCount ?? 0) == 0)
             }
-        }.padding(24).frame(width: 780, height: 650)
+        }.padding(24).frame(width: 780, height: 700)
             .interactiveDismissDisabled(store.isBusy)
             .onDisappear { store.clearFolderImport() }
     }

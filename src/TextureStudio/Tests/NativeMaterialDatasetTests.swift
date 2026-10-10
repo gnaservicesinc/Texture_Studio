@@ -129,6 +129,154 @@ final class NativeMaterialDatasetTests: XCTestCase {
                              "Choosing one worker cannot admit a crop that exceeds the entire memory budget")
     }
 
+    func testRecognizedPNGMapsWithWrongExtensionsImportAndPrepareWithoutChangingOriginals() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: false)
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Misnamed PNG maps", "--training-size", "256"])
+        let rgb = try fixturePNG(width: 512, height: 512, bits: 8, channels: 3)
+        let heightPNG = try fixturePNG(width: 512, height: 512, bits: 16, channels: 1)
+        let roughnessPNG = try fixturePNG(width: 512, height: 512, bits: 8, channels: 1)
+        let layouts = [
+            ("PolyHaven", "granite_tile_diff_1k.png", "granite_tile_disp_1k.txt", "granite_tile_rough_1k.txt"),
+            ("AmbientCG", "Tiles014_1K-PNG_Color.txt", "Tiles014_1K-PNG_Displacement.txt", "Tiles014_1K-PNG_Roughness.png"),
+            ("Generic", "diffuse.txt", "height.txt", "roughness.png")
+        ]
+        var originals: [URL: Data] = [:]
+        for (directory, inputName, heightName, roughnessName) in layouts {
+            let folder = sources.appendingPathComponent(directory)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+            for (filename, bytes) in [(inputName, rgb), (heightName, heightPNG), (roughnessName, roughnessPNG)] {
+                let file = folder.appendingPathComponent(filename); try bytes.write(to: file); originals[file] = bytes
+            }
+        }
+        let canonicalHeight = sources.appendingPathComponent("PolyHaven/granite_tile_disp_1k.png")
+        try heightPNG.write(to: canonicalHeight); originals[canonicalHeight] = heightPNG
+        let planURL = root.appendingPathComponent("preview.json")
+        let preview = try await output(["scan-folder", "--dataset", dataset.path, "--folder", sources.path, "--plan", planURL.path])
+        XCTAssertEqual(preview["source_set_count"] as? Int, 3)
+        XCTAssertEqual(preview["added_material_count"] as? Int, 3)
+        let notices = try XCTUnwrap(preview["warnings"] as? [String])
+        for file in originals.keys where file.pathExtension == "txt" {
+            XCTAssertTrue(notices.contains { $0.contains(file.path) && $0.contains(".txt extension") && $0.contains("detected and read as PNG") },
+                          "Every misnamed PNG must identify its exact path and actual format, including identical duplicates")
+        }
+        let plan = try object(planURL), materials = try XCTUnwrap(plan["materials"] as? [[String: Any]])
+        XCTAssertEqual(materials.count, 3)
+        for material in materials {
+            let maps = try XCTUnwrap(material["maps"] as? [String: [String: Any]])
+            XCTAssertEqual(Set(maps.keys), ["input", "height", "roughness"])
+            let heightPath = try XCTUnwrap(maps["height"]?["path"] as? String)
+            if material["material_id"] as? String == "granite_tile_1k" {
+                XCTAssertEqual(heightPath, canonicalHeight.path, "Identical target duplicates must keep one canonical source")
+            } else { XCTAssertTrue(heightPath.hasSuffix(".txt"), "The original path must retain its actual extension") }
+            XCTAssertEqual(maps["height"]?["sample_bits"] as? Int, 16)
+        }
+        _ = try await output(["import-folder", "--dataset", dataset.path, "--folder", sources.path, "--plan", planURL.path,
+                              "--expected-plan-sha256", try XCTUnwrap(preview["plan_sha256"] as? String),
+                              "--expected-index-sha256", try XCTUnwrap(preview["index_sha256"] as? String), "--training-size", "256"])
+        let prepared = try await output(["prepare-size", "--dataset", dataset.path, "--size", "256", "--target", "height"])
+        let preparedURL = URL(fileURLWithPath: try XCTUnwrap(prepared["dataset_path"] as? String))
+        let descriptors = try NativeMaterialDatasetService.trainingSamples(datasetURL: preparedURL, size: 256, target: "height")
+        XCTAssertEqual(descriptors.count, 3)
+        let expected = try NativePNG.decode(heightPNG).crop([128, 128, 256, 256]).pixels
+        for descriptor in descriptors { XCTAssertEqual(try NativePNG.decode(Data(contentsOf: descriptor.targetURL)).pixels, expected) }
+        for (file, bytes) in originals { XCTAssertEqual(try Data(contentsOf: file), bytes) }
+        _ = try await output(["cleanup-size", "--dataset", preparedURL.path])
+    }
+
+    func testMisnamedPNGMapChangeInvalidatesTheBoundImportPreview() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: false)
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Bound import", "--training-size", "256"])
+        let input = sources.appendingPathComponent("metal_plate_diff_1k.png"), height = sources.appendingPathComponent("metal_plate_disp_1k.txt")
+        try fixturePNG(width: 256, height: 256, bits: 8, channels: 3).write(to: input)
+        try fixturePNG(width: 256, height: 256, bits: 16, channels: 1).write(to: height)
+        let planURL = root.appendingPathComponent("preview.json")
+        let preview = try await output(["scan-folder", "--dataset", dataset.path, "--folder", sources.path, "--plan", planURL.path])
+        XCTAssertEqual(preview["added_material_count"] as? Int, 1)
+        let originalIndex = try Data(contentsOf: dataset.appendingPathComponent("dataset.json"))
+        let replacement = try NativePNG(header: .init(width: 256, height: 256, bits: 16, channels: 1, color: 0, interlace: 0),
+                                        pixels: Data(repeating: 9, count: 256 * 256 * 2), colorChunks: []).encoded()
+        try replacement.write(to: height)
+        do {
+            _ = try await output(["import-folder", "--dataset", dataset.path, "--folder", sources.path, "--plan", planURL.path,
+                                  "--expected-plan-sha256", try XCTUnwrap(preview["plan_sha256"] as? String)])
+            XCTFail("Changing a misnamed original after preview must require another scan")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("changed")) }
+        XCTAssertEqual(try Data(contentsOf: dataset.appendingPathComponent("dataset.json")), originalIndex)
+        XCTAssertEqual(try Data(contentsOf: height), replacement)
+    }
+
+    func testRecognizedNonPNGExtensionsStillRequireValidPNGContentAndChunkChecksums() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: false)
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Invalid originals", "--training-size", "256"])
+        let input = try fixturePNG(width: 256, height: 256, bits: 8, channels: 3)
+        var damagedPNG = try fixturePNG(width: 256, height: 256, bits: 16, channels: 1)
+        damagedPNG[29] ^= 1
+        let invalidSources = [("text", Data("This is text, not a PNG image.".utf8)), ("crc", damagedPNG)]
+        var originals: [URL: Data] = [:]
+        for (name, bytes) in invalidSources {
+            let folder = sources.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+            try input.write(to: folder.appendingPathComponent(name + "_diff_1k.png"))
+            let file = folder.appendingPathComponent(name + "_disp_1k.txt")
+            try bytes.write(to: file); originals[file] = bytes
+        }
+        let preview = try await output(["scan-folder", "--dataset", dataset.path, "--folder", sources.path,
+                                        "--plan", root.appendingPathComponent("preview.json").path])
+        XCTAssertEqual(preview["source_set_count"] as? Int, 0)
+        XCTAssertEqual(preview["added_material_count"] as? Int, 0)
+        let notices = try XCTUnwrap(preview["warnings"] as? [String])
+        XCTAssertTrue(notices.contains { $0.contains(sources.appendingPathComponent("crc/crc_disp_1k.txt").path) },
+                      "A PNG signature alone must not bypass full chunk validation")
+        XCTAssertTrue(notices.contains { $0.contains(sources.appendingPathComponent("text/text_disp_1k.txt").path) },
+                      "Invalid content must identify the exact original file that was rejected")
+        for (file, bytes) in originals { XCTAssertEqual(try Data(contentsOf: file), bytes) }
+    }
+
+    func testImportPreviewIdentifiesMissingAndUnsupportedTargetSources() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: false)
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Useful preview", "--training-size", "256"])
+        let fixtures = [("complete", 16), ("low_precision", 8), ("missing_height", 0)]
+        var heightPaths: [String: String] = [:], inputPaths: [String: String] = [:]
+        for (name, heightBits) in fixtures {
+            let folder = sources.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+            let input = folder.appendingPathComponent(name + "_diff_1k.png")
+            try fixturePNG(width: 512, height: 512, bits: 8, channels: 3).write(to: input)
+            inputPaths[name] = input.path
+            if heightBits > 0 {
+                let map = folder.appendingPathComponent(name + "_disp_1k.png")
+                try fixturePNG(width: 512, height: 512, bits: heightBits, channels: 1).write(to: map)
+                heightPaths[name] = map.path
+            }
+            try fixturePNG(width: 512, height: 512, bits: 8, channels: 1).write(to: folder.appendingPathComponent(name + "_rough_1k.png"))
+        }
+        let preview = try await output(["scan-folder", "--dataset", dataset.path, "--folder", sources.path,
+                                        "--plan", root.appendingPathComponent("preview.json").path])
+        XCTAssertEqual(preview["source_set_count"] as? Int, 3)
+        XCTAssertEqual(preview["warnings"] as? [String], [], "Nominal filename resolutions must not become per-map warning spam")
+        let targets = try XCTUnwrap((preview["plans"] as? [String: [String: [String: Any]]])?["256"])
+        let plan = try XCTUnwrap(targets["height"]), issues = try XCTUnwrap(plan["source_issues"] as? [[String: Any]])
+        let missing = try XCTUnwrap(issues.first { $0["material_id"] as? String == "missing_height_1k" && $0["code"] as? String == "missing_target" })
+        XCTAssertEqual(missing["source_path"] as? String, inputPaths["missing_height"])
+        XCTAssertEqual(missing["target"] as? String, "height"); XCTAssertEqual(missing["crop_count"] as? Int, 1)
+        XCTAssertFalse(try XCTUnwrap(missing["reason"] as? String).isEmpty)
+        let lowPrecision = try XCTUnwrap(issues.first { $0["material_id"] as? String == "low_precision_1k" && $0["code"] as? String == "unsupported_precision" })
+        XCTAssertEqual(lowPrecision["source_path"] as? String, heightPaths["low_precision"])
+        XCTAssertEqual(lowPrecision["target"] as? String, "height"); XCTAssertEqual(lowPrecision["crop_count"] as? Int, 1)
+        let precisionReason = try XCTUnwrap(lowPrecision["reason"] as? String)
+        XCTAssertTrue(precisionReason.contains("8") && precisionReason.contains("16"))
+        XCTAssertEqual(plan["train_count"] as? Int, 1)
+        XCTAssertEqual(plan["unavailable_target_count"] as? Int, 2)
+    }
+
     func testPreparationCommandRespectsUserWorkerLimit() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let dataset = try await preparationFixture(root, materials: 4, dimension: 512)
@@ -745,6 +893,11 @@ final class NativeMaterialDatasetTests: XCTestCase {
         XCTAssertEqual(png.pixels, codes)
         XCTAssertThrowsError(try png.modelFloatSamples(role: "height"))
         XCTAssertThrowsError(try png.modelFloatSamples(role: "input", encoding: "unknown"))
+    }
+    private func fixturePNG(width: Int, height: Int, bits: Int, channels: Int) throws -> Data {
+        let pixels = Data((0..<width * height * channels * bits / 8).map { UInt8(truncatingIfNeeded: $0 * 97) })
+        return try NativePNG(header: .init(width: width, height: height, bits: bits, channels: channels,
+                                          color: channels == 1 ? 0 : 2, interlace: 0), pixels: pixels, colorChunks: []).encoded()
     }
     private func output(_ arguments: [String]) async throws -> [String: Any] {
         let returned = try await NativeMaterialDatasetService.run(arguments: arguments)
