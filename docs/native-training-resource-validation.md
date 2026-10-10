@@ -1,5 +1,17 @@
 # Native resource validation — 2026-10-09
 
+## Training CPU overhead — 2026-10-10
+
+Training activation checkpoints now retain independent, compact GPU buffers directly within the existing byte cap. Replay reuses those buffers without reading whole-grid activations into CPU `Data` or uploading another copy. Compiler/executable ownership and reverse-consumer eviction remain bounded as before.
+
+Staged execution also reuses its uncompiled symbolic graph, derivative plans and immutable weight/mask uploads. Actual stage compilation uses separate disposable graph owners, released after every execution; loaded executables remain transient. Any failure or cancellation discards the retained metadata, and factor keys, dimensions, precision and byte counts are checked before reuse or rebuilding. Nonstaged execution continues to use a fresh graph.
+
+The worklog uses one file handle and a bounded UTF-8 display buffer. UI delivery batches the complete event stream at 100 ms intervals; the final flush consumes only undelivered events. An optimized Foundation-only comparison of the previous and new log helpers appended 5,000 identical 79-byte Unicode JSON events (395,000 bytes total), with one warmup and three measured trials in alternating order. Mean append time was **1.69438 s before** and **0.010863 s after**, about **156× faster for this logging workload**. Disk bytes matched exactly, and the new helper delivered every pending event once. OS caches were not cleared. Evidence: `docs/validation/native-training-log-2026-10-10.txt`.
+
+This comparison measures log handling only. It does not measure UI rendering, whole training updates or GPU utilization. Current full-size throughput remains unmeasured for these changes; the historical production results below describe their recorded implementations.
+
+The final selected regression run executed **93 tests with two opt-in skips and zero failures**. It covers two-step factor/Adam parity in both scopes across three checkpoint budgets, cancellation recovery, factor contracts, naming through snapshots/exports/library display, progress delivery and stop/deadline behavior. The normal Release build, build-tool checks, native bundle verification and code-signature verification also passed. Evidence and the test command: [October 10 validation record](validation/native-training-tests-2026-10-10.txt). The production 1K/2K benchmark and externally driven control-button test were the opt-in skips.
+
 ## Source scanning: measured
 
 Machine: Apple M2 Max, 12 CPU cores, 64 GiB unified memory. Optimized arm64 Swift harnesses exercised the native dataset service against the existing `sources_mats` inventory: **936 PNGs, 31.20 GiB, 224 registered native source sets**. Serial and concurrent runs found the same 35 ignored images and 29 discovery warnings.
@@ -50,7 +62,7 @@ Backward replay collects unique stage dependencies and runs them once in forward
 
 Checkpoint placement uses the dependency graph and retained bytes: it keeps the generator output when it fits and chooses cuts that reduce subsequent recomputation. The plan is reused across updates. The default RAM pool is capped at the smallest of **6 GiB**, one eighth of training capacity, and half the estimated spare capacity. Spare capacity is zero when the working estimate exceeds capacity. For the pinned map-decoder model on this 64 GiB Mac, the current policy selects **6 GiB at both 1K and 2K**. These are checkpoint storage limits, not total process memory estimates or measured peaks.
 
-Each execution releases its cold symbolic graph. Compiled stage code uses a temporary cache capped at **1 GiB**, removed when the training program is released. Frozen features have a separate **2 GiB** cache limit; no activation files are written. Fresh production benchmarks at both sizes remain pending for the latest cuts and checkpoint policy.
+The October 9 implementation released its cold symbolic graph after each execution. The October 10 changes above reuse only the uncompiled staged graph and continue releasing compiler and executable workspaces. Compiled stage code uses a temporary cache capped at **1 GiB**, removed when the training program is released. Frozen features have a separate **2 GiB** cache limit; no activation files are written. Fresh production benchmarks at both sizes remain pending for the latest cuts and checkpoint policy.
 
 A **standalone small-fixture check**, with the activation checkpoint budget forced to zero, completed two Adam updates in both training scopes. Every trainable factor and Adam first/second moment matched the reference within 0.3% relative tolerance; predictions and loss matched within 2 × 10⁻⁶. The fixture's compiled code cache peaked at approximately 17.8 MB, and Metal allocations were approximately 21 MB after execution returned. This verifies replay numerics on the small fixture; the production measurements below exercise the learned base at its full channel widths.
 

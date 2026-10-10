@@ -38,6 +38,7 @@ final class WorkbenchPreferencesTests: XCTestCase {
         let fixture = try PreferencesFixture()
         defer { fixture.remove() }
         let first = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
+        first.training.modelName = "Stone / warm evening"
         first.training.target = "normal"
         first.training.size = 2048
         first.training.updatesPerCrop = 875
@@ -55,6 +56,7 @@ final class WorkbenchPreferencesTests: XCTestCase {
 
         let reopened = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
         XCTAssertEqual(reopened.training, first.training)
+        XCTAssertEqual(reopened.training.modelName, "Stone / warm evening")
         XCTAssertEqual(reopened.selectedSampleId, "soil_crop_002")
         XCTAssertEqual(reopened.selectedRole, "roughness")
         XCTAssertEqual(reopened.selectedCheckpointId, "second-checkpoint")
@@ -161,6 +163,7 @@ final class WorkbenchPreferencesTests: XCTestCase {
         let options = try JSONDecoder().decode(MaterialTrainingOptions.self,
             from: Data("{\"size\":2048}".utf8))
         XCTAssertEqual(options.size, 2048)
+        XCTAssertEqual(options.modelName, "")
         XCTAssertEqual(options.target, "height")
         XCTAssertEqual(options.restored(for: fixture.resources), options)
         fixture.defaults.set(Data("{\"training\":{\"size\":2048}}".utf8), forKey: WorkbenchPreferences.key)

@@ -51,6 +51,36 @@ final class NativeMaterialModelTests: XCTestCase {
                 actual.withUnsafeMutableBytes { array.readBytes($0.baseAddress!, strideBytes: nil) }
                 XCTAssertEqual(actual, expected, "Logical order, signed zero, subnormal and mantissa bits must survive compaction.")
             }
+            // Activation replay feeds the retained compact GPU buffer directly
+            // into a fresh graph after the producer and executable are gone.
+            // Reusing it repeatedly must preserve both samples and storage.
+            let checkpoint = retained[0]
+            var expectedReplay: [UInt32] = []
+            for channel in 0..<2 {
+                for y in 0..<3 {
+                    for x in 1...2 { expectedReplay.append(words[(channel * 3 + y) * 4 + x]) }
+                }
+            }
+            for _ in 0..<2 {
+                let replay: [UInt32] = try autoreleasepool {
+                    let graph = MPSGraph()
+                    let input = graph.placeholder(shape: checkpoint.shape, dataType: .float32, name: "gpu_checkpoint")
+                    let output = graph.transpose(input, permutation: [0, 1, 3, 2], name: "replayed_channels")
+                    var cache: [String: MPSGraphExecutable] = [:]
+                    let result = try NativeGraphExecution.runData(graph, feeds: [input: checkpoint], targets: [output], cache: &cache)[0]
+                    XCTAssertNil(result.mpsndarray().parent)
+                    XCTAssertEqual(result.mpsndarray().resourceSize(), expectedReplay.count * MemoryLayout<UInt32>.size)
+                    var values = [UInt32](repeating: 0, count: expectedReplay.count)
+                    values.withUnsafeMutableBytes { result.mpsndarray().readBytes($0.baseAddress!, strideBytes: nil) }
+                    return values
+                }
+                XCTAssertEqual(replay, expectedReplay, "GPU checkpoint replay must preserve every Float32 bit.")
+                XCTAssertNil(checkpoint.mpsndarray().parent)
+                XCTAssertEqual(checkpoint.mpsndarray().resourceSize(), sliced.count * MemoryLayout<UInt32>.size)
+                var unchanged = [UInt32](repeating: 0, count: sliced.count)
+                unchanged.withUnsafeMutableBytes { checkpoint.mpsndarray().readBytes($0.baseAddress!, strideBytes: nil) }
+                XCTAssertEqual(unchanged, sliced, "Replay must not overwrite a retained checkpoint.")
+            }
         }.value
     }
     func testCheckpointedReverseMatchesMonolithicAdamForEveryFactorOverTwoSteps() async throws {
@@ -102,7 +132,9 @@ final class NativeMaterialModelTests: XCTestCase {
                     "All factor gradients and Adam state must agree, including tiny upstream gradients: \(name)")
             }
             let cases = ["final-map", "map-decoder"].flatMap { scope in
-                [UInt64(0), UInt64(512 * 1024)].map { (scope, $0) }
+                // Cover no checkpoints, partial replay and a generous compact
+                // GPU checkpoint pool, including plan reuse on the next step.
+                [UInt64(0), UInt64(512 * 1024), UInt64(16 * 1024 * 1024)].map { (scope, $0) }
             }
             for (scope, checkpointByteLimit) in cases {
                 let original = try fixture.model(scope: scope, rank: 4, alpha: 8)
@@ -180,10 +212,17 @@ final class NativeMaterialModelTests: XCTestCase {
             for (a, b) in zip(expected.output, actual.output) { XCTAssertEqual(a, b, accuracy: 2e-6) }
             XCTAssertEqual(expected.loss!, actual.loss!, accuracy: 2e-6)
             stageCalls = 0
+            var graphBuilds = 0, graphReuses = 0
             let changedReference = reference.map { $0 + 0.1 }
             let update = try staged.execute(rgb: rgb, adapters: model.adapterWeights, reference: changedReference,
-                learningRate: 1e-3, featureKey: "same-input", onStage: { _, _ in stageCalls += 1 })
+                learningRate: 1e-3, featureKey: "same-input", onStage: { _, _ in stageCalls += 1 },
+                onOperation: { operation, done, _ in
+                    if operation == "Building model execution graph", done == 0 { graphBuilds += 1 }
+                    if operation == "Reusing model execution graph", done == 1 { graphReuses += 1 }
+                })
             XCTAssertEqual(stageCalls, 0, "Frozen features are reused, while changed target and adapter feeds stay live")
+            XCTAssertEqual(graphBuilds, 0)
+            XCTAssertEqual(graphReuses, 1, "Successive staged executions reuse their uncompiled symbolic graph.")
             XCTAssertNotEqual(actual.loss, update.loss)
             XCTAssertNotEqual(update.updated["ups.3.model.10.lora_B"]!.bytes, model.adapterWeights["ups.3.model.10.lora_B"]!.bytes)
             let control = NativeMaterialTrainingControl()
@@ -202,6 +241,78 @@ final class NativeMaterialModelTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(broadBytes, UInt64(3 * 1_073_741_824))
         XCTAssertNoThrow(try NativeMaterialTrainer.admitTraining(model: focused, size: 1024, budget: focusedBytes))
         XCTAssertThrowsError(try NativeMaterialTrainer.admitTraining(model: broad, size: 1024, budget: broadBytes - 1))
+    }
+
+    func testStagedMetadataRebuildsAfterEntryAndForwardCancellation() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        try await Task.detached {
+            let model = try NativeMaterialModelFixture().model(adapter: true)
+            let program = try model.program(width: 64, height: 64, target: "height")
+            let rgb = (0..<12_288).map { Float($0 % 97) / 97 }
+            let reference = [Float](repeating: 0.2, count: 4_096)
+            let baseline = try program.execute(rgb: rgb, adapters: model.adapterWeights,
+                reference: reference, featureKey: "same-input")
+            let entryControl = NativeMaterialTrainingControl()
+            entryControl.stop()
+            XCTAssertThrowsError(try program.execute(rgb: rgb, adapters: model.adapterWeights,
+                reference: reference, featureKey: "same-input", checkCancellation: { try entryControl.check() })) {
+                XCTAssertTrue($0 is CancellationError)
+            }
+            var graphBuilds = 0, stageCalls = 0
+            let update = try program.execute(rgb: rgb, adapters: model.adapterWeights,
+                reference: reference, learningRate: 1e-3, featureKey: "same-input",
+                onStage: { _, _ in stageCalls += 1 }, onOperation: { operation, done, _ in
+                    if operation == "Building model execution graph", done == 0 { graphBuilds += 1 }
+                })
+            XCTAssertEqual(graphBuilds, 1, "Entry cancellation must discard the retained metadata graph.")
+            XCTAssertGreaterThan(stageCalls, 10, "An aborted execution must discard its frozen feature cache.")
+            XCTAssertEqual(Set(update.updated.keys), Set(model.adapterWeights.keys))
+            XCTAssertEqual(update.optimizerState.count, model.adapterWeights.count * 2)
+            XCTAssertNotEqual(update.updated["ups.3.model.10.lora_B"]!.bytes,
+                model.adapterWeights["ups.3.model.10.lora_B"]!.bytes)
+            let forwardControl = NativeMaterialTrainingControl()
+            XCTAssertThrowsError(try program.execute(rgb: rgb, adapters: model.adapterWeights,
+                reference: reference, featureKey: "uncached-input", checkCancellation: { try forwardControl.check() },
+                onStage: { _, _ in forwardControl.stop() })) {
+                XCTAssertTrue($0 is CancellationError)
+            }
+            graphBuilds = 0
+            let retried = try program.execute(rgb: rgb, adapters: model.adapterWeights,
+                reference: reference, featureKey: "same-input", onOperation: { operation, done, _ in
+                    if operation == "Building model execution graph", done == 0 { graphBuilds += 1 }
+                })
+            XCTAssertEqual(graphBuilds, 1)
+            XCTAssertEqual(retried.output, baseline.output)
+            XCTAssertEqual(retried.loss, baseline.loss)
+        }.value
+    }
+
+    func testReusedStagedMetadataRejectsChangedFactorContractsBeforeGraphRebuild() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        try await Task.detached {
+            let model = try NativeMaterialModelFixture().model(adapter: true)
+            let program = try model.program(width: 64, height: 64, target: "height")
+            let rgb = [Float](repeating: 0.5, count: 12_288)
+            let baseline = try program.execute(rgb: rgb, adapters: model.adapterWeights)
+            let name = "ups.3.model.10.lora_A", original = model.adapterWeights["ups.3.model.10.lora_A"]!
+            var missing = model.adapterWeights; missing.removeValue(forKey: name)
+            var extra = model.adapterWeights; extra["unexpected.lora_A"] = .floats([1], shape: [1])
+            var reshaped = model.adapterWeights
+            reshaped[name] = NativeTensor(dtype: "F32", shape: Array(original.shape.reversed()), bytes: original.bytes)
+            var integer = model.adapterWeights
+            integer[name] = NativeTensor(dtype: "I32", shape: original.shape, bytes: original.bytes)
+            var truncated = model.adapterWeights
+            truncated[name] = NativeTensor(dtype: "F32", shape: original.shape, bytes: Data(original.bytes.dropLast()))
+            for factors in [missing, extra, reshaped, integer, truncated] {
+                var graphBuilds = 0
+                XCTAssertThrowsError(try program.execute(rgb: rgb, adapters: factors, onOperation: { operation, done, _ in
+                    if operation == "Building model execution graph", done == 0 { graphBuilds += 1 }
+                }))
+                XCTAssertEqual(graphBuilds, 0, "Reject changed cached-package structure before building a new graph.")
+            }
+            let retried = try program.execute(rgb: rgb, adapters: model.adapterWeights)
+            XCTAssertEqual(retried.output, baseline.output, "Valid factors can retry after a rejected execution.")
+        }.value
     }
 
     func testCachedProgramDoesNotRetainOwningModel() throws {

@@ -258,8 +258,9 @@ struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
     var architecture: String? = nil
     var scope: String? = nil
     var base: Base? = nil
+    var modelName: String? = nil
     enum CodingKeys: String, CodingKey {
-        case checkpointPath, sha256, schema, target, step, compatible, variant, refinementPolicy, architecture, scope, base
+        case checkpointPath, sha256, schema, target, step, compatible, variant, refinementPolicy, architecture, scope, base, modelName
         case warmStartSupported = "supportsTrainingWarmStart"
     }
     var supportsTrainingWarmStart: Bool { compatible && warmStartSupported == true }
@@ -269,7 +270,10 @@ struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
     var availabilityLabel: String { variant == "full" ? "Full material checkpoint" : "Material LoRA" }
     var id: String { sha256 }
     var url: URL { URL(fileURLWithPath: checkpointPath) }
-    var title: String { url.deletingLastPathComponent().lastPathComponent + " · " + url.lastPathComponent }
+    var title: String {
+        let name = modelName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return (name.isEmpty ? url.deletingLastPathComponent().lastPathComponent : name) + " · " + url.lastPathComponent
+    }
     var trainingBaseLabel: String {
         architecture ?? "PBRnxt material model"
     }
@@ -280,6 +284,7 @@ struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
 }
 
 struct MaterialTrainingOptions: Codable, Equatable, Sendable {
+    var modelName = ""
     var target = "height"
     var scope = "final-map"
     var size = 1024
@@ -295,12 +300,13 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
     init() {}
 
     enum CodingKeys: String, CodingKey {
-        case target, scope, size, updatesPerCrop, maxMinutes, useSelectedMaterialOnly, useWarmStart, loraRank, loraAlpha, validationEvery, checkpointEvery
+        case modelName, target, scope, size, updatesPerCrop, maxMinutes, useSelectedMaterialOnly, useWarmStart, loraRank, loraAlpha, validationEvery, checkpointEvery
     }
 
     init(from decoder: Decoder) throws {
         self.init()
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        modelName = try values.decodeIfPresent(String.self, forKey: .modelName) ?? modelName
         target = try values.decodeIfPresent(String.self, forKey: .target) ?? target
         scope = try values.decodeIfPresent(String.self, forKey: .scope) ?? scope
         size = try values.decodeIfPresent(Int.self, forKey: .size) ?? size

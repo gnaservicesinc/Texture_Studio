@@ -615,6 +615,20 @@ final class WorkbenchStore {
         }
     }
 
+    var suggestedTrainingModelName: String {
+        if training.useWarmStart,
+           let name = selectedCheckpoint?.modelName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return name
+        }
+        let map = ["height": "Displacement", "roughness": "Roughness", "normal": "Normals"][training.target] ?? training.target.capitalized
+        return "\(datasetName) \(map)"
+    }
+
+    var effectiveTrainingModelName: String {
+        let name = training.modelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? suggestedTrainingModelName : name
+    }
+
     var trainingConfigurationIssue: String? {
         if dataset == nil { return "Open your source dataset first." }
         if !supportedTrainingSizes.contains(training.size) {
@@ -649,6 +663,7 @@ final class WorkbenchStore {
 
     private func runTraining(checkpoint: WorkbenchCheckpoint?) {
         let options = training
+        let modelName = effectiveTrainingModelName
         let selectedMaterial = selectedMaterialId
         let dependencies = checkpoint.map { dependencyArguments(for: $0) } ?? dependencyArguments
         let developer = developerMode
@@ -659,6 +674,7 @@ final class WorkbenchStore {
             self.lastOutputURL = output
             var args = [checkpoint == nil ? "train" : "refine", "--dataset", prepared.datasetPath,
                 "--output", output.path, "--size", String(options.size), "--whole-maps",
+                "--model-name", modelName,
                 "--target", options.target, "--scope", options.scope,
                 "--max-minutes", String(options.maxMinutes),
                 "--updates-per-map", String(options.updatesPerCrop),
@@ -1024,20 +1040,26 @@ final class WorkbenchStore {
         let control = NativeMaterialTrainingControl(); runner = control
         let workerId = UUID(); activeWorkerId = workerId
         let event: @Sendable (String) -> Void = { [weak self] chunk in
-            events.append(chunk)
+            guard events.append(chunk) else { return }
             Task { @MainActor in
-                guard self?.activeWorkerId == workerId else { return }
-                self?.logText += chunk
-                if let text = self?.logText, text.count > 100000 { self?.logText = String(text.suffix(100000)) }
-                if progressWorker { self?.recordTrainingProgress(chunk) }
+                // Deliver progress in order at most ten times per second. The
+                // trainer never waits for UI updates, and its disk log is complete.
+                try? await Task.sleep(for: .milliseconds(100))
+                guard let self, self.activeWorkerId == workerId else { return }
+                let pending = events.drainPending()
+                self.logText = events.text
+                if progressWorker, !pending.isEmpty { self.recordTrainingProgress(pending) }
             }
         }
         let operation = Task { try await NativeMaterialCommands.run(arguments: args, onEvent: event, control: control) }
         WorkbenchLifecycle.shared.add(control, cancel: { operation.cancel() })
         defer {
+            // Flush any final events once before retiring the worker. A queued
+            // UI delivery then fails its worker identity check and cannot replay them.
+            let pending = events.drainPending()
+            if progressWorker, !pending.isEmpty { recordTrainingProgress(pending) }
             runner = nil; activeWorkerId = nil
             logText = events.text
-            if progressWorker { recordTrainingProgress(events.text) }
             WorkbenchLifecycle.shared.remove(control)
         }
         let output = try await withTaskCancellationHandler { try await operation.value } onCancel: { operation.cancel(); control.stop() }

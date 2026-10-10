@@ -1,0 +1,11 @@
+chunk_bytes=79 events=5000
+warmup old append_seconds=1.685547042 disk_bytes=395000 display_bytes=103948 verified=true
+warmup new append_seconds=0.01121375 disk_bytes=395000 display_bytes=100000 verified=true
+trial-1 old append_seconds=1.691492625 disk_bytes=395000 display_bytes=103948 verified=true
+trial-1 new append_seconds=0.0104865 disk_bytes=395000 display_bytes=100000 verified=true
+trial-2 new append_seconds=0.011076917 disk_bytes=395000 display_bytes=100000 verified=true
+trial-2 old append_seconds=1.6979175 disk_bytes=395000 display_bytes=103948 verified=true
+trial-3 old append_seconds=1.693737791 disk_bytes=395000 display_bytes=103948 verified=true
+trial-3 new append_seconds=0.0110255 disk_bytes=395000 display_bytes=100000 verified=true
+old_mean_seconds=1.6943826386666665 new_mean_seconds=0.010862972333333333 old_over_new_ratio=155.97781037031697
+candidate_pending_delivery=full_stream_once reservation_count=1 repeated_drain_empty=true

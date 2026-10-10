@@ -47,6 +47,10 @@ struct TrainingWorkbenchView: View {
                     }
                 }.disabled(store.isBusy)
                 Section("Refine a material model") {
+                    TextField("Model name", text: $store.training.modelName, prompt: Text(store.suggestedTrainingModelName))
+                        .accessibilityIdentifier("training.model-name")
+                    Text("Shown in Saved Models and exported with the checkpoint. Leave blank to use the suggested name.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Picker("Map", selection: Binding(get: { store.training.target }, set: { store.selectTrainingTarget($0) })) {
                         Text("Displacement").tag("height")
                         Text("Roughness").tag("roughness")

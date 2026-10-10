@@ -1,0 +1,53 @@
+Native training/name validation — 2026-10-10
+
+Host: Apple M2 Max, 64 GiB unified memory, macOS 26, Xcode 26.
+Repository base: dc7fc47, with the October 10 working-tree changes.
+
+Production Release build:
+  make build: passed
+  ./script/test_build_tools.sh: passed
+  ./script/verify_native_bundle.sh 'build/TextureStudio/Build/Products/Release/Texture Studio.app': passed
+  codesign --verify --deep --strict 'build/TextureStudio/Build/Products/Release/Texture Studio.app': passed
+  Material Trainer helper staged inside Contents/Applications.
+
+Selected regression command:
+  xcodebuild -project src/TextureStudio/TextureStudio.xcodeproj
+    -scheme TextureStudio -configuration Release
+    -destination 'platform=macOS,arch=arm64'
+    -derivedDataPath build/TextureStudioValidationFinal
+    ENABLE_TESTABILITY=YES ENABLE_HARDENED_RUNTIME=NO
+    -only-testing:TextureStudioTests/NativeMaterialModelTests
+    -only-testing:TextureStudioTests/NativeMaterialTrainerTests
+    -only-testing:TextureStudioTests/NativeWorkbenchRoutingTests
+    -only-testing:TextureStudioTests/TrainingPreparationTests
+    -only-testing:TextureStudioTests/WorkbenchPreferencesTests
+    -only-testing:TextureStudioTests/TrainingWorkbenchLayoutTests
+    -only-testing:TextureStudioTests/MaterialTrainingHandoffTests
+    -only-testing:TextureStudioTests/WorkbenchInteractionTests
+    -only-testing:TextureStudioTests/NativeMaterialPackageTests
+    -only-testing:TextureStudioTests/NativeSafetensorsTests
+    -only-testing:TextureStudioTests/WorkbenchTrainingProgressTests test
+
+Testability and hardened-runtime overrides apply only to the separate test
+build. The normal Release app above uses its default build settings.
+
+Final result: TEST SUCCEEDED, exit 0.
+Executed 93 tests, 2 skipped, 0 failures, 1165.916 seconds.
+Completed: 2026-10-10 05:04:54 America/Detroit.
+
+Coverage includes:
+  Every factor and Adam moment versus monolithic execution over two updates,
+    both adapter scopes, and 0 / 512 KiB / 16 MiB checkpoint budgets.
+  Float32 checkpoint compaction, changed input/reference handling, current
+    adapter feeds, cancellation recovery, and invalid factor contracts.
+  Model-name persistence, automatic naming before dataset staging, warm-start
+    inheritance, Unicode/slashes, named snapshots/exports/library display.
+  Lossless progress logging, bounded Unicode display tail, final drain,
+    Stop & Save, Abort, deadline behavior, and training layout.
+
+Opt-in skips:
+  testProductionExactGridTrainingResourceRegression
+  testExternallyDrivenTrainingStopAbortButtons
+
+These checks validate correctness on the numerical fixtures. Full-size
+training throughput and production peak memory were not measured in this run.

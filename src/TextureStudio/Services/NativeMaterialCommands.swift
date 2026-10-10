@@ -49,23 +49,84 @@ enum NativeMaterialCommands {
     }
 }
 
-/// Native events are complete Swift strings, so logs need no pipe polling or
-/// incremental UTF-8 decoding. Writes are serialized off the app's main actor.
+/// Native events are complete Swift strings. Keep the complete worklog on disk,
+/// a bounded UTF-8 display tail, and lossless chunks awaiting one UI delivery.
+/// Writes and delivery reservations share a lock off the app's main actor.
 final class NativeWorkbenchLog: @unchecked Sendable {
     private let lock = NSLock()
-    private let url: URL
-    private var contents = ""
-    init(url: URL) { self.url = url }
-    var text: String { lock.withLock { String(contents.suffix(100000)) } }
-    func append(_ text: String) {
-        lock.withLock {
-            contents += text
-            if contents.count > 100000 { contents = String(contents.suffix(100000)) }
-            if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: nil) }
-            if let file = try? FileHandle(forWritingTo: url) {
-                defer { try? file.close() }
-                _ = try? file.seekToEnd(); try? file.write(contentsOf: Data(text.utf8))
-            }
+    private let file: FileHandle?
+    private var displayBytes: [UInt8]
+    private var displayStart = 0
+    private var displayCount = 0
+    private var pending: [String] = []
+    private var deliveryReserved = false
+
+    init(url: URL, displayByteLimit: Int = 100000) {
+        displayBytes = [UInt8](repeating: 0, count: max(0, displayByteLimit))
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
         }
+        file = try? FileHandle(forWritingTo: url)
+        _ = try? file?.seekToEnd()
+    }
+    deinit { try? file?.close() }
+
+    var text: String {
+        lock.withLock {
+            guard displayCount > 0 else { return "" }
+            let firstCount = min(displayCount, displayBytes.count - displayStart)
+            var bytes = Data(displayBytes[displayStart..<(displayStart + firstCount)])
+            if firstCount < displayCount { bytes.append(contentsOf: displayBytes[0..<(displayCount - firstCount)]) }
+            // A byte cap can cut through the oldest scalar. Remove its trailing
+            // bytes so the displayed suffix never introduces replacement text.
+            var start = bytes.startIndex
+            while start < bytes.endIndex, bytes[start] & 0xc0 == 0x80 { start += 1 }
+            return String(decoding: bytes[start...], as: UTF8.self)
+        }
+    }
+
+    /// Returns true only when this append reserves the next delivery. Callers
+    /// schedule one delayed main-actor drain for that reservation, not per event.
+    @discardableResult func append(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
+        let bytes = Data(text.utf8)
+        return lock.withLock {
+            try? file?.write(contentsOf: bytes)
+            appendDisplay(bytes)
+            pending.append(text)
+            guard !deliveryReserved else { return false }
+            deliveryReserved = true
+            return true
+        }
+    }
+
+    /// Clears the reservation and returns each queued chunk exactly once. A
+    /// final drain consumes only undelivered events, never the display tail.
+    func drainPending() -> String {
+        lock.withLock {
+            let result = pending.joined()
+            pending.removeAll(keepingCapacity: true)
+            deliveryReserved = false
+            return result
+        }
+    }
+
+    private func appendDisplay(_ bytes: Data) {
+        let capacity = displayBytes.count
+        guard capacity > 0 else { return }
+        if bytes.count >= capacity {
+            displayBytes.replaceSubrange(0..<capacity, with: bytes.suffix(capacity))
+            displayStart = 0; displayCount = capacity
+            return
+        }
+        let end = (displayStart + displayCount) % capacity
+        let firstCount = min(bytes.count, capacity - end)
+        displayBytes.replaceSubrange(end..<(end + firstCount), with: bytes.prefix(firstCount))
+        if firstCount < bytes.count {
+            displayBytes.replaceSubrange(0..<(bytes.count - firstCount), with: bytes.dropFirst(firstCount))
+        }
+        let overflow = max(0, displayCount + bytes.count - capacity)
+        displayStart = (displayStart + overflow) % capacity
+        displayCount = min(capacity, displayCount + bytes.count)
     }
 }

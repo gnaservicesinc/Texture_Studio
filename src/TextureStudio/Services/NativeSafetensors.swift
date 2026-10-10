@@ -194,10 +194,12 @@ enum NativeMaterialCheckpoint {
         let imagePadding: Bool, imageResizing: Bool
         let base: Base
         let scope: String?
+        let modelName: String?
         let layers: [String: Layer]?
         enum CodingKeys: String, CodingKey {
             case schema, architecture, target, step, base, scope, layers
             case trainingSize = "training_size", imagePadding = "image_padding", imageResizing = "image_resizing"
+            case modelName = "model_name"
         }
     }
 
@@ -238,6 +240,7 @@ enum NativeMaterialCheckpoint {
             "variant": full ? "full" : "lora", "supports_training_warm_start": true,
             "supports_studio_inference": true, "refinement_policy": "native_material_lora",
             "base": object["base"]!, "training_size": configuration.trainingSize,
+            "model_name": configuration.modelName as Any? ?? NSNull(),
             "scope": object["scope"] ?? NSNull(), "validation": object["validation"] ?? NSNull()]
         try Task.checkCancellation()
         return String(decoding: try JSONSerialization.data(withJSONObject: information, options: [.sortedKeys]), as: UTF8.self)

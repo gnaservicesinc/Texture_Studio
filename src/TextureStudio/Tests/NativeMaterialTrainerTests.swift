@@ -5,6 +5,22 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeMaterialTrainerTests: XCTestCase {
+    func testModelNameAcceptsDisplayTextAndRefinementDefaultsToRecordedName() throws {
+        let arguments = ["train", "--dataset", "/dataset", "--output", "/output"]
+        XCTAssertNil(try NativeMaterialTrainer.Options(arguments).modelName)
+        XCTAssertEqual(try NativeMaterialTrainer.Options(arguments + ["--model-name", "  石 Stone / Warm evening  "]).modelName,
+            "石 Stone / Warm evening")
+        XCTAssertNil(try NativeMaterialTrainer.Options(arguments + ["--model-name", " \n "]).modelName)
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let checkpoint = root.appendingPathComponent("adapter.safetensors")
+        try NativeSafetensors.write(tensors: ["weight": .floats([1], shape: [1])],
+            metadata: ["configuration": "{\"model_name\":\"Recorded stone\"}"], to: checkpoint)
+        let refine = ["refine", "--dataset", "/dataset", "--output", "/output", "--checkpoint", checkpoint.path]
+        XCTAssertEqual(try NativeMaterialTrainer.Options(refine).modelName, "Recorded stone")
+        XCTAssertEqual(try NativeMaterialTrainer.Options(refine + ["--model-name", " \n "]).modelName, "Recorded stone")
+        XCTAssertEqual(try NativeMaterialTrainer.Options(refine + ["--model-name", "New stone"]).modelName, "New stone")
+    }
+
     func testQuickCheckCadenceAcceptsZeroAndHasNoArbitraryMaximum() throws {
         for value in [0, 1, Int.max] {
             let options = try NativeMaterialTrainer.Options(["train", "--dataset", "/dataset", "--output", "/output",
@@ -121,7 +137,8 @@ final class NativeMaterialTrainerTests: XCTestCase {
         let model = try NativeMaterialModel(baseWeights: original.baseWeights, adapterWeights: original.adapterWeights,
             layers: original.layers, configuration: configuration, baseSHA256: String(repeating: "a", count: 64), architecture: .test)
         let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
-            "--size", "256", "--updates-per-map", "5", "--validation-every", "2", "--learning-rate", "0.001"])
+            "--size", "256", "--updates-per-map", "5", "--validation-every", "2", "--learning-rate", "0.001",
+            "--model-name", "  石 Stone / Displacement  "])
         let control = NativeMaterialTrainingControl(), events = Recorder()
         let text = try await Task.detached { try NativeMaterialTrainer.train(options, onEvent: { line in
             events.append(line)
@@ -133,11 +150,24 @@ final class NativeMaterialTrainerTests: XCTestCase {
         XCTAssertEqual(result["status"] as? String, "stopped"); XCTAssertEqual(result["completed_updates"] as? Int, 2)
         XCTAssertEqual(result["stopped_reason"] as? String, "user_stop")
         XCTAssertEqual(result["requested_updates"] as? Int, 5)
+        XCTAssertEqual(result["model_name"] as? String, "石 Stone / Displacement")
+        let recordedRun = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: output.appendingPathComponent("run.json"))) as? [String: Any])
+        XCTAssertEqual(recordedRun["model_name"] as? String, "石 Stone / Displacement")
         let saved = try NativeSafetensors(contentsOf: output.appendingPathComponent("export/adapter.safetensors"))
         XCTAssertNotEqual(try saved.tensorBytes(named: "ups.3.model.10.lora_B"), original.adapterWeights["ups.3.model.10.lora_B"]!.bytes)
         XCTAssertNoThrow(try NativeMaterialPackage.verify(output.appendingPathComponent("export")))
         XCTAssertTrue(FileManager.default.fileExists(atPath: output.appendingPathComponent("checkpoint-step-00000001.safetensors").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: output.appendingPathComponent("checkpoint-step-00000002.safetensors").path))
+        for path in ["checkpoint-step-00000001.safetensors", "checkpoint-step-00000002.safetensors", "export/adapter.safetensors"] {
+            let checkpoint = try WorkbenchResult.decode(WorkbenchCheckpoint.self,
+                output: NativeMaterialCheckpoint.inspect(at: output.appendingPathComponent(path)))
+            XCTAssertEqual(checkpoint.modelName, "石 Stone / Displacement")
+            XCTAssertTrue(checkpoint.title.hasPrefix("石 Stone / Displacement · "))
+        }
+        let packageConfig = try NativeMaterialTransfer.object(output.appendingPathComponent("export/config.json"))
+        XCTAssertEqual(packageConfig["model_name"] as? String, "石 Stone / Displacement")
+        XCTAssertTrue(try String(contentsOf: output.appendingPathComponent("export/README.md"), encoding: .utf8)
+            .contains("Model name: 石 Stone / Displacement"))
         XCTAssertEqual(events.updates, 2)
         XCTAssertFalse(events.executedOnMain)
         let final = try XCTUnwrap(result["final_validation"] as? [String: Any])

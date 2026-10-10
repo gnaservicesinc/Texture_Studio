@@ -268,7 +268,8 @@ enum NativeMaterialPackage {
             files["ModelLicenses/" + name] = try Data(contentsOf: source)
         }
         files["LICENSE"] = files["ModelLicenses/TextureStudio_LICENSE"]
-        files["README.md"] = Data("---\nlicense: gpl-3.0\ntags:\n- texture-studio-material\n- material-maps\n- safetensors\n---\n\n# Texture Studio native material model\n\nTarget: \(configuration["target"] ?? ""). Every training map uses its declared native grid without padding or resizing. The app evaluates this numeric checkpoint with Apple MPSGraph in Float32. Source images and an interpreter are not included. Original model notices are in ModelLicenses. Visual review is required before choosing a model.\n".utf8)
+        let modelName = (configuration["model_name"] as? String).map { "Model name: \($0)\n\n" } ?? ""
+        files["README.md"] = Data("---\nlicense: gpl-3.0\ntags:\n- texture-studio-material\n- material-maps\n- safetensors\n---\n\n# Texture Studio native material model\n\n\(modelName)Target: \(configuration["target"] ?? ""). Every training map uses its declared native grid without padding or resizing. The app evaluates this numeric checkpoint with Apple MPSGraph in Float32. Source images and an interpreter are not included. Original model notices are in ModelLicenses. Visual review is required before choosing a model.\n".utf8)
         let size = files.values.reduce(Int64(0)) { $0 + Int64($1.count) }
         try fm.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
         let capacity = try output.deletingLastPathComponent().resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage

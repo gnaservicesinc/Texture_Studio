@@ -29,6 +29,7 @@ enum NativeMaterialTrainer {
     }
     struct Options: Sendable {
         let command: String, target: String, scope: String
+        let modelName: String?
         let dataset: URL?, output: URL, image: URL?, checkpoint: URL?, expectedSHA256: String?, base: URL
         let size: Int, rank: Int, updatesPerMap: Int, validationEvery: Int, checkpointEvery: Int
         let alpha: Float, learningRate: Float, maxMinutes: Double
@@ -46,6 +47,10 @@ enum NativeMaterialTrainer {
                 let snapshot = try NativeSafetensors(contentsOf: NativeMaterialModel.resolvedCheckpoint(checkpoint), expectedSHA256: expectedSHA256)
                 if let text = snapshot.metadata["configuration"] { recorded = (try JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] ?? [:] }
             }
+            let requestedName = (value("--model-name") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let recordedName = (recorded["model_name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = requestedName.isEmpty ? recordedName : requestedName
+            modelName = name.isEmpty ? nil : name
             target = value("--target") ?? recorded["target"] as? String ?? "height"
             scope = value("--scope") ?? recorded["scope"] as? String ?? "final-map"
             guard ["height", "roughness", "normal"].contains(target), ["final-map", "map-decoder"].contains(scope) else { throw StudioError("Choose a supported material target and layer scope.") }
@@ -139,6 +144,7 @@ enum NativeMaterialTrainer {
         try setup("Loading material model", step: 2, requested: requestedUpdates, maps: training.count)
         let model = try suppliedModel ?? NativeMaterialModel.load(checkpointURL: options.checkpoint, expectedSHA256: options.expectedSHA256,
             baseURL: options.base, target: options.target, scope: options.scope, rank: options.rank, alpha: options.alpha, training: true, seed: options.seed)
+        if let name = options.modelName { model.configuration["model_name"] = name }
         try admitTraining(model: model, size: options.size)
         try setup("Preparing model execution graph", step: 3)
         let program = try model.program(width: options.size, height: options.size, target: options.target)
@@ -173,6 +179,7 @@ enum NativeMaterialTrainer {
             event["epoch"] = currentEpoch
             event["total_epochs"] = options.updatesPerMap
             event["workflow_phase"] = workflowPhase
+            if let name = options.modelName { event["model_name"] = name }
             let line = try json(event) + "\n"; onEvent(line)
         }
         func pair(_ descriptor: NativeMaterialDatasetService.TrainingSample) throws -> ([Float], [Float]) {
@@ -318,15 +325,18 @@ enum NativeMaterialTrainer {
                 "dataset_manifest_sha256": sourceHash, "native_dimensions": [options.size, options.size],
                 "image_padding": false, "image_resizing": false, "runtime": "Apple MPSGraph Float32"]
             if let reason { result["stopped_reason"] = reason }
+            if let name = options.modelName { result["model_name"] = name }
             try writeJSON(result, to: options.output.appendingPathComponent("run.json"))
             try emit(["event": "training_completed", "status": reason == nil ? "completed" : "stopped"])
             return try json(result)
         } catch {
             if error is CancellationError, let ownedExport { try? FileManager.default.removeItem(at: ownedExport) }
-            try? writeJSON(["status": error is CancellationError ? "aborted" : "failed", "completed_updates": completed,
+            var failure: [String: Any] = ["status": error is CancellationError ? "aborted" : "failed", "completed_updates": completed,
                 "requested_updates": requestedUpdates, "max_minutes": options.maxMinutes,
                 "elapsed_training_seconds": elapsedSeconds(), "error": error.localizedDescription,
-                "training_performed": completed > 0], to: options.output.appendingPathComponent("run.json"))
+                "training_performed": completed > 0]
+            if let name = options.modelName { failure["model_name"] = name }
+            try? writeJSON(failure, to: options.output.appendingPathComponent("run.json"))
             throw error
         }
     }

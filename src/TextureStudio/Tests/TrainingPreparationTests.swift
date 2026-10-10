@@ -88,6 +88,7 @@ final class TrainingPreparationTests: XCTestCase {
         try await store.loadTrainingCapabilities()
         try await store.loadDataset(fixture.original)
         store.training.size = 1024
+        store.training.modelName = "  石 Stone / Displacement  "
         store.startTraining()
         try await settled(store)
         XCTAssertNil(store.error)
@@ -97,11 +98,32 @@ final class TrainingPreparationTests: XCTestCase {
         XCTAssertTrue(train.contains("--whole-maps"))
         XCTAssertEqual(value("--size", in: train), "1024")
         XCTAssertEqual(value("--dataset", in: train), fixture.prepared.path)
+        XCTAssertEqual(value("--model-name", in: train), "石 Stone / Displacement")
+        XCTAssertTrue(value("--output", in: train)?.hasPrefix(fixture.root.path + "/out/material-training/material-height-") == true,
+            "Display names never become path components")
         XCTAssertFalse(train.contains("--developer-mode"))
         XCTAssertTrue(fixture.calls.contains { $0.first == "cleanup-size" })
         XCTAssertEqual(store.dataset?.datasetPath, fixture.original.path)
         XCTAssertEqual(store.selectedCheckpoint?.url.pathExtension, "safetensors")
         XCTAssertTrue(store.selectedCheckpoint?.supportsTrainingWarmStart == true)
+    }
+
+    func testBlankModelNameUsesSourceDatasetAndMapBeforePreparingTrainingFiles() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let store = fixture.store()
+        store.uploadAfterTraining = false
+        try await store.loadTrainingCapabilities()
+        try await store.loadDataset(fixture.original)
+        store.training.size = 1024
+        store.training.modelName = " \n "
+        let suggested = "\(store.datasetName) Displacement"
+        XCTAssertEqual(store.suggestedTrainingModelName, suggested)
+        store.startTraining()
+        try await settled(store)
+        XCTAssertNil(store.error)
+        let train = try XCTUnwrap(fixture.calls.first { $0.first == "train" })
+        XCTAssertEqual(value("--model-name", in: train), suggested)
     }
 
     func testStopFinalizesOnlyAfterTrainingStartsAndAllowsFinalAdapterResult() async throws {
