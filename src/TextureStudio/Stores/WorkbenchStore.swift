@@ -803,6 +803,10 @@ final class WorkbenchStore {
             guard let data = line.data(using: .utf8),
                   let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let kind = event["event"] as? String else { continue }
+            if kind == "source_recovery_progress" {
+                if isBusy, !isStopping, let message = event["message"] as? String { activity = message }
+                continue
+            }
             if ["preparation_started", "preparation_progress", "preparation_completed"].contains(kind) {
                 guard isPreparingDataset, !isStopping,
                       let completed = event["completed"] as? Int, let total = event["total"] as? Int,
@@ -992,7 +996,7 @@ final class WorkbenchStore {
         try Task.checkCancellation()
         guard !WorkbenchLifecycle.shared.isTerminating else { throw CancellationError() }
         let trainingWorker = ["train", "refine"].contains(args.first ?? "")
-        let progressWorker = trainingWorker || args.first == "prepare-size"
+        let progressWorker = trainingWorker || ["prepare-size", "scan-folder", "import-folder"].contains(args.first ?? "")
         if progressWorker { trainingEventBuffer = "" }
         if trainingWorker { hasTrainingStarted = false }
         defer { if trainingWorker { hasTrainingStarted = false } }

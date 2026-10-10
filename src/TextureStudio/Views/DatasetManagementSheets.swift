@@ -332,26 +332,44 @@ private struct DatasetTargetSourceIssues: View {
     private var issues: [WorkbenchImportSourceIssue] {
         plan.sourceIssues.filter { $0.target == target }
     }
+    private var missingMaps: [WorkbenchImportSourceIssue] {
+        issues.filter { ["missing_target", "not_published"].contains($0.code) }
+    }
+    private var unsupportedMaps: [WorkbenchImportSourceIssue] {
+        issues.filter { !["missing_target", "not_published"].contains($0.code) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("\(title) maps needing attention", systemImage: "exclamationmark.triangle")
-                .font(.callout.bold()).foregroundStyle(.orange)
             if issues.isEmpty {
-                Text("A \(title.lowercased()) map is unavailable. Scan the folder again to identify the affected source files.")
-                    .font(.callout).fixedSize(horizontal: false, vertical: true)
+                Text("Source sets without a \(title.lowercased()) map are skipped for this target. Their available surface maps remain usable.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
-                ForEach(issues) { issue in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(issue.materialId).font(.callout.bold())
-                        Text(issue.reason).font(.callout)
-                        Text("\(issue.code == "missing_target" ? "Diffuse source" : "Map file"): \(issue.sourcePath)")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }.fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled).padding(.leading, 14)
+                if !missingMaps.isEmpty {
+                    Text("\(title): \(missingMaps.count) \(missingMaps.count == 1 ? "source set has" : "source sets have") no map")
+                        .font(.callout.bold())
+                    Text("Skipped for \(title.lowercased()) training. Other available surface maps remain usable for their own targets.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    ForEach(missingMaps) { issue in sourceDetails(issue, sourceLabel: "Diffuse source") }
+                }
+                if !unsupportedMaps.isEmpty {
+                    Label("\(title) training requirements", systemImage: "exclamationmark.triangle")
+                        .font(.callout.bold()).foregroundStyle(.orange)
+                    ForEach(unsupportedMaps) { issue in sourceDetails(issue, sourceLabel: "Map file") }
                 }
             }
         }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
+    }
+
+    private func sourceDetails(_ issue: WorkbenchImportSourceIssue, sourceLabel: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(issue.materialId).font(.callout.bold())
+            Text(issue.reason).font(.callout)
+            Text("\(sourceLabel): \(issue.sourcePath)").font(.caption).foregroundStyle(.secondary)
+        }.fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled).padding(.leading, 14)
     }
 }
 
@@ -370,6 +388,11 @@ struct ImportDatasetFolderSheet: View {
                     if let preview = store.folderImport {
                         Text("Found \(preview.sourceSetCount) paired source sets · \(preview.addedMaterialCount) new · \(preview.duplicateMaterialCount) already present")
                             .font(.headline)
+                        if let recoveredCount = preview.recoveredMapCount, recoveredCount > 0 {
+                            Label("Added \(recoveredCount) missing \(recoveredCount == 1 ? "map" : "maps") from Poly Haven to the source folder.", systemImage: "checkmark.circle")
+                                .font(.callout).foregroundStyle(.green)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         if let plans = preview.plans[String(store.folderImportSize)] { DatasetPlanSummary(plans: plans) }
                         if !preview.warnings.isEmpty {
                             VStack(alignment: .leading, spacing: 10) {
@@ -386,7 +409,7 @@ struct ImportDatasetFolderSheet: View {
                                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         }
                     } else if store.isBusy {
-                        Text("Scanning subfolders and verifying full-quality original maps. Large collections can take a minute. You can change resolution while this scan continues; no restart is needed.")
+                        Text("Scanning source maps and obtaining missing Poly Haven maps when published. Source sets without a published map continue with their available targets. You can change resolution while the scan continues.")
                             .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }.padding(4)

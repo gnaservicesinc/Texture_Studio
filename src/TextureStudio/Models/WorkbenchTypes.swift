@@ -205,6 +205,7 @@ struct WorkbenchFolderImport: Decodable, Sendable {
     let ignoredFileCount: Int
     let warnings: [String]
     let plans: [String: [String: WorkbenchDatasetPlan]]
+    var recoveredMapCount: Int? = nil
 }
 
 struct WorkbenchDatasetLocation: Codable, Identifiable, Equatable, Sendable {

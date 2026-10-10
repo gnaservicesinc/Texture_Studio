@@ -328,16 +328,14 @@ final class DatasetManagementTests: XCTestCase {
             ("fabric_pattern_05_2k", "Fabric Pattern 05/fabric_pattern_05_col_01_2k.png"),
             ("fabric_pattern_05_4k", "Fabric Pattern 05/fabric_pattern_05_col_01_4k.png"),
             ("fabric_pattern_07_2k", "Fabric Pattern 07/fabric_pattern_07_col_1_2k.png"),
-            ("fabric_pattern_07_4k", "Fabric Pattern 07/fabric_pattern_07_col_1_4k.png"),
-            ("granite_tile_04_4k", "Granite Tile 04/granite_tile_04_diff_4k.png"),
-            ("leather_red_03_4k", "Leather Red 03/leather_red_03_coll1_4k.png")
+            ("fabric_pattern_07_4k", "Fabric Pattern 07/fabric_pattern_07_col_1_4k.png")
         ]
         var heightPlan = plan
-        heightPlan["unavailable_target_count"] = 7
+        heightPlan["unavailable_target_count"] = 4
         heightPlan["source_issues"] = missingSources.map { material, relativePath in
             ["material_id": material, "source_path": "/opt/ipde/sources_mats/\(relativePath)",
-             "target": "height", "code": "missing_target",
-             "reason": "No displacement map was found for this source set. Add a matching displacement PNG to this folder and scan again.",
+             "target": "height", "code": "not_published",
+             "reason": "Poly Haven does not publish displacement for this material. It is skipped for displacement training; available normal and roughness maps remain usable.",
              "crop_count": 1] as [String: Any]
         }
         var roughnessPlan = plan
@@ -356,7 +354,7 @@ final class DatasetManagementTests: XCTestCase {
         store.folderImport = try WorkbenchResult.decode(WorkbenchFolderImport.self, output: String(decoding: JSONSerialization.data(withJSONObject: [
             "folder_path": "/opt/ipde/sources_mats", "plan_path": "/tmp/preview.json", "plan_sha256": "proof",
             "index_sha256": "source-hash", "source_set_count": 231, "added_material_count": 231,
-            "duplicate_material_count": 0, "ignored_file_count": 18,
+            "duplicate_material_count": 0, "ignored_file_count": 18, "recovered_map_count": 2,
             "warnings": unusualPaths.map { "\($0): PNG content detected despite .txt extension; read as PNG." },
             "plans": ["2048": ["height": heightPlan, "roughness": roughnessPlan, "normal": plan]]]), as: UTF8.self))
         let decodedIssues = try XCTUnwrap(store.folderImport?.plans["2048"]?["height"]?.sourceIssues)
@@ -364,8 +362,9 @@ final class DatasetManagementTests: XCTestCase {
         XCTAssertEqual(decodedIssues.first?.materialId, missingSources.first?.0)
         XCTAssertEqual(decodedIssues.first?.sourcePath, "/opt/ipde/sources_mats/Fabric Pattern 05/fabric_pattern_05_col_01_2k.png")
         XCTAssertEqual(decodedIssues.first?.target, "height")
-        XCTAssertEqual(decodedIssues.first?.code, "missing_target")
+        XCTAssertEqual(decodedIssues.first?.code, "not_published")
         XCTAssertEqual(decodedIssues.first?.cropCount, 1)
+        XCTAssertEqual(store.folderImport?.recoveredMapCount, 2)
         try await snapshotSheet(NewMaterialDatasetSheet(store: store), name: "new-dataset", size: NSSize(width: 660, height: 600))
         try await snapshotSheet(MaterialDatasetInfoSheet(store: store), name: "dataset-info", size: NSSize(width: 700, height: 700))
         try await snapshotSheet(ImportDatasetFolderSheet(store: store), name: "folder-import", size: NSSize(width: 780, height: 700))
@@ -415,6 +414,7 @@ final class DatasetManagementTests: XCTestCase {
         store.folderImportSize = 512
         try await settled(store)
         XCTAssertEqual(store.folderImportSize, 512, "Scan completion cannot reset the user's choice")
+        XCTAssertNil(store.folderImport?.recoveredMapCount, "Older scan results must remain readable without a recovery count")
         store.commitFolderImport(size: store.folderImportSize)
         try await settled(store)
         XCTAssertNil(store.error)

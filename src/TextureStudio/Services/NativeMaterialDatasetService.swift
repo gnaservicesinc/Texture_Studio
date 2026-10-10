@@ -74,10 +74,26 @@ enum NativeMaterialDatasetService {
 
     /// nil means this service does not own the requested native command.
     static func run(arguments: [String], preparationPolicy: PreparationPolicy? = nil,
+                    sourceRecovery: NativeMaterialSourceRecovery? = nil,
                     onEvent: @escaping @Sendable (String) -> Void = { _ in }) async throws -> String? {
         guard let command = arguments.first, commands.contains(command) else { return nil }
         try Task.checkCancellation()
-        let operation = Task.detached(priority: .userInitiated) { try runSynchronously(arguments, preparationPolicy: preparationPolicy, onEvent: onEvent) }
+        let operation = Task.detached(priority: .userInitiated) {
+            let context = try recoveryContext(arguments)
+            let recovery = sourceRecovery ?? NativeMaterialSourceRecovery()
+            var attempts: [RecoveryAttempt] = []
+            for request in context.requests {
+                try Task.checkCancellation()
+                let result = try await recovery.recover(request) { message in
+                    if let event = try? jsonString(["event": "source_recovery_progress", "message": message]) { onEvent(event + "\n") }
+                }
+                attempts.append(RecoveryAttempt(request: request, result: result))
+            }
+            try Task.checkCancellation()
+            let revised = try attachRecoveredTargets(arguments, context: context)
+            let result = try runSynchronously(revised, preparationPolicy: preparationPolicy, onEvent: onEvent)
+            return try recoveryResponse(result, attempts: attempts)
+        }
         return try await withTaskCancellationHandler {
             let result = try await operation.value
             try Task.checkCancellation()
@@ -86,13 +102,7 @@ enum NativeMaterialDatasetService {
     }
     private static func runSynchronously(_ arguments: [String], preparationPolicy: PreparationPolicy?, onEvent: @Sendable (String) -> Void) throws -> String? {
         try Task.checkCancellation()
-        var options: [String: String] = [:]
-        var cursor = 1
-        while cursor < arguments.count {
-            if arguments[cursor] == "--automatic-validation" { options[arguments[cursor]] = "true"; cursor += 1; continue }
-            guard cursor + 1 < arguments.count, arguments[cursor].hasPrefix("--") else { throw StudioError("Invalid native dataset arguments.") }
-            options[arguments[cursor]] = arguments[cursor + 1]; cursor += 2
-        }
+        let options = try parsedOptions(arguments)
         guard let requested = options["--dataset"] else { throw StudioError("Choose a dataset folder.") }
         let command = arguments[0]
         let root = canonical(URL(fileURLWithPath: requested))
@@ -108,12 +118,14 @@ enum NativeMaterialDatasetService {
         }
         return try locked(root) {
             try Task.checkCancellation()
+            // Check the user's revision before our own inventory maintenance.
+            // Recovery may legitimately change source file statistics.
+            if command != "dataset", command != "create-dataset" { try checkIndex(root, expected: options["--expected-index-sha256"]) }
             var index = try object(root.appendingPathComponent("dataset.json"))
             try compactStoredRecords(root, index: index)
             if try sourceInventoryNeedsRefresh(root, index: index) { index = try refreshSourceIndex(root, index: index) }
             let records = try readRecords(root, index: index)
             if ["curate", "remove-missing"].contains(command), let lineage = index["native_size_preparation"] as? Object {
-                try checkIndex(root, expected: options["--expected-index-sha256"])
                 guard lineage["schema"] as? String == preparationSchema, let source = lineage["source_dataset_path"] as? String else { throw StudioError("Prepared dataset source lineage is invalid.") }
                 let original = canonical(URL(fileURLWithPath: source))
                 guard original != root else { throw StudioError("Prepared dataset source lineage is circular.") }
@@ -143,7 +155,6 @@ enum NativeMaterialDatasetService {
                 }
             }
             if command != "dataset", command != "create-dataset" {
-                try checkIndex(root, expected: options["--expected-index-sha256"])
                 guard index["native_size_preparation"] == nil else { throw StudioError("Open the original dataset before managing its information.") }
             }
             if command == "curate" { return try jsonString(curate(root, index: index, records: records, options: options)) }
@@ -199,6 +210,200 @@ enum NativeMaterialDatasetService {
             let refreshed = try object(root.appendingPathComponent("dataset.json"))
             return try jsonString(info(root, index: refreshed, records: readRecords(root, index: refreshed), options: options))
         }
+    }
+
+    private struct RecoveryContext: Sendable {
+        var requests: [NativeMaterialSourceRecovery.Request] = []
+        var original: URL?
+        var indexSHA256: String?
+        var reviewSHA256: String?
+    }
+    private struct RecoveryAttempt: Sendable {
+        let request: NativeMaterialSourceRecovery.Request
+        let result: NativeMaterialSourceRecovery.Result
+    }
+    private static func parsedOptions(_ arguments: [String]) throws -> [String: String] {
+        var options: [String: String] = [:], cursor = 1
+        while cursor < arguments.count {
+            if arguments[cursor] == "--automatic-validation" { options[arguments[cursor]] = "true"; cursor += 1; continue }
+            guard cursor + 1 < arguments.count, arguments[cursor].hasPrefix("--") else { throw StudioError("Invalid native dataset arguments.") }
+            options[arguments[cursor]] = arguments[cursor + 1]; cursor += 2
+        }
+        return options
+    }
+    /// Inspect and download before taking the manifest transaction lock or
+    /// capturing an import preview. The preview then binds the repaired files.
+    private static func recoveryContext(_ arguments: [String]) throws -> RecoveryContext {
+        let options = try parsedOptions(arguments), command = arguments[0]
+        guard ["scan-folder", "import-folder", "prepare-size"].contains(command),
+              !(command == "import-folder" && options["--plan"] != nil),
+              let requested = options["--dataset"] else { return RecoveryContext() }
+        let supplied = canonical(URL(fileURLWithPath: requested))
+        let initial = try locked(supplied) {
+            try checkIndex(supplied, expected: options["--expected-index-sha256"])
+            return try object(supplied.appendingPathComponent("dataset.json"))
+        }
+        let original: URL
+        if let lineage = initial["native_size_preparation"] as? Object {
+            guard command == "prepare-size", lineage["schema"] as? String == preparationSchema,
+                  let path = lineage["source_dataset_path"] as? String, path.hasPrefix("/") else { return RecoveryContext() }
+            original = canonical(URL(fileURLWithPath: path))
+            guard original != supplied else { throw StudioError("Native dataset has circular source lineage.") }
+        } else { original = supplied }
+        var context = RecoveryContext(original: original)
+        var files: [URL] = [], recorded: [NativeMaterialSourceRecovery.Request] = []
+        try locked(original) {
+            let index = try object(original.appendingPathComponent("dataset.json"))
+            context.indexSHA256 = try digest(original.appendingPathComponent("dataset.json"))
+            context.reviewSHA256 = try optionalDigest(original.appendingPathComponent(".material-size-reviews.json")) ?? hash(Data())
+            if let expected = options["--expected-review-sha256"], expected != context.reviewSHA256 { throw StudioError("Dataset reviews changed; reload before preparing native crops.") }
+            for record in try readRecords(original, index: index) {
+                if let selected = options["--material"], record.sample["material_id"] as? String != selected { continue }
+                for source in sources(record.sample) {
+                    guard let path = source["path"] as? String else { continue }
+                    let url = URL(fileURLWithPath: path)
+                    files.append(url)
+                    if !FileManager.default.fileExists(atPath: path),
+                       let (asset, suffix, resolution) = polyHavenName(url), let role = providerRole(suffix),
+                       let sha = source["file_sha256"] as? String {
+                        recorded.append(.init(asset: asset, resolution: resolution,
+                            target: suffix == "nor_dx" ? "normal_dx" : role, destination: url,
+                            width: source["width"] as? Int ?? 0, height: source["height"] as? Int ?? 0,
+                            expectedSHA256: sha, publishedRole: role == "input" && suffix.hasPrefix("col_") ? suffix : nil))
+                    }
+                }
+            }
+        }
+        if command != "prepare-size", let folder = options["--folder"] {
+            let url = canonical(URL(fileURLWithPath: folder))
+            if !FileManager.default.fileExists(atPath: url.appendingPathComponent("dataset.json").path) {
+                files += try inventory(url, dataset: original).compactMap { ($0.first as? String).map { URL(fileURLWithPath: $0) } }
+            }
+        }
+        var groups: [String: (asset: String, resolution: String, folder: URL, width: Int, height: Int, roles: Set<String>)] = [:]
+        for file in Set(files) {
+            guard let (asset, suffix, resolution) = polyHavenName(file), let role = providerRole(suffix),
+                  let header = try? NativePNG.inspect(file), let scale = Int(resolution.dropLast()) else { continue }
+            let nominal = scale * 1024, tolerance = max(2, Int(ceil(Double(nominal) * 0.02)))
+            // A provider label alone is insufficient evidence: small fixtures,
+            // resized copies and unrelated manual sets must not trigger downloads.
+            guard abs(header.width - nominal) <= tolerance, abs(header.height - nominal) <= tolerance else { continue }
+            let folder = file.deletingLastPathComponent(), key = folder.path + "|" + asset + "|" + resolution + "|\(header.width)x\(header.height)"
+            var group = groups[key] ?? (asset, resolution, folder, header.width, header.height, [])
+            group.roles.insert(role); groups[key] = group
+        }
+        var requests = Dictionary(recorded.map { ($0.destination.path, $0) }, uniquingKeysWith: { first, _ in first })
+        for key in groups.keys.sorted() {
+            let group = groups[key]!
+            for target in ["input", "height", "roughness", "normal"] where !group.roles.contains(target) {
+                let suffix = ["input": "diff", "height": "disp", "roughness": "rough", "normal": "nor_gl"][target]!
+                let destination = group.folder.appendingPathComponent("\(group.asset)_\(suffix)_\(group.resolution).png")
+                if requests[destination.path] == nil {
+                    requests[destination.path] = .init(asset: group.asset, resolution: group.resolution, target: target,
+                        destination: destination, width: group.width, height: group.height)
+                }
+            }
+        }
+        context.requests = requests.keys.sorted().map { requests[$0]! }
+        return context
+    }
+    private static func polyHavenName(_ file: URL) -> (String, String, String)? {
+        guard !file.lastPathComponent.lowercased().contains("-png_"), let (asset, suffix, resolution) = parsedProvider(file.lastPathComponent) else { return nil }
+        return (identifier(asset), suffix, resolution)
+    }
+    /// Add only absent roles. Previously recorded pixels and their reviews stay
+    /// authoritative; a download never replaces changed or competing originals.
+    private static func attachRecoveredTargets(_ arguments: [String], context: RecoveryContext) throws -> [String] {
+        guard let root = context.original, let snapshot = context.indexSHA256 else { return arguments }
+        let options = try parsedOptions(arguments)
+        return try locked(root) {
+            try Task.checkCancellation()
+            try checkIndex(root, expected: snapshot)
+            let reviewPath = root.appendingPathComponent(".material-size-reviews.json")
+            guard try optionalDigest(reviewPath) ?? hash(Data()) == context.reviewSHA256 else { throw StudioError("Dataset reviews changed during source recovery. Reload the dataset.") }
+            var index = try object(root.appendingPathComponent("dataset.json")), reviews = try optionalObject(reviewPath)
+            var updates: [(URL, Object)] = [], changedReviews = false
+            for record in try readRecords(root, index: index) {
+                if let selected = options["--material"], record.sample["material_id"] as? String != selected { continue }
+                var metadata = record.sample["map_metadata"] as? [String: Object] ?? [:]
+                guard let input = metadata["input"]?["source"] as? Object, let path = input["path"] as? String,
+                      let (asset, _, resolution) = polyHavenName(URL(fileURLWithPath: path)),
+                      let dimensions = record.sample["source_pixel_dimensions"] as? [Int], dimensions.count == 2 else { continue }
+                let folder = URL(fileURLWithPath: path).deletingLastPathComponent()
+                var additions: [String: Object] = [:]
+                for target in ["height", "roughness", "normal"] where metadata[target] == nil {
+                    let suffix = ["height": "disp", "roughness": "rough", "normal": "nor_gl"][target]!
+                    let url = folder.appendingPathComponent("\(asset)_\(suffix)_\(resolution).png")
+                    guard var source = try? sourceSummary(url), [source["width"] as? Int ?? 0, source["height"] as? Int ?? 0] == dimensions,
+                          target != "height" || source["sample_bits"] as? Int == 16,
+                          target != "normal" || [3, 4].contains(source["channels"] as? Int ?? 0) else { continue }
+                    source["path"] = canonical(url).path
+                    additions[target] = source
+                }
+                guard !additions.isEmpty else { continue }
+                guard sources(record.sample).allSatisfy({ source in
+                    guard let path = source["path"] as? String, let sha = source["file_sha256"] as? String else { return false }
+                    return (try? digest(URL(fileURLWithPath: path))) == sha
+                }) else { continue }
+                var sample = record.sample, maps = sample["maps"] as? [String: String] ?? [:]
+                for (role, summary) in additions {
+                    var source = summary; source["suffix"] = ["height": "disp", "roughness": "rough", "normal": "nor_gl"][role]
+                    source["resolution_label"] = resolution; source["source_family_id"] = asset; source["asset_family_id"] = asset
+                    let path = source["path"] as! String; maps[role] = path
+                    metadata[role] = ["source": source, "storage": "source_reference", "filename": path, "sample_sha256": source["file_sha256"]!, "sample_bits": source["sample_bits"]!, "channels": source["channels"]!, "encoding": "linear_data", "transforms": [Object](), "exact_source_crop": true]
+                }
+                sample["maps"] = maps; sample["map_metadata"] = metadata
+                sample["available_targets"] = ["height", "roughness", "normal"].filter { metadata[$0] != nil && ($0 != "height" || ((metadata[$0]?["source"] as? Object)?["sample_bits"] as? Int == 16)) }
+                let oldBinding = sourceBinding(record.sample), newBinding = sourceBinding(sample), id = sample["material_id"] as? String ?? ""
+                for key in reviews.keys where key.split(separator: ":", maxSplits: 1).last?.hasPrefix(id + "_") == true {
+                    guard var review = reviews[key] as? Object, review["source_binding_sha256"] as? String == oldBinding else { continue }
+                    review["source_binding_sha256"] = newBinding; reviews[key] = review; changedReviews = true
+                }
+                updates.append((record.path, sample))
+            }
+            guard !updates.isEmpty else { return arguments }
+            try Task.checkCancellation()
+            index["updated_utc"] = timestamp()
+            if changedReviews { updates.append((reviewPath, reviews)) }
+            try commit(root, updates: updates + [(root.appendingPathComponent("dataset.json"), index)])
+            var revised = arguments
+            func replace(_ option: String, with value: String) {
+                if let offset = revised.firstIndex(of: option), offset + 1 < revised.count { revised[offset + 1] = value }
+            }
+            if canonical(URL(fileURLWithPath: options["--dataset"] ?? "")) == root { replace("--expected-index-sha256", with: try digest(root.appendingPathComponent("dataset.json"))) }
+            if changedReviews { replace("--expected-review-sha256", with: try optionalDigest(reviewPath) ?? hash(Data())) }
+            return revised
+        }
+    }
+    private static func recoveryResponse(_ text: String?, attempts: [RecoveryAttempt]) throws -> String? {
+        guard let text, !attempts.isEmpty, var result = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? Object else { return text }
+        func annotate(_ value: Any) -> Any {
+            if let array = value as? [Any] { return array.map(annotate) }
+            guard var object = value as? Object else { return value }
+            if object["code"] as? String == "missing_target", let target = object["target"] as? String,
+               let path = object["source_path"] as? String, let (asset, _, resolution) = polyHavenName(URL(fileURLWithPath: path)),
+               let attempt = attempts.first(where: { $0.request.asset == asset && $0.request.resolution == resolution && $0.request.target == target && canonical($0.request.destination.deletingLastPathComponent()).path == canonical(URL(fileURLWithPath: path).deletingLastPathComponent()).path }) {
+                let label = target == "height" ? "displacement" : target
+                switch attempt.result {
+                case .notPublished:
+                    object["code"] = "not_published"
+                    object["reason"] = "Poly Haven does not publish a \(label) map for this source set. Excluded from \(label) training; its other maps remain usable."
+                case .failed(let reason):
+                    object["reason"] = "\(label.capitalized) is unavailable: \(reason) Other maps remain usable; recovery will retry on the next scan."
+                default: break
+                }
+            }
+            for key in object.keys where key != "reason" { object[key] = annotate(object[key]!) }
+            return object
+        }
+        result = annotate(result) as! Object
+        result["recovered_map_count"] = attempts.filter { if case .recovered = $0.result { return true }; return false }.count
+        result["recovered_sources"] = attempts.compactMap { attempt -> Object? in
+            guard case .recovered(let proof) = attempt.result else { return nil }
+            return ["source_path": proof.destination.path, "download_url": proof.downloadURL.absoluteString, "published_md5": proof.publishedMD5,
+                    "published_bytes": proof.publishedBytes, "sha256": proof.sha256, "crop_rectangle": proof.cropRectangle as Any? ?? NSNull()]
+        }
+        return try jsonString(result)
     }
 
     private static func info(_ root: URL, index: Object, records original: [Record], options: [String: String]) throws -> Object {
@@ -1198,6 +1403,10 @@ enum NativeMaterialDatasetService {
             if supplied != original {
                 let cached = try readRecords(supplied, index: current)
                 for record in cached {
+                    // Recovery can append a target without changing reviewed
+                    // pixels. Its rebound original review is authoritative.
+                    guard let sourceRecord = allRecords.first(where: { $0.sample["material_id"] as? String == record.sample["material_id"] as? String }),
+                          sourceBinding(sourceRecord.sample) == sourceBinding(record.sample) else { continue }
                     let key = "\(current["crop_size"] as? Int ?? size):\(record.sample["sample_id"] as? String ?? "")", review = currentReview(reviews, key: key, sample: record.sample)
                     if let snapshot = record.sample["source_review_snapshot"] as? Object, NSDictionary(dictionary: snapshot).isEqual(to: review) || review.isEmpty { reviews[key] = savedReview(record.sample) }
                 }
