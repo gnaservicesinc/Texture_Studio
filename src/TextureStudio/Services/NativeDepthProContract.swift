@@ -89,20 +89,24 @@ struct NativeDepthProRuntimeError: LocalizedError {
 final class NativeDepthProInputCache {
     let modelSHA256: String
     let directory: URL
+    let fallbackDirectories: [URL]
     private let modelURL: URL?
     private var service: NativeDepthProService?
     private let suppliedPrediction: ((CGImage) throws -> ModelDepthResult)?
     private(set) var generatedCount = 0
     private(set) var reusedCount = 0
     private(set) var remappedCount = 0
+    private(set) var legacyReusedCount = 0
 
-    init(modelURL: URL, directory: URL = NativeDepthProContract.cacheURL) throws {
+    init(modelURL: URL, directory: URL = NativeDepthProContract.cacheURL, fallbackDirectories: [URL] = []) throws {
         self.modelURL = modelURL; self.directory = directory
+        self.fallbackDirectories = fallbackDirectories.filter { $0.standardizedFileURL != directory.standardizedFileURL }
         modelSHA256 = try NativeDepthProService.modelIdentity(at: modelURL)
         suppliedPrediction = nil
     }
-    init(modelSHA256: String, directory: URL, predict: @escaping (CGImage) throws -> ModelDepthResult) {
+    init(modelSHA256: String, directory: URL, fallbackDirectories: [URL] = [], predict: @escaping (CGImage) throws -> ModelDepthResult) {
         self.modelSHA256 = modelSHA256; self.directory = directory
+        self.fallbackDirectories = fallbackDirectories.filter { $0.standardizedFileURL != directory.standardizedFileURL }
         modelURL = nil; suppliedPrediction = predict
     }
 
@@ -117,9 +121,9 @@ final class NativeDepthProInputCache {
                     checkCancellation: () throws -> Void = { try Task.checkCancellation() }) throws -> Bool {
         try checkCancellation()
         let original = location(sourceSHA256: fromSourceSHA256, width: width, height: height)
-        guard FileManager.default.fileExists(atPath: original.url.path) else { return false }
         do {
-            let cached = try cachedEntry(at: original.url, binding: original.binding, width: width, height: height)
+            guard let cached = try reusableEntry(at: original.url, binding: original.binding, width: width, height: height,
+                                                 checkCancellation: checkCancellation) else { return false }
             if !horizontal, !vertical, fromSourceSHA256 == toSourceSHA256 { return true }
             let input = NativeTensor.floats(try NativeDepthProContract.flipped(cached.inputValues,
                 width: width, height: height, horizontal: horizontal, vertical: vertical,
@@ -138,6 +142,7 @@ final class NativeDepthProInputCache {
             metadata["paired_flip_vertical"] = String(vertical)
             let encoded = try NativeSafetensors.encoded(tensors: ["input": input, "depth_meters": metric], metadata: metadata)
             try checkCancellation()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try encoded.write(to: destination.url, options: .atomic)
             remappedCount += 1
             return true
@@ -158,6 +163,35 @@ final class NativeDepthProInputCache {
         let inputValues: [Float], metricValues: [Float]
         let metricWidth: Int, metricHeight: Int
         let metadata: [String: String]
+    }
+
+    /// Older runs used a shared cache. Validate a requested entry before reuse,
+    /// then link it into this dataset when possible without copying the corpus.
+    /// Across volumes it remains a read-only fallback; new predictions are local.
+    private func reusableEntry(at destination: URL, binding: String, width: Int, height: Int,
+                               checkCancellation: () throws -> Void) throws -> CachedEntry? {
+        if FileManager.default.fileExists(atPath: destination.path) {
+            return try cachedEntry(at: destination, binding: binding, width: width, height: height)
+        }
+        for fallback in fallbackDirectories {
+            let source = fallback.appendingPathComponent(destination.lastPathComponent)
+            guard FileManager.default.fileExists(atPath: source.path) else { continue }
+            let cached = try cachedEntry(at: source, binding: binding, width: width, height: height)
+            try checkCancellation()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            do { try FileManager.default.linkItem(at: source, to: destination) }
+            catch {
+                // Another run may already have published this identity.
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    return try cachedEntry(at: destination, binding: binding, width: width, height: height)
+                }
+                // A hard link may be unavailable across volumes or on the
+                // dataset filesystem. The verified legacy entry is still usable.
+            }
+            legacyReusedCount += 1
+            return cached
+        }
+        return nil
     }
 
     private func cachedEntry(at url: URL, binding: String, width: Int, height: Int) throws -> CachedEntry {
@@ -197,16 +231,16 @@ final class NativeDepthProInputCache {
         }
         let entry = location(sourceSHA256: expectedSHA256, width: width, height: height)
         let binding = entry.binding, destination = entry.url
-        if FileManager.default.fileExists(atPath: destination.path) {
-          do {
-            let cached = try cachedEntry(at: destination, binding: binding, width: width, height: height)
+        do {
+            if let cached = try reusableEntry(at: destination, binding: binding, width: width, height: height,
+                                              checkCancellation: checkCancellation) {
             reusedCount += 1
             return cached.inputValues
-          } catch {
+            }
+        } catch {
             try checkCancellation()
             if error is CancellationError { throw error }
             throw NativeDepthProRuntimeError(underlying: error)
-          }
         }
         guard let source = CGImageSourceCreateWithData(bytes as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil),

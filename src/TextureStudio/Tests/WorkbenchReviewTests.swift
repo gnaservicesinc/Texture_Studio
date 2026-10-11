@@ -80,19 +80,22 @@ final class WorkbenchReviewTests: XCTestCase {
         let output = root.appendingPathComponent("height.exr")
         try FloatEXRWriter.write(depth.image, to: output, context: context, color: false)
         try FloatEXRWriter.verifyChannelPrecision(at: output, expected: .float32)
-        // Verify importing a scalar Y channel as well as the writer's R channel.
+        // Verify importing the writer's scalar Y channel and legacy R channel.
         // Both keep the same Float32 scanline storage.
         var bytes = try Data(contentsOf: output)
-        let channel = try XCTUnwrap(bytes.range(of: Data([0x52, 0, 2, 0, 0, 0])))
-        bytes[channel.lowerBound] = 0x59
+        let channel = try XCTUnwrap(bytes.range(of: Data([0x59, 0, 2, 0, 0, 0])))
+        bytes[channel.lowerBound] = 0x52
         let workerOutput = root.appendingPathComponent("worker-height.exr")
         try bytes.write(to: workerOutput)
-        let imported = try XCTUnwrap(CIImage(contentsOf: workerOutput, options: [.colorSpace: NSNull()]))
         var readback = [Float](repeating: 0, count: values.count)
-        readback.withUnsafeMutableBytes {
-            context.render(imported, toBitmap: $0.baseAddress!, rowBytes: 3 * 4, bounds: imported.extent, format: .Rf, colorSpace: nil)
+        for imageURL in [output, workerOutput] {
+            let imported = try XCTUnwrap(CIImage(contentsOf: imageURL, options: [.colorSpace: NSNull()]))
+            readback.withUnsafeMutableBytes {
+                context.render(imported, toBitmap: $0.baseAddress!, rowBytes: 3 * 4, bounds: imported.extent, format: .Rf, colorSpace: nil)
+            }
+            XCTAssertEqual(readback.map(\.bitPattern), values.map(\.bitPattern),
+                "Y and legacy R EXRs must keep native rows and signed/out-of-range height samples")
         }
-        XCTAssertEqual(readback, values, "EXR readback must keep native rows and signed/out-of-range height samples")
         let materialized = try TextureDepth(width: 3, height: 2, values: readback, sourceLabel: "Worker output", interpretation: .surfaceHeight)
         var final = [Float](repeating: 0, count: values.count)
         final.withUnsafeMutableBytes {

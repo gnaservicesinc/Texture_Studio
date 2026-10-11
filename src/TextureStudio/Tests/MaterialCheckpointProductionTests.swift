@@ -163,7 +163,7 @@ final class MaterialCheckpointProductionTests: XCTestCase {
             cursor += count
         }
         let list = try XCTUnwrap(channels)
-        XCTAssertEqual(list.prefix(2), Data([0x52, 0]))
+        XCTAssertEqual(list.prefix(2), Data([0x59, 0]))
         XCTAssertEqual(list.count, 19)
         guard list.count >= 6 else { throw StudioError("Truncated EXR channel declaration.") }
         let storage = list.withUnsafeBytes { UInt32(littleEndian: $0.loadUnaligned(fromByteOffset: 2, as: UInt32.self)) }

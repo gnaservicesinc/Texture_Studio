@@ -1501,6 +1501,107 @@ final class NativeMaterialDatasetTests: XCTestCase {
         catch { XCTAssertTrue(error.localizedDescription.contains("retired material schema")) }
         XCTAssertEqual(try Data(contentsOf: input), inputBytes); XCTAssertEqual(try Data(contentsOf: height), heightBytes)
     }
+    func testPreparedCleanupAcceptsLateFinderMetadataAndPreservesUnrelatedData() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let prepared = root.appendingPathComponent("prepared"), child = prepared.appendingPathComponent("samples/crop")
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        try Data("owned manifest".utf8).write(to: prepared.appendingPathComponent("dataset.json"))
+        try Data("owned crop".utf8).write(to: child.appendingPathComponent("height.png"))
+        let finder = Data([0, 0, 0, 1, 0x42, 0x75, 0x64, 0x31] + [UInt8](repeating: 0, count: 16))
+        try finder.write(to: child.appendingPathComponent(".DS_Store"))
+        try NativeMaterialDatasetService.removePreparedTrainingDirectory(prepared,
+            ownedFiles: ["dataset.json", "samples/crop/height.png"], ownedDirectories: ["samples", "samples/crop"],
+            beforeFinalRemoval: { try finder.write(to: prepared.appendingPathComponent(".DS_Store")) })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.path))
+        try FileManager.default.createDirectory(at: prepared, withIntermediateDirectories: true)
+        let unrelated = Data("User notes".utf8)
+        XCTAssertThrowsError(try NativeMaterialDatasetService.removePreparedTrainingDirectory(prepared, ownedFiles: [], ownedDirectories: [],
+            beforeFinalRemoval: { try unrelated.write(to: prepared.appendingPathComponent(".DS_Store")) }))
+        XCTAssertEqual(try Data(contentsOf: prepared.appendingPathComponent(".DS_Store")), unrelated)
+    }
+
+    func testCleanupResumesOwnedReceiptButDoesNotRemoveReusableDatasetCaches() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let original = root.appendingPathComponent("dataset"), prepared = original.appendingPathComponent(".training-data/256-recoverable")
+        let cache = original.appendingPathComponent(".training-data/depthpro-inputs")
+        try FileManager.default.createDirectory(at: prepared, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        let bytes = Data("Retained numeric cache".utf8), cached = cache.appendingPathComponent("fixture.safetensors")
+        try bytes.write(to: cached)
+        let receipt: [String: Any] = ["schema": "texture-studio-native-crop-cleanup-v2", "source_dataset_path": original.path,
+            "prepared_dataset_path": prepared.path, "prepared_index_sha256": String(repeating: "a", count: 64),
+            "owned_files_sha256": ["dataset.json": String(repeating: "a", count: 64),
+                ".material-workbench.lock": NativeMaterialTrainer.checksum(Data())], "owned_directories": [String]()]
+        try JSONSerialization.data(withJSONObject: receipt).write(to: prepared.appendingPathComponent(".native-crop-cleanup.json"))
+        let finder = Data([0, 0, 0, 1, 0x42, 0x75, 0x64, 0x31] + [UInt8](repeating: 0, count: 16))
+        try finder.write(to: prepared.appendingPathComponent(".DS_Store"))
+        let result = try await output(["cleanup-size", "--dataset", prepared.path])
+        XCTAssertEqual(result["removed"] as? Bool, true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.path))
+        XCTAssertEqual(try Data(contentsOf: cached), bytes)
+        let unowned = original.appendingPathComponent(".training-data/unowned")
+        try FileManager.default.createDirectory(at: unowned, withIntermediateDirectories: true)
+        var wrongReceipt = receipt; wrongReceipt["prepared_dataset_path"] = prepared.path
+        try JSONSerialization.data(withJSONObject: wrongReceipt).write(to: unowned.appendingPathComponent(".native-crop-cleanup.json"))
+        do { _ = try await output(["cleanup-size", "--dataset", unowned.path]); XCTFail("Cleanup receipt must match its exact path") }
+        catch { XCTAssertTrue(FileManager.default.fileExists(atPath: unowned.path)) }
+    }
+
+    func testPartialChildCleanupResumesWithoutSampleManifestAndRejectsChangedOrForeignData() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        for failure in ["foreign", "permission"] {
+            let original = root.appendingPathComponent("dataset-" + failure), sources = root.appendingPathComponent("sources-" + failure)
+            try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: false)
+            let input = sources.appendingPathComponent("diffuse.png"), height = sources.appendingPathComponent("height.png")
+            let inputBytes = try fixturePNG(width: 512, height: 512, bits: 8, channels: 3)
+            let heightBytes = try fixturePNG(width: 512, height: 512, bits: 16, channels: 1)
+            try inputBytes.write(to: input); try heightBytes.write(to: height)
+            _ = try await output(["create-dataset", "--dataset", original.path, "--name", "Recoverable cleanup", "--training-size", "256"])
+            _ = try await output(["add-material", "--dataset", original.path, "--name", "wall", "--input", input.path, "--height", height.path])
+            let preparedInfo = try await output(["prepare-size", "--dataset", original.path, "--size", "256", "--target", "height"])
+            let prepared = URL(fileURLWithPath: try XCTUnwrap(preparedInfo["dataset_path"] as? String))
+            let sample = try XCTUnwrap(NativeMaterialDatasetService.trainingSamples(datasetURL: prepared, size: 256, target: "height").first)
+            let child = sample.targetURL.deletingLastPathComponent(), foreign = child.appendingPathComponent("user-notes.txt")
+            let foreignBytes = Data("Keep these user notes".utf8)
+            let indexURL = prepared.appendingPathComponent("dataset.json"), indexBytes = try Data(contentsOf: indexURL)
+            do {
+                _ = try NativeMaterialDatasetService.cleanup(prepared, beforeDirectoryRemoval: { directory in
+                    guard directory == child else { return }
+                    if failure == "foreign" { try foreignBytes.write(to: foreign) }
+                    else { throw POSIXError(.EACCES) }
+                })
+                XCTFail("Injected child cleanup failure must be reported")
+            } catch {
+                if failure == "foreign" { XCTAssertTrue(error.localizedDescription.contains("unrelated files")) }
+                else { XCTAssertEqual((error as? POSIXError)?.code, .EACCES) }
+            }
+            XCTAssertTrue(FileManager.default.fileExists(atPath: indexURL.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: child.appendingPathComponent("sample.json").path),
+                           "Recovery must succeed after a child sample manifest has already been deleted")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.appendingPathComponent(".native-crop-cleanup.json").path))
+            if failure == "foreign" {
+                XCTAssertEqual(try Data(contentsOf: foreign), foreignBytes)
+                do { _ = try await output(["cleanup-size", "--dataset", prepared.path]); XCTFail("Foreign contents must prevent recovery removal") }
+                catch { XCTAssertEqual(try Data(contentsOf: foreign), foreignBytes) }
+                try FileManager.default.removeItem(at: foreign)
+                try Data("Changed index".utf8).write(to: indexURL)
+                do { _ = try await output(["cleanup-size", "--dataset", prepared.path]); XCTFail("Remaining owned files must match their receipt hashes") }
+                catch { XCTAssertTrue(error.localizedDescription.contains("contents changed")) }
+                try indexBytes.write(to: indexURL)
+                let link = child.appendingPathComponent("unrelated-link")
+                try FileManager.default.createSymbolicLink(at: link, withDestinationURL: input)
+                do { _ = try await output(["cleanup-size", "--dataset", prepared.path]); XCTFail("Recovery must retain symbolic-link protection") }
+                catch { XCTAssertTrue(error.localizedDescription.contains("symbolic link")) }
+                try FileManager.default.removeItem(at: link)
+            }
+            let recovered = try await output(["cleanup-size", "--dataset", prepared.path])
+            XCTAssertEqual(recovered["removed"] as? Bool, true)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.path))
+            XCTAssertEqual(try Data(contentsOf: input), inputBytes)
+            XCTAssertEqual(try Data(contentsOf: height), heightBytes)
+        }
+    }
+
     func testNativeImportPrepareCleanupAndMissingSourceLifecycleKeepsOriginalCodes() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let sources = root.appendingPathComponent("Walls"), dataset = root.appendingPathComponent("Dataset")

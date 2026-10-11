@@ -301,6 +301,7 @@ final class EngineTests: XCTestCase {
         try FloatEXRWriter.write(image,to:url,context:context,color:true)
         try FloatEXRWriter.verifyChannelPrecision(at:url,expected:.float32)
         XCTAssertEqual(try FloatEXRWriter.channelTypes(Data(contentsOf:url)),[2,2,2])
+        XCTAssertEqual(try FloatEXRWriter.channelNames(Data(contentsOf:url)),["B","G","R"])
         let restored = try XCTUnwrap(CIImage(contentsOf:url,options:[.colorSpace:NSNull()]))
         var samples = [Float](repeating:0,count:16)
         samples.withUnsafeMutableBytes { context.render(restored,toBitmap:$0.baseAddress!,rowBytes:32,
@@ -309,6 +310,16 @@ final class EngineTests: XCTestCase {
         let grayURL = folder.appendingPathComponent("gray.exr")
         try FloatEXRWriter.write(image,to:grayURL,context:context,color:false)
         XCTAssertEqual(try FloatEXRWriter.channelTypes(Data(contentsOf:grayURL)),[2])
+        XCTAssertEqual(try FloatEXRWriter.channelNames(Data(contentsOf:grayURL)),["Y"])
+        let gray = try XCTUnwrap(CIImage(contentsOf:grayURL,options:[.colorSpace:NSNull()]))
+        samples.withUnsafeMutableBytes { context.render(gray,toBitmap:$0.baseAddress!,rowBytes:32,
+            bounds:gray.extent,format:.RGBAf,colorSpace:nil) }
+        for pixel in 0..<4 {
+            for component in 0..<3 {
+                XCTAssertEqual(samples[pixel*4+component].bitPattern,values[pixel*4].bitPattern,
+                    "Grayscale pixel \(pixel), component \(component)")
+            }
+        }
     }
 
     func testAppleHalfEXRAndFullEngineFlatMaterial() async throws {

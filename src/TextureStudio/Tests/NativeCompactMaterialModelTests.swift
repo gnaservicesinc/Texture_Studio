@@ -10,6 +10,7 @@ final class NativeCompactMaterialModelTests: XCTestCase {
         let rgb = try NativeCompactMaterialModel(target: "height", width: 16, seed: 19)
         XCTAssertEqual(model.architectureID, NativeCompactMaterialModel.depthProRefinerArchitecture)
         XCTAssertEqual(model.modelFamily, .depthProHeightRefiner)
+        XCTAssertEqual(model.configuration["convolution_padding"] as? String, NativeCompactMaterialModel.reflectionConvolutionPadding)
         XCTAssertEqual(model.inputChannels, 1); XCTAssertEqual(model.outputChannels, 1)
         XCTAssertEqual(model.weights["input.weight"]?.shape, [16, 1, 3, 3])
         XCTAssertEqual(model.baseSHA256, repeated.baseSHA256)
@@ -34,6 +35,45 @@ final class NativeCompactMaterialModelTests: XCTestCase {
         }
         let rgbSnapshot = try NativeSafetensors(bytes: NativeSafetensors.encoded(tensors: rgb.weights, metadata: [:]))
         XCTAssertThrowsError(try NativeCompactMaterialModel.validateCheckpoint(rgbSnapshot, configuration: configuration))
+        var unsupported = configuration; unsupported["convolution_padding"] = "unknown"
+        XCTAssertThrowsError(try NativeCompactMaterialModel.validateCheckpoint(snapshot, configuration: unsupported))
+        unsupported["convolution_padding"] = 1
+        XCTAssertThrowsError(try NativeCompactMaterialModel.validateCheckpoint(snapshot, configuration: unsupported))
+        var legacy = configuration; legacy.removeValue(forKey: "convolution_padding")
+        XCTAssertNoThrow(try NativeCompactMaterialModel.validateCheckpoint(snapshot, configuration: legacy))
+    }
+
+    func testReflectionKeepsConstantFieldFreeOfFrameAndLegacyCheckpointRetainsZeroBorders() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        try await Task.detached {
+            let model = try NativeCompactMaterialModel(target: "height", width: 16, seed: 23, family: .depthProHeightRefiner)
+            let input = [Float](repeating: 0.5, count: 64 * 64)
+            let reflected = try model.predict(rgb: input, width: 64, height: 64, target: "height")
+            XCTAssertLessThan(try XCTUnwrap(reflected.values.max()) - XCTUnwrap(reflected.values.min()), 0.00002,
+                "A spatially constant field must stay constant through reflection convolutions at every scale")
+            model.configuration.removeValue(forKey: "convolution_padding")
+            let implicitZero = try model.predict(rgb: input, width: 64, height: 64, target: "height")
+            XCTAssertGreaterThan(try XCTUnwrap(implicitZero.values.max()) - XCTUnwrap(implicitZero.values.min()), 0.0001)
+            model.configuration["convolution_padding"] = NativeCompactMaterialModel.legacyConvolutionPadding
+            let explicitZero = try model.predict(rgb: input, width: 64, height: 64, target: "height")
+            XCTAssertEqual(implicitZero.values.map(\.bitPattern), explicitZero.values.map(\.bitPattern))
+            model.configuration["depthpro_model_sha256"] = String(repeating: "a", count: 64)
+            var legacy = try model.checkpointConfiguration(size: 64, step: 1)
+            legacy.removeValue(forKey: "convolution_padding")
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let checkpoint = directory.appendingPathComponent("legacy-model.safetensors")
+            try NativeSafetensors.write(tensors: model.weights,
+                metadata: ["configuration": NativeMaterialTransfer.json(legacy)], to: checkpoint)
+            let original = try Data(contentsOf: checkpoint)
+            let loaded = try NativeCompactMaterialModel.load(checkpointURL: checkpoint, target: "height", width: 16, family: .depthProHeightRefiner)
+            let reloaded = try loaded.predict(rgb: input, width: 64, height: 64, target: "height")
+            XCTAssertEqual(reloaded.values.map(\.bitPattern), implicitZero.values.map(\.bitPattern))
+            XCTAssertEqual(try loaded.checkpointConfiguration(size: 64, step: 2)["convolution_padding"] as? String,
+                NativeCompactMaterialModel.legacyConvolutionPadding)
+            XCTAssertEqual(try Data(contentsOf: checkpoint), original)
+        }.value
     }
 
     func testDepthProRefinerPredictsAndDifferentiatesOneScalarChannel() async throws {
@@ -147,6 +187,7 @@ final class NativeCompactMaterialModelTests: XCTestCase {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         try await Task.detached {
             let model = try NativeCompactMaterialModel(target: "height", width: 16, seed: 23)
+            XCTAssertEqual(model.configuration["convolution_padding"] as? String, NativeCompactMaterialModel.reflectionConvolutionPadding)
             let before = model.weights, rgb = Self.rgb(width: 64, height: 64)
             let reference = (0..<64 * 64).map { Float(($0 * 11) % 251) / 251 }
             let program = try model.program(width: 64, height: 64, target: "height")
@@ -169,6 +210,16 @@ final class NativeCompactMaterialModelTests: XCTestCase {
             }
             let finiteDifference = try (loss(shift: epsilon) - loss(shift: -epsilon)) / (2 * epsilon)
             XCTAssertEqual(try evaluated.gradients["output.bias"]!.floatValues()[0], finiteDifference, accuracy: 0.005)
+            func inputWeightLoss(shift: Float) throws -> Float {
+                var shifted = before
+                var values = try before["input.weight"]!.floatValues()
+                values[0] += shift
+                shifted["input.weight"] = .floats(values, shape: before["input.weight"]!.shape)
+                return try XCTUnwrap(program.execute(rgb: rgb, weights: shifted, reference: reference).loss)
+            }
+            let inputFiniteDifference = try (inputWeightLoss(shift: epsilon) - inputWeightLoss(shift: -epsilon)) / (2 * epsilon)
+            XCTAssertEqual(try evaluated.gradients["input.weight"]!.floatValues()[0], inputFiniteDifference, accuracy: 0.005,
+                "Autodiff must accumulate gradients through the reflected borders in downstream convolutions")
             let update = try NativeMaterialOptimizer.apply(gradients: evaluated.gradients, weights: before, state: [:],
                 learningRate: 1e-3, step: 1, configuration: .init())
             XCTAssertEqual(Set(update.weights.keys), Set(before.keys))

@@ -11,7 +11,9 @@ enum FloatEXRWriter {
         guard image.extent.origin == .zero, width > 0, height > 0, width <= 8192, height <= 8192 else {
             throw TextureError.processing("Invalid EXR dimensions.")
         }
-        let channels = color ? ["B","G","R"] : ["R"]
+        // A lone Y channel declares grayscale luminance. A lone R channel is
+        // interpreted as red color by OpenEXR consumers such as GIMP.
+        let channels = color ? ["B","G","R"] : ["Y"]
         let channelCount = channels.count
         let bytesPerScanline = width * channelCount * 4
         var header = Data()
@@ -102,6 +104,14 @@ enum FloatEXRWriter {
     }
 
     static func channelTypes(_ data: Data) throws -> [UInt32] {
+        try channelDeclarations(data).map(\.type)
+    }
+
+    static func channelNames(_ data: Data) throws -> [String] {
+        try channelDeclarations(data).map(\.name)
+    }
+
+    private static func channelDeclarations(_ data: Data) throws -> [(name: String, type: UInt32)] {
         var reader = HeaderReader(data:data)
         guard try reader.u32() == 20_000_630 else { throw TextureError.processing("Not an OpenEXR file.") }
         _ = try reader.u32()
@@ -113,10 +123,11 @@ enum FloatEXRWriter {
             let end = reader.offset + size
             guard end <= data.count else { throw TextureError.processing("Incomplete EXR header.") }
             if name == "channels", type == "chlist" {
-                var result = [UInt32]()
+                var result = [(name: String, type: UInt32)]()
                 while reader.offset < end {
-                    if try reader.string().isEmpty { break }
-                    result.append(try reader.u32()); reader.offset += 12
+                    let name = try reader.string()
+                    if name.isEmpty { break }
+                    result.append((name, try reader.u32())); reader.offset += 12
                 }
                 return result
             }

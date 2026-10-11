@@ -98,6 +98,119 @@ final class NativeMaterialCropAugmentationTests: XCTestCase {
         XCTAssertThrowsError(try NativeMaterialCropAugmentation.spunCenter(source: source, expectedSHA256: sha, size: 8, degrees: 45), "No introduced border pixels or padding")
     }
 
+    func testArbitrarySpinPreservesAnalyticHeightRampAndPairedColorAtBothPrecisions() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        for bits in [8, 16] {
+            let slopeX = bits == 8 ? 7 : 1200, slopeY = bits == 8 ? 3 : 400
+            let base = bits == 8 ? 40 : 7000
+            let ramp = (0..<144).map { base + ($0 % 12) * slopeX + ($0 / 12) * slopeY }
+            let height = png(width: 12, height: 12, channels: 1, codes: ramp, bits: bits)
+            let diffuse = png(width: 12, height: 12, channels: 3, codes: ramp.flatMap { [$0, $0, $0] }, bits: bits)
+            let heightURL = root.appendingPathComponent("height-\(bits).png"), diffuseURL = root.appendingPathComponent("diffuse-\(bits).png")
+            let heightBytes = try height.encoded(), diffuseBytes = try diffuse.encoded()
+            try heightBytes.write(to: heightURL); try diffuseBytes.write(to: diffuseURL)
+            let rotated = try NativeMaterialCropAugmentation.spunCenter(source: heightURL,
+                expectedSHA256: NativeMaterialTrainer.checksum(heightBytes), size: 4, degrees: 33)
+            let paired = try NativeMaterialCropAugmentation.spunCenter(source: diffuseURL,
+                expectedSHA256: NativeMaterialTrainer.checksum(diffuseBytes), size: 4, degrees: 33)
+            let actual = codes(rotated), rgb = codes(paired)
+            // A bilinear sampler must preserve a continuous affine field; a
+            // nearest-pixel sampler cannot reproduce its fractional positions.
+            let angle = 33.0 * .pi / 180
+            for y in 0..<4 { for x in 0..<4 {
+                let dx = Double(x) - 1.5, dy = Double(y) - 1.5
+                let sourceX = cos(angle) * dx + sin(angle) * dy + 5.5
+                let sourceY = -sin(angle) * dx + cos(angle) * dy + 5.5
+                let analytic = Double(base) + Double(slopeX) * sourceX + Double(slopeY) * sourceY
+                XCTAssertEqual(actual[y * 4 + x], Int(analytic.rounded()))
+                XCTAssertEqual(Array(rgb[(y * 4 + x) * 3..<(y * 4 + x + 1) * 3]), Array(repeating: actual[y * 4 + x], count: 3))
+            } }
+            XCTAssertEqual(rotated.header.bits, bits); XCTAssertEqual(paired.header.bits, bits)
+            XCTAssertEqual(try Data(contentsOf: heightURL), heightBytes)
+            XCTAssertEqual(try Data(contentsOf: diffuseURL), diffuseBytes)
+        }
+    }
+
+    func testArbitrarySpinInterpolatesHighContrastEdgeWithoutOvershoot() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("edge.png")
+        let image = png(width: 12, height: 12, channels: 1, codes: (0..<144).map { $0 % 12 < 6 ? 0 : 65535 })
+        let bytes = try image.encoded(); try bytes.write(to: source)
+        let spun = try NativeMaterialCropAugmentation.spunCenter(source: source,
+            expectedSHA256: NativeMaterialTrainer.checksum(bytes), size: 6, degrees: 15)
+        let values = codes(spun)
+        XCTAssertTrue(values.contains(0)); XCTAssertTrue(values.contains(65535))
+        XCTAssertTrue(values.contains { $0 > 0 && $0 < 65535 }, "Rotated boundary pixels must blend instead of snapping to one side")
+        XCTAssertTrue(values.allSatisfy { (0...65535).contains($0) })
+        // The source's unit step has this fractional coverage at output (2, 3).
+        let sourceX = cos(.pi / 12) * -0.5 + sin(.pi / 12) * 0.5 + 5.5
+        XCTAssertEqual(values[3 * 6 + 2], Int(((sourceX - 5) * 65535).rounded()))
+    }
+
+    func testSpunNormalInterpolatesRotatesAndRenormalizesVectors() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("normal.png")
+        let image = png(width: 12, height: 12, channels: 3,
+            codes: (0..<144).flatMap { $0 % 12 < 6 ? [65535, 32768, 32768] : [32768, 65535, 32768] })
+        let bytes = try image.encoded(); try bytes.write(to: source)
+        let spun = try NativeMaterialCropAugmentation.spunCenter(source: source,
+            expectedSHA256: NativeMaterialTrainer.checksum(bytes), size: 6, degrees: 30, normal: true)
+        let values = codes(spun).map { Double($0) / 65535 * 2 - 1 }
+        for pixel in 0..<36 {
+            let offset = pixel * 3
+            let length = sqrt(values[offset] * values[offset] + values[offset + 1] * values[offset + 1] + values[offset + 2] * values[offset + 2])
+            XCTAssertEqual(length, 1, accuracy: 0.00004)
+        }
+        let offset = (3 * 6 + 2) * 3, angle = Double.pi / 6
+        let fraction = cos(angle) * -0.5 + sin(angle) * 0.5 + 0.5
+        let zeroCode = 1.0 / 65535
+        let nx = (1 - fraction) + fraction * zeroCode, ny = (1 - fraction) * zeroCode + fraction
+        let length = sqrt(nx * nx + ny * ny + zeroCode * zeroCode)
+        XCTAssertEqual(values[offset], (cos(angle) * nx + sin(angle) * ny) / length, accuracy: 0.00002)
+        XCTAssertEqual(values[offset + 1], (-sin(angle) * nx + cos(angle) * ny) / length, accuracy: 0.00002)
+        XCTAssertEqual(try Data(contentsOf: source), bytes)
+    }
+
+    func testRetainedCedarRotationExportsCorrected1024WithoutChangingSourcesWhenRequested() throws {
+        guard let outputPath = ProcessInfo.processInfo.environment["TEXTURE_STUDIO_ROTATION_CHECK_OUTPUT"], !outputPath.isEmpty else {
+            throw XCTSkip("Set TEXTURE_STUDIO_ROTATION_CHECK_OUTPUT to export the retained cedar rotation spot check.")
+        }
+        let folder = URL(fileURLWithPath: "/opt/ipde/sources_mats/japanese_cedar_planks")
+        let heightSource = folder.appendingPathComponent("japanese_cedar_planks_disp_2k.png")
+        let diffuseSource = folder.appendingPathComponent("japanese_cedar_planks_diff_2k.png")
+        guard FileManager.default.fileExists(atPath: heightSource.path), FileManager.default.fileExists(atPath: diffuseSource.path) else {
+            throw XCTSkip("The optional retained public cedar fixture is unavailable.")
+        }
+        let output = URL(fileURLWithPath: outputPath)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let heightBytes = try Data(contentsOf: heightSource), diffuseBytes = try Data(contentsOf: diffuseSource)
+        let heightSHA = NativeMaterialTrainer.checksum(heightBytes), diffuseSHA = NativeMaterialTrainer.checksum(diffuseBytes)
+        let corrected = try NativeMaterialCropAugmentation.spunCenter(source: heightSource,
+            expectedSHA256: heightSHA, size: 1024, degrees: 174)
+        let paired = try NativeMaterialCropAugmentation.spunCenter(source: diffuseSource,
+            expectedSHA256: diffuseSHA, size: 1024, degrees: 174)
+        XCTAssertEqual(corrected.header.width, 1024); XCTAssertEqual(corrected.header.height, 1024)
+        XCTAssertEqual(corrected.header.bits, 16); XCTAssertEqual(corrected.header.channels, 1)
+        XCTAssertEqual(paired.header.width, 1024); XCTAssertEqual(paired.header.height, 1024)
+        let values = codes(corrected), minimum = try XCTUnwrap(values.min()), maximum = try XCTUnwrap(values.max())
+        XCTAssertGreaterThan(maximum, minimum)
+        XCTAssertGreaterThanOrEqual(minimum, 0); XCTAssertLessThanOrEqual(maximum, 65535)
+        let heightOutput = output.appendingPathComponent("cedar-height-bilinear-174deg-1024.png")
+        let diffuseOutput = output.appendingPathComponent("cedar-diffuse-bilinear-174deg-1024.png")
+        try corrected.encoded().write(to: heightOutput, options: .atomic)
+        try paired.encoded().write(to: diffuseOutput, options: .atomic)
+        let report: [String: Any] = ["center_spin_sampling": NativeMaterialCropAugmentation.centerSpinSampling,
+            "degrees": 174, "width": 1024, "height": 1024, "height_bits": corrected.header.bits,
+            "height_source": heightSource.path, "height_source_sha256": heightSHA,
+            "diffuse_source": diffuseSource.path, "diffuse_source_sha256": diffuseSHA,
+            "height_output": heightOutput.path, "diffuse_output": diffuseOutput.path,
+            "minimum_height_code": minimum, "maximum_height_code": maximum, "original_sources_modified": false]
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("cedar-rotation-check.json"), options: .atomic)
+        XCTAssertEqual(NativeMaterialTrainer.checksum(try Data(contentsOf: heightSource)), heightSHA)
+        XCTAssertEqual(NativeMaterialTrainer.checksum(try Data(contentsOf: diffuseSource)), diffuseSHA)
+    }
+
     func testProgressiveFlipsUseCachedPairsAndReuseDepthProPrediction() throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let input = root.appendingPathComponent("input.png"), target = root.appendingPathComponent("height.png")
@@ -207,6 +320,7 @@ final class NativeMaterialCropAugmentationTests: XCTestCase {
             let receipt = try XCTUnwrap(augmentation.history.last)
             let angle = try XCTUnwrap(receipt["source_center_spin_degrees"] as? Int)
             XCTAssertTrue((1...179).contains(angle))
+            XCTAssertEqual(receipt["center_spin_sampling"] as? String, "bilinear-pixel-center-v1")
             let fresh = try NativeMaterialCropAugmentation.spunCenter(source: originalTarget,
                 expectedSHA256: NativeMaterialTrainer.checksum(targetOriginal), size: 4, degrees: angle)
             let expected = try NativeMaterialCropAugmentation.flipped(fresh,
@@ -224,12 +338,16 @@ final class NativeMaterialCropAugmentationTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("crop-augmentation-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true); return url
     }
-    private func png(width: Int, height: Int, channels: Int, codes: [Int]) -> NativePNG {
+    private func png(width: Int, height: Int, channels: Int, codes: [Int], bits: Int = 16) -> NativePNG {
         var pixels = Data()
-        for value in codes { pixels.append(UInt8(value >> 8)); pixels.append(UInt8(value & 255)) }
-        return .init(header: .init(width: width, height: height, bits: 16, channels: channels, color: channels == 1 ? 0 : 2, interlace: 0), pixels: pixels, colorChunks: [])
+        for value in codes {
+            if bits == 16 { pixels.append(UInt8(value >> 8)) }
+            pixels.append(UInt8(value & 255))
+        }
+        return .init(header: .init(width: width, height: height, bits: bits, channels: channels, color: channels == 1 ? 0 : 2, interlace: 0), pixels: pixels, colorChunks: [])
     }
     private func codes(_ image: NativePNG) -> [Int] {
-        stride(from: 0, to: image.pixels.count, by: 2).map { Int(image.pixels[$0]) * 256 + Int(image.pixels[$0 + 1]) }
+        if image.header.bits == 8 { return image.pixels.map(Int.init) }
+        return stride(from: 0, to: image.pixels.count, by: 2).map { Int(image.pixels[$0]) * 256 + Int(image.pixels[$0 + 1]) }
     }
 }

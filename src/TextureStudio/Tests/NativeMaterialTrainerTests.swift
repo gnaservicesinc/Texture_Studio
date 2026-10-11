@@ -5,6 +5,30 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeMaterialTrainerTests: XCTestCase {
+    func testTrainingCachesResolveOriginalDatasetAndExplicitOverride() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let original = root.appendingPathComponent("dataset"), prepared = original.appendingPathComponent(".training-data/256-fixture")
+        try FileManager.default.createDirectory(at: prepared, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: ["native_size_preparation": [
+            "schema": "texture-studio-native-crops-v1", "source_dataset_path": original.path]]).write(to: prepared.appendingPathComponent("dataset.json"))
+        let output = root.appendingPathComponent("run")
+        let options = try NativeMaterialTrainer.Options(["train", "--dataset", prepared.path, "--output", output.path])
+        XCTAssertEqual(options.trainingCacheRootURL?.path, original.appendingPathComponent(".training-data").path)
+        XCTAssertEqual(options.depthProCacheURL, original.appendingPathComponent(".training-data/depthpro-inputs"))
+        XCTAssertEqual(options.depthProFallbackCacheURLs, [NativeDepthProContract.cacheURL])
+        XCTAssertEqual(options.cropCacheURL.deletingLastPathComponent().path, original.appendingPathComponent(".training-data/run-crops").path)
+        let override = root.appendingPathComponent("custom-depthpro")
+        let explicit = try NativeMaterialTrainer.Options(["train", "--dataset", prepared.path, "--output", output.path, "--depthpro-cache", override.path])
+        XCTAssertEqual(explicit.depthProCacheURL, override)
+        XCTAssertTrue(explicit.depthProFallbackCacheURLs.isEmpty)
+        let otherRun = try NativeMaterialTrainer.Options(["train", "--dataset", prepared.path, "--output", root.appendingPathComponent("other-run").path])
+        XCTAssertNotEqual(options.cropCacheURL, otherRun.cropCacheURL)
+        let misplaced = root.appendingPathComponent("unowned-prepared")
+        try FileManager.default.createDirectory(at: misplaced, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: prepared.appendingPathComponent("dataset.json"), to: misplaced.appendingPathComponent("dataset.json"))
+        XCTAssertThrowsError(try NativeMaterialTrainer.Options(["train", "--dataset", misplaced.path, "--output", output.path]))
+    }
+
     func testCadenceUsesEpochByDefaultAndRejectsRetiredOrInvalidUnits() throws {
         let arguments = ["train", "--dataset", "/dataset", "--output", "/output"]
         let options = try NativeMaterialTrainer.Options(arguments)
@@ -280,28 +304,31 @@ final class NativeMaterialTrainerTests: XCTestCase {
         let words: [UInt32] = [0x80000000, 1, 0x3f800001, 0xbf000000, 0x40000001, 0x00800001,
             0x3e000003, 0xbe000004, 0x3f400005, 0x3e800006, 0x3fa00007, 0xbf800008,
             0x3f000009, 0xbe80000a, 0x3fc0000b, 0x3d00000c, 0x4020000d, 0xc010000e]
-        let values = words.map(Float.init(bitPattern:)), url = root.appendingPathComponent("numeric.exr")
-        try NativeMaterialNumericExporter.writeEXR(.init(width: 3, height: 2, channels: 3, values: values), to: url)
-        let bytes = try Data(contentsOf: url)
-        XCTAssertEqual(u32(bytes, 0), 20_000_630); XCTAssertEqual(u32(bytes, 4), 2)
-        var cursor = 8, attributes: [String: (String, Data)] = [:]
-        while bytes[cursor] != 0 {
-            let name = cString(bytes, &cursor), type = cString(bytes, &cursor), count = Int(u32(bytes, cursor)); cursor += 4
-            attributes[name] = (type, bytes.subdata(in: cursor..<cursor + count)); cursor += count
-        }
-        cursor += 1
-        XCTAssertEqual(attributes["compression"]?.1, Data([0])); XCTAssertEqual(attributes["channels"]?.0, "chlist")
-        let channelData = try XCTUnwrap(attributes["channels"]?.1)
-        var channelCursor = 0, names: [String] = []
-        while channelData[channelCursor] != 0 {
-            names.append(cString(channelData, &channelCursor)); XCTAssertEqual(u32(channelData, channelCursor), 2); channelCursor += 16
-        }
-        XCTAssertEqual(names, ["B", "G", "R"])
-        for row in 0..<2 {
-            let offset = Int(u64(bytes, cursor + row * 8))
-            XCTAssertEqual(u32(bytes, offset), UInt32(row)); XCTAssertEqual(u32(bytes, offset + 4), 36)
-            for (stored, original) in [2, 1, 0].enumerated() {
-                for column in 0..<3 { XCTAssertEqual(u32(bytes, offset + 8 + (stored * 3 + column) * 4), words[original * 6 + row * 3 + column]) }
+        for channels in [1, 3] {
+            let values = words.prefix(channels * 6).map(Float.init(bitPattern:))
+            let url = root.appendingPathComponent("numeric-\(channels).exr")
+            try NativeMaterialNumericExporter.writeEXR(.init(width: 3, height: 2, channels: channels, values: values), to: url)
+            let bytes = try Data(contentsOf: url)
+            XCTAssertEqual(u32(bytes, 0), 20_000_630); XCTAssertEqual(u32(bytes, 4), 2)
+            var cursor = 8, attributes: [String: (String, Data)] = [:]
+            while bytes[cursor] != 0 {
+                let name = cString(bytes, &cursor), type = cString(bytes, &cursor), count = Int(u32(bytes, cursor)); cursor += 4
+                attributes[name] = (type, bytes.subdata(in: cursor..<cursor + count)); cursor += count
+            }
+            cursor += 1
+            XCTAssertEqual(attributes["compression"]?.1, Data([0])); XCTAssertEqual(attributes["channels"]?.0, "chlist")
+            let channelData = try XCTUnwrap(attributes["channels"]?.1)
+            var channelCursor = 0, names: [String] = []
+            while channelData[channelCursor] != 0 {
+                names.append(cString(channelData, &channelCursor)); XCTAssertEqual(u32(channelData, channelCursor), 2); channelCursor += 16
+            }
+            XCTAssertEqual(names, channels == 1 ? ["Y"] : ["B", "G", "R"])
+            for row in 0..<2 {
+                let offset = Int(u64(bytes, cursor + row * 8))
+                XCTAssertEqual(u32(bytes, offset), UInt32(row)); XCTAssertEqual(u32(bytes, offset + 4), UInt32(12 * channels))
+                for (stored, original) in (channels == 1 ? [0] : [2, 1, 0]).enumerated() {
+                    for column in 0..<3 { XCTAssertEqual(u32(bytes, offset + 8 + (stored * 3 + column) * 4), words[original * 6 + row * 3 + column]) }
+                }
             }
         }
     }
@@ -512,7 +539,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
             }
             XCTAssertEqual(progress.count, 1)
             XCTAssertTrue(recorded.filter { $0["event"] as? String == "crop_preparation" }.allSatisfy { $0["total"] as? Int == 1 })
-            let cache = output.appendingPathComponent("crop-cache")
+            let cache = options.cropCacheURL
             let cached = try FileManager.default.contentsOfDirectory(atPath: cache.path)
             XCTAssertEqual(cached.filter { $0.hasSuffix("-diffuse.png") }.count, 1)
             XCTAssertEqual(cached.filter { $0.hasSuffix("-height.png") }.count, 1)

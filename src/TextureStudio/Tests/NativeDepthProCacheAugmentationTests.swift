@@ -4,6 +4,57 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeDepthProCacheAugmentationTests: XCTestCase {
+    func testDatasetCacheReusesVerifiedLegacyEntryAndPublishesNewEntriesLocally() throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let hash = try fixture.writePhoto(Array(0..<12))
+        let input = try fixture.cache.input(imageURL: fixture.imageURL, expectedSHA256: hash, width: 4, height: 3)
+        let legacyURL = fixture.entryURL(sourceSHA256: hash), bytes = try Data(contentsOf: legacyURL)
+        let local = fixture.root.appendingPathComponent("dataset/.training-data/depthpro-inputs")
+        var predictions = 0
+        let cache = NativeDepthProInputCache(modelSHA256: fixture.cache.modelSHA256, directory: local,
+            fallbackDirectories: [fixture.cache.directory]) { _ in
+                predictions += 1
+                return ModelDepthResult(width: 3, height: 2, values: Fixture.meters,
+                    outputName: "depthMeters", interpretation: "Camera depth in meters")
+            }
+        XCTAssertEqual(try cache.input(imageURL: fixture.imageURL, expectedSHA256: hash, width: 4, height: 3).map(\.bitPattern), input.map(\.bitPattern))
+        XCTAssertEqual(predictions, 0)
+        XCTAssertEqual(cache.legacyReusedCount, 1)
+        XCTAssertEqual(cache.reusedCount, 1)
+        let localURL = local.appendingPathComponent(legacyURL.lastPathComponent)
+        XCTAssertEqual(try Data(contentsOf: localURL), bytes)
+        let legacyAttributes = try FileManager.default.attributesOfItem(atPath: legacyURL.path)
+        let localAttributes = try FileManager.default.attributesOfItem(atPath: localURL.path)
+        XCTAssertEqual(legacyAttributes[.systemFileNumber] as? NSNumber, localAttributes[.systemFileNumber] as? NSNumber,
+                       "A lazily adopted entry shares an inode rather than duplicating its numeric payload")
+        let changed = try fixture.writePhoto(Array((0..<12).reversed()))
+        _ = try cache.input(imageURL: fixture.imageURL, expectedSHA256: changed, width: 4, height: 3)
+        XCTAssertEqual(predictions, 1)
+        XCTAssertEqual(cache.generatedCount, 1)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: local.path).count, 2)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.cache.directory.path).count, 1)
+        XCTAssertEqual(try Data(contentsOf: legacyURL), bytes)
+    }
+
+    func testLegacyCacheCorruptionDoesNotPublishOrRegenerateInput() throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let hash = try fixture.writePhoto(Array(0..<12))
+        _ = try fixture.cache.input(imageURL: fixture.imageURL, expectedSHA256: hash, width: 4, height: 3)
+        let snapshot = try fixture.entry(sourceSHA256: hash)
+        var tensors = try snapshot.nativeTensors()
+        tensors["input"] = .floats([Float](repeating: 0.5, count: 12), shape: [1, 1, 3, 4])
+        try NativeSafetensors.write(tensors: tensors, metadata: snapshot.metadata, to: fixture.entryURL(sourceSHA256: hash))
+        let local = fixture.root.appendingPathComponent("local-cache")
+        let cache = NativeDepthProInputCache(modelSHA256: fixture.cache.modelSHA256, directory: local,
+            fallbackDirectories: [fixture.cache.directory]) { _ in
+                XCTFail("A corrupt legacy cache must remain an actual error")
+                return ModelDepthResult(width: 3, height: 2, values: Fixture.meters, outputName: "depthMeters", interpretation: "Meters")
+            }
+        XCTAssertThrowsError(try cache.input(imageURL: fixture.imageURL, expectedSHA256: hash, width: 4, height: 3))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: local.path))
+        XCTAssertEqual(cache.legacyReusedCount, 0)
+    }
+
     func testProgressivePairedFlipsPreserveBothNumericGridsWithoutPrediction() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }

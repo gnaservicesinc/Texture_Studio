@@ -62,6 +62,31 @@ enum NativeMaterialDatasetService {
             self.cropRectangle = cropRectangle; self.subjectID = subjectID; self.cropKind = cropKind
         }
     }
+    /// Prepared datasets are disposable children of the original dataset.
+    /// Predictions and per-run augmentation files are siblings of those crops,
+    /// so cleanup-size never deletes reusable model inputs or run provenance.
+    static func trainingCacheRoot(datasetURL: URL) throws -> URL {
+        let dataset = datasetURL.resolvingSymlinksInPath().standardizedFileURL
+        var original = dataset
+        let manifest = dataset.appendingPathComponent("dataset.json")
+        if FileManager.default.fileExists(atPath: manifest.path),
+           let binding = try object(manifest)["native_size_preparation"] as? Object {
+            guard binding["schema"] as? String == preparationSchema,
+                  let path = binding["source_dataset_path"] as? String, path.hasPrefix("/") else {
+                throw StudioError("Native crop dataset has an invalid source lineage.")
+            }
+            original = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
+            guard dataset.deletingLastPathComponent() == original.appendingPathComponent(".training-data") else {
+                throw StudioError("Native crop dataset differs from its owned source location.")
+            }
+        }
+        let root = original.appendingPathComponent(".training-data")
+        guard (try? root.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else {
+            throw StudioError("Native training data cannot be a symbolic link.")
+        }
+        return root
+    }
+
     static func trainingSamples(datasetURL: URL, size: Int, target: String, materials: [String] = []) throws -> [TrainingSample] {
         let root = canonical(datasetURL), index = try object(root.appendingPathComponent("dataset.json"))
         let records = try readRecords(root, index: index)
@@ -2100,19 +2125,51 @@ enum NativeMaterialDatasetService {
         for key in ["status", "split", "split_assignment", "review_status", "curation_note"] { result[key] = sample[key] ?? NSNull() }
         result["source_binding_sha256"] = sourceBinding(sample); return result
     }
-    private static func cleanup(_ supplied: URL) throws -> Object {
+    static func cleanup(_ supplied: URL, beforeDirectoryRemoval: (URL) throws -> Void = { _ in }) throws -> [String: Any] {
+        let receiptURL = supplied.appendingPathComponent(".native-crop-cleanup.json")
+        // Prefer the durable inventory even when dataset.json is still present:
+        // a previous attempt may already have removed some sample manifests.
+        if FileManager.default.fileExists(atPath: receiptURL.path) {
+            let receipt = try object(receiptURL)
+            guard receipt["schema"] as? String == "texture-studio-native-crop-cleanup-v2",
+                  receipt["prepared_dataset_path"] as? String == supplied.path,
+                  let path = receipt["source_dataset_path"] as? String else {
+                throw StudioError("Temporary training cleanup ownership changed.")
+            }
+            let original = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
+            try validateCleanupLocation(supplied, original: original)
+            return try locked(original) { try locked(supplied) {
+                let currentReceipt = try object(receiptURL)
+                let inventory = try validateCleanupReceipt(currentReceipt, supplied: supplied, original: original)
+                let receiptBytes = try jsonData(currentReceipt)
+                do {
+                    try removePreparedTrainingDirectory(supplied,
+                        ownedFiles: Set(inventory.files.keys).union([receiptURL.lastPathComponent]), ownedDirectories: inventory.directories,
+                        expectedFileHashes: inventory.files, beforeDirectoryRemoval: beforeDirectoryRemoval)
+                } catch {
+                    if FileManager.default.fileExists(atPath: supplied.path),
+                       (try? supplied.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true {
+                        try? atomic(receiptURL, data: receiptBytes)
+                    }
+                    throw error
+                }
+                try sync(supplied.deletingLastPathComponent())
+                return ["dataset_path": supplied.path, "source_dataset_path": original.path, "removed": true,
+                        "source_images_modified": false, "reviews_preserved": true]
+            } }
+        }
         guard FileManager.default.fileExists(atPath: supplied.appendingPathComponent("dataset.json").path) else { return ["dataset_path": supplied.path, "removed": false] }
         let index = try object(supplied.appendingPathComponent("dataset.json")), binding = index["native_size_preparation"] as? Object ?? [:]
         guard binding["schema"] as? String == preparationSchema, binding["ephemeral"] as? Bool == true, let source = binding["source_dataset_path"] as? String else { return ["dataset_path": supplied.path, "removed": false] }
         let original = URL(fileURLWithPath: source).resolvingSymlinksInPath().standardizedFileURL
         return try locked(original) { try locked(supplied) {
-            try cleanupLocked(supplied, original: original)
+            try cleanupLocked(supplied, original: original, beforeDirectoryRemoval: beforeDirectoryRemoval)
             return ["dataset_path": supplied.path, "source_dataset_path": original.path, "removed": true, "source_images_modified": false, "reviews_preserved": true]
         } }
     }
-    private static func cleanupLocked(_ supplied: URL, original: URL) throws {
+    private static func cleanupLocked(_ supplied: URL, original: URL, beforeDirectoryRemoval: (URL) throws -> Void = { _ in }) throws {
         let staging = original.appendingPathComponent(".training-data")
-        guard supplied.deletingLastPathComponent() == staging, (try? supplied.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true, (try? staging.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { throw StudioError("Temporary cleanup scope differs from its owned source location.") }
+        try validateCleanupLocation(supplied, original: original)
         let index = try object(supplied.appendingPathComponent("dataset.json")), binding = index["native_size_preparation"] as? Object ?? [:]
         guard binding["schema"] as? String == preparationSchema, binding["ephemeral"] as? Bool == true, binding["source_dataset_path"] as? String == original.path else { throw StudioError("Temporary training data ownership changed.") }
         let reviewPath = original.appendingPathComponent(".material-size-reviews.json")
@@ -2168,7 +2225,160 @@ enum NativeMaterialDatasetService {
         }
         guard !failed else { throw StudioError("Temporary training data could not be fully inspected.") }
         try Task.checkCancellation(); try commit(original, updates: [(reviewPath, reviews)])
-        try FileManager.default.removeItem(at: supplied); try sync(staging)
+        // Store the complete validated inventory before removing any generated
+        // files. Recovery no longer depends on sample manifests surviving a
+        // failed child-directory removal.
+        let receiptURL = supplied.appendingPathComponent(".native-crop-cleanup.json")
+        var fileHashes: [String: String] = [:]
+        for relative in ownedFiles.sorted() {
+            let file = try contained(supplied, relative)
+            var state = stat()
+            if lstat(file.path, &state) == 0 {
+                guard state.st_mode & S_IFMT == S_IFREG else { throw StudioError("Temporary training file type changed during cleanup.") }
+                fileHashes[relative] = try digest(file)
+            } else if errno != ENOENT { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        }
+        let receiptObject: Object = ["schema": "texture-studio-native-crop-cleanup-v2",
+            "source_dataset_path": original.path, "prepared_dataset_path": supplied.path,
+            "prepared_index_sha256": fileHashes["dataset.json"]!, "owned_files_sha256": fileHashes,
+            "owned_directories": ownedDirectories.sorted()]
+        let receipt = try jsonData(receiptObject)
+        try atomic(receiptURL, data: receipt)
+        let inventory = try validateCleanupReceipt(receiptObject, supplied: supplied, original: original)
+        do {
+            try removePreparedTrainingDirectory(supplied, ownedFiles: Set(inventory.files.keys).union([receiptURL.lastPathComponent]),
+                ownedDirectories: inventory.directories, expectedFileHashes: inventory.files, beforeDirectoryRemoval: beforeDirectoryRemoval)
+        } catch {
+            if FileManager.default.fileExists(atPath: supplied.path),
+               (try? supplied.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true {
+                try? atomic(receiptURL, data: receipt)
+            }
+            throw error
+        }
+        try sync(staging)
+    }
+
+    private static func validateCleanupReceipt(_ receipt: Object, supplied: URL, original: URL) throws -> (files: [String: String], directories: Set<String>) {
+        try validateCleanupLocation(supplied, original: original)
+        guard receipt["schema"] as? String == "texture-studio-native-crop-cleanup-v2",
+              receipt["prepared_dataset_path"] as? String == supplied.path,
+              receipt["source_dataset_path"] as? String == original.path,
+              let hashes = receipt["owned_files_sha256"] as? [String: String],
+              let indexHash = hashes["dataset.json"], indexHash == receipt["prepared_index_sha256"] as? String,
+              let directories = receipt["owned_directories"] as? [String], Set(directories).count == directories.count else {
+            throw StudioError("Temporary training cleanup ownership changed.")
+        }
+        var expectedDirectories = Set<String>()
+        for (relative, hash) in hashes {
+            guard !relative.isEmpty, !relative.hasPrefix("/"),
+                  !relative.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }),
+                  hash.count == 64, hash.allSatisfy({ $0.isHexDigit }),
+                  relative != ".native-crop-cleanup.json" else { throw StudioError("Invalid temporary training cleanup inventory.") }
+            _ = try contained(supplied, relative)
+            var components = relative.split(separator: "/")
+            while components.count > 1 { components.removeLast(); expectedDirectories.insert(components.joined(separator: "/")) }
+        }
+        guard expectedDirectories == Set(directories) else { throw StudioError("Temporary training cleanup directory inventory changed.") }
+        var failed = false
+        guard let entries = FileManager.default.enumerator(at: supplied,
+            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey],
+            errorHandler: { _, _ in failed = true; return false }) else { throw StudioError("Cannot inspect temporary training cleanup inventory.") }
+        for case let file as URL in entries {
+            try Task.checkCancellation()
+            let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isSymbolicLink != true else { throw StudioError("Temporary training data contains an unexpected symbolic link.") }
+            // Foundation enumeration may spell /var as /private/var. Use the
+            // same canonical spelling as the supplied dataset before deriving
+            // its relative path; otherwise a valid receipt looks unrelated.
+            let checkedFile = file.resolvingSymlinksInPath().standardizedFileURL
+            guard isInside(checkedFile, supplied) else { throw StudioError("Temporary training data contains an unexpected outside path.") }
+            let relative = String(checkedFile.path.dropFirst(supplied.path.count + 1))
+            if values.isDirectory == true {
+                guard expectedDirectories.contains(relative) else { throw StudioError("Temporary training data contains an unrelated folder; originals are kept.") }
+            } else if values.isRegularFile == true {
+                if relative == ".native-crop-cleanup.json" { continue }
+                if let expected = hashes[relative] {
+                    guard try digest(checkedFile) == expected else { throw StudioError("Temporary training contents changed during cleanup; originals are kept.") }
+                } else if try !isFinderDirectoryMetadata(checkedFile) {
+                    throw StudioError("Temporary training data contains new unrelated files (\(relative)); originals are kept.")
+                }
+            } else { throw StudioError("Temporary training data contains an unrelated special file; originals are kept.") }
+        }
+        guard !failed else { throw StudioError("Temporary training data could not be fully inspected.") }
+        return (hashes, expectedDirectories)
+    }
+
+    private static func validateCleanupLocation(_ supplied: URL, original: URL) throws {
+        let staging = original.appendingPathComponent(".training-data")
+        guard supplied.deletingLastPathComponent() == staging,
+              (try? supplied.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true,
+              (try? staging.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else {
+            throw StudioError("Temporary cleanup scope differs from its owned source location.")
+        }
+    }
+
+    /// Remove validated generated files, then each directory explicitly. Finder
+    /// can recreate .DS_Store during recursive FileManager removal; bounded final
+    /// retries accept only its regular-file signature, never arbitrary new data.
+    static func removePreparedTrainingDirectory(_ supplied: URL, ownedFiles: Set<String>, ownedDirectories: Set<String>,
+                                                expectedFileHashes: [String: String] = [:],
+                                                beforeDirectoryRemoval: (URL) throws -> Void = { _ in },
+                                                beforeFinalRemoval: () throws -> Void = {}) throws {
+        let finalFiles: Set<String> = ["dataset.json", ".material-workbench.lock", ".native-crop-cleanup.json"]
+        for relative in ownedFiles.subtracting(finalFiles).sorted() {
+            try Task.checkCancellation()
+            let file = try contained(supplied, relative)
+            var state = stat()
+            if lstat(file.path, &state) == 0 {
+                guard state.st_mode & S_IFMT == S_IFREG else { throw StudioError("Temporary training file type changed during cleanup.") }
+                if let expected = expectedFileHashes[relative] {
+                    guard try digest(file) == expected else { throw StudioError("Temporary training contents changed during cleanup; originals are kept.") }
+                }
+                try FileManager.default.removeItem(at: file)
+            } else if errno != ENOENT { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        }
+        for relative in ownedDirectories.sorted(by: { $0.count > $1.count }) {
+            let directory = try contained(supplied, relative)
+            try removeEmptyPreparedDirectory(directory, finalFiles: [], beforeFirstRemoval: { try beforeDirectoryRemoval(directory) })
+        }
+        try removeEmptyPreparedDirectory(supplied, finalFiles: finalFiles.intersection(ownedFiles),
+            expectedFileHashes: expectedFileHashes, beforeFirstRemoval: {
+                try beforeDirectoryRemoval(supplied)
+                try beforeFinalRemoval()
+            })
+    }
+
+    private static func removeEmptyPreparedDirectory(_ directory: URL, finalFiles: Set<String>,
+                                                    expectedFileHashes: [String: String] = [:],
+                                                    beforeFirstRemoval: () throws -> Void = {}) throws {
+        for attempt in 0..<4 {
+            try Task.checkCancellation()
+            var directoryState = stat()
+            if lstat(directory.path, &directoryState) != 0 {
+                if errno == ENOENT { return }
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            guard directoryState.st_mode & S_IFMT == S_IFDIR else {
+                throw StudioError("Temporary training directory became a symbolic link during cleanup.")
+            }
+            for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+                var state = stat()
+                guard lstat(file.path, &state) == 0, state.st_mode & S_IFMT == S_IFREG,
+                      try (finalFiles.contains(file.lastPathComponent) || isFinderDirectoryMetadata(file)) else {
+                    throw StudioError("Temporary training data contains new unrelated files (\(file.lastPathComponent)); originals are kept.")
+                }
+                if let expected = expectedFileHashes[file.lastPathComponent] {
+                    guard try digest(file) == expected else { throw StudioError("Temporary training contents changed during cleanup; originals are kept.") }
+                }
+                try FileManager.default.removeItem(at: file)
+            }
+            if attempt == 0 { try beforeFirstRemoval() }
+            if Darwin.rmdir(directory.path) == 0 { return }
+            let code = errno
+            if code == ENOENT { return }
+            guard code == ENOTEMPTY || code == EEXIST else { throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO) }
+        }
+        throw StudioError("Finder is still updating temporary training metadata. The saved model is intact; retry cleanup after closing that folder.")
     }
 
     /// Finder may add this cache while a run is in progress. Match its exact

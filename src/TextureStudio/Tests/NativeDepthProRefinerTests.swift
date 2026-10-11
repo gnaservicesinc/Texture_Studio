@@ -147,13 +147,14 @@ final class NativeDepthProRefinerTests: XCTestCase {
                 XCTAssertEqual(image.width, 256); XCTAssertEqual(image.height, 256)
                 counter.increment(); return depth
             }
-            let output = root.appendingPathComponent("trained"), cropDirectory = output.appendingPathComponent("crop-cache")
-            let recorder = Recorder(), crops = CropEpochRecorder(cropDirectory: cropDirectory,
-                depthDirectory: cacheDirectory, modelSHA256: cache.modelSHA256)
+            let output = root.appendingPathComponent("trained")
             let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
                 "--model-family", "depthpro-height-refiner", "--target", "height", "--size", "256",
                 "--compact-width", "16", "--updates-per-map", "2", "--seed", "4", "--learning-rate", "0.001",
                 "--randomize-crops", "epoch", "--random-flip", "--checkpoint-every", "1", "--checkpoint-unit", "epoch"])
+            let cropDirectory = options.cropCacheURL
+            let recorder = Recorder(), crops = CropEpochRecorder(cropDirectory: cropDirectory,
+                depthDirectory: cacheDirectory, modelSHA256: cache.modelSHA256)
             let trained = try NativeMaterialTransfer.object(Data(NativeMaterialTrainer.train(options,
                 onEvent: { recorder.record($0); crops.record($0) }, control: .init(), depthProCache: cache).utf8))
             XCTAssertEqual(trained["completed_updates"] as? Int, 2)
@@ -172,6 +173,9 @@ final class NativeDepthProRefinerTests: XCTestCase {
             let historyDocument = try NativeMaterialTransfer.object(cropDirectory.appendingPathComponent("crop-history.json"))
             let history = try XCTUnwrap(historyDocument["history"] as? [[String: Any]])
             XCTAssertEqual(history.count, 2)
+            let cachePointer = try NativeMaterialTransfer.object(output.appendingPathComponent("crop-cache.json"))
+            XCTAssertEqual(cachePointer["crop_cache_path"] as? String, cropDirectory.path)
+            XCTAssertEqual(cachePointer["prepared_dataset_path"] as? String, dataset.path)
             XCTAssertEqual(history.compactMap { $0["epoch"] as? Int }, [1, 2])
             XCTAssertEqual(history.compactMap { $0["progressive_cached_flip"] as? Bool }, [true, true])
             XCTAssertEqual(history.compactMap { $0["source_center_spin_degrees"] as? Int }, [0, 0])
@@ -584,7 +588,7 @@ final class NativeDepthProRefinerTests: XCTestCase {
         XCTAssertEqual(attributes["compression"], Data([0]))
         XCTAssertEqual(attributes["lineOrder"], Data([0]))
         let channels = try XCTUnwrap(attributes["channels"])
-        XCTAssertEqual(channels.prefix(2), Data([82, 0]))
+        XCTAssertEqual(channels.prefix(2), Data([89, 0]))
         XCTAssertEqual(channels.withUnsafeBytes { UInt32(littleEndian: $0.loadUnaligned(fromByteOffset: 2, as: UInt32.self)) }, 2)
         var values = [Float](repeating: 0, count: width * height)
         for row in 0..<height {

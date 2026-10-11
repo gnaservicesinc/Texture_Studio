@@ -30,7 +30,8 @@ enum NativeMaterialTrainer {
                 try control.check()
                 let modelURL = try await depthProResources.ensureAvailable(requestedURL: options.depthProModelURL, onEvent: onEvent)
                 try control.check()
-                depthProCache = try NativeDepthProInputCache(modelURL: modelURL, directory: options.depthProCacheURL)
+                depthProCache = try NativeDepthProInputCache(modelURL: modelURL, directory: options.depthProCacheURL,
+                                                            fallbackDirectories: options.depthProFallbackCacheURLs)
             } else { depthProCache = nil }
             if options.command == "infer" { return try infer(options, control: control, depthProCache: depthProCache) }
             if let dataset = options.dataset,
@@ -63,6 +64,7 @@ enum NativeMaterialTrainer {
         let randomFlip: Bool, randomSpinCentercut: Bool
         let compactWidth: Int
         let depthProModelURL: URL, depthProCacheURL: URL
+        let depthProFallbackCacheURLs: [URL], trainingCacheRootURL: URL?, cropCacheURL: URL
         let modelName: String?
         let dataset: URL?, output: URL, image: URL?, checkpoint: URL?, expectedSHA256: String?, base: URL
         let size: Int, rank: Int, updatesPerMap: Int, validationEvery: Int, checkpointEvery: Int
@@ -80,7 +82,12 @@ enum NativeMaterialTrainer {
             guard let output = url("--output") else { throw StudioError("Choose a new material operation output folder.") }
             self.output = output; dataset = url("--dataset"); image = url("--image"); checkpoint = url("--checkpoint")
             depthProModelURL = url("--depthpro-model") ?? NativeDepthProContract.configuredModelURL
-            depthProCacheURL = url("--depthpro-cache") ?? NativeDepthProContract.cacheURL
+            let cacheRoot = command != "infer" ? try dataset.map { try NativeMaterialDatasetService.trainingCacheRoot(datasetURL: $0) } : nil
+            trainingCacheRootURL = cacheRoot
+            depthProCacheURL = url("--depthpro-cache") ?? cacheRoot?.appendingPathComponent("depthpro-inputs") ?? NativeDepthProContract.cacheURL
+            depthProFallbackCacheURLs = value("--depthpro-cache") == nil && cacheRoot != nil ? [NativeDepthProContract.cacheURL] : []
+            cropCacheURL = cacheRoot.map { $0.appendingPathComponent("run-crops")
+                .appendingPathComponent(NativeMaterialTrainer.checksum(Data(output.path.utf8)).prefix(24).description) } ?? output.appendingPathComponent("crop-cache")
             guard let timing = MaterialTrainingCropRandomization(rawValue: value("--randomize-crops") ?? "run") else {
                 throw StudioError("Choose crop randomization never, run or epoch.")
             }
@@ -201,7 +208,8 @@ enum NativeMaterialTrainer {
         let imageURL = options.image!, snapshot = try Data(contentsOf: imageURL)
         let photo = try NativePNG.decode(snapshot)
         let model = try NativeTrainableMaterialModel.load(options, training: false)
-        let cache = try options.modelFamily == .depthProHeightRefiner ? suppliedCache ?? NativeDepthProInputCache(modelURL: options.depthProModelURL, directory: options.depthProCacheURL) : nil
+        let cache = try options.modelFamily == .depthProHeightRefiner ? suppliedCache ?? NativeDepthProInputCache(modelURL: options.depthProModelURL, directory: options.depthProCacheURL,
+            fallbackDirectories: options.depthProFallbackCacheURLs) : nil
         if let cache {
             if let recorded = model.configuration["depthpro_model_sha256"] as? String, recorded != cache.modelSHA256 {
                 throw StudioError("This refiner requires the exact DepthPro model used for training. Locate those weights before inference.")
@@ -304,7 +312,8 @@ enum NativeMaterialTrainer {
         if let suppliedModel { model = .init(suppliedModel) }
         else if let suppliedCompactModel { model = .init(suppliedCompactModel) }
         else { model = try NativeTrainableMaterialModel.load(options, training: true) }
-        let depthProCache = try options.modelFamily == .depthProHeightRefiner ? suppliedCache ?? NativeDepthProInputCache(modelURL: options.depthProModelURL, directory: options.depthProCacheURL) : nil
+        let depthProCache = try options.modelFamily == .depthProHeightRefiner ? suppliedCache ?? NativeDepthProInputCache(modelURL: options.depthProModelURL, directory: options.depthProCacheURL,
+            fallbackDirectories: options.depthProFallbackCacheURLs) : nil
         defer { depthProCache?.releasePredictor() }
         if let depthProCache {
             if let recorded = model.configuration["depthpro_model_sha256"] as? String, recorded != depthProCache.modelSHA256 {
@@ -323,6 +332,8 @@ enum NativeMaterialTrainer {
         effectiveConfiguration["target"] = options.target
         effectiveConfiguration["scope"] = options.scope
         effectiveConfiguration["dataset_manifest_sha256"] = sourceHash
+        effectiveConfiguration["crop_cache_path"] = options.cropCacheURL.path
+        effectiveConfiguration["training_cache_root"] = options.trainingCacheRootURL?.path
         effectiveConfiguration["crop_selection"] = (manifest?["native_size_preparation"] as? [String: Any])?["crop_selection"]
         effectiveConfiguration["material_filter"] = options.materials
         effectiveConfiguration["requested_updates"] = requestedUpdates
@@ -337,11 +348,14 @@ enum NativeMaterialTrainer {
         effectiveConfiguration["output_channels"] = options.target == "normal" ? 3 : 1
         effectiveConfiguration["crop_preparation_policy"] = "Prepare only the paired crop requested by the active optimizer update; reuse it until its next requested epoch."
         effectiveConfiguration["crop_preparation"] = "per-map-on-demand-v1"
+        effectiveConfiguration["center_spin_sampling"] = NativeMaterialCropAugmentation.centerSpinSampling
         if let depthProCache {
             effectiveConfiguration["depthpro_model_sha256"] = depthProCache.modelSHA256
             effectiveConfiguration["depthpro_preparation_contract"] = NativeDepthProContract.identifier
             effectiveConfiguration["input_channels"] = 1
             effectiveConfiguration["depthpro_predictor_lifetime"] = "current_run"
+            effectiveConfiguration["depthpro_cache_path"] = depthProCache.directory.path
+            effectiveConfiguration["depthpro_fallback_cache_paths"] = depthProCache.fallbackDirectories.map(\.path)
         }
         model.configuration["training_configuration"] = effectiveConfiguration
         try model.prepareTraining(size: options.size)
@@ -350,8 +364,21 @@ enum NativeMaterialTrainer {
         try control.check()
         guard !FileManager.default.fileExists(atPath: options.output.path) else { throw StudioError("Choose a new training output directory.") }
         try FileManager.default.createDirectory(at: options.output, withIntermediateDirectories: true)
+        if options.randomizeCrops != .never && (options.randomFlip || options.randomSpinCentercut) {
+            guard !FileManager.default.fileExists(atPath: options.cropCacheURL.path) else {
+                throw StudioError("This training output already owns a crop cache. Choose a new output directory.")
+            }
+            try FileManager.default.createDirectory(at: options.cropCacheURL, withIntermediateDirectories: true)
+            let receipt: [String: Any] = ["schema": "texture-studio-run-crop-cache-v1", "output_path": options.output.path,
+                "prepared_dataset_path": dataset.path, "source_dataset_path": options.trainingCacheRootURL?.deletingLastPathComponent().path ?? dataset.path,
+                "dataset_manifest_sha256": sourceHash, "seed": String(options.seed), "target": options.target]
+            try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys]).write(
+                to: options.cropCacheURL.appendingPathComponent("run-cache.json"), options: .atomic)
+            try JSONSerialization.data(withJSONObject: receipt.merging(["crop_cache_path": options.cropCacheURL.path]) { _, new in new }, options: [.sortedKeys]).write(
+                to: options.output.appendingPathComponent("crop-cache.json"), options: .atomic)
+        }
         let cropAugmentation = options.randomizeCrops != .never && (options.randomFlip || options.randomSpinCentercut) ?
-            NativeMaterialCropAugmentation(directory: options.output.appendingPathComponent("crop-cache"), target: options.target, seed: options.seed) : nil
+            NativeMaterialCropAugmentation(directory: options.cropCacheURL, target: options.target, seed: options.seed) : nil
         defer { try? cropAugmentation?.saveHistory() }
         var started = now(), trainingClockStarted = false
         var completed = 0, random = NativeMaterialRandom(seed: options.seed)
@@ -381,6 +408,7 @@ enum NativeMaterialTrainer {
             effectiveConfiguration["depthpro_generated_inputs"] = depthProCache.generatedCount
             effectiveConfiguration["depthpro_reused_inputs"] = depthProCache.reusedCount
             effectiveConfiguration["depthpro_remapped_inputs"] = depthProCache.remappedCount
+            effectiveConfiguration["depthpro_legacy_reused_inputs"] = depthProCache.legacyReusedCount
             model.configuration["training_configuration"] = effectiveConfiguration
         }
         func emit(_ event: [String: Any]) throws {
@@ -788,7 +816,9 @@ enum NativeMaterialNumericExporter {
         let width = prediction.width, height = prediction.height, channelCount = prediction.channels
         guard [1, 3].contains(channelCount), width > 0, height > 0,
               prediction.values.count == width * height * channelCount, prediction.values.allSatisfy(\.isFinite) else { throw StudioError("Invalid native material FLOAT32 image.") }
-        let channels = channelCount == 1 ? ["R"] : ["B", "G", "R"]
+        // Y is grayscale luminance; a lone R channel imports as red in GIMP.
+        // Channel naming does not alter the Float32 height samples.
+        let channels = channelCount == 1 ? ["Y"] : ["B", "G", "R"]
         func u32(_ value: UInt32) -> Data { var value = value.littleEndian; return withUnsafeBytes(of: &value) { Data($0) } }
         func u64(_ value: UInt64) -> Data { var value = value.littleEndian; return withUnsafeBytes(of: &value) { Data($0) } }
         func text(_ value: String) -> Data { Data(value.utf8) + Data([0]) }

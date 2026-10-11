@@ -901,9 +901,9 @@ final class WorkbenchStore {
             }
             let completionActivity = self.activity
             do {
-                try await self.cleanupTrainingDataset(prepared)
+                try await Task { @MainActor in try await self.cleanupTrainingDataset(prepared) }.value
             } catch {
-                notices.append("Model saved; could not finish training-file cleanup or reopen the source dataset: \(error.localizedDescription)")
+                notices.append("Model saved; \(error.localizedDescription)")
             }
             if publishAfterTraining && !self.isStopping && !Task.isCancelled {
                 do {
@@ -932,11 +932,25 @@ final class WorkbenchStore {
     }
 
     private func cleanupTrainingDataset(_ prepared: WorkbenchDataset) async throws {
-        guard prepared.preparation != nil else { return }
-        let output = try await worker(["cleanup-size", "--dataset", prepared.datasetPath])
-        _ = try WorkbenchResult.decode(WorkbenchDatasetCleanup.self, output: output)
-        try await loadDataset(URL(fileURLWithPath: prepared.preparation!.sourceDatasetPath))
-        datasetPreparationSummary = "Training files cleared. Original source maps are selected."
+        guard let preparation = prepared.preparation else { return }
+        var notices: [String] = []
+        do {
+            let output = try await worker(["cleanup-size", "--dataset", prepared.datasetPath])
+            _ = try WorkbenchResult.decode(WorkbenchDatasetCleanup.self, output: output)
+        } catch {
+            notices.append("could not finish training-file cleanup at \(prepared.datasetPath): \(error.localizedDescription)")
+        }
+        // Reopening the durable source is independent of removing temporary
+        // files. A cleanup failure must not strand the UI on a partial stage.
+        do {
+            try await loadDataset(URL(fileURLWithPath: preparation.sourceDatasetPath))
+            datasetPreparationSummary = notices.isEmpty ?
+                "Training files cleared. Original source maps are selected." :
+                "Original source maps are selected. Temporary training files remain at \(prepared.datasetPath)."
+        } catch {
+            notices.append("could not reopen the source dataset at \(preparation.sourceDatasetPath): \(error.localizedDescription)")
+        }
+        if !notices.isEmpty { throw StudioError(notices.joined(separator: "; ")) }
     }
 
     func chooseResumeCheckpoint() {

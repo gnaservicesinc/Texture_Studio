@@ -29,6 +29,20 @@ final class WorkbenchTrainingCompletionTests: XCTestCase {
         XCTAssertNotNil(outcome.package)
         XCTAssertNil(outcome.error)
         XCTAssertTrue(outcome.savedBytesUnchanged)
+        XCTAssertTrue(outcome.commands.contains("dataset"), "Cleanup failure must still reopen the source dataset")
+        XCTAssertTrue(outcome.datasetPath?.hasSuffix("/source") == true)
+        XCTAssertFalse(outcome.activity.contains("could not reopen the source dataset"))
+    }
+
+    func testSourceReopenFailureIsReportedSeparatelyAfterSavedTraining() async throws {
+        let outcome = try await run(failing: "dataset")
+        XCTAssertEqual(outcome.progress?.state, .completed)
+        XCTAssertTrue(outcome.commands.contains("cleanup-size"))
+        XCTAssertTrue(outcome.activity.contains("could not reopen the source dataset"))
+        XCTAssertFalse(outcome.activity.contains("could not finish training-file cleanup"))
+        XCTAssertNotNil(outcome.package)
+        XCTAssertNil(outcome.error)
+        XCTAssertTrue(outcome.savedBytesUnchanged)
     }
 
     func testAccountAndUploadFailuresCannotTurnASavedRunIntoTrainingFailure() async throws {
@@ -71,6 +85,8 @@ final class WorkbenchTrainingCompletionTests: XCTestCase {
         XCTAssertNil(outcome.error)
         XCTAssertTrue(outcome.savedBytesUnchanged)
         XCTAssertFalse(outcome.commands.contains("upload-selected"))
+        XCTAssertTrue(outcome.datasetPath?.hasSuffix("/source") == true,
+            "Post-save cancellation must still restore the source dataset")
     }
 
     private struct Outcome {
@@ -83,6 +99,7 @@ final class WorkbenchTrainingCompletionTests: XCTestCase {
         let commands: [String]
         let arguments: [[String]]
         let savedBytesUnchanged: Bool
+        let datasetPath: String?
     }
 
     private func run(failing command: String, publish: Bool = false, cancelAfterSave: Bool = false,
@@ -170,6 +187,7 @@ final class WorkbenchTrainingCompletionTests: XCTestCase {
         XCTAssertFalse(store.isBusy)
         return Outcome(progress: store.trainingProgress, activity: store.activity, error: store.error,
             checkpoint: store.selectedCheckpoint, package: store.lastPackageURL, upload: store.lastUploadURL,
-            commands: commands, arguments: capturedArguments, savedBytesUnchanged: try Data(contentsOf: file) == saved)
+            commands: commands, arguments: capturedArguments, savedBytesUnchanged: try Data(contentsOf: file) == saved,
+            datasetPath: store.dataset?.datasetPath)
     }
 }

@@ -153,8 +153,8 @@ final class DepthProCheckpointProductionTests: XCTestCase {
             cursor += count
         }
         let list = try XCTUnwrap(channels)
-        XCTAssertEqual(list.prefix(2), Data([0x52, 0]))
-        XCTAssertEqual(list.count, 19, "Exactly one scalar R channel")
+        XCTAssertEqual(list.prefix(2), Data([0x59, 0]))
+        XCTAssertEqual(list.count, 19, "Exactly one grayscale Y channel")
         guard list.count >= 6 else { throw StudioError("Truncated EXR channel declaration.") }
         let storage = list.withUnsafeBytes { UInt32(littleEndian: $0.loadUnaligned(fromByteOffset: 2, as: UInt32.self)) }
         XCTAssertEqual(storage, 2, "EXR pixel type2 is Float32")

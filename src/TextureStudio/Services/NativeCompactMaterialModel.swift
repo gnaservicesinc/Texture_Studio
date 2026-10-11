@@ -15,6 +15,8 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
     static let scalarArchitecture = "texture-studio-compact-scalar-native-v1"
     static let normalArchitecture = "texture-studio-compact-normal-native-v1"
     static let depthProRefinerArchitecture = "texture-studio-depthpro-height-refiner-native-v1"
+    static let reflectionConvolutionPadding = "reflect-v1"
+    static let legacyConvolutionPadding = "zero-v1"
     let target: String, networkWidth: Int, inputChannels: Int, outputChannels: Int
     let modelFamily: MaterialTrainingModelFamily
     let architectureID: String, baseSHA256: String, initializationSeed: UInt64
@@ -53,6 +55,7 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
             "input_channels": inputChannels, "output_channels": outputChannels,
             "initialization_seed": seed, "initial_weights_sha256": baseSHA256,
             "training_scope": "all-weights", "scope": "full-model", "head_activation": "linear",
+            "convolution_padding": Self.reflectionConvolutionPadding,
             "normal_encoding": "declared dataset convention; numeric source codes / code maximum",
             "parameter_count": initial.values.reduce(0) { $0 + $1.shape.reduce(1, *) },
             "runtime": "Apple MPSGraph Float32", "reduced_precision_fast_math": false]
@@ -88,6 +91,7 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
     }
 
     static func validateCheckpoint(_ snapshot: NativeSafetensors, configuration: [String: Any]) throws {
+        _ = try convolutionPadding(in: configuration)
         guard configuration["schema"] as? String == schema,
               let target = configuration["target"] as? String,
               let familyName = configuration["model_family"] as? String,
@@ -207,6 +211,17 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
         guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
         return number.boolValue
     }
+
+    /// Older checkpoints used implicit zero convolution borders. Their absent
+    /// policy retains that exact graph; a new training run records reflection.
+    static func convolutionPadding(in configuration: [String: Any]) throws -> String {
+        guard let recorded = configuration["convolution_padding"] else { return legacyConvolutionPadding }
+        guard let policy = recorded as? String,
+              [reflectionConvolutionPadding, legacyConvolutionPadding].contains(policy) else {
+            throw NativeCheckpointError.invalid("unsupported compact convolution padding contract")
+        }
+        return policy
+    }
     private static func validGrid(width: Int, height: Int) -> Bool {
         width >= 64 && height >= 64 && width <= 8192 && height <= 8192 && width % 64 == 0 && height % 64 == 0
     }
@@ -227,7 +242,8 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
 
     func program(width: Int, height: Int, target: String) throws -> Program {
         guard target == self.target else { throw StudioError("This compact model was trained for a different material map.") }
-        if let cached, cached.width == width, cached.height == height { return cached }
+        let padding = try Self.convolutionPadding(in: configuration)
+        if let cached, cached.width == width, cached.height == height, cached.convolutionPadding == padding { return cached }
         let program = try Program(model: self, width: width, height: height)
         cached = program; return program
     }
@@ -246,6 +262,7 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
         result["initial_weights_sha256"] = baseSHA256; result["training_scope"] = "all-weights"; result["scope"] = "full-model"
         result["runtime"] = "Apple MPSGraph Float32"; result["reduced_precision_fast_math"] = false
         result["head_activation"] = "linear"; result["step"] = step; result["training_size"] = size
+        result["convolution_padding"] = try Self.convolutionPadding(in: configuration)
         result["image_padding"] = false; result["image_resizing"] = false
         result["input_transfer"] = modelFamily == .depthProHeightRefiner
             ? "normalized inverse DepthPro meters / full-field min-max" : "sRGB diffuse codes / code maximum"
@@ -264,6 +281,7 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
     final class Program {
         let width: Int, height: Int, target: String, frozenStageCount = 0
         let inputChannels: Int, outputChannels: Int
+        let convolutionPadding: String
         private let networkWidth: Int, shapes: [String: [Int]]
         private let graph = MPSGraph()
         private var input: MPSGraphTensor!
@@ -284,6 +302,7 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
             }
             self.width = width; self.height = height; target = model.target
             networkWidth = model.networkWidth; inputChannels = model.inputChannels; outputChannels = model.outputChannels
+            convolutionPadding = try NativeCompactMaterialModel.convolutionPadding(in: model.configuration)
             shapes = try NativeCompactMaterialModel.weightShapes(target: target, width: networkWidth, family: model.modelFamily)
             input = graph.placeholder(shape: [1, inputChannels, height, width].map { NSNumber(value: $0) }, dataType: .float32,
                 name: inputChannels == 1 ? "depthpro_normalized_scalar" : "compact_native_rgb")
@@ -307,14 +326,21 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
             guard let weight = parameters[name + ".weight"], let bias = parameters[name + ".bias"], let shape = shapes[name + ".weight"] else {
                 throw StudioError("Compact material graph omitted a convolution: \(name).")
             }
-            let padding = stride == 1 ? shape[2] / 2 : 0
+            var padding = stride == 1 ? shape[2] / 2 : 0
+            var source = input
+            if padding > 0, convolutionPadding == NativeCompactMaterialModel.reflectionConvolutionPadding {
+                let edges = [0, 0, padding, padding].map { NSNumber(value: $0) }
+                source = graph.padTensor(input, with: .reflect, leftPadding: edges, rightPadding: edges,
+                    constantValue: 0, name: name + ".reflect-pad")
+                padding = 0
+            }
             guard let descriptor = MPSGraphConvolution2DOpDescriptor(strideInX: stride, strideInY: stride,
                 dilationRateInX: 1, dilationRateInY: 1, groups: groups,
                 paddingLeft: padding, paddingRight: padding, paddingTop: padding, paddingBottom: padding,
                 paddingStyle: .explicit, dataLayout: .NCHW, weightsLayout: .OIHW) else {
                 throw StudioError("Compact material convolution descriptor is invalid.")
             }
-            return add(graph.convolution2D(input, weights: weight, descriptor: descriptor, name: name), bias)
+            return add(graph.convolution2D(source, weights: weight, descriptor: descriptor, name: name), bias)
         }
         private func normalize(_ input: MPSGraphTensor, _ name: String) -> MPSGraphTensor {
             let mean = graph.mean(of: input, axes: [1], name: nil)

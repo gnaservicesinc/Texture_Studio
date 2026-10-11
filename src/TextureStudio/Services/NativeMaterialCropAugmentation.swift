@@ -4,6 +4,7 @@ import Foundation
 /// immutable; an epoch flip reads the preceding cached crop, never its source.
 final class NativeMaterialCropAugmentation {
     typealias Sample = NativeMaterialDatasetService.TrainingSample
+    static let centerSpinSampling = "bilinear-pixel-center-v1"
     let directory: URL
     let target: String
     private var random: NativeMaterialRandom
@@ -132,6 +133,7 @@ final class NativeMaterialCropAugmentation {
             changed.targetURL = paired.0; changed.targetSHA256 = paired.1; changed.targetConvention = paired.2
             refreshed.append(changed)
             let receipt: [String: Any] = ["sample_id": sample.id, "epoch": epoch, "source_center_spin_degrees": degrees,
+                "center_spin_sampling": degrees > 0 ? Self.centerSpinSampling : "exact-crop-or-flip",
                 "horizontal_flip": horizontal, "vertical_flip": vertical,
                 "input_sha256": inputSHA, "target_sha256": paired.1,
                 "center_spin_skipped_insufficient_support": insufficientSupport,
@@ -200,7 +202,8 @@ final class NativeMaterialCropAugmentation {
     }
 
     /// Sample the rotated full source's center without decoding its entire grid.
-    /// Nearest integer sampling keeps scalar target codes and color precision.
+    /// Bilinear pixel-center sampling retains the source's 8/16-bit precision
+    /// while avoiding nearest-neighbor stair steps in continuous height targets.
     static func spunCenter(source: URL, expectedSHA256: String, size: Int, degrees: Int,
                            normal: Bool = false, normalConvention: String = "opengl") throws -> NativePNG {
         let bytes = try Data(contentsOf: source, options: .mappedIfSafe)
@@ -208,7 +211,9 @@ final class NativeMaterialCropAugmentation {
             throw StudioError("The center-spin source or angle is invalid.")
         }
         let header = try NativePNG.inspect(source)
-        let angle = Double(degrees) * .pi / 180, c = cos(angle), s = sin(angle)
+        let angle = Double(degrees) * .pi / 180
+        // Exact quarter turns keep integer-aligned scalar/color pixels exact.
+        let c = degrees == 90 ? 0 : cos(angle), s = degrees == 90 ? 1 : sin(angle)
         let bound = spinBound(size: size, degrees: degrees)
         guard bound <= header.width, bound <= header.height else { throw StudioError("The original source cannot cover this center spin without padding.") }
         let left = (header.width - bound) / 2, top = (header.height - bound) / 2
@@ -225,8 +230,8 @@ final class NativeMaterialCropAugmentation {
                     let offset = channel * component
                     return component == 1 ? Int(p[offset]) : Int(p[offset]) * 256 + Int(p[offset + 1])
                 }
-                func put(_ offset: Int, _ value: Double) {
-                    let integer = min(maximum, max(0, Int(((value + 1) * 0.5 * Double(maximum)).rounded())))
+                func putCode(_ offset: Int, _ value: Double) {
+                    let integer = min(maximum, max(0, Int(value.rounded())))
                     if component == 1 { output[offset] = UInt8(integer) }
                     else { output[offset] = UInt8(integer >> 8); output[offset + 1] = UInt8(integer & 255) }
                 }
@@ -234,15 +239,43 @@ final class NativeMaterialCropAugmentation {
                     try Task.checkCancellation()
                     for x in 0..<size {
                         let dx = Double(x) + 0.5 - Double(size) / 2, dy = Double(y) + 0.5 - Double(size) / 2
-                        let sx = Int((c * dx + s * dy + Double(header.width) / 2 - 0.5).rounded()) - left
-                        let sy = Int((-s * dx + c * dy + Double(header.height) / 2 - 0.5).rounded()) - top
-                        guard sx >= 0, sy >= 0, sx < bound, sy < bound else { throw StudioError("Center spin escaped its original pixel support.") }
-                        let from = input + (sy * bound + sx) * bpp, to = (y * size + x) * bpp
-                        (output + to).update(from: from, count: bpp)
+                        let sx = c * dx + s * dy + Double(header.width) / 2 - 0.5 - Double(left)
+                        let sy = -s * dx + c * dy + Double(header.height) / 2 - 0.5 - Double(top)
+                        guard sx >= 0, sy >= 0, sx <= Double(bound - 1), sy <= Double(bound - 1) else {
+                            throw StudioError("Center spin escaped its original pixel support.")
+                        }
+                        let x0 = Int(floor(sx)), y0 = Int(floor(sy))
+                        let x1 = min(x0 + 1, bound - 1), y1 = min(y0 + 1, bound - 1)
+                        let fx = sx - Double(x0), fy = sy - Double(y0)
+                        let p00 = input + (y0 * bound + x0) * bpp, p10 = input + (y0 * bound + x1) * bpp
+                        let p01 = input + (y1 * bound + x0) * bpp, p11 = input + (y1 * bound + x1) * bpp
+                        let to = (y * size + x) * bpp
+                        func interpolated(_ channel: Int) -> Double {
+                            let upper = Double(code(p00, channel)) * (1 - fx) + Double(code(p10, channel)) * fx
+                            let lower = Double(code(p01, channel)) * (1 - fx) + Double(code(p11, channel)) * fx
+                            return upper * (1 - fy) + lower * fy
+                        }
+                        if fx == 0 && fy == 0 && !normal {
+                            (output + to).update(from: p00, count: bpp)
+                        } else {
+                            // Normal RGB is encoded only after normalization;
+                            // interpolate any remaining alpha channel normally.
+                            for channel in (normal ? 3 : 0)..<h.channels {
+                                putCode(to + channel * component, interpolated(channel))
+                            }
+                        }
                         if normal {
-                            let nx = Double(code(from, 0)) / Double(maximum) * 2 - 1
-                            let ny = Double(code(from, 1)) / Double(maximum) * 2 - 1
-                            put(to, c * nx + s * ny); put(to + component, -s * nx + c * ny)
+                            let nx = interpolated(0) / Double(maximum) * 2 - 1
+                            let ny = interpolated(1) / Double(maximum) * 2 - 1
+                            let nz = interpolated(2) / Double(maximum) * 2 - 1
+                            let rx = c * nx + s * ny, ry = -s * nx + c * ny
+                            let length = sqrt(rx * rx + ry * ry + nz * nz)
+                            // Opposing vectors can cancel; the neutral tangent
+                            // normal is deterministic and finite in that case.
+                            let vector = length > 1e-12 ? (rx / length, ry / length, nz / length) : (0.0, 0.0, 1.0)
+                            putCode(to, (vector.0 + 1) * 0.5 * Double(maximum))
+                            putCode(to + component, (vector.1 + 1) * 0.5 * Double(maximum))
+                            putCode(to + component * 2, (vector.2 + 1) * 0.5 * Double(maximum))
                         }
                     }
                 }
@@ -256,6 +289,7 @@ final class NativeMaterialCropAugmentation {
     }
 
     private static func spinBound(size: Int, degrees: Int) -> Int {
+        if degrees == 90 { return size + 2 }
         let angle = Double(degrees) * .pi / 180
         return Int(ceil(Double(size) * (abs(cos(angle)) + abs(sin(angle))))) + 2
     }
