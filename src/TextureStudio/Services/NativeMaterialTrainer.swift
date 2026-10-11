@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import ImageIO
 
 final class NativeMaterialTrainingControl: @unchecked Sendable {
     private let lock = NSLock()
@@ -21,8 +22,28 @@ enum NativeMaterialTrainer {
     static func run(arguments: [String], onEvent: @escaping Event = { _ in }, control: NativeMaterialTrainingControl = .init()) async throws -> String {
         try Task.checkCancellation()
         let job = Task.detached(priority: .userInitiated) {
-            let options = try Options(arguments)
+            var arguments = arguments
+            var options = try Options(arguments)
             if options.command == "infer" { return try infer(options, control: control) }
+            if let dataset = options.dataset,
+               let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: dataset.appendingPathComponent("dataset.json"))) as? [String: Any],
+               (manifest["storage_policy"] as? String == "original-source-references-v1" ||
+                manifest["native_size_preparation"] != nil && !arguments.contains("--crop-selection-prepared")) {
+                var preparation = ["prepare-size", "--dataset", dataset.path, "--size", String(options.size),
+                    "--target", options.target, "--automatic-validation", "--crop-seed",
+                    String(options.randomizeCrops == .never ? 0 : UInt64.random(in: 1...UInt64.max))]
+                if let material = options.materials.first { preparation += ["--material", material] }
+                let text = try await NativeMaterialDatasetService.run(arguments: preparation, onEvent: onEvent)!
+                let prepared = try NativeMaterialTransfer.object(Data(text.utf8))
+                guard let path = prepared["dataset_path"] as? String, let offset = arguments.firstIndex(of: "--dataset") else {
+                    throw StudioError("The native crop preparation did not return its dataset.")
+                }
+                arguments[offset + 1] = path
+                while let selection = arguments.firstIndex(of: "--material"), selection + 1 < arguments.count {
+                    arguments.removeSubrange(selection...(selection + 1))
+                }
+                options = try Options(arguments)
+            }
             return try train(options, onEvent: onEvent, control: control)
         }
         return try await withTaskCancellationHandler { try await job.value } onCancel: { control.stop(); job.cancel() }
@@ -30,7 +51,10 @@ enum NativeMaterialTrainer {
     struct Options: Sendable {
         let command: String, target: String, scope: String
         let modelFamily: MaterialTrainingModelFamily
+        let randomizeCrops: MaterialTrainingCropRandomization
+        let randomFlip: Bool, randomSpinCentercut: Bool
         let compactWidth: Int
+        let depthProModelURL: URL, depthProCacheURL: URL
         let modelName: String?
         let dataset: URL?, output: URL, image: URL?, checkpoint: URL?, expectedSHA256: String?, base: URL
         let size: Int, rank: Int, updatesPerMap: Int, validationEvery: Int, checkpointEvery: Int
@@ -47,6 +71,14 @@ enum NativeMaterialTrainer {
             func url(_ flag: String) -> URL? { value(flag).map { URL(fileURLWithPath: $0).standardizedFileURL } }
             guard let output = url("--output") else { throw StudioError("Choose a new material operation output folder.") }
             self.output = output; dataset = url("--dataset"); image = url("--image"); checkpoint = url("--checkpoint")
+            depthProModelURL = url("--depthpro-model") ?? NativeDepthProContract.configuredModelURL
+            depthProCacheURL = url("--depthpro-cache") ?? NativeDepthProContract.cacheURL
+            guard let timing = MaterialTrainingCropRandomization(rawValue: value("--randomize-crops") ?? "run") else {
+                throw StudioError("Choose crop randomization never, run or epoch.")
+            }
+            randomizeCrops = timing
+            randomFlip = timing != .never && arguments.contains("--random-flip")
+            randomSpinCentercut = timing != .never && arguments.contains("--random-spin-centercut")
             let requestedSHA256 = value("--expected-sha256")
             var recorded: [String: Any] = [:]
             if let checkpoint {
@@ -73,7 +105,7 @@ enum NativeMaterialTrainer {
             scope = value("--scope") ?? recorded["scope"] as? String ?? (family == .pbrnxt ? "final-map" : "full-model")
             guard ["height", "roughness", "normal"].contains(target),
                   family == .pbrnxt ? ["final-map", "map-decoder"].contains(scope) : scope == "full-model",
-                  family == .pbrnxt || (family.rawValue == "compact-normal" ? target == "normal" : target != "normal") else {
+                  family.supports(target: target) else {
                 throw StudioError("Choose a compatible material map and training scope for this model family.")
             }
             compactWidth = Int(value("--compact-width") ?? String(recorded["network_width"] as? Int ?? 32)) ?? 0
@@ -144,6 +176,8 @@ enum NativeMaterialTrainer {
                 "learning_rate_schedule": learningRateSchedule, "minimum_learning_rate_ratio": minimumLearningRateRatio,
                 "minimum_learning_rate": max(Float.leastNonzeroMagnitude, learningRate * minimumLearningRateRatio),
                 "warmup_updates": warmupUpdates, "seed": seed, "precision": "Float32",
+                "randomize_crops": randomizeCrops.rawValue, "random_flip": randomFlip,
+                "random_spin_centercut": randomSpinCentercut,
                 "value_loss_weight": 1, "detail_loss_weight": 4,
                 "model_family": modelFamily.rawValue, "trainable_parameters": modelFamily == .pbrnxt ? "LoRA factors" : "complete compact network",
                 "optimizer_state_restored": false,
@@ -154,12 +188,20 @@ enum NativeMaterialTrainer {
             ]) { _, new in new }
         }
     }
-    private static func infer(_ options: Options, control: NativeMaterialTrainingControl) throws -> String {
+    static func infer(_ options: Options, control: NativeMaterialTrainingControl, depthProCache suppliedCache: NativeDepthProInputCache? = nil) throws -> String {
         try control.check()
         let imageURL = options.image!, snapshot = try Data(contentsOf: imageURL)
         let photo = try NativePNG.decode(snapshot)
-        let rgb = try photo.modelFloatSamples(role: "input", encoding: options.inputEncoding)
         let model = try NativeTrainableMaterialModel.load(options, training: false)
+        let cache = try options.modelFamily == .depthProHeightRefiner ? suppliedCache ?? NativeDepthProInputCache(modelURL: options.depthProModelURL, directory: options.depthProCacheURL) : nil
+        if let cache {
+            if let recorded = model.configuration["depthpro_model_sha256"] as? String, recorded != cache.modelSHA256 {
+                throw StudioError("This refiner requires the exact DepthPro model used for training. Locate those weights before inference.")
+            }
+            model.configuration["depthpro_model_sha256"] = cache.modelSHA256
+        }
+        let rgb = try cache?.input(imageURL: imageURL, expectedSHA256: checksum(snapshot), width: photo.header.width,
+            height: photo.header.height, checkCancellation: { try control.check() }) ?? photo.modelFloatSamples(role: "input", encoding: options.inputEncoding)
         let prediction = try model.predict(rgb: rgb, width: photo.header.width, height: photo.header.height, target: options.target)
         try control.check()
         guard try checksum(Data(contentsOf: imageURL)) == checksum(snapshot) else { throw StudioError("The prepared diffuse changed during inference.") }
@@ -174,9 +216,9 @@ enum NativeMaterialTrainer {
         guard checkpointHash == nil || checkpointHash == options.expectedSHA256 else {
             throw StudioError("The selected checkpoint changed during inference. Choose the model again.")
         }
-        let result: [String: Any] = ["checkpoint_sha256": checkpointHash ?? model.baseSHA256,
+        var result: [String: Any] = ["checkpoint_sha256": checkpointHash ?? model.baseSHA256,
             "checkpoint_step": options.baseline ? 0 : model.configuration["step"] ?? 0,
-            "target": options.target, "input_kind": "diffuse", "diffuse_path": imageURL.path,
+            "target": options.target, "input_kind": cache == nil ? "diffuse" : "depthpro", "diffuse_path": imageURL.path,
             "model_family": options.modelFamily.rawValue, "architecture": model.configuration["architecture"] ?? "pbrnxt-native-v1",
             "output_channels": prediction.channels, "untrained_initialization": options.modelFamily != .pbrnxt && options.baseline,
             "image_sha256": checksum(snapshot), "native_dimensions": [prediction.width, prediction.height],
@@ -184,6 +226,23 @@ enum NativeMaterialTrainer {
             "generation": ["tiled": false, "model_input_dimensions": [prediction.width, prediction.height],
                 "source_pixels_resized": false, "source_pixels_discarded": false, "runtime": "Apple MPSGraph Float32"],
             "outputs": [options.target: ["path": final.path, "sha256": digest, "encoding": "linear_data", "storage": "FLOAT32", "blender_color_space": "Non-Color"]]]
+        if let cache {
+            let inputName = "depthpro-input.float32.exr"
+            try NativeMaterialNumericExporter.writeEXR(.init(width: photo.header.width, height: photo.header.height, channels: 1, values: rgb), to: stage.appendingPathComponent(inputName))
+            result["depthpro_model_sha256"] = cache.modelSHA256
+            result["depthpro_preparation_contract"] = NativeDepthProContract.identifier
+            result["input_channels"] = 1
+            result["prepared_input_path"] = options.output.appendingPathComponent(inputName).path
+            result["generation"] = ["tiled": false, "model_input_dimensions": [prediction.width, prediction.height],
+                "refiner_input_channels": 1, "refiner_input_resized": false,
+                "source_pixels_resized": photo.header.width != NativeDepthProService.inputSize || photo.header.height != NativeDepthProService.inputSize,
+                "source_pixels_discarded": false, "runtime": "Core ML DepthPro followed by Apple MPSGraph Float32",
+                "depthpro_input_dimensions": [NativeDepthProService.inputSize, NativeDepthProService.inputSize],
+                "depthpro_original_width": photo.header.width,
+                "depthpro_full_source_field_of_view": true,
+                "depthpro_grid_preparation": "pixel-center bilinear meters to paired grid; inverse-depth full-field min-max",
+                "depthpro_preparation_contract": NativeDepthProContract.identifier]
+        }
         try writeJSON(result, to: stage.appendingPathComponent("inference.json"))
         try control.check()
         try FileManager.default.moveItem(at: stage, to: options.output)
@@ -191,6 +250,7 @@ enum NativeMaterialTrainer {
     }
     static func train(_ options: Options, onEvent: Event, control: NativeMaterialTrainingControl, model suppliedModel: NativeMaterialModel? = nil,
                       compactModel suppliedCompactModel: NativeCompactMaterialModel? = nil,
+                      depthProCache suppliedCache: NativeDepthProInputCache? = nil,
                       now: @Sendable () -> ContinuousClock.Instant = { .now }) throws -> String {
         let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Training the requested material model")
         defer { ProcessInfo.processInfo.endActivity(activity) }
@@ -218,7 +278,7 @@ enum NativeMaterialTrainer {
         let settings = manifest?["validation"] as? [String: Any] ?? [:]
         let validationEnabled = settings["enabled"] as? Bool ?? true
         let quickCount = max(0, settings["quick_count"] as? Int ?? 4)
-        let training = descriptors.filter { $0.split == "train" }
+        var training = descriptors.filter { $0.split == "train" }
         let validation = validationEnabled ? descriptors.filter { $0.split == "validation" } : []
         guard !training.isEmpty else { throw StudioError("The selected native dataset has no included training maps.") }
         let requested = training.count.multipliedReportingOverflow(by: options.updatesPerMap)
@@ -236,6 +296,14 @@ enum NativeMaterialTrainer {
         if let suppliedModel { model = .init(suppliedModel) }
         else if let suppliedCompactModel { model = .init(suppliedCompactModel) }
         else { model = try NativeTrainableMaterialModel.load(options, training: true) }
+        let depthProCache = try options.modelFamily == .depthProHeightRefiner ? suppliedCache ?? NativeDepthProInputCache(modelURL: options.depthProModelURL, directory: options.depthProCacheURL) : nil
+        if let depthProCache {
+            if let recorded = model.configuration["depthpro_model_sha256"] as? String, recorded != depthProCache.modelSHA256 {
+                throw StudioError("Warm-start refinement requires its recorded DepthPro model. The selected upstream weights differ.")
+            }
+            model.configuration["depthpro_model_sha256"] = depthProCache.modelSHA256
+            model.configuration["depthpro_preparation_contract"] = NativeDepthProContract.identifier
+        }
         if let name = options.modelName { model.configuration["model_name"] = name }
         var effectiveConfiguration = options.trainingConfiguration
         effectiveConfiguration["training_size"] = options.size
@@ -246,6 +314,7 @@ enum NativeMaterialTrainer {
         effectiveConfiguration["target"] = options.target
         effectiveConfiguration["scope"] = options.scope
         effectiveConfiguration["dataset_manifest_sha256"] = sourceHash
+        effectiveConfiguration["crop_selection"] = (manifest?["native_size_preparation"] as? [String: Any])?["crop_selection"]
         effectiveConfiguration["material_filter"] = options.materials
         effectiveConfiguration["requested_updates"] = requestedUpdates
         effectiveConfiguration["training_map_count"] = training.count
@@ -264,7 +333,9 @@ enum NativeMaterialTrainer {
         try control.check()
         guard !FileManager.default.fileExists(atPath: options.output.path) else { throw StudioError("Choose a new training output directory.") }
         try FileManager.default.createDirectory(at: options.output, withIntermediateDirectories: true)
-        let started = now()
+        let cropAugmentation = options.randomizeCrops != .never && (options.randomFlip || options.randomSpinCentercut) ?
+            NativeMaterialCropAugmentation(directory: options.output.appendingPathComponent("crop-cache"), target: options.target, seed: options.seed) : nil
+        var started = now()
         var completed = 0, random = NativeMaterialRandom(seed: options.seed)
         var accumulationRandom = NativeMaterialRandom(seed: options.seed ^ 0x9e3779b97f4a7c15)
         var sampleEvaluations = 0, accumulationOrder: [Int] = [], accumulationPosition = 0
@@ -285,6 +356,13 @@ enum NativeMaterialTrainer {
             if control.shouldStopAndSave { return "user_stop" }
             if training.allSatisfy({ quarantined.contains("train:" + $0.id) }) { return "no_valid_training_samples" }
             return completed < requestedUpdates && timeLimitReached() ? "time_limit" : nil
+        }
+        func refreshDepthProCacheCounts() {
+            guard let depthProCache else { return }
+            effectiveConfiguration["depthpro_generated_inputs"] = depthProCache.generatedCount
+            effectiveConfiguration["depthpro_reused_inputs"] = depthProCache.reusedCount
+            effectiveConfiguration["depthpro_remapped_inputs"] = depthProCache.remappedCount
+            model.configuration["training_configuration"] = effectiveConfiguration
         }
         func emit(_ event: [String: Any]) throws {
             var event = event
@@ -313,7 +391,8 @@ enum NativeMaterialTrainer {
             let input = try NativePNG.decode(inputBytes), target = try NativePNG.decode(targetBytes)
             guard input.header.width == options.size, input.header.height == options.size,
                   target.header.width == input.header.width, target.header.height == input.header.height else { throw StudioError("Every native training pair must exactly match the prepared model grid.") }
-            let rgb = try input.modelFloatSamples(role: "input", encoding: descriptor.inputEncoding)
+            let rgb = try depthProCache?.input(imageURL: descriptor.inputURL, expectedSHA256: descriptor.inputSHA256,
+                width: options.size, height: options.size, checkCancellation: { try control.check() }) ?? input.modelFloatSamples(role: "input", encoding: descriptor.inputEncoding)
             let reference = try target.modelFloatSamples(role: options.target, normalConvention: descriptor.targetConvention)
             return (rgb, reference)
         }
@@ -334,7 +413,10 @@ enum NativeMaterialTrainer {
             try control.check()
             guard !quarantined.contains(sample.split + ":" + sample.id) else { return nil }
             do { return try pair(sample) }
-            catch { try quarantine(sample, phase: phase, error: error); return nil }
+            catch {
+                if error is NativeDepthProRuntimeError { throw error }
+                try quarantine(sample, phase: phase, error: error); return nil
+            }
         }
         func check(full: Bool, context: String) throws -> [String: Any] {
             var errors: [[String: Any]] = [], sum = Double(0)
@@ -386,6 +468,7 @@ enum NativeMaterialTrainer {
             if lastSavedStep == completed { return options.output.appendingPathComponent(String(format: "checkpoint-step-%08d.safetensors", initialStep + completed)) }
             lastValidation = try check(full: true, context: final ? "final" : "checkpoint")
             try control.check()
+            refreshDepthProCacheCounts()
             try emit(["event": "checkpoint_started", "operation": "Writing checkpoint", "final": final])
             let config = try model.checkpointConfiguration(size: options.size, step: initialStep + completed, validation: lastValidation)
             let configText = try json(config)
@@ -400,6 +483,26 @@ enum NativeMaterialTrainer {
             return destination
         }
         do {
+            if let cropAugmentation {
+                try emit(["event": "crop_preparation", "operation": "Refreshing cached crops", "completed": 0, "total": training.count])
+                training = try cropAugmentation.refresh(training, epoch: 1, flip: options.randomFlip,
+                    spin: options.randomSpinCentercut, depthProCache: depthProCache, check: { try control.check() })
+                try emit(["event": "crop_preparation", "operation": "Cached paired crops", "completed": training.count, "total": training.count])
+            }
+            if let depthProCache {
+                let preparedSamples = training + validation
+                for (position, sample) in preparedSamples.enumerated() {
+                    try emit(["event": "depthpro_preparation", "operation": "Caching DepthPro input before training", "completed": position, "total": preparedSamples.count, "sample_id": sample.id, "sample_position": position + 1, "sample_total": preparedSamples.count])
+                    let preparedPair = try autoreleasepool { try availablePair(sample, phase: "depthpro_preparation") }
+                    try emit(["event": "depthpro_preparation", "operation": preparedPair == nil ? "Skipped invalid source pair" : "Cached DepthPro input", "completed": position + 1, "total": preparedSamples.count, "sample_id": sample.id, "sample_position": position + 1, "sample_total": preparedSamples.count])
+                }
+                effectiveConfiguration["depthpro_model_sha256"] = depthProCache.modelSHA256
+                effectiveConfiguration["depthpro_preparation_contract"] = NativeDepthProContract.identifier
+                effectiveConfiguration["input_channels"] = 1
+                refreshDepthProCacheCounts()
+                depthProCache.releasePredictor()
+                started = now()
+            }
             try emit(["event": "training_started", "runtime": "Apple MPSGraph", "precision": "Float32", "training_size": options.size,
                 "execution": model.isCompact ? "compact-native-full-network-v1" : "bounded-native-stages-v1", "stage_count": program.frozenStageCount,
                 "model_family": options.modelFamily.rawValue, "trainable_parameter_count": model.parameterCount,
@@ -410,6 +513,19 @@ enum NativeMaterialTrainer {
             let baseline = try check(full: true, context: "baseline")
             for epoch in 0..<options.updatesPerMap {
                 currentEpoch = epoch + 1
+                if epoch > 0, options.randomizeCrops == .epoch, let cropAugmentation {
+                    let preparationStarted = now()
+                    try emit(["event": "crop_preparation", "operation": "Refreshing cached crops", "completed": 0, "total": training.count])
+                    training = try cropAugmentation.refresh(training, epoch: currentEpoch, flip: options.randomFlip,
+                        spin: options.randomSpinCentercut, depthProCache: depthProCache, check: { try control.check() })
+                    if let depthProCache {
+                        for sample in training { _ = try availablePair(sample, phase: "depthpro_preparation") }
+                        refreshDepthProCacheCounts()
+                        depthProCache.releasePredictor()
+                    }
+                    started = started.advanced(by: preparationStarted.duration(to: now()))
+                    try emit(["event": "crop_preparation", "operation": "Cached paired crops", "completed": training.count, "total": training.count])
+                }
                 var order = Array(training.indices); random.shuffle(&order)
                 var epochFinished = true
                 for (position, index) in order.enumerated() {
@@ -550,6 +666,7 @@ enum NativeMaterialTrainer {
             }
             let checkpoint = try save(final: true)
             try control.check()
+            refreshDepthProCacheCounts()
             try emit(["event": "export_started", "operation": "Exporting material model", "developer_mode": options.developerMode])
             let export = options.output.appendingPathComponent("export")
             let configuration = try model.checkpointConfiguration(size: options.size, step: initialStep + completed, validation: lastValidation)
@@ -581,6 +698,7 @@ enum NativeMaterialTrainer {
             return try json(result)
         } catch {
             if error is CancellationError, let ownedExport { try? FileManager.default.removeItem(at: ownedExport) }
+            refreshDepthProCacheCounts()
             var failure: [String: Any] = ["status": error is CancellationError ? "aborted" : "failed", "completed_updates": completed,
                 "requested_updates": requestedUpdates, "max_minutes": options.maxMinutes,
                 "training_configuration": effectiveConfiguration, "sample_evaluations": sampleEvaluations,

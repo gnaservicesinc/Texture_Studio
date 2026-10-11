@@ -1,7 +1,8 @@
 import Foundation
 
 /// Account and catalog discovery use the Hub HTTPS API directly. This does not
-/// import a model runtime or execute a CLI. Credentials live in Apple Keychain.
+/// import a model runtime or execute a CLI. Existing Hub logins are discovered
+/// from the environment, Apple Keychain, or the standard `hf` token file.
 struct NativeHuggingFaceService: Sendable {
     typealias Transport = @Sendable (URLRequest) async throws -> Data
     let token: String?
@@ -84,7 +85,7 @@ struct NativeHuggingFaceService: Sendable {
         try Task.checkCancellation()
         guard let token, !token.isEmpty else {
             return Account(authenticated: false, username: nil,
-                message: "Save a Hugging Face token in settings, then refresh the account")
+                message: "Sign in with hf auth login, or save a Hugging Face token in settings, then refresh the account")
         }
         do {
             let bytes = try await transport(request(URL(string: "https://huggingface.co/api/whoami-v2")!))
@@ -103,13 +104,16 @@ struct NativeHuggingFaceService: Sendable {
     }
 
     static func savedToken(environment: [String: String] = ProcessInfo.processInfo.environment,
-                           keychain: () -> String? = NativeHubCredentials.read) -> String? {
+                           keychain: () -> String? = NativeHubCredentials.read,
+                           homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+                           readTokenFile: (URL) -> String? = NativeHubCredentials.readTokenFile) -> String? {
         func cleaned(_ value: String?) -> String? {
             guard let value else { return nil }
             let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
             return text.isEmpty ? nil : text
         }
-        return cleaned(environment["HF_TOKEN"]) ?? cleaned(keychain())
+        return cleaned(environment["HF_TOKEN"]) ?? cleaned(environment["HUGGING_FACE_HUB_TOKEN"]) ??
+            cleaned(keychain()) ?? cleaned(readTokenFile(NativeHubCredentials.tokenFileURL(environment: environment, homeDirectory: homeDirectory)))
     }
 
     private func request(_ url: URL) -> URLRequest {

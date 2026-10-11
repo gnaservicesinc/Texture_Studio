@@ -50,11 +50,10 @@ actor TextureEngine {
             throw TextureError.invalidImage("Cannot read this photo's primary image.")
         }
         let image = CIImage(cgImageSource:source,index:primaryIndex,options:[.applyOrientationProperty:true])
-        let width = image.extent.width, height = image.extent.height
-        guard width.isFinite, height.isFinite, width >= 4, height >= 4,
-              width * height <= 150_000_000 else {
-            throw TextureError.invalidImage("The photo is empty or exceeds the 150-megapixel import limit.")
+        guard let dimensions = Self.sourceDimensions(image.extent, minimumSide: 4) else {
+            throw TextureError.invalidImage("The photo is empty or its dimensions cannot be represented safely.")
         }
+        let width = dimensions.width, height = dimensions.height
         let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any] ?? [:]
         let tiff = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any] ?? [:]
         var metadata = CameraMetadata()
@@ -84,21 +83,19 @@ actor TextureEngine {
         var acceptedIndices = [Int]()
         let supporting = indices.compactMap { index -> CIImage? in
             let view = CIImage(cgImageSource:source,index:index,options:[.applyOrientationProperty:true])
-            guard view.extent.width >= 32,view.extent.height >= 32,
-                  view.extent.width*view.extent.height <= 150_000_000 else { return nil }
+            guard Self.sourceDimensions(view.extent, minimumSide: 32) != nil else { return nil }
             acceptedIndices.append(index)
             return view.transformed(by:CGAffineTransform(translationX:-view.extent.minX,y:-view.extent.minY))
         }
         return TextureSource(url: url, orientedImage: zero,
-                             camera: metadata, pixelWidth: Int(width), pixelHeight: Int(height),
+                             camera: metadata, pixelWidth: width, pixelHeight: height,
                              supportingViews:supporting,primaryImageIndex:primaryIndex,supportingImageIndices:acceptedIndices,
                              hdrImage:hdrImage)
     }
 
     func importDepth(_ url: URL, matching source: TextureSource) throws -> TextureDepth {
         guard let image = CIImage(contentsOf: url, options: [.colorSpace:NSNull(), .applyOrientationProperty:true]),
-              image.extent.width > 0, image.extent.height > 0,
-              image.extent.width * image.extent.height <= 150_000_000 else {
+              Self.sourceDimensions(image.extent, minimumSide: 1) != nil else {
             throw TextureError.invalidDepth("Cannot read this depth map. Choose a float EXR or TIFF registered to the photo.")
         }
         let ratio = image.extent.width / image.extent.height
@@ -123,7 +120,7 @@ actor TextureEngine {
     func prepareDiffuse(source: TextureSource, settings: TextureSettings) async throws -> PreparedDiffuse {
         guard device != nil else { throw TextureError.missingMetal }
         try Task.checkCancellation()
-        try validate(settings)
+        try validate(settings, preparingDiffuse: true)
         let kernels = try loadKernels()
         let extent = source.orientedImage.extent
         let focal = settings.focalLengthPixels ?? source.camera.focalLength35mm.map {
@@ -398,15 +395,32 @@ actor TextureEngine {
         return published
     }
 
-    private func validate(_ settings: TextureSettings) throws {
-        guard (TextureSettings.outputSizes.contains(settings.outputSize) || settings.outputSize == 4098),
-              settings.lensDistortion.isFinite, abs(settings.lensDistortion) <= 0.15,
+    private func validate(_ settings: TextureSettings, preparingDiffuse: Bool = false) throws {
+        let sizes = preparingDiffuse ? TextureSettings.diffusePreparationSizes : TextureSettings.outputSizes
+        guard sizes.contains(settings.outputSize) || settings.outputSize == 4098 else {
+            throw TextureError.invalidSettings(preparingDiffuse
+                ? "Choose a supported diffuse preparation grid: 256, 512, 1024, 2048, 4096 or 8192 pixels."
+                : "Choose a supported material output size: 1024, 2048, 4096 or 8192 pixels.")
+        }
+        guard settings.lensDistortion.isFinite, abs(settings.lensDistortion) <= 0.15,
               [settings.lightingStrength,settings.lightingRadius,settings.heightStrength,
                settings.heightDetail,settings.surfacePlaneRemoval,settings.depthCleanup,settings.roughnessBase,settings.roughnessDetail].allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }),
               settings.materialWidthMeters.isFinite, settings.materialWidthMeters > 0,
               settings.displacementScaleMeters.isFinite, settings.displacementScaleMeters >= 0 else {
-            throw TextureError.invalidSettings("Use a supported output size and finite material controls within their ranges.")
+            throw TextureError.invalidSettings("Use finite material controls within their ranges.")
         }
+    }
+
+    /// Source import is independent of the requested processing grid. ImageIO
+    /// and Core Image retain the original frame lazily; only actual integer and
+    /// buffer-size overflow is rejected here, never an arbitrary pixel budget.
+    static func sourceDimensions(_ extent: CGRect, minimumSide: Int) -> (width: Int, height: Int)? {
+        guard [extent.minX, extent.minY, extent.maxX, extent.maxY].allSatisfy(\.isFinite),
+              let width = Int(exactly: extent.width), let height = Int(exactly: extent.height),
+              width >= minimumSide, height >= minimumSide else { return nil }
+        let pixels = width.multipliedReportingOverflow(by: height)
+        guard !pixels.overflow, pixels.partialValue <= Int.max / 16 else { return nil }
+        return (width, height)
     }
 
     static func depthCleanupSide(outputSize:Int, depthExtent:CGRect) -> Int {

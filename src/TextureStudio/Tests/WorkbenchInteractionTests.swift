@@ -124,7 +124,7 @@ final class WorkbenchInteractionTests: XCTestCase {
         store.comparisonCheckpointIds = [model.id]
         XCTAssertNil(store.comparisonConfigurationIssue)
         store.comparisonIncludesBase = false
-        XCTAssertEqual(store.comparisonConfigurationIssue, "Include the base model or select a second checkpoint.")
+        XCTAssertNil(store.comparisonConfigurationIssue, "A checkpoint output can be inspected without a baseline")
     }
 
     func testDeveloperAutoUploadKeepsVisibilityPrivateUnlessChosen() throws {

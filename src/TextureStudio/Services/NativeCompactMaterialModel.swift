@@ -14,39 +14,58 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
     static let schema = "texture-studio-compact-material-v1"
     static let scalarArchitecture = "texture-studio-compact-scalar-native-v1"
     static let normalArchitecture = "texture-studio-compact-normal-native-v1"
-    let target: String, networkWidth: Int, outputChannels: Int
+    static let depthProRefinerArchitecture = "texture-studio-depthpro-height-refiner-native-v1"
+    let target: String, networkWidth: Int, inputChannels: Int, outputChannels: Int
+    let modelFamily: MaterialTrainingModelFamily
     let architectureID: String, baseSHA256: String, initializationSeed: UInt64
     private(set) var weights: [String: NativeTensor]
     var configuration: [String: Any]
     private var cached: Program?
 
-    static func architecture(for target: String) throws -> String {
-        guard ["height", "roughness", "normal"].contains(target) else {
-            throw StudioError("Choose height, roughness or normal for the compact material model.")
+    private static func resolvedFamily(target: String, requested: MaterialTrainingModelFamily?) throws -> MaterialTrainingModelFamily {
+        let family = requested ?? (target == "normal" ? .compactNormal : .compactScalar)
+        guard family.isCompact, family.supports(target: target) else {
+            throw StudioError("Choose a map supported by the selected compact model family.")
         }
-        return target == "normal" ? normalArchitecture : scalarArchitecture
+        return family
     }
 
-    init(target: String, width: Int = 32, seed: UInt64 = 17) throws {
-        architectureID = try Self.architecture(for: target)
-        let initial = try Self.initialWeights(target: target, width: width, seed: seed)
+    static func architecture(for target: String, family: MaterialTrainingModelFamily? = nil) throws -> String {
+        switch try resolvedFamily(target: target, requested: family) {
+        case .compactScalar: return scalarArchitecture
+        case .compactNormal: return normalArchitecture
+        case .depthProHeightRefiner: return depthProRefinerArchitecture
+        case .pbrnxt: throw StudioError("The compact backend requires a compact model family.")
+        }
+    }
+
+    init(target: String, width: Int = 32, seed: UInt64 = 17, family: MaterialTrainingModelFamily? = nil) throws {
+        modelFamily = try Self.resolvedFamily(target: target, requested: family)
+        architectureID = try Self.architecture(for: target, family: modelFamily)
+        let initial = try Self.initialWeights(target: target, width: width, seed: seed, family: modelFamily)
         self.target = target; networkWidth = width; outputChannels = target == "normal" ? 3 : 1
+        inputChannels = modelFamily == .depthProHeightRefiner ? 1 : 3
         initializationSeed = seed; weights = initial
         baseSHA256 = try Self.weightIdentity(initial)
         configuration = ["schema": Self.schema, "architecture": architectureID,
-            "model_family": target == "normal" ? "compact-normal" : "compact-scalar",
+            "model_family": modelFamily.rawValue,
             "from_scratch": true, "target": target, "network_width": width,
-            "input_channels": 3, "output_channels": outputChannels,
+            "input_channels": inputChannels, "output_channels": outputChannels,
             "initialization_seed": seed, "initial_weights_sha256": baseSHA256,
             "training_scope": "all-weights", "scope": "full-model", "head_activation": "linear",
             "normal_encoding": "declared dataset convention; numeric source codes / code maximum",
             "parameter_count": initial.values.reduce(0) { $0 + $1.shape.reduce(1, *) },
             "runtime": "Apple MPSGraph Float32", "reduced_precision_fast_math": false]
+        if modelFamily == .depthProHeightRefiner {
+            configuration["input_kind"] = "depthpro"
+            configuration["depthpro_preparation_contract"] = NativeDepthProContract.identifier
+        }
     }
 
     static func load(checkpointURL: URL?, expectedSHA256: String? = nil, target: String,
-                     width: Int = 32, seed: UInt64 = 17) throws -> NativeCompactMaterialModel {
-        guard let checkpointURL else { return try .init(target: target, width: width, seed: seed) }
+                     width: Int = 32, seed: UInt64 = 17, family: MaterialTrainingModelFamily? = nil) throws -> NativeCompactMaterialModel {
+        let requestedFamily = try resolvedFamily(target: target, requested: family)
+        guard let checkpointURL else { return try .init(target: target, width: width, seed: seed, family: requestedFamily) }
         let source = NativeMaterialModel.resolvedCheckpoint(checkpointURL)
         let snapshot = try NativeSafetensors(contentsOf: source, expectedSHA256: expectedSHA256)
         _ = try NativeMaterialCheckpoint.inspect(at: source, expectedSHA256: snapshot.sha256)
@@ -56,12 +75,13 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
         let configuration = try NativeMaterialTransfer.object(Data(metadata.utf8))
         try validateCheckpoint(snapshot, configuration: configuration)
         guard configuration["target"] as? String == target,
+              configuration["model_family"] as? String == requestedFamily.rawValue,
               let storedWidth = integer(configuration["network_width"]),
               storedWidth == width,
               let storedSeed = unsigned(configuration["initialization_seed"]) else {
             throw NativeCheckpointError.invalid("compact checkpoint target or network width differs from the selected model")
         }
-        let model = try NativeCompactMaterialModel(target: target, width: storedWidth, seed: storedSeed)
+        let model = try NativeCompactMaterialModel(target: target, width: storedWidth, seed: storedSeed, family: requestedFamily)
         try model.updateWeights(snapshot.nativeTensors())
         model.configuration = configuration
         return model
@@ -70,12 +90,13 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
     static func validateCheckpoint(_ snapshot: NativeSafetensors, configuration: [String: Any]) throws {
         guard configuration["schema"] as? String == schema,
               let target = configuration["target"] as? String,
+              let familyName = configuration["model_family"] as? String,
+              let family = MaterialTrainingModelFamily(rawValue: familyName),
               let width = integer(configuration["network_width"]),
               let seed = unsigned(configuration["initialization_seed"]),
-              configuration["architecture"] as? String == (try architecture(for: target)),
-              configuration["model_family"] as? String == (target == "normal" ? "compact-normal" : "compact-scalar"),
+              configuration["architecture"] as? String == (try architecture(for: target, family: family)),
               boolean(configuration["from_scratch"]) == true,
-              integer(configuration["input_channels"]) == 3,
+              integer(configuration["input_channels"]) == (family == .depthProHeightRefiner ? 1 : 3),
               integer(configuration["output_channels"]) == (target == "normal" ? 3 : 1),
               configuration["training_scope"] as? String == "all-weights",
               configuration["scope"] as? String == "full-model",
@@ -90,19 +111,29 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
               configuration["base"] == nil, configuration["layers"] == nil else {
             throw NativeCheckpointError.invalid("compact model identity or output family is invalid")
         }
-        let shapes = try weightShapes(target: target, width: width)
+        if family == .depthProHeightRefiner {
+            guard configuration["input_kind"] as? String == "depthpro",
+                  configuration["depthpro_preparation_contract"] as? String == NativeDepthProContract.identifier,
+                  configuration["input_transfer"] as? String == "normalized inverse DepthPro meters / full-field min-max",
+                  configuration["target_transfer"] as? String == "linear numeric source codes / code maximum",
+                  let modelHash = configuration["depthpro_model_sha256"] as? String,
+                  modelHash.count == 64, modelHash.allSatisfy({ "0123456789abcdef".contains($0) }) else {
+                throw NativeCheckpointError.invalid("DepthPro refiner input preparation or model identity is missing")
+            }
+        }
+        let shapes = try weightShapes(target: target, width: width, family: family)
         guard Set(snapshot.tensors.keys) == Set(shapes.keys), snapshot.tensors.allSatisfy({
             $0.value.dtype == "F32" && $0.value.shape == shapes[$0.key]
         }) else { throw NativeCheckpointError.invalid("compact checkpoint tensors differ from its complete architecture") }
         try snapshot.validateFiniteFloatingPoint()
-        let initialIdentity = try weightIdentity(initialWeights(target: target, width: width, seed: seed))
+        let initialIdentity = try weightIdentity(initialWeights(target: target, width: width, seed: seed, family: family))
         guard configuration["initial_weights_sha256"] as? String == initialIdentity else {
             throw NativeCheckpointError.invalid("compact initialization identity differs from its recorded seed")
         }
     }
 
-    static func weightShapes(target: String, width: Int) throws -> [String: [Int]] {
-        _ = try architecture(for: target)
+    static func weightShapes(target: String, width: Int, family: MaterialTrainingModelFamily? = nil) throws -> [String: [Int]] {
+        let modelFamily = try resolvedFamily(target: target, requested: family)
         guard [16, 32].contains(width) else { throw StudioError("Compact material width must be 16 or 32.") }
         var shapes: [String: [Int]] = [:]
         func convolution(_ name: String, _ incoming: Int, _ outgoing: Int, kernel: Int = 1, groups: Int = 1) {
@@ -123,7 +154,7 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
             shapes[name + ".beta"] = [1, channels, 1, 1]
             shapes[name + ".gamma"] = [1, channels, 1, 1]
         }
-        convolution("input", 3, width, kernel: 3)
+        convolution("input", modelFamily == .depthProHeightRefiner ? 1 : 3, width, kernel: 3)
         for level in 0..<3 {
             let channels = width << level
             block("encoder.\(level)", channels)
@@ -136,8 +167,8 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
         return shapes
     }
 
-    private static func initialWeights(target: String, width: Int, seed: UInt64) throws -> [String: NativeTensor] {
-        let shapes = try weightShapes(target: target, width: width)
+    private static func initialWeights(target: String, width: Int, seed: UInt64, family: MaterialTrainingModelFamily? = nil) throws -> [String: NativeTensor] {
+        let shapes = try weightShapes(target: target, width: width, family: family)
         var random = NativeMaterialRandom(seed: seed), result: [String: NativeTensor] = [:]
         for name in shapes.keys.sorted() {
             try Task.checkCancellation()
@@ -181,7 +212,7 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
     }
 
     func updateWeights(_ weights: [String: NativeTensor]) throws {
-        try Self.validateWeights(weights, shapes: Self.weightShapes(target: target, width: networkWidth))
+        try Self.validateWeights(weights, shapes: Self.weightShapes(target: target, width: networkWidth, family: modelFamily))
         self.weights = weights
     }
     private static func validateWeights(_ weights: [String: NativeTensor], shapes: [String: [Int]]) throws {
@@ -208,15 +239,20 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
         guard Self.validGrid(width: size, height: size), step >= 0 else { throw StudioError("Compact checkpoint grid or step is invalid.") }
         var result = configuration
         result["schema"] = Self.schema; result["architecture"] = architectureID
-        result["model_family"] = target == "normal" ? "compact-normal" : "compact-scalar"
+        result["model_family"] = modelFamily.rawValue
         result["target"] = target; result["network_width"] = networkWidth
-        result["input_channels"] = 3; result["output_channels"] = outputChannels
+        result["input_channels"] = inputChannels; result["output_channels"] = outputChannels
         result["from_scratch"] = true; result["initialization_seed"] = initializationSeed
         result["initial_weights_sha256"] = baseSHA256; result["training_scope"] = "all-weights"; result["scope"] = "full-model"
         result["runtime"] = "Apple MPSGraph Float32"; result["reduced_precision_fast_math"] = false
         result["head_activation"] = "linear"; result["step"] = step; result["training_size"] = size
         result["image_padding"] = false; result["image_resizing"] = false
-        result["input_transfer"] = "sRGB diffuse codes / code maximum"
+        result["input_transfer"] = modelFamily == .depthProHeightRefiner
+            ? "normalized inverse DepthPro meters / full-field min-max" : "sRGB diffuse codes / code maximum"
+        if modelFamily == .depthProHeightRefiner {
+            result["input_kind"] = "depthpro"
+            result["depthpro_preparation_contract"] = NativeDepthProContract.identifier
+        }
         result["target_transfer"] = "linear numeric source codes / code maximum"
         result["native_runtime"] = "Apple MPSGraph Float32, reduced precision fast math disabled"
         result["trained_utc"] = ISO8601DateFormatter().string(from: Date())
@@ -227,7 +263,7 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
 
     final class Program {
         let width: Int, height: Int, target: String, frozenStageCount = 0
-        let outputChannels: Int
+        let inputChannels: Int, outputChannels: Int
         private let networkWidth: Int, shapes: [String: [Int]]
         private let graph = MPSGraph()
         private var input: MPSGraphTensor!
@@ -247,9 +283,10 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
                 throw StudioError("Compact material evaluation needs native dimensions divisible by 64, without resizing or padding.")
             }
             self.width = width; self.height = height; target = model.target
-            networkWidth = model.networkWidth; outputChannels = model.outputChannels
-            shapes = try NativeCompactMaterialModel.weightShapes(target: target, width: networkWidth)
-            input = graph.placeholder(shape: [1, 3, height, width].map { NSNumber(value: $0) }, dataType: .float32, name: "compact_native_rgb")
+            networkWidth = model.networkWidth; inputChannels = model.inputChannels; outputChannels = model.outputChannels
+            shapes = try NativeCompactMaterialModel.weightShapes(target: target, width: networkWidth, family: model.modelFamily)
+            input = graph.placeholder(shape: [1, inputChannels, height, width].map { NSNumber(value: $0) }, dataType: .float32,
+                name: inputChannels == 1 ? "depthpro_normalized_scalar" : "compact_native_rgb")
             for name in shapes.keys.sorted() {
                 parameters[name] = graph.placeholder(shape: shapes[name]!.map { NSNumber(value: $0) }, dataType: .float32, name: name)
             }
@@ -350,8 +387,10 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
                      onStage: (Int, Int) -> Void = { _, _ in },
                      onOperation: (String, Int, Int) -> Void = { _, _, _ in }) throws -> NativeMaterialModel.Program.Execution {
             try Task.checkCancellation(); try checkCancellation()
-            guard rgb.count == width * height * 3, rgb.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }) else {
-                throw StudioError("Compact material evaluation needs finite native RGB codes between zero and one.")
+            guard rgb.count == width * height * inputChannels, rgb.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }) else {
+                throw StudioError(inputChannels == 1
+                    ? "DepthPro refinement needs one finite normalized depth channel between zero and one."
+                    : "Compact material evaluation needs finite native RGB codes between zero and one.")
             }
             try NativeCompactMaterialModel.validateWeights(weights, shapes: shapes)
             if let reference {
@@ -364,7 +403,7 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
             var feeds = try Dictionary(uniqueKeysWithValues: parameters.map { name, tensor in
                 (tensor, try NativeGraphExecution.tensorData(weights[name]!))
             })
-            feeds[input] = try NativeGraphExecution.tensorData(.floats(rgb, shape: [1, 3, height, width]))
+            feeds[input] = try NativeGraphExecution.tensorData(.floats(rgb, shape: [1, inputChannels, height, width]))
             var targets = [output!]
             if let reference {
                 feeds[targetInput!] = try NativeGraphExecution.tensorData(.floats(reference, shape: [1, outputChannels, height, width]))

@@ -17,14 +17,15 @@ enum NativeMaterialCommands {
             return try await withTaskCancellationHandler { try await job.value } onCancel: { job.cancel() }
         case "capabilities":
             let family = value("--model-family") ?? "pbrnxt"
-            guard ["pbrnxt", "compact-scalar", "compact-normal"].contains(family) else { throw StudioError("Unsupported material model family.") }
+            guard MaterialTrainingModelFamily(rawValue: family) != nil else { throw StudioError("Unsupported material model family.") }
             let scope = value("--scope") ?? "final-map"
             guard family != "pbrnxt" || ["final-map", "map-decoder"].contains(scope) else { throw StudioError("Unsupported material training scope.") }
             let families: [[String: Any]] = [
                 ["id": "pbrnxt", "architecture": "pbrnxt-native-v1", "targets": ["height", "roughness", "normal"], "base_required": true, "training_policy": "lora"],
                 ["id": "compact-scalar", "architecture": "texture-studio-compact-scalar-native-v1", "targets": ["height", "roughness"], "base_required": false, "training_policy": "all_weights_from_scratch"],
-                ["id": "compact-normal", "architecture": "texture-studio-compact-normal-native-v1", "targets": ["normal"], "base_required": false, "training_policy": "all_weights_from_scratch"]]
-            let targets = family == "compact-scalar" ? ["height", "roughness"] : family == "compact-normal" ? ["normal"] : ["height", "roughness", "normal"]
+                ["id": "compact-normal", "architecture": "texture-studio-compact-normal-native-v1", "targets": ["normal"], "base_required": false, "training_policy": "all_weights_from_scratch"],
+                ["id": "depthpro-height-refiner", "architecture": "texture-studio-depthpro-height-refiner-native-v1", "targets": ["height"], "input_channels": 1, "output_channels": 1, "base_required": false, "depthpro_required": true, "training_policy": "cached_depth_to_height"]]
+            let targets = family == "depthpro-height-refiner" ? ["height"] : family == "compact-scalar" ? ["height", "roughness"] : family == "compact-normal" ? ["normal"] : ["height", "roughness", "normal"]
             return try NativeMaterialTransfer.json(["training_sizes": [256,512,1024,2048,4096], "inference_sizes": [256,512,1024,2048,4096,8192],
                 "targets": targets, "scope": family == "pbrnxt" ? scope : "full-model", "model_family": family, "model_families": families,
                 "base_required": family == "pbrnxt", "all_weights_trainable": family != "pbrnxt", "image_size_matches_training_size": true,

@@ -37,6 +37,7 @@ struct TrainingWorkbenchView: View {
                     if let plans = store.dataset?.trainingPlans { DatasetPlanSummary(plans: plans) }
                     Text("Every diffuse and target map uses this exact grid. Matching sources are referenced directly; each crop is saved once in temporary training storage; smaller source sets are excluded.")
                         .font(.caption).foregroundStyle(.secondary)
+                    TrainingCropSelectionFields(options: $store.training)
                     Toggle("Train only selected material", isOn: $store.training.useSelectedMaterialOnly)
                     if store.training.useSelectedMaterialOnly {
                         Text(store.selectedMaterialName.map { "Selected material: \($0)" } ?? "Select a material in Dataset.")
@@ -46,15 +47,17 @@ struct TrainingWorkbenchView: View {
                         Text(store.datasetPreparationSummary).font(.caption).foregroundStyle(.secondary)
                     }
                 }.disabled(store.isBusy)
-                Section(store.training.modelFamily.isCompact ? "Train a compact material model" : "Refine a material model") {
+                Section(store.training.modelFamily == .depthProHeightRefiner ? "Train a DepthPro Height Refiner" : store.training.modelFamily.isCompact ? "Train a compact material model" : "Refine a material model") {
                     TrainingModelFamilyField(store: store)
                     TrainingModelNameField(name: $store.training.modelName, suggestedName: store.suggestedTrainingModelName)
                     Text("Shown in Saved Models and exported with the checkpoint. Clear the field to use the suggested name.")
                         .font(.caption).foregroundStyle(.secondary)
                     Picker("Map", selection: Binding(get: { store.training.target }, set: { store.selectTrainingTarget($0) })) {
                         Text("Displacement").tag("height")
-                        Text("Roughness").tag("roughness")
-                        Text("Normals").tag("normal")
+                        if store.training.modelFamily != .depthProHeightRefiner {
+                            Text("Roughness").tag("roughness")
+                            Text("Normals").tag("normal")
+                        }
                     }
                     Toggle("Start from selected checkpoint", isOn: $store.training.useWarmStart)
                     Text(store.training.modelFamily.isCompact ? "Training scope: complete compact model" : "Training scope: \(store.training.scope == "map-decoder" ? "Map decoder and output branch" : "Map output branch")")
@@ -207,13 +210,46 @@ struct TrainingModelFamilyField: View {
             }
         }
         .accessibilityIdentifier("training.model-family")
-        if store.training.modelFamily == .compactScalar {
+        if store.training.modelFamily == .depthProHeightRefiner {
+            Text("One DepthPro depth channel → one surface-height channel. Diffuse color is used once to cache DepthPro predictions before training. Evaluate the learned relief on held-out materials.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                TextField("DepthPro Core ML package", text: $store.depthProModelPath)
+                Button("Locate DepthPro…") { store.chooseDepthProModel() }
+            }
+            Text("Production runs DepthPro once, then this refiner. Cached float data uses the same depth preparation as inference.")
+                .font(.caption).foregroundStyle(.secondary)
+        } else if store.training.modelFamily == .compactScalar {
             Text("RGB diffuse input has 3 channels. The model predicts one displacement or roughness value per pixel. New compact models start from scratch; review their learned quality before use.")
                 .font(.caption).foregroundStyle(.secondary)
         } else if store.training.modelFamily == .compactNormal {
             Text("RGB diffuse input has 3 channels. The model predicts a normal vector with 3 components per pixel. New compact models start from scratch; review their learned quality before use.")
                 .font(.caption).foregroundStyle(.secondary)
         }
+    }
+}
+
+struct TrainingCropSelectionFields: View {
+    @Binding var options: MaterialTrainingOptions
+
+    var body: some View {
+        Picker("Randomize Crops when", selection: $options.randomizeCrops) {
+            ForEach(MaterialTrainingCropRandomization.allCases, id: \.self) { timing in
+                Text(timing.label).tag(timing)
+            }
+        }
+        .pickerStyle(.menu)
+        .accessibilityIdentifier("training.randomize-crops")
+        Toggle("Randomly Flip Crop", isOn: $options.randomFlip)
+            .disabled(!options.cropAugmentationEnabled)
+            .accessibilityIdentifier("training.random-flip")
+            .help("Choose equally among vertical flip, horizontal flip, both or unchanged. Every epoch applies the choice to the current cached crop.")
+        Toggle("Randomly Spin Centercut Crops", isOn: $options.randomSpinCentercut)
+            .disabled(!options.cropAugmentationEnabled)
+            .accessibilityIdentifier("training.random-spin-centercut")
+            .help("Rotate the original source by a random whole degree from 1 to 179, then take its center crop. Each spin starts from the original source; an optional flip follows.")
+        Text("Never keeps the current crops and pauses both options. A new run or epoch replaces the cached crops; DepthPro predictions are reused for unchanged inputs.")
+            .font(.caption).foregroundStyle(.secondary)
     }
 }
 

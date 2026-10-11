@@ -35,6 +35,7 @@ struct WorkbenchTrainingProgress: Equatable, Sendable {
     var lastLoss: Double?
     var validationError: Double?
     var skippedSampleCount = 0
+    private var preparingCrops = false
 
     var fractionCompleted: Double {
         totalUpdates > 0 ? Double(completedUpdates) / Double(totalUpdates) : 0
@@ -50,16 +51,23 @@ struct WorkbenchTrainingProgress: Equatable, Sendable {
     }
     var sampleSummary: String? {
         guard samplePosition > 0, sampleTotal > 0 else { return nil }
-        let name = state == .validation ? "Validation crop" : "Training map"
+        let name = state == .validation ? "Validation crop" : state == .modelSetup ? "Input map" : "Training map"
         return "\(name) \(samplePosition.formatted()) / \(sampleTotal.formatted())"
     }
     var stageSummary: String? {
         guard stageTotal > 0 else { return nil }
+        if preparingCrops {
+            return "\(stageCompleted.formatted()) / \(stageTotal.formatted()) cached crops refreshed"
+        }
+        if state == .modelSetup, operationLabel == "Caching DepthPro inputs" {
+            return "\(stageCompleted.formatted()) / \(stageTotal.formatted()) inputs processed"
+        }
         return "\(stageCompleted.formatted()) / \(stageTotal.formatted()) stages complete"
     }
 
     mutating func consume(_ event: [String: Any]) {
         guard let kind = event["event"] as? String else { return }
+        if kind != "crop_preparation" { preparingCrops = false }
         if let value = event["completed_updates"] as? Int, value >= 0 { completedUpdates = value }
         if let value = event["skipped_sample_count"] as? Int, value >= 0 { skippedSampleCount = value }
         if let value = event["requested_updates"] as? Int, value >= 0 { totalUpdates = value }
@@ -88,6 +96,22 @@ struct WorkbenchTrainingProgress: Equatable, Sendable {
             state = .modelSetup; phaseIndex = 2; operationDetail = ""
             operationLabel = event["operation"] as? String ?? "Preparing model"
             setStage(event)
+        case "crop_preparation":
+            preparingCrops = true
+            state = epoch > 1 ? .training : .modelSetup
+            phaseIndex = epoch > 1 ? 3 : 2
+            operationLabel = event["operation"] as? String ?? "Refreshing cached crops"
+            clearStageAndSample()
+            setStage(event)
+            operationDetail = stageSummary ?? ""
+        case "depthpro_preparation":
+            state = .modelSetup; phaseIndex = 2
+            operationLabel = "Caching DepthPro inputs"
+            setStage(event)
+            operationDetail = "\(stageCompleted.formatted()) / \(stageTotal.formatted()) inputs processed"
+            sampleID = event["sample_id"] as? String
+            sampleTotal = event["total"] as? Int ?? 0
+            samplePosition = event["sample_position"] as? Int ?? min(stageCompleted + 1, sampleTotal)
         case "training_started":
             state = .training; phaseIndex = 3
             operationLabel = "Starting training"; operationDetail = ""; clearStageAndSample()
@@ -118,8 +142,8 @@ struct WorkbenchTrainingProgress: Equatable, Sendable {
                 completedUpdates = max(0, step - initialStep); currentUpdate = completedUpdates
                 checkpointStep = step
             }
-            state = .training
-            operationLabel = "Optimizer update completed"; stageCompleted = 0; stageTotal = 0
+            state = .training; phaseIndex = 3
+            operationLabel = "Optimizer update completed"; operationDetail = ""; stageCompleted = 0; stageTotal = 0
             lastLoss = event["total"] as? Double
             if let seconds = event["update_duration_seconds"] as? Double, seconds.isFinite, seconds >= 0 {
                 lastUpdateSeconds = seconds
@@ -181,7 +205,7 @@ struct WorkbenchTrainingProgress: Equatable, Sendable {
         case .failed: operationLabel = "Training failed"
         default: break
         }
-        operationDetail = ""; clearStageAndSample()
+        operationDetail = ""; preparingCrops = false; clearStageAndSample()
     }
 
     private mutating func setSample(_ event: [String: Any]) {

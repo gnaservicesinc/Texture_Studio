@@ -1,0 +1,47 @@
+{
+  "date": "2026-10-11",
+  "model_repository": "coreml-projects/DepthPro-coreml",
+  "model_revision": "e3b374e875fa7c89ca4c80203e1fb12e5e02bceb",
+  "model_path": "/opt/ipde/ipde/out/models/depthpro-coreml/DepthPro.mlpackage",
+  "model_package_sha256": "e62c68496d25c76e099fbbcfb7a39814a201a1f2d9a6a9411e37feec2d5d94ec",
+  "weight_bin_sha256": "8de676bd5dbc417085aa69f0e6264ab636d78c2af4015564c88ee4d14452447e",
+  "weight_bin_bytes": 1901556288,
+  "source_path": "/opt/ipde/ipde/out/material-training/comparison-632B8338/diffuse.png",
+  "source_sha256": "0613eac0aa02c09d2b4ef00a0487c6a4a5151d30b846231f26277317e8c6c240",
+  "source_dimensions": [
+    1024,
+    1024
+  ],
+  "model_input_dimensions": [
+    1536,
+    1536
+  ],
+  "required_originalWidth_shape": [
+    1,
+    1,
+    1,
+    1
+  ],
+  "required_originalWidth_dtype": "Float16",
+  "compute_units": "all",
+  "hardware": "Apple M2 Max,64 GB unified memory",
+  "os": "macOS27.2,26B5101f",
+  "compile_and_load_seconds": 9.298217058181763,
+  "prediction_seconds": [
+    5.200864911079407,
+    2.373317003250122
+  ],
+  "output_dimensions": [
+    1536,
+    1536
+  ],
+  "output_dtype": "Float16 decoded to Float32 without numeric normalization",
+  "output_count": 2359296,
+  "output_finite_positive": true,
+  "output_min_meters": 2.546875,
+  "output_max_meters": 2.7792969,
+  "output_mean_meters": 2.558711169494523,
+  "maximum_resident_set_bytes": 5916475392,
+  "peak_memory_footprint_bytes": 4190162928,
+  "verification_scope": "DepthPro native input adapter and camera-depth output smoke, not refiner training or material-height quality qualification"
+}

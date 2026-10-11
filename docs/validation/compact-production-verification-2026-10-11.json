@@ -1,0 +1,22 @@
+{
+  "checkpoint_sha256" : "127c8856f78ccec6c035eb3816b3cfce35447645389736721445ab835af09b48",
+  "checkpoint_step" : 6425,
+  "fixture" : "new procedural imported 2K RGB PNG",
+  "maximum" : 0.54857760667800903,
+  "minimum" : 0.30537733435630798,
+  "model_and_source_unchanged" : true,
+  "numeric_readback_bitwise_equal" : true,
+  "output_dimensions" : [
+    512,
+    512
+  ],
+  "output_sha256" : "213a23073bb539101ae6a4ce1505470011f315fb0c06c74e19b2e028fb6f0f19",
+  "output_storage" : "FLOAT32",
+  "prepared_sha256" : "90916bcbc228f718d2fa206c1d923161a58be76ee89f7863b4caa9d016b5f091",
+  "quality_qualification" : false,
+  "source_dimensions" : [
+    2048,
+    2048
+  ],
+  "source_sha256" : "3e4ae092cbae03f475eca0710784ec18a51d2a0efebd9afe884a7e54b9151c5f"
+}

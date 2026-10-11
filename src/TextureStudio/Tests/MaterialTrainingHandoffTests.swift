@@ -3,6 +3,24 @@ import XCTest
 @testable import TextureStudio
 
 final class MaterialTrainingHandoffTests: XCTestCase {
+    func testHandoffPreservesCropTimingAndDisabledOrientationSelections() throws {
+        for timing in MaterialTrainingCropRandomization.allCases {
+            var training = options()
+            training.randomizeCrops = timing
+            training.randomFlip = true
+            training.randomSpinCentercut = true
+            let handoff = try MaterialTrainingHandoff(checkpoint: checkpoint(), dataset: nil, training: training,
+                sampleID: nil, inputVariantID: nil)
+            let document = try handoff.writeTemporary()
+            defer { _ = try? handoff.discardTemporaryFile(at: document) }
+            let restored = try MaterialTrainingHandoff.read(from: document)
+            XCTAssertEqual(restored.training.randomizeCrops, timing)
+            XCTAssertTrue(restored.training.randomFlip)
+            XCTAssertTrue(restored.training.randomSpinCentercut)
+            XCTAssertEqual(restored.training.cropArguments, training.cropArguments)
+        }
+    }
+
     func testCompactHandoffRoundTripBindsScalarAndNormalTargetsAndIgnoresUnusedLoRASettings() throws {
         for target in ["height", "roughness", "normal"] {
             let family: MaterialTrainingModelFamily = target == "normal" ? .compactNormal : .compactScalar

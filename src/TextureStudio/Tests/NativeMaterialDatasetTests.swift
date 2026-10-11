@@ -6,6 +6,137 @@ import XCTest
 
 @MainActor
 final class NativeMaterialDatasetTests: XCTestCase {
+    func testBalancedCropLayoutUsesOneSampleAtEveryResolutionTier() throws {
+        func crop(_ dimensions: [Int], seed: UInt64 = 0, source: String = "stone") throws -> (String, [Int]) {
+            let selected = NativeMaterialDatasetService.cropLayout(dimensions, size: 1024, subject: "/sources/stone", sourceSet: source, seed: seed)
+            XCTAssertEqual(selected.count, 1, "A larger source must not multiply this material's training weight")
+            return try XCTUnwrap(selected.first)
+        }
+        XCTAssertEqual(try crop([1024, 1024]).0, "full")
+        XCTAssertEqual(try crop([1024, 1024], seed: 17).1, [0, 0, 1024, 1024])
+        XCTAssertEqual(try crop([2048, 2048], seed: 1).1, [512, 512, 1024, 1024])
+        XCTAssertEqual(try crop([2048, 2048], seed: 99).0, "center")
+        let anchors = Set(["0,0", "3072,0", "0,3072", "3072,3072", "1536,1536"])
+        var chosen = Set<String>()
+        for seed in UInt64(0)..<64 {
+            let anchor = try crop([4096, 4096], seed: seed)
+            XCTAssertEqual(anchor.0, "selected")
+            let position = "\(anchor.1[0]),\(anchor.1[1])"
+            XCTAssertTrue(anchors.contains(position)); chosen.insert(position)
+            XCTAssertEqual(anchor.1, try crop([4096, 4096], seed: seed, source: "other-color-or-target").1,
+                           "The five-position choice belongs to the folder, not a variant or target")
+        }
+        XCTAssertEqual(chosen, anchors)
+        let restricted = NativeMaterialDatasetService.cropLayout([4096, 4096], size: 1024, subject: "/sources/stone", sourceSet: "stone", seed: 7, excludedAnchors: [0, 1, 2, 3])
+        XCTAssertEqual(restricted.first?.1, [1536, 1536, 1024, 1024], "A reserved diagnostic position must remain separate from training")
+        let random = try crop([8192, 8192], seed: 17)
+        XCTAssertEqual(random.0, "random")
+        XCTAssertEqual(random.1, try crop([8192, 8192], seed: 17).1)
+        XCTAssertNotEqual(random.1, try crop([8192, 8192], seed: 18).1)
+        XCTAssertTrue((0...7168).contains(random.1[0])); XCTAssertTrue((0...7168).contains(random.1[1]))
+        XCTAssertEqual(Array(random.1.suffix(2)), [1024, 1024])
+        XCTAssertTrue(NativeMaterialDatasetService.cropLayout([512, 512], size: 1024).isEmpty)
+        XCTAssertTrue(NativeMaterialDatasetService.cropLayout([1024, 1024], size: 0).isEmpty)
+    }
+
+    func testSeededPreparationKeepsVariantAndTargetGeometryPairedAndReusesOnlyMatchingSelection() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), folder = root.appendingPathComponent("stone")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Balanced", "--training-size", "256", "--validation-percent", "100"])
+        var originals: [URL: Data] = [:]
+        for (dimension, label) in [(1024, "1k"), (2048, "2k")] {
+            for (suffix, bits, channels) in [("diff", 8, 3), ("diff2", 8, 3), ("disp", 16, 1), ("rough", 8, 1), ("nor_dx", 8, 3)] {
+                let url = folder.appendingPathComponent("stone_\(suffix)_\(label).png")
+                let bytes = try fixturePNG(width: dimension, height: dimension, bits: bits, channels: channels)
+                try bytes.write(to: url); originals[url] = bytes
+            }
+        }
+        _ = try await output(["import-folder", "--dataset", dataset.path, "--folder", folder.path, "--training-size", "256"])
+        let indexBytes = try Data(contentsOf: dataset.appendingPathComponent("dataset.json"))
+        var geometry: [String: [Int]] = [:]
+        var firstHeightURL: URL?
+        for target in ["height", "roughness", "normal"] {
+            let result = try await output(["prepare-size", "--dataset", dataset.path, "--size", "256", "--target", target, "--crop-seed", "17"])
+            let preparedURL = URL(fileURLWithPath: try XCTUnwrap(result["dataset_path"] as? String))
+            if target == "height" { firstHeightURL = preparedURL }
+            let preparedIndex = try object(preparedURL.appendingPathComponent("dataset.json"))
+            let entries = try XCTUnwrap(preparedIndex["samples"] as? [[String: Any]])
+            XCTAssertEqual(entries.count, 2, "One spatial sample must come from each registered resolution")
+            let binding = try XCTUnwrap(preparedIndex["native_size_preparation"] as? [String: Any])
+            let selection = try XCTUnwrap(binding["crop_selection"] as? [String: Any])
+            XCTAssertEqual(selection["policy"] as? String, NativeMaterialDatasetService.cropSelectionPolicy)
+            XCTAssertEqual(selection["seed"] as? String, "17")
+            let samples = try NativeMaterialDatasetService.trainingSamples(datasetURL: preparedURL, size: 256, target: target)
+            XCTAssertEqual(samples.count, 4, "Each registered diffuse variant contributes once at its source resolution")
+            for sample in samples {
+                let sourceInput = try XCTUnwrap(sample.augmentationSourceInputURL)
+                let sourceTarget = try XCTUnwrap(sample.augmentationSourceTargetURL)
+                XCTAssertEqual(sample.augmentationSourceInputSHA256, SHA256.hash(data: try XCTUnwrap(originals[sourceInput])).map { String(format: "%02x", $0) }.joined())
+                XCTAssertEqual(sample.augmentationSourceTargetSHA256, SHA256.hash(data: try XCTUnwrap(originals[sourceTarget])).map { String(format: "%02x", $0) }.joined())
+                XCTAssertEqual(sample.subjectID, folder.path)
+                let rectangle = try XCTUnwrap(sample.cropRectangle), identity = String(sample.id.split(separator: "|")[0])
+                let sourceSize = sourceInput.lastPathComponent.contains("_1k") ? 1024 : 2048
+                let isCenter = rectangle == [(sourceSize - 256) / 2, (sourceSize - 256) / 2, 256, 256]
+                XCTAssertEqual(sample.cropKind, isCenter ? "center" : sourceSize == 1024 ? "anchor" : "random")
+                if let recorded = geometry[identity] { XCTAssertEqual(rectangle, recorded) }
+                else { geometry[identity] = rectangle }
+                XCTAssertEqual(try NativePNG.decode(Data(contentsOf: sample.inputURL)).pixels,
+                               try NativePNG.decode(Data(contentsOf: sourceInput)).crop(rectangle).pixels)
+                let expectedTarget = try NativePNG.decode(Data(contentsOf: sourceTarget)).crop(rectangle, flipGreen: target == "normal")
+                XCTAssertEqual(try NativePNG.decode(Data(contentsOf: sample.targetURL)).pixels, expectedTarget.pixels)
+                XCTAssertEqual(sample.targetConvention, "opengl")
+                XCTAssertEqual(sample.augmentationSourceTargetConvention, target == "normal" ? "directx" : "opengl")
+            }
+        }
+        let originalPrepared = try XCTUnwrap(firstHeightURL)
+        let reused = try await output(["prepare-size", "--dataset", dataset.path, "--size", "256", "--target", "height", "--crop-seed", "17"])
+        XCTAssertEqual(reused["dataset_path"] as? String, originalPrepared.path)
+        XCTAssertEqual((reused["preparation"] as? [String: Any])?["reused"] as? Bool, true)
+        let refreshed = try NativeMaterialDatasetService.prepareTrainingDataset(datasetURL: originalPrepared, size: 256, target: "height", cropSeed: 18, material: "stone_1k", automaticValidation: false)
+        XCTAssertNotEqual(refreshed, originalPrepared, "A refreshed choice must not overwrite another run's immutable crops")
+        let refreshedSamples = try NativeMaterialDatasetService.trainingSamples(datasetURL: refreshed, size: 256, target: "height")
+        XCTAssertEqual(refreshedSamples.count, 4, "Selecting a source folder must retain its asset's other native resolution sets")
+        XCTAssertTrue(refreshedSamples.contains { $0.cropRectangle != geometry[String($0.id.split(separator: "|")[0])] })
+        let selectedInfo = try await output(["dataset", "--dataset", refreshed.path])
+        let selectedDataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: String(decoding: JSONSerialization.data(withJSONObject: selectedInfo), as: UTF8.self))
+        XCTAssertEqual(selectedDataset.automaticValidation?.quickFitMaterialId, "stone_1k")
+        XCTAssertTrue(selectedDataset.readyForTraining(size: 256, material: "stone_1k", target: "height"))
+        XCTAssertFalse(selectedDataset.readyForTraining(size: 256, material: nil, target: "height"))
+        let centerRectangle = [384, 384, 256, 256]
+        let centerSeed = try XCTUnwrap((UInt64(0)..<256).first {
+            NativeMaterialDatasetService.cropLayout([1024, 1024], size: 256, subject: folder.path, sourceSet: "stone_1024x1024", seed: $0).first?.1 == centerRectangle
+        })
+        let centerURL = try NativeMaterialDatasetService.prepareTrainingDataset(datasetURL: dataset, size: 256, target: "height", cropSeed: centerSeed, material: "stone_1k", automaticValidation: false)
+        let centerSamples = try NativeMaterialDatasetService.trainingSamples(datasetURL: centerURL, size: 256, target: "height")
+            .filter { $0.augmentationSourceInputURL?.lastPathComponent.contains("_1k") == true }
+        XCTAssertEqual(centerSamples.count, 2)
+        for sample in centerSamples {
+            XCTAssertEqual(sample.cropRectangle, centerRectangle)
+            XCTAssertEqual(sample.cropKind, "center", "The center among the five anchor positions must be eligible for a center spin")
+            XCTAssertTrue(sample.id.contains("_selected"), "Spin eligibility must preserve the reviewed spatial slot identity")
+            let metadata = try object(sample.inputURL.deletingLastPathComponent().appendingPathComponent("sample.json"))
+            XCTAssertEqual(metadata["source_region_id"] as? String, "selected")
+            XCTAssertEqual(metadata["crop_kind"] as? String, "center")
+        }
+        var diagnostic: [(String, [Int])] = []
+        for seed in [UInt64(17), 18] {
+            let url = try NativeMaterialDatasetService.prepareTrainingDataset(datasetURL: dataset, size: 256, target: "height", cropSeed: seed)
+            let descriptors = try NativeMaterialDatasetService.trainingSamples(datasetURL: url, size: 256, target: "height")
+            let check = try XCTUnwrap(descriptors.first { $0.split == "validation" })
+            diagnostic.append((check.id, try XCTUnwrap(check.cropRectangle)))
+            XCTAssertFalse(descriptors.contains { $0.split == "train" && $0.augmentationSourceTargetURL == check.augmentationSourceTargetURL && $0.cropRectangle == check.cropRectangle })
+        }
+        XCTAssertEqual(diagnostic[0].0, diagnostic[1].0, "Run refresh must preserve diagnostic source membership")
+        XCTAssertEqual(diagnostic[0].1, diagnostic[1].1, "Diagnostic pixels must remain stable when training refreshes")
+        XCTAssertEqual(try Data(contentsOf: dataset.appendingPathComponent("dataset.json")), indexBytes)
+        for (url, bytes) in originals { XCTAssertEqual(try Data(contentsOf: url), bytes) }
+        do {
+            _ = try await output(["prepare-size", "--dataset", dataset.path, "--size", "256", "--target", "height", "--crop-seed", "-1"])
+            XCTFail("Invalid selection seeds must not publish crops")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("seed")) }
+    }
+
     func testSourceScanWorkersRespectCPUAndMappedFileMemory() {
         let gib = MachineResources.gibibyte
         let resources = MachineResources(physicalBytes: 16 * gib, availableProcessorCount: 12)
@@ -16,6 +147,106 @@ final class NativeMaterialDatasetTests: XCTestCase {
         XCTAssertEqual(NativeMaterialDatasetService.sourceScanWorkerCount(fileCount: 0, largestFileBytes: 0, resources: resources), 0)
         let singleCPU = MachineResources(physicalBytes: 16 * gib, availableProcessorCount: 1)
         XCTAssertEqual(NativeMaterialDatasetService.sourceScanWorkerCount(fileCount: 20, largestFileBytes: 1, resources: singleCPU), 1)
+    }
+
+    func testPreparationRegistersExternalZoomTierAndRepairsSelectedFolderSiblingWithoutChangingEvidence() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), folder = root.appendingPathComponent("External")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let recovery = NativeMaterialSourceRecovery(transport: .init(fetchMetadata: { url in
+            .init(data: Data(), statusCode: 404, url: url)
+        }, download: { _, _ in throw StudioError("Unpublished fixture maps must never download.") }))
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "External references", "--training-size", "256"], sourceRecovery: recovery)
+        var originals: [URL: Data] = [:]
+        for (dimension, label) in [(256, "4k"), (512, "8k")] {
+            for (suffix, bits, channels) in [("diff", 8, 3), ("nor_gl", 8, 3)] {
+                let url = folder.appendingPathComponent("stone_\(suffix)_\(label).png")
+                let bytes = try fixturePNG(width: dimension, height: dimension, bits: bits, channels: channels)
+                try bytes.write(to: url); originals[url] = bytes
+            }
+        }
+        let firstHeight = folder.appendingPathComponent("stone_disp_4k.png")
+        let firstHeightBytes = try fixturePNG(width: 256, height: 256, bits: 16, channels: 1)
+        try firstHeightBytes.write(to: firstHeight); originals[firstHeight] = firstHeightBytes
+        _ = try await output(["import-folder", "--dataset", dataset.path, "--folder", folder.path, "--training-size", "256"], sourceRecovery: recovery)
+        for (sample, note) in [("stone_4k_full", "Keep the full source"), ("stone_8k_center", "Keep the sibling crop")] {
+            _ = try await output(["curate", "--dataset", dataset.path, "--sample", sample, "--review-size", "256", "--status", "approved", "--note", note], sourceRecovery: recovery)
+        }
+        let firstMetadataURL = dataset.appendingPathComponent("samples/stone_4k_full/sample.json")
+        let firstMetadata = try Data(contentsOf: firstMetadataURL)
+        let before = try await output(["dataset", "--dataset", dataset.path], sourceRecovery: recovery)
+        let siblingHeight = folder.appendingPathComponent("stone_disp_8k.png")
+        let siblingHeightBytes = try fixturePNG(width: 512, height: 512, bits: 16, channels: 1)
+        try siblingHeightBytes.write(to: siblingHeight); originals[siblingHeight] = siblingHeightBytes
+        for family in ["stone", "unrelated"] {
+            for (suffix, bits, channels) in [("diff", 8, 3), ("disp", 16, 1)] {
+                let url = folder.appendingPathComponent("\(family)_\(suffix)_1k.png")
+                let bytes = try fixturePNG(width: 1024, height: 1024, bits: bits, channels: channels)
+                try bytes.write(to: url); originals[url] = bytes
+            }
+        }
+        let result = try await output(["prepare-size", "--dataset", dataset.path, "--size", "256", "--target", "height", "--material", "stone_4k", "--crop-seed", "17",
+            "--expected-index-sha256", try XCTUnwrap(before["index_sha256"] as? String),
+            "--expected-review-sha256", try XCTUnwrap(before["review_sha256"] as? String)], sourceRecovery: recovery)
+        let preparedURL = URL(fileURLWithPath: try XCTUnwrap(result["dataset_path"] as? String))
+        let samples = try NativeMaterialDatasetService.trainingSamples(datasetURL: preparedURL, size: 256, target: "height")
+        XCTAssertEqual(Set(samples.map { String($0.id.split(separator: "_").dropLast().joined(separator: "_")) }), ["stone_4k", "stone_8k", "stone_1k"])
+        XCTAssertEqual(samples.count, 3, "External source folders must contribute their newly complete zoom tiers")
+        XCTAssertEqual(try Data(contentsOf: firstMetadataURL), firstMetadata, "Current recorded source evidence must not be replaced by discovery")
+        let siblingMetadata = try object(dataset.appendingPathComponent("samples/stone_8k_full/sample.json"))
+        let siblingMaps = try XCTUnwrap(siblingMetadata["map_metadata"] as? [String: [String: Any]])
+        XCTAssertEqual((siblingMaps["height"]?["source"] as? [String: Any])?["file_sha256"] as? String,
+                       SHA256.hash(data: siblingHeightBytes).map { String(format: "%02x", $0) }.joined())
+        let reviews = try object(dataset.appendingPathComponent(".material-size-reviews.json"))
+        XCTAssertEqual((reviews["256:stone_4k_full"] as? [String: Any])?["curation_note"] as? String, "Keep the full source")
+        XCTAssertEqual((reviews["256:stone_8k_center"] as? [String: Any])?["curation_note"] as? String, "Keep the sibling crop")
+        let originalIndex = try object(dataset.appendingPathComponent("dataset.json"))
+        XCTAssertEqual(Set((originalIndex["samples"] as? [[String: Any]] ?? []).compactMap { $0["material_id"] as? String }), ["stone_4k", "stone_8k", "stone_1k"], "Other assets in the authorized folder must not be imported as a side effect")
+        let preparedIndex = try object(preparedURL.appendingPathComponent("dataset.json"))
+        let binding = try XCTUnwrap(preparedIndex["native_size_preparation"] as? [String: Any])
+        let snapshot = try XCTUnwrap(binding["source_snapshot"] as? [String: Any])
+        XCTAssertEqual(snapshot["index_sha256"] as? String, SHA256.hash(data: try Data(contentsOf: dataset.appendingPathComponent("dataset.json"))).map { String(format: "%02x", $0) }.joined(), "Preparation must bind the fully registered source snapshot")
+        let decoded = try WorkbenchResult.decode(WorkbenchDataset.self, output: String(decoding: JSONSerialization.data(withJSONObject: result), as: UTF8.self))
+        XCTAssertTrue(decoded.readyForTraining(size: 256, material: "stone_4k", target: "height"))
+        for sample in samples {
+            let source = try XCTUnwrap(sample.augmentationSourceTargetURL), rectangle = try XCTUnwrap(sample.cropRectangle)
+            XCTAssertEqual(try NativePNG.decode(Data(contentsOf: sample.targetURL)).pixels,
+                           try NativePNG.decode(Data(contentsOf: source)).crop(rectangle).pixels)
+        }
+        for (url, bytes) in originals { XCTAssertEqual(try Data(contentsOf: url), bytes) }
+    }
+
+    func testPreparationRecoversOnlyAuthorizedProviderAssetsBesideNominalResolutionSiblings() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), folder = root.appendingPathComponent("External")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let probe = DatasetRecoveryMetadataProbe()
+        let recovery = NativeMaterialSourceRecovery(transport: .init(fetchMetadata: { url in
+            await probe.record(url)
+            return .init(data: Data(), statusCode: 404, url: url)
+        }, download: { _, _ in throw StudioError("Unpublished fixture maps must never download.") }))
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Scoped source recovery", "--training-size", "256"], sourceRecovery: recovery)
+        let input = folder.appendingPathComponent("stone_diff_1k.png"), height = folder.appendingPathComponent("stone_disp_1k.png")
+        let inputBytes = try fixturePNG(width: 1024, height: 1024, bits: 8, channels: 3)
+        let heightBytes = try fixturePNG(width: 1024, height: 1024, bits: 16, channels: 1)
+        try inputBytes.write(to: input); try heightBytes.write(to: height)
+        _ = try await output(["add-material", "--dataset", dataset.path, "--name", "stone", "--input", input.path, "--height", height.path], sourceRecovery: recovery)
+        let matching = folder.appendingPathComponent("stone_diff_2k.png")
+        let matchingBytes = try fixturePNG(width: 2048, height: 2048, bits: 8, channels: 3)
+        try matchingBytes.write(to: matching)
+        let unrelated = folder.appendingPathComponent("unrelated_diff_1k.png")
+        try inputBytes.write(to: unrelated)
+        let result = try await output(["prepare-size", "--dataset", dataset.path, "--size", "256", "--target", "height", "--material", "stone_1k"], sourceRecovery: recovery)
+        let requested = await probe.urls()
+        XCTAssertEqual(requested, ["https://api.polyhaven.com/files/stone"],
+                       "Repair the authorized existing2k diffuse's target while leaving an unrelated provider sibling outside download scope")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("unrelated_disp_1k.png").path))
+        let prepared = URL(fileURLWithPath: try XCTUnwrap(result["dataset_path"] as? String))
+        let samples = try NativeMaterialDatasetService.trainingSamples(datasetURL: prepared, size: 256, target: "height")
+        XCTAssertEqual(samples.count, 1)
+        XCTAssertEqual(samples.first?.augmentationSourceInputURL, input)
+        XCTAssertEqual(try Data(contentsOf: input), inputBytes); XCTAssertEqual(try Data(contentsOf: height), heightBytes)
+        XCTAssertEqual(try Data(contentsOf: matching), matchingBytes); XCTAssertEqual(try Data(contentsOf: unrelated), inputBytes)
     }
 
     func testSourceScanReadsConcurrentlyPreservesOrderAndIsolatesCorruptFiles() async throws {
@@ -998,6 +1229,22 @@ final class NativeMaterialDatasetTests: XCTestCase {
         catch { XCTAssertTrue(error.localizedDescription.contains("special file")) }
         XCTAssertTrue(FileManager.default.fileExists(atPath: pipe.path))
         try FileManager.default.removeItem(at: pipe)
+        let finderMetadata = preparedURL.appendingPathComponent(".DS_Store")
+        let unrelatedBytes = Data("Unrelated user content, even with a Finder filename".utf8)
+        try unrelatedBytes.write(to: finderMetadata)
+        do { _ = try await output(["cleanup-size", "--dataset", preparedPath]); XCTFail("The Finder filename alone must not authorize unrelated data removal") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("unrelated files (.DS_Store)")) }
+        XCTAssertEqual(try Data(contentsOf: finderMetadata), unrelatedBytes)
+        try FileManager.default.removeItem(at: finderMetadata)
+        try FileManager.default.createSymbolicLink(at: finderMetadata, withDestinationURL: input)
+        do { _ = try await output(["cleanup-size", "--dataset", preparedPath]); XCTFail("Finder metadata must not bypass symbolic-link protection") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("unexpected symbolic link")) }
+        try FileManager.default.removeItem(at: finderMetadata)
+        // This exact version/Bud1 signature is written by macOS Finder. The
+        // disposable fixture is permitted at both the cache and sample level.
+        let finderBytes = Data([0, 0, 0, 1, 0x42, 0x75, 0x64, 0x31, 0, 0, 0x10, 0, 0, 0, 8, 0])
+        try finderBytes.write(to: finderMetadata)
+        try finderBytes.write(to: descriptor.targetURL.deletingLastPathComponent().appendingPathComponent(".DS_Store"))
         let reused = try await output(["prepare-size", "--dataset", dataset.path, "--size", "256", "--target", "height", "--automatic-validation"])
         XCTAssertEqual((reused["preparation"] as? [String: Any])?["reused"] as? Bool, true)
         _ = try await output(["cleanup-size", "--dataset", preparedPath])
@@ -1030,8 +1277,8 @@ final class NativeMaterialDatasetTests: XCTestCase {
         return try NativePNG(header: .init(width: width, height: height, bits: bits, channels: channels,
                                           color: channels == 1 ? 0 : 2, interlace: 0), pixels: pixels, colorChunks: []).encoded()
     }
-    private func output(_ arguments: [String]) async throws -> [String: Any] {
-        let returned = try await NativeMaterialDatasetService.run(arguments: arguments)
+    private func output(_ arguments: [String], sourceRecovery: NativeMaterialSourceRecovery? = nil) async throws -> [String: Any] {
+        let returned = try await NativeMaterialDatasetService.run(arguments: arguments, sourceRecovery: sourceRecovery)
         let text = try XCTUnwrap(returned)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
     }
@@ -1046,6 +1293,12 @@ private final class PreparationEventRecorder: @unchecked Sendable {
     func objects() throws -> [[String: Any]] {
         try lock.withLock { try values.map { try JSONSerialization.jsonObject(with: Data($0.utf8)) as! [String: Any] } }
     }
+}
+
+private actor DatasetRecoveryMetadataProbe {
+    private var requested: [String] = []
+    func record(_ url: URL) { requested.append(url.absoluteString) }
+    func urls() -> [String] { requested }
 }
 
 private final class SourceScanProbe: @unchecked Sendable {

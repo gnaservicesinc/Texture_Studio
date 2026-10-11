@@ -4,6 +4,33 @@ import XCTest
 
 @MainActor
 final class NativeCompactMaterialPackageTests: XCTestCase {
+    func testDepthProRefinerPackagePreservesInputIdentityAndRejectsRGBWarmStart() throws {
+        let fixture = try NativeMaterialPackageFixture(); defer { fixture.remove() }
+        let model = try NativeCompactMaterialModel(target: "height", width: 16, seed: 19, family: .depthProHeightRefiner)
+        let depthProHash = String(repeating: "b", count: 64)
+        model.configuration["depthpro_model_sha256"] = depthProHash
+        let configuration = try model.checkpointConfiguration(size: 256, step: 3)
+        let package = fixture.root.appendingPathComponent("depthpro-refiner")
+        let info = try NativeMaterialTransfer.object(Data(NativeMaterialPackage.export(model: model,
+            configuration: configuration, to: package, developer: false).utf8))
+        let (saved, hashes) = try NativeMaterialPackage.verify(package)
+        XCTAssertEqual(saved["input_channels"] as? Int, 1)
+        XCTAssertEqual(saved["output_channels"] as? Int, 1)
+        XCTAssertEqual(info["input_kind"] as? String, "depthpro")
+        XCTAssertEqual(info["depthpro_model_sha256"] as? String, depthProHash)
+        XCTAssertEqual(info["depthpro_preparation_contract"] as? String, NativeDepthProContract.identifier)
+        XCTAssertEqual(info["model_family"] as? String, "depthpro-height-refiner")
+        XCTAssertNil(hashes["adapter.safetensors"])
+        let checkpoint = package.appendingPathComponent("model.safetensors")
+        let loaded = try NativeCompactMaterialModel.load(checkpointURL: checkpoint, target: "height", width: 16,
+            family: .depthProHeightRefiner)
+        XCTAssertEqual(loaded.inputChannels, 1)
+        XCTAssertEqual(loaded.configuration["depthpro_model_sha256"] as? String, depthProHash)
+        XCTAssertThrowsError(try NativeCompactMaterialModel.load(checkpointURL: checkpoint, target: "height", width: 16))
+        let readme = try String(contentsOf: package.appendingPathComponent("README.md"), encoding: .utf8)
+        XCTAssertTrue(readme.contains(depthProHash)); XCTAssertTrue(readme.contains("upstream weights are not included"))
+    }
+
     func testEveryCompactTargetExportsStandaloneFullWeightsInBothModes() throws {
         let fixture = try NativeMaterialPackageFixture(); defer { fixture.remove() }
         for target in ["height", "roughness", "normal"] { for developer in [false, true] {

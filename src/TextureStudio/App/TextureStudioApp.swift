@@ -14,7 +14,7 @@ struct TextureStudioApp: App {
             if let role = MaterialTool.launchRole {
                 MaterialToolRootView(role: role, store: workbench)
             } else {
-                ContentView(models: models, adviser: adviser)
+                ContentView(models: models, adviser: adviser, materialStore: workbench)
                     .frame(minWidth: 980, minHeight: 680)
             }
         }
@@ -35,7 +35,7 @@ struct TextureStudioApp: App {
                             .help("Expose advanced model controls. Export fused full checkpoints alongside the separate LoRA, with Hugging Face publishing controls.")
                     }.padding(20)
                     Divider()
-                    ModelLibraryView(models: models, adviser: adviser)
+                    ModelLibraryView(models: models, materialStore: workbench, adviser: adviser)
                         .frame(width: 640, height: 540)
                 }
             }

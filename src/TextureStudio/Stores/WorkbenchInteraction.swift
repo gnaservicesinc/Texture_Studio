@@ -49,15 +49,14 @@ extension WorkbenchStore {
             return "Choose a test photo or select a dataset material with a diffuse map."
         }
         let selected = checkpoints.filter { comparisonCheckpointIds.contains($0.id) }
-        if selected.isEmpty { return "Choose a checkpoint to compare with its base model." }
+        if selected.isEmpty && !comparisonIncludesBase {
+            return "Select a checkpoint or include the untrained initialization / material base."
+        }
         if selected.contains(where: { !$0.supportsStudioInference }) {
             return "Select compatible material checkpoints for this comparison."
         }
-        if Set(selected.map(\.target)).count != 1 {
+        if Set(selected.map(\.target)).count > 1 {
             return "Select checkpoints for the same map: displacement, roughness or normals."
-        }
-        if selected.count == 1 && !comparisonIncludesBase {
-            return "Include the base model or select a second checkpoint."
         }
         return nil
     }

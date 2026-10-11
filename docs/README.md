@@ -6,6 +6,7 @@ Texture Studio and its material tools are native SwiftUI macOS applications. Bui
 - [Native dataset, review and training tools](native-material-tools.md)
 - [Training and precision contract](material-training-data.md)
 - [Training workflow](material-training-workflow.md)
+- [DepthPro Height Refiner experiment](depthpro-height-refiner.md)
 - [Model setup](model-setup.md)
 - [Training configuration and upstream model audit](training-audit.md)
 - [Building and releasing](releasing.md)

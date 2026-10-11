@@ -118,29 +118,49 @@ final class NativeCompactMaterialTrainerTests: XCTestCase {
 
     /// Opt-in short throughput probe. It deliberately does not assess trained quality.
     func testCompact512TrainingBenchmark() async throws {
+        try await benchmark(size: 512)
+    }
+
+    func testCompact1024TrainingBenchmark() async throws {
+        try await benchmark(size: 1024)
+    }
+
+    private func benchmark(size: Int) async throws {
         let environment = ProcessInfo.processInfo.environment
-        guard environment["TEXTURE_STUDIO_COMPACT_BENCHMARK"] == "1" else { throw XCTSkip("Opt-in 512 compact training throughput probe.") }
+        guard environment["TEXTURE_STUDIO_COMPACT_BENCHMARK"] == "1" else { throw XCTSkip("Opt-in compact training throughput probe.") }
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let dataset = root.appendingPathComponent("dataset")
-        try fixture(dataset, target: "height", size: 512, trainingCount: 3)
+        try fixture(dataset, target: "height", size: size, trainingCount: 3)
         let report = URL(fileURLWithPath: environment["TEXTURE_STUDIO_COMPACT_BENCHMARK_OUTPUT"] ?? "/opt/ipde/ipde/out/compact-native-benchmark.json")
+        let warmStart = environment["TEXTURE_STUDIO_COMPACT_BENCHMARK_CHECKPOINT"].map { URL(fileURLWithPath: $0) }
+        let originalDigest = try warmStart.map { try NativeMaterialTransfer.hash($0) }
         let recorder = Recorder(), start = ProcessInfo.processInfo.systemUptime
-        let result = try NativeMaterialTransfer.object(Data(try await NativeMaterialTrainer.run(arguments: ["train",
+        var arguments = ["train",
             "--dataset", dataset.path, "--output", root.appendingPathComponent("trained").path,
-            "--model-family", "compact-scalar", "--size", "512", "--updates-per-map", "2"],
+            "--model-family", "compact-scalar", "--size", String(size), "--updates-per-map", "2"]
+        if let warmStart, let originalDigest { arguments += ["--checkpoint", warmStart.path, "--expected-sha256", originalDigest] }
+        let result = try NativeMaterialTransfer.object(Data(try await NativeMaterialTrainer.run(arguments: arguments,
             onEvent: { recorder.record($0) }).utf8))
         let updates = recorder.events.filter { $0["event"] as? String == "update" }
         XCTAssertEqual(result["completed_updates"] as? Int, 6)
         XCTAssertEqual(updates.count, 6)
         XCTAssertTrue(updates.allSatisfy { ($0["total"] as? Double)?.isFinite == true })
+        if let warmStart, let originalDigest {
+            XCTAssertEqual(try NativeMaterialTransfer.hash(warmStart), originalDigest)
+            let final = try NativeMaterialTransfer.object(Data(NativeMaterialCheckpoint.inspect(at:
+                URL(fileURLWithPath: try XCTUnwrap(result["checkpoint_path"] as? String))).utf8))
+            XCTAssertEqual(final["training_size"] as? Int, size)
+            XCTAssertEqual(final["step"] as? Int, (updates.first?["initial_step"] as? Int ?? 0) + 6)
+        }
         var resources = rusage(); getrusage(RUSAGE_SELF, &resources)
-        let receipt: [String: Any] = ["model_family": "compact-scalar", "size": 512, "network_width": 32,
+        var receipt: [String: Any] = ["model_family": "compact-scalar", "size": size, "network_width": 32,
             "parameters": 999_937, "fixture": "three distinct procedural native RGB/16-bit scalar pairs; two epochs",
             "device": device.name, "total_wall_seconds": ProcessInfo.processInfo.systemUptime - start,
             "peak_resident_bytes": resources.ru_maxrss, "metal_allocated_bytes_at_completion": device.currentAllocatedSize,
             "updates": updates, "completed_updates": 6,
             "quality_qualification": false, "cold_step_includes_graph_compilation": true]
+        if let originalDigest { receipt["warm_start_sha256"] = originalDigest; receipt["initial_step"] = updates.first?["initial_step"] }
         try FileManager.default.createDirectory(at: report.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: receipt, options: [.prettyPrinted, .sortedKeys]).write(to: report)
     }

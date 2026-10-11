@@ -90,11 +90,13 @@ final class WorkbenchStore {
     private(set) var lastUploadURL: URL?
     var workspacePath: String { didSet { preferences.set(workspacePath, forKey: "workspace") } }
     var modelDirectory: String { didSet { preferences.set(modelDirectory, forKey: "materialModelDirectory") } }
+    var depthProModelPath: String { didSet { depthProPreferences.set(depthProModelPath, forKey: NativeDepthProContract.modelPathKey) } }
     let resources: MachineResources
     @ObservationIgnored private var runner: NativeMaterialTrainingControl?
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var activeWorkerId: UUID?
     @ObservationIgnored let preferences: UserDefaults
+    @ObservationIgnored private let depthProPreferences: UserDefaults
     @ObservationIgnored let trashHandler: (URL) throws -> Void
     @ObservationIgnored private let workerOverride: (@MainActor ([String], String) async throws -> String)?
     @ObservationIgnored private let managedWorkspaceURL: URL
@@ -114,8 +116,14 @@ final class WorkbenchStore {
         dataset?.materials.first { $0.samples.contains { $0.id == selectedSampleId } }.map { $0.name ?? $0.materialId.replacingOccurrences(of: "_", with: " ") }
     }
     var selectedCheckpoint: WorkbenchCheckpoint? { checkpoints.first { $0.id == selectedCheckpointId } }
+    var comparisonBaselineCheckpoint: WorkbenchCheckpoint? {
+        checkpoints.first { comparisonCheckpointIds.contains($0.id) }
+            ?? selectedCheckpoint.flatMap { $0.supportsStudioInference ? $0 : nil }
+            ?? checkpoints.first { $0.supportsStudioInference && $0.modelFamily == training.modelFamily && $0.target == training.target }
+            ?? checkpoints.first { $0.supportsStudioInference }
+    }
     var comparisonBaselineLabel: String {
-        checkpoints.first { comparisonCheckpointIds.contains($0.id) }?.modelFamily?.isCompact == true ?
+        (comparisonBaselineCheckpoint?.modelFamily ?? training.modelFamily).isCompact ?
             "Include untrained compact initialization" : "Include the material base before refinement"
     }
     var selectedDiffuseMap: WorkbenchMap? {
@@ -160,17 +168,23 @@ final class WorkbenchStore {
     var workspaceURL: URL { URL(fileURLWithPath: workspacePath).standardizedFileURL }
     var dependencyArguments: [String] { ["--model-directory", modelDirectory] }
     func dependencyArguments(for checkpoint: WorkbenchCheckpoint) -> [String] {
+        if checkpoint.modelFamily == .depthProHeightRefiner { return ["--depthpro-model", depthProModelPath] }
         if checkpoint.modelFamily?.isCompact == true { return [] }
         return ["--model-directory", baseDirectory(for: checkpoint)]
     }
 
-    init(preferences defaults: UserDefaults = UserDefaults(suiteName: "org.ipde.material-tools")!,
+    init(preferences suppliedDefaults: UserDefaults? = nil,
+         depthProPreferences suppliedDepthProDefaults: UserDefaults? = nil,
          managedWorkspaceURL: URL? = nil,
          resources: MachineResources = .current,
          selectedCheckpointRegistryURL: URL = SelectedMaterialCheckpoint.registryURL,
          trashHandler: @escaping (URL) throws -> Void = { url in try FileManager.default.trashItem(at: url, resultingItemURL: nil) },
          workerOverride: (@MainActor ([String], String) async throws -> String)? = nil) {
+        let defaults = suppliedDefaults ?? UserDefaults(suiteName: "org.ipde.material-tools")!
         preferences = defaults
+        // A test or isolated workspace that injects its preferences keeps every
+        // setting in that suite unless it explicitly supplies a shared suite.
+        depthProPreferences = suppliedDepthProDefaults ?? suppliedDefaults ?? StudioPreferences.defaults
         materialBaseLocations = defaults.dictionary(forKey: "nativeMaterialBaseLocations") as? [String: String] ?? [:]
         self.trashHandler = trashHandler
         if let data = defaults.data(forKey: "recentDatasets.v1"),
@@ -195,6 +209,7 @@ final class WorkbenchStore {
         let cache = URL(fileURLWithPath: workspace).appendingPathComponent("out/material-training/transfer-models")
         let materialBasePath = defaults.string(forKey: "materialModelDirectory") ?? cache.appendingPathComponent("pbrnxt-base").path
         modelDirectory = materialBasePath
+        depthProModelPath = NativeDepthProContract.configuredModelURL(in: depthProPreferences, migrating: defaults).path
         let saved = WorkbenchPreferences.load(from: defaults)
         if let options = saved.training {
             training = options.restored(for: resources)
@@ -348,6 +363,16 @@ final class WorkbenchStore {
         }
     }
 
+    func chooseDepthProModel() {
+        guard !isBusy else { return }
+        let panel = NSOpenPanel(); panel.title = "Locate the DepthPro Core ML package"
+        panel.canChooseFiles = true; panel.canChooseDirectories = true
+        panel.treatsFilePackagesAsDirectories = false
+        panel.begin { response in
+            if response == .OK, let url = panel.url { self.depthProModelPath = url.path }
+        }
+    }
+
     func loadDataset(_ url: URL) async throws {
         let result: WorkbenchDataset = try WorkbenchResult.decode(WorkbenchDataset.self,
             output: await worker(["dataset", "--dataset", url.path, "--target", training.target,
@@ -373,7 +398,7 @@ final class WorkbenchStore {
         if let size = result.trainingSize {
             training.size = size
         }
-        supportedTrainingSizes = backendTrainingSizes.filter { result.supportedTrainingSizes?.contains($0) ?? true }
+        supportedTrainingSizes = backendTrainingSizes.filter { result.supportedTrainingSizes?.contains($0) ?? true || result.samples.contains(where: canRecoverCropTiers) }
         if !result.samples.contains(where: { $0.id == selectedSampleId }) {
             selectedSampleId = result.materials.first(where: { $0.id == material })?.samples.first?.id ?? result.samples.first?.id
         }
@@ -389,7 +414,7 @@ final class WorkbenchStore {
     func selectTrainingTarget(_ target: String) {
         guard !isBusy, ["height", "roughness", "normal"].contains(target) else { return }
         training.target = target
-        if training.modelFamily.isCompact {
+        if training.modelFamily.isCompact && !training.modelFamily.supports(target: target) {
             training.modelFamily = target == "normal" ? .compactNormal : .compactScalar
         }
         clearIncompatibleTrainingCheckpoint()
@@ -431,13 +456,13 @@ final class WorkbenchStore {
         guard let current = dataset else { throw StudioError("Open a material dataset first.") }
         guard supportedTrainingSizes.contains(size) else { throw StudioError("Choose a training size supported by the model and original source maps.") }
         let checkMaterial = options.useSelectedMaterialOnly ? selectedMaterial : nil
-        if current.readyForTraining(size: size, material: checkMaterial, target: target) { return current }
         isPreparingDataset = true
         activity = "Preparing \(size) × \(size) complete training maps from the original materials…"
         defer { isPreparingDataset = false }
         var arguments = [
             "prepare-size", "--dataset", current.datasetPath, "--size", String(size), "--target", target,
             "--automatic-validation", "--expected-index-sha256", current.indexSha256]
+        arguments += ["--crop-seed", String(options.randomizeCrops == .never ? 0 : UInt64.random(in: 1...UInt64.max))]
         if let reviewHash = current.reviewSha256 { arguments += ["--expected-review-sha256", reviewHash] }
         if let checkMaterial { arguments += ["--material", checkMaterial] }
         let result: WorkbenchDataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: await worker(arguments))
@@ -498,10 +523,13 @@ final class WorkbenchStore {
         }
         let selected = checkpoints.filter { comparisonCheckpointIds.contains($0.id) }
         let includeBase = comparisonIncludesBase
-        guard !selected.isEmpty, selected.count + (includeBase ? 1 : 0) >= 2, Set(selected.map(\.target)).count == 1 else {
-            error = "Select one checkpoint plus its base, or two checkpoints predicting the same map type."; return
-        }
-        let target = selected[0].target
+        let baselineCheckpoint = comparisonBaselineCheckpoint
+        let baselineFamily = baselineCheckpoint?.modelFamily ?? training.modelFamily
+        let target = selected.first?.target ?? baselineCheckpoint?.target ??
+            (baselineFamily.supports(target: training.target) ? training.target : baselineFamily == .compactNormal ? "normal" : "height")
+        let baselineSeed = training.seed
+        let baselineDependencies = baselineCheckpoint.map { dependencyArguments(for: $0) } ??
+            (baselineFamily == .depthProHeightRefiner ? ["--depthpro-model", depthProModelPath] : baselineFamily.isCompact ? [] : dependencyArguments)
         let sampleLabel = sourceImageURL == nil ? selectedSampleId ?? image.lastPathComponent : image.lastPathComponent
         let referenceMap = sourceImageURL == nil ? selectedSample?.maps[target] : nil
         let referenceSampleID = sourceImageURL == nil ? selectedSampleId : nil
@@ -540,7 +568,8 @@ final class WorkbenchStore {
                 if let rectangle = diffuseTransform.cropRectangle { arguments += ["--source-rectangle"] + rectangle.map(String.init) }
                 _ = try await self.worker(arguments)
             }
-            var candidates = [MapReviewCandidate(id: "diffuse|" + reviewedDiffuse.path, label: "Diffuse · model input", mapURL: reviewedDiffuse, numeric: false,
+            let usesDepthPro = selected.contains { $0.modelFamily == .depthProHeightRefiner } || includeBase && baselineFamily == .depthProHeightRefiner
+            var candidates = [MapReviewCandidate(id: "diffuse|" + reviewedDiffuse.path, label: usesDepthPro ? "Diffuse · DepthPro source" : "Diffuse · model input", mapURL: reviewedDiffuse, numeric: false,
                 sampleLabel: sampleLabel, detail: reviewedDiffuse.path, role: "diffuse",
                 modelIdentity: MapReviewModelIdentity(mapType: "input"), displayTransform: diffuseTransform)]
             if let referenceMap {
@@ -560,19 +589,31 @@ final class WorkbenchStore {
                     modelIdentity: MapReviewModelIdentity(mapType: target, modelName: "Dataset reference"), sourceIdentity: sourceIdentity,
                     displayTransform: referenceTransform))
             }
-            if includeBase, let reference = selected.first {
-                let compact = reference.modelFamily?.isCompact == true
+            if includeBase {
+                let compact = baselineFamily.isCompact
                 self.activity = compact ? "Running untrained compact initialization" : "Running the material base model"
-                let result: MaterialInferenceResponse = try WorkbenchResult.decode(MaterialInferenceResponse.self, output: await self.worker([
-                    "infer", "--baseline", "--checkpoint", reference.checkpointPath, "--expected-sha256", reference.sha256,
-                    "--image", modelImage.path, "--output", parent.appendingPathComponent("base-untrained").path] + self.dependencyArguments(for: reference)))
-                guard result.checkpointSha256 == reference.sha256, let map = result.outputs[target] else {
-                    throw StudioError("The base comparison did not match the selected checkpoint architecture and map type.")
+                var arguments = ["infer", "--baseline", "--image", modelImage.path,
+                    "--output", parent.appendingPathComponent("base-untrained").path] + baselineDependencies
+                if let reference = baselineCheckpoint {
+                    arguments += ["--checkpoint", reference.checkpointPath, "--expected-sha256", reference.sha256]
+                } else {
+                    arguments += ["--model-family", baselineFamily.rawValue, "--target", target, "--seed", String(baselineSeed)]
                 }
-                candidates.append(MapReviewCandidate(id: "base|" + reference.id, label: "\(compact ? "Untrained initialization" : "Base") · \(targetLabel)",
+                let result: MaterialInferenceResponse = try WorkbenchResult.decode(MaterialInferenceResponse.self, output: await self.worker(arguments))
+                if let path = result.preparedInputPath {
+                    candidates.append(MapReviewCandidate(id: "depthpro|" + path, label: "DepthPro · refiner input", mapURL: URL(fileURLWithPath: path), numeric: true,
+                        sampleLabel: sampleLabel, detail: "One-channel normalized inverse DepthPro depth before refinement", role: "model-input",
+                        modelIdentity: MapReviewModelIdentity(mapType: target, modelName: "DepthPro refiner input")))
+                }
+                guard baselineCheckpoint.map({ result.checkpointSha256 == $0.sha256 }) ?? true,
+                      let map = result.outputs[target] else {
+                    throw StudioError("The baseline comparison did not match the requested model architecture and map type.")
+                }
+                let initializationDetail = baselineCheckpoint == nil ? "seed \(baselineSeed) · SHA256 \(result.checkpointSha256)" : "its recorded random initialization"
+                candidates.append(MapReviewCandidate(id: "base|" + (baselineCheckpoint?.id ?? result.checkpointSha256), label: "\(compact ? "Untrained initialization" : "Base") · \(targetLabel)",
                     mapURL: URL(fileURLWithPath: map.path), numeric: true, sampleLabel: sampleLabel,
-                    detail: compact ? "Compact model prediction from its recorded random initialization before training" : "Material base prediction before refinement", role: "base",
-                    modelIdentity: MapReviewModelIdentity(architecture: reference.trainingBaseLabel,
+                    detail: compact ? "Compact model prediction from \(initializationDetail) before training" : "Material base prediction before refinement", role: "base",
+                    modelIdentity: MapReviewModelIdentity(architecture: baselineCheckpoint?.trainingBaseLabel ?? baselineFamily.architecture ?? "PBRnxt material model",
                         mapType: target, modelName: compact ? "Untrained compact initialization" : "Material base")))
             }
             for (i, checkpoint) in selected.enumerated() {
@@ -581,6 +622,11 @@ final class WorkbenchStore {
                 let result: MaterialInferenceResponse = try WorkbenchResult.decode(MaterialInferenceResponse.self, output: await self.worker([
                     "infer", "--checkpoint", checkpoint.checkpointPath, "--expected-sha256", checkpoint.sha256,
                     "--image", modelImage.path, "--output", child.path] + self.dependencyArguments(for: checkpoint)))
+                if let path = result.preparedInputPath, !candidates.contains(where: { $0.role == "model-input" }) {
+                    candidates.append(MapReviewCandidate(id: "depthpro|" + path, label: "DepthPro · refiner input", mapURL: URL(fileURLWithPath: path), numeric: true,
+                        sampleLabel: sampleLabel, detail: "One-channel normalized inverse DepthPro depth before refinement", role: "model-input",
+                        modelIdentity: MapReviewModelIdentity(mapType: target, modelName: "DepthPro refiner input")))
+                }
                 guard result.checkpointSha256 == checkpoint.sha256, let map = result.outputs[checkpoint.target] else {
                     throw StudioError("The comparison did not use the selected checkpoint or map type.")
                 }
@@ -627,7 +673,7 @@ final class WorkbenchStore {
         let result = try WorkbenchResult.decode(WorkbenchTrainingCapabilities.self,
             output: await worker(["capabilities", "--scope", training.effectiveScope, "--model-family", training.modelFamily.rawValue]))
         backendTrainingSizes = result.trainingSizes.filter { [256, 512, 1024, 2048].contains($0) }.sorted()
-        supportedTrainingSizes = backendTrainingSizes.filter { dataset?.supportedTrainingSizes?.contains($0) ?? true }
+        supportedTrainingSizes = backendTrainingSizes.filter { dataset?.supportedTrainingSizes?.contains($0) ?? true || samples.contains(where: canRecoverCropTiers) }
         if dataset?.trainingSize == nil, !supportedTrainingSizes.contains(training.size), let size = supportedTrainingSizes.last {
             training.size = size
         }
@@ -648,7 +694,7 @@ final class WorkbenchStore {
             return name
         }
         let map = ["height": "Displacement", "roughness": "Roughness", "normal": "Normals"][training.target] ?? training.target.capitalized
-        return "\(datasetName) \(map)"
+        return training.modelFamily == .depthProHeightRefiner ? "\(datasetName) DepthPro Height Refiner" : "\(datasetName) \(map)"
     }
 
     var effectiveTrainingModelName: String {
@@ -664,8 +710,8 @@ final class WorkbenchStore {
             return "Choose a supported training size."
         }
         if training.useSelectedMaterialOnly && selectedMaterialId == nil { return "Select a material first." }
-        let selected = training.useSelectedMaterialOnly ? dataset?.materials.first { $0.id == selectedMaterialId }?.samples ?? [] : samples
-        let eligible = selected.filter { self.sampleIsTrainable($0) }
+        let selected = training.useSelectedMaterialOnly ? trainingFolderSamples : samples
+        let eligible = selected.filter { self.sampleIsTrainable($0) || !["excluded", "rejected"].contains($0.status) && canRecoverCropTiers($0) }
         if eligible.isEmpty { return "No included material provides a registered \(training.target == "height" ? "16-bit displacement" : training.target) target at this size." }
         if eligible.allSatisfy({ $0.split == "validation" && $0.splitAssignment == "manual" }) {
             return "Assign at least one included material to Training in Dataset. All available materials are assigned to Validation."
@@ -686,6 +732,33 @@ final class WorkbenchStore {
             (sample.availableTargets?.contains(training.target) ?? (sample.maps[training.target] != nil))
     }
 
+    /// Training selects a folder's balanced zoom tiers, including originals
+    /// which preparation will obtain from the registered provider when absent.
+    var trainingFolderSamples: [WorkbenchSample] {
+        guard let materials = dataset?.materials, let selected = materials.first(where: { $0.id == selectedMaterialId }) else { return [] }
+        func folder(_ material: WorkbenchMaterial) -> String? {
+            if let path = material.sourceDirectory ?? material.subjectId { return URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path }
+            guard let input = material.samples.first?.maps["input"] else { return nil }
+            return URL(fileURLWithPath: input.originalSourcePath ?? input.path).deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath().path
+        }
+        guard let selectedFolder = folder(selected) else { return selected.samples }
+        let family = selected.samples.first?.sourceFamilyId
+        return materials.filter { material in
+            folder(material) == selectedFolder && (family == nil || material.samples.first?.sourceFamilyId == nil || material.samples.first?.sourceFamilyId == family)
+        }.flatMap(\.samples)
+    }
+
+    private func canRecoverCropTiers(_ sample: WorkbenchSample) -> Bool {
+        guard let input = sample.maps["input"] else { return false }
+        let source = URL(fileURLWithPath: input.originalSourcePath ?? input.path)
+        let filename = source.lastPathComponent.lowercased()
+        guard filename.range(of: #"_(?:diff|col(?:_.+)?)_(?:1|2|4|8|16)k\.png$"#, options: .regularExpression) != nil,
+              let scale = source.deletingPathExtension().lastPathComponent.split(separator: "_").last.flatMap({ Int($0.dropLast()) }) else { return false }
+        let pixels = scale * 1024, tolerance = max(2, Int(ceil(Double(pixels) * 0.02)))
+        return abs((input.originalSourceWidth ?? sample.width) - pixels) <= tolerance &&
+            abs((input.originalSourceHeight ?? sample.height) - pixels) <= tolerance
+    }
+
     func startTraining() {
         if let issue = trainingConfigurationIssue { error = issue; return }
         runTraining(checkpoint: training.useWarmStart ? selectedCheckpoint : nil)
@@ -696,9 +769,10 @@ final class WorkbenchStore {
         let modelName = effectiveTrainingModelName
         let selectedMaterial = selectedMaterialId
         let dependencies = options.modelFamily.isCompact ? [] : checkpoint.map { dependencyArguments(for: $0) } ?? dependencyArguments
+        let depthProArguments = options.modelFamily == .depthProHeightRefiner ? ["--depthpro-model", depthProModelPath] : []
         let developer = developerMode
         let publishAfterTraining = developer && uploadAfterTraining
-        operation(options.modelFamily.isCompact ? "Training compact material model…" : checkpoint == nil ? "Training material LoRA…" : "Refining material LoRA…", training: true) {
+        operation(options.modelFamily == .depthProHeightRefiner ? "Training DepthPro Height Refiner…" : options.modelFamily.isCompact ? "Training compact material model…" : checkpoint == nil ? "Training material LoRA…" : "Refining material LoRA…", training: true) {
             let prepared = try await self.ensureTrainingDataset(options: options, selectedMaterial: selectedMaterial)
             let output = try self.newOutputURL(prefix: "material-\(options.target)")
             self.lastOutputURL = output
@@ -719,47 +793,78 @@ final class WorkbenchStore {
                 "--learning-rate-schedule", options.learningRateSchedule,
                 "--minimum-learning-rate-ratio", String(options.minimumLearningRateRatio),
                 "--warmup-updates", String(options.warmupUpdates), "--seed", String(options.seed)] + dependencies
+            args += depthProArguments
+            args += options.cropArguments
+            args += ["--crop-selection-prepared"]
             if !options.modelFamily.isCompact { args += ["--lora-rank", String(options.loraRank), "--lora-alpha", String(options.loraAlpha)] }
             if developer { args += ["--developer-mode"] }
-            if options.useSelectedMaterialOnly, let id = selectedMaterial { args += ["--material", id] }
+            // Preparation already restricted the selected folder across all zoom
+            // tiers; filtering its original resolution ID would discard the rest.
             if let checkpoint { args += ["--checkpoint", checkpoint.checkpointPath, "--expected-sha256", checkpoint.sha256] }
             self.isResumingTraining = checkpoint != nil
+            let result: WorkbenchTrainingResponse
             do {
-                let result = try WorkbenchResult.decode(WorkbenchTrainingResponse.self, output: await self.worker(args))
-                self.trainingProgress?.finish(state: result.status == "stopped" ? .stopped : .completed,
-                    completed: result.completedUpdates, total: result.requestedUpdates)
-                try await self.loadCheckpoint(URL(fileURLWithPath: result.checkpointPath))
-                self.lastPackageURL = result.packagePath.map { URL(fileURLWithPath: $0) }
-                self.lastPackageCheckpointId = self.selectedCheckpointId
-                if result.stoppedReason == "time_limit" {
-                    let counts = result.completedUpdates.flatMap { completed in
-                        result.requestedUpdates.map { " Saved \(completed.formatted()) of \($0.formatted()) updates." }
-                    } ?? " Saved the completed updates."
-                    self.activity = "Training time limit reached." + counts
-                } else if result.stoppedReason == "no_valid_training_samples" {
-                    self.activity = result.completedUpdates == 0 ?
-                        "No valid training samples remain. Saved the current weights without training." :
-                        "No valid training samples remain. Saved \((result.completedUpdates ?? 0).formatted()) completed steps."
-                } else if self.isSavingTraining || result.status == "stopped" {
-                    self.activity = options.modelFamily.isCompact ? "Stopped and saved compact material model." : "Stopped and saved material LoRA."
-                } else {
-                    self.activity = "Training finished. Review the material maps before using this model."
-                }
-                try await self.cleanupTrainingDataset(prepared)
-                if publishAfterTraining && !self.isStopping {
-                    let account = try WorkbenchResult.decode(HuggingFaceAccountResponse.self, output: await self.worker(["hub-account"]))
-                    self.uploadAccount = account.authenticated ? account.username : nil
-                    self.uploadAccountChecked = true
-                    if let checkpoint = self.selectedCheckpoint, self.canUploadSelectedCheckpoint {
-                        try await self.performUpload(checkpoint)
-                    } else {
-                        self.activity += " Saved locally; sign in to Hugging Face to publish it."
-                    }
-                }
+                result = try WorkbenchResult.decode(WorkbenchTrainingResponse.self, output: await self.worker(args))
             } catch {
                 // Cancellation must not prevent cleanup of a positively owned stage.
                 await Task { @MainActor in try? await self.cleanupTrainingDataset(prepared) }.value
                 throw error
+            }
+            // The worker has published the final weights. Library refresh, temporary
+            // file cleanup and optional Hub upload cannot undo this completed run.
+            var notices: [String] = []
+            self.trainingProgress?.finish(state: result.status == "stopped" ? .stopped : .completed,
+                completed: result.completedUpdates, total: result.requestedUpdates)
+            self.lastPackageURL = result.packagePath.map { URL(fileURLWithPath: $0) }
+            do {
+                try await self.loadCheckpoint(URL(fileURLWithPath: result.checkpointPath))
+                self.lastPackageCheckpointId = self.selectedCheckpointId
+            } catch {
+                self.lastPackageCheckpointId = nil
+                notices.append("Model saved at \(result.checkpointPath). Could not refresh the model library: \(error.localizedDescription)")
+            }
+            if result.stoppedReason == "time_limit" {
+                let counts = result.completedUpdates.flatMap { completed in
+                    result.requestedUpdates.map { " Saved \(completed.formatted()) of \($0.formatted()) updates." }
+                } ?? " Saved the completed updates."
+                self.activity = "Training time limit reached." + counts
+            } else if result.stoppedReason == "no_valid_training_samples" {
+                self.activity = result.completedUpdates == 0 ?
+                    "No valid training samples remain. Saved the current weights without training." :
+                    "No valid training samples remain. Saved \((result.completedUpdates ?? 0).formatted()) completed steps."
+            } else if self.isSavingTraining || result.status == "stopped" {
+                self.activity = options.modelFamily.isCompact ? "Stopped and saved compact material model." : "Stopped and saved material LoRA."
+            } else {
+                self.activity = "Training finished. Review the material maps before using this model."
+            }
+            let completionActivity = self.activity
+            do {
+                try await self.cleanupTrainingDataset(prepared)
+            } catch {
+                notices.append("Model saved; could not finish training-file cleanup or reopen the source dataset: \(error.localizedDescription)")
+            }
+            if publishAfterTraining && !self.isStopping && !Task.isCancelled {
+                do {
+                    let account = try WorkbenchResult.decode(HuggingFaceAccountResponse.self, output: await self.worker(["hub-account"]))
+                    self.uploadAccount = account.authenticated ? account.username : nil
+                    self.uploadAccountChecked = true
+                    self.uploadAccountMessage = account.message
+                    if let checkpoint = self.selectedCheckpoint,
+                       checkpoint.url.standardizedFileURL == URL(fileURLWithPath: result.checkpointPath).standardizedFileURL,
+                       self.canUploadSelectedCheckpoint {
+                        try await self.performUpload(checkpoint)
+                        notices.append(self.activity)
+                    } else {
+                        notices.append(account.authenticated ? "Saved locally; locate the saved model in Saved Models to upload it." :
+                            "Saved locally; sign in to Hugging Face to publish it.")
+                    }
+                } catch {
+                    notices.append("Model saved locally; Hugging Face upload did not finish: \(error.localizedDescription)")
+                }
+            }
+            self.activity = completionActivity + (notices.isEmpty ? "" : " " + notices.joined(separator: " "))
+            if !notices.isEmpty {
+                self.logText += "\n" + notices.joined(separator: "\n") + "\n"
             }
         }
     }
@@ -888,9 +993,14 @@ final class WorkbenchStore {
             }
             guard isTraining else { continue }
             switch kind {
+            case "depthpro_preparation", "crop_preparation":
+                if !isStopping, let progress = trainingProgress {
+                    activity = [progress.operationLabel, progress.operationDetail, progress.sampleID]
+                        .compactMap { $0 }.joined(separator: " · ")
+                }
             case "training_started":
                 hasTrainingStarted = true
-                if !isStopping { activity = training.modelFamily.isCompact ? "Training compact material model…" : "Training material LoRA…" }
+                if !isStopping { activity = training.modelFamily == .depthProHeightRefiner ? "Training DepthPro Height Refiner…" : training.modelFamily.isCompact ? "Training compact material model…" : "Training material LoRA…" }
             case "training_stopped":
                 guard let reason = event["stopped_reason"] as? String,
                       ["time_limit", "no_valid_training_samples"].contains(reason), !isStopping else { continue }
@@ -991,7 +1101,7 @@ final class WorkbenchStore {
         guard let checkpoint = selectedCheckpoint else { error = "Select a model checkpoint to upload."; return }
         let repository = effectiveUploadRepo
         guard uploadAccount != nil else {
-            uploadAccountMessage = "Save a Hugging Face token in settings, then click Refresh Account."
+            uploadAccountMessage = "Sign in with hf auth login or save a token in settings, then click Refresh Account."
             return
         }
         guard HuggingFaceUpload.validRepository(repository) else {
@@ -1021,8 +1131,14 @@ final class WorkbenchStore {
         }
         lastUploadURL = URL(string: result.commitUrl ?? result.url)
         activity = "Uploaded \(checkpoint.title) to \(repository) (\(isPublic ? "public" : "private"))."
-        let models = try WorkbenchResult.decode(WorkbenchHubModels.self, output: await worker(["hub-models"]))
-        hubModels = models.models
+        if let warning = result.catalogWarning { activity += " " + warning }
+        do {
+            let models = try WorkbenchResult.decode(WorkbenchHubModels.self, output: await worker(["hub-models"]))
+            hubModels = models.models
+        } catch {
+            // The upload is already committed; discovery can be refreshed later.
+            activity += " Could not refresh the Hub model list: \(error.localizedDescription)"
+        }
     }
     var managedEncoderURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -1086,7 +1202,7 @@ final class WorkbenchStore {
         if let workerOverride {
             let output = try await workerOverride(args, args.first ?? "")
             if progressWorker { recordTrainingProgress(output) }
-            try Task.checkCancellation()
+            if !trainingWorker || !Self.hasSavedTrainingResult(output) { try Task.checkCancellation() }
             return output
         }
         saveConfiguration(refreshSelectedRuntime: false)
@@ -1121,10 +1237,23 @@ final class WorkbenchStore {
             logText = events.text
             WorkbenchLifecycle.shared.remove(control)
         }
-        let output = try await withTaskCancellationHandler { try await operation.value } onCancel: { operation.cancel(); control.stop() }
+        let output: String
+        do {
+            output = try await withTaskCancellationHandler { try await operation.value } onCancel: { operation.cancel(); control.stop() }
+        } catch {
+            if let bytes = try? JSONSerialization.data(withJSONObject: ["event": "operation_failed", "operation": args.first ?? "", "error": error.localizedDescription], options: [.sortedKeys]) {
+                events.append(String(decoding: bytes, as: UTF8.self) + "\n")
+            }
+            throw error
+        }
         events.append(output + "\n")
-        try Task.checkCancellation()
+        if !trainingWorker || !Self.hasSavedTrainingResult(output) { try Task.checkCancellation() }
         return output
+    }
+
+    private static func hasSavedTrainingResult(_ output: String) -> Bool {
+        guard let result = try? WorkbenchResult.decode(WorkbenchTrainingResponse.self, output: output) else { return false }
+        return !result.checkpointPath.isEmpty && ["completed", "stopped"].contains(result.status ?? "")
     }
     func operation(_ label: String, training: Bool = false, body: @escaping @MainActor () async throws -> Void) {
         guard !isBusy else { return }

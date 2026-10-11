@@ -35,6 +35,8 @@ struct TextureSettings: Codable, Sendable, Equatable {
     var materialWidthMeters: Double = 0.25
     var displacementScaleMeters: Double = 0.005
     static let outputSizes = [1024, 2048, 4096, 8192]
+    /// Comparison input follows the training grid, independently of export size.
+    static let diffusePreparationSizes = [256, 512] + outputSizes
     static let modelProcessResolutions = [1036, 1540, 2044]
     init() {}
 

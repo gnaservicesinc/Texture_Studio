@@ -65,6 +65,27 @@ final class ModelManagerTests: XCTestCase {
         XCTAssertNil(manager.records["fixture"])
     }
 
+    func testNativeMaterialWeightsPointToMaterialImporterAndDoNotReplaceCoreMLSelection() async throws {
+        let root = try fixture(), externalRoot = try fixture()
+        let coreML = externalRoot.appendingPathComponent("depth.mlmodel")
+        try Data("external".utf8).write(to: coreML)
+        let manager = ModelManager(storageDirectory: root, catalog: [descriptor()],
+            transfer: FixtureTransfer(), validator: FixtureValidator())
+        try await manager.locate(id: "fixture", url: coreML)
+        let native = externalRoot.appendingPathComponent("model.safetensors")
+        try Data("native material weights".utf8).write(to: native)
+        for url in [native, externalRoot] {
+            do {
+                try await manager.locate(id: "fixture", url: url)
+                XCTFail("Native material weights cannot be installed as a Core ML package.")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("Locate Material Model"))
+                XCTAssertEqual(manager.records["fixture"]?.path, coreML.path)
+                XCTAssertEqual(try Data(contentsOf: native), Data("native material weights".utf8))
+            }
+        }
+    }
+
     func testMovedManagedModelCanReconnectWithoutRedownloadOrDeletingIt() async throws {
         let root = try fixture(), externalRoot = try fixture()
         let manager = ModelManager(storageDirectory: root, catalog: [descriptor()],

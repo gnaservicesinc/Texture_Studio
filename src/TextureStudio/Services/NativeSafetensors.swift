@@ -240,6 +240,9 @@ enum NativeMaterialCheckpoint {
                 "output_channels": outputChannels, "network_width": width,
                 "from_scratch": true, "base_required": false, "base": NSNull(),
                 "initialization_seed": seed, "initial_weights_sha256": initialDigest,
+                "input_kind": object["input_kind"] ?? "diffuse",
+                "depthpro_preparation_contract": object["depthpro_preparation_contract"] ?? NSNull(),
+                "depthpro_model_sha256": object["depthpro_model_sha256"] ?? NSNull(),
                 "model_name": object["model_name"] ?? NSNull(), "scope": "full-model", "validation": object["validation"] ?? NSNull()]
             try Task.checkCancellation()
             return String(decoding: try JSONSerialization.data(withJSONObject: information, options: [.sortedKeys]), as: UTF8.self)

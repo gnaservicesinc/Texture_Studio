@@ -226,9 +226,13 @@ final class ModelManager {
     }
 
     private static func requireBackend(_ backend: LocalModelBackend, at url: URL) throws {
-        guard ["mlpackage", "mlmodel", "mlmodelc"].contains(url.pathExtension.lowercased()) else {
-            throw LocalModelError.unsupported("select a Core ML model package")
+        if ["mlpackage", "mlmodel", "mlmodelc"].contains(url.pathExtension.lowercased()) { return }
+        if url.pathExtension.lowercased() == "safetensors" ||
+            FileManager.default.fileExists(atPath: url.appendingPathComponent("model.safetensors").path) ||
+            FileManager.default.fileExists(atPath: url.appendingPathComponent("adapter.safetensors").path) {
+            throw LocalModelError.unsupported("use Locate Material Model in Material models to load this native safetensors model")
         }
+        throw LocalModelError.unsupported("select a Core ML model package")
     }
 
     private static func safeComponent(_ value: String) -> Bool {

@@ -4,6 +4,53 @@ import XCTest
 
 @MainActor
 final class WorkbenchComparisonTests: XCTestCase {
+    func testImportedPhotosPrepareAtCompactGridRegardlessOfSourceDimensions() async throws {
+        for (side, width, height) in [(512, 64, 48), (512, 777, 529), (512, 2048, 1536), (256, 777, 529)] {
+            let root = try temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let suite = "imported-comparison-\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let image = root.appendingPathComponent("new-material-\(width)-\(height).png")
+            let original = try NativePNG(header: .init(width: width, height: height, bits: 8, channels: 3, color: 2, interlace: 0),
+                pixels: Data((0..<width * height * 3).map { UInt8(($0 * 7 + $0 / width) % 251) }),
+                colorChunks: [("sRGB", Data([0]))]).encoded()
+            try original.write(to: image)
+            var calls: [[String]] = []
+            var inputs: [String] = []
+            let store = WorkbenchStore(preferences: defaults, managedWorkspaceURL: root, workerOverride: { arguments, _ in
+                calls.append(arguments)
+                let input = arguments[try XCTUnwrap(arguments.firstIndex(of: "--image")) + 1]
+                inputs.append(input)
+                XCTAssertNotEqual(input, image.path, "Only the prepared model input follows the training grid")
+                let png = try NativePNG.inspect(URL(fileURLWithPath: input))
+                XCTAssertEqual(png.width, side)
+                XCTAssertEqual(png.height, side)
+                XCTAssertEqual(png.bits, 16, "Preparation retains color precision rather than writing an 8-bit display preview")
+                let output = arguments[try XCTUnwrap(arguments.firstIndex(of: "--output")) + 1]
+                return "{\"outputs\":{\"height\":{\"path\":\"\(output)/height.exr\"}},\"checkpoint_sha256\":\"compact-sha\"}"
+            })
+            store.sourceImageURL = image
+            store.training.modelFamily = .compactScalar
+            store.training.size = side
+            let checkpoint = try WorkbenchResult.decode(WorkbenchCheckpoint.self, output: """
+            {"checkpoint_path":"/models/compact/model.safetensors","sha256":"compact-sha",
+             "schema":"texture-studio-compact-material-v1","architecture":"texture-studio-compact-scalar-native-v1",
+             "target":"height","step":42,"compatible":true,"variant":"full","supports_training_warm_start":true}
+            """)
+            store.checkpoints = [checkpoint]
+            store.comparisonCheckpointIds = [checkpoint.id]
+            store.compare()
+            try await waitForOperation(store, timeout: 20)
+            XCTAssertNil(store.error)
+            XCTAssertEqual(calls.count, 2)
+            XCTAssertEqual(Set(inputs).count, 1, "Baseline and trained model must receive the same prepared pixels")
+            XCTAssertEqual(store.comparisonCandidates.map(\.role), ["diffuse", "base", "checkpoint"])
+            XCTAssertEqual(store.comparisonCandidates.first?.sampleLabel, image.lastPathComponent)
+            XCTAssertEqual(try Data(contentsOf: image), original, "Import and comparison never resize or rewrite the source")
+        }
+    }
+
     func testCompactComparisonRunsRecordedUntrainedInitializationWithoutPBRDependency() async throws {
         for target in ["height", "roughness", "normal"] {
             let root = try temporaryDirectory()
@@ -192,7 +239,119 @@ final class WorkbenchComparisonTests: XCTestCase {
         XCTAssertTrue(candidates[0].accessibleLabel.contains("sand_crop_003"))
     }
 
-    func testDisablingBaseStillRequiresTwoMatchingCheckpoints() async throws {
+    func testSingleCheckpointWithoutBaselineRunsWithOrWithoutSourceHeight() async throws {
+        for includeReference in [true, false] {
+            let root = try temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let suite = "single-output-comparison-\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            var calls: [[String]] = []
+            let store = WorkbenchStore(preferences: defaults, managedWorkspaceURL: root, workerOverride: { arguments, _ in
+                calls.append(arguments)
+                let output = arguments[try XCTUnwrap(arguments.firstIndex(of: "--output")) + 1]
+                return "{\"outputs\":{\"height\":{\"path\":\"\(output)/height.exr\"}},\"checkpoint_sha256\":\"exact-sha\"}"
+            })
+            let reference = includeReference ? ",\"height\":{\"path\":\"/dataset/soil/height.png\"}" : ""
+            store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: """
+            {"dataset_path":"/dataset","index_sha256":"index","materials":[{"material_id":"soil","samples":[{"sample_id":"soil","status":"approved","split":"train","width":1024,"height":1024,"maps":{"input":{"path":"/dataset/soil/photo.png"}\(reference)}}]}]}
+            """)
+            store.selectedSampleId = "soil"
+            store.checkpoints = [try checkpoint(sha: "exact-sha", target: "height")]
+            store.comparisonCheckpointIds = ["exact-sha"]
+            store.comparisonIncludesBase = false
+            XCTAssertNil(store.comparisonConfigurationIssue)
+            store.compare()
+            try await waitForOperation(store)
+            XCTAssertNil(store.error)
+            XCTAssertEqual(calls.count, 1, "Disabling the baseline runs only the selected checkpoint")
+            XCTAssertFalse(try XCTUnwrap(calls.first).contains("--baseline"))
+            let roles = includeReference ? ["diffuse", "target", "checkpoint"] : ["diffuse", "checkpoint"]
+            XCTAssertEqual(store.comparisonCandidates.map(\.role), roles)
+            XCTAssertEqual(ReviewWorkbenchView.initialCandidates(store.comparisonCandidates).map(\.role),
+                includeReference ? ["target", "checkpoint"] : ["checkpoint"])
+            let review = ReviewSessionStore(preferences: defaults)
+            review.load(try XCTUnwrap(store.lastOutputURL).appendingPathComponent("review-manifest.json"))
+            XCTAssertNil(review.error)
+            XCTAssertEqual(review.groups.first?.candidates.map(\.role), roles)
+        }
+    }
+
+    func testBaselineOnlyRunsWithRecordedCheckpointOrConfiguredCompactInitialization() async throws {
+        for useRecordedCheckpoint in [true, false] {
+            let root = try temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let suite = "baseline-only-comparison-\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            var calls: [[String]] = []
+            let store = WorkbenchStore(preferences: defaults, managedWorkspaceURL: root, workerOverride: { arguments, _ in
+                calls.append(arguments)
+                let output = arguments[try XCTUnwrap(arguments.firstIndex(of: "--output")) + 1]
+                return "{\"outputs\":{\"height\":{\"path\":\"\(output)/height.exr\"}},\"checkpoint_sha256\":\"compact-sha\"}"
+            })
+            store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: """
+            {"dataset_path":"/dataset","index_sha256":"index","materials":[{"material_id":"soil","samples":[{"sample_id":"soil","status":"approved","split":"train","width":1024,"height":1024,"maps":{"input":{"path":"/dataset/photo.png"},"height":{"path":"/dataset/height.png"}}}]}]}
+            """)
+            store.selectedSampleId = "soil"
+            store.training.modelFamily = .compactScalar
+            store.training.seed = 123
+            if useRecordedCheckpoint {
+                let checkpoint = try WorkbenchResult.decode(WorkbenchCheckpoint.self, output: """
+                {"checkpoint_path":"/models/compact/model.safetensors","sha256":"compact-sha","schema":"texture-studio-compact-material-v1","architecture":"texture-studio-compact-scalar-native-v1","target":"height","step":42,"compatible":true}
+                """)
+                store.checkpoints = [checkpoint]
+                store.selectedCheckpointId = checkpoint.id
+            }
+            store.comparisonCheckpointIds = []
+            store.comparisonIncludesBase = true
+            XCTAssertEqual(store.comparisonBaselineLabel, "Include untrained compact initialization")
+            XCTAssertNil(store.comparisonConfigurationIssue)
+            store.compare()
+            try await waitForOperation(store)
+            XCTAssertNil(store.error)
+            XCTAssertEqual(calls.count, 1)
+            let call = try XCTUnwrap(calls.first)
+            XCTAssertTrue(call.contains("--baseline"))
+            XCTAssertFalse(call.contains("--model-directory"))
+            XCTAssertEqual(call.contains("--checkpoint"), useRecordedCheckpoint)
+            if useRecordedCheckpoint {
+                XCTAssertTrue(call.contains("compact-sha"))
+                XCTAssertFalse(call.contains("--seed"), "A checkpoint baseline uses the recorded seed")
+            } else {
+                XCTAssertEqual(call[try XCTUnwrap(call.firstIndex(of: "--model-family")) + 1], "compact-scalar")
+                XCTAssertEqual(call[try XCTUnwrap(call.firstIndex(of: "--target")) + 1], "height")
+                XCTAssertEqual(call[try XCTUnwrap(call.firstIndex(of: "--seed")) + 1], "123")
+            }
+            XCTAssertEqual(store.comparisonCandidates.map(\.role), ["diffuse", "target", "base"])
+            let baseline = try XCTUnwrap(store.comparisonCandidates.last)
+            XCTAssertEqual(baseline.modelIdentity?.architecture, MaterialTrainingModelFamily.compactScalar.architecture)
+            XCTAssertNil(baseline.modelIdentity?.checkpointStep)
+        }
+    }
+
+    func testComparisonModelSelectionRequiresCheckpointOrBaseline() throws {
+        let suite = "comparison-selection-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = WorkbenchStore(preferences: defaults)
+        store.sourceImageURL = URL(fileURLWithPath: "/photo.png")
+        store.checkpoints = [try checkpoint(sha: "height", target: "height")]
+        for includeCheckpoint in [true, false] {
+            for includeBase in [true, false] {
+                store.comparisonCheckpointIds = includeCheckpoint ? ["height"] : []
+                store.comparisonIncludesBase = includeBase
+                XCTAssertEqual(store.comparisonConfigurationIssue == nil, includeCheckpoint || includeBase)
+            }
+        }
+        store.comparisonCheckpointIds = []
+        store.comparisonIncludesBase = false
+        store.compare()
+        XCTAssertNotNil(store.error)
+        XCTAssertFalse(store.isBusy)
+    }
+
+    func testComparisonStillRejectsDifferentMapTypesBeforeLaunchingWorkers() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let suite = "comparison-test-\(UUID().uuidString)"
@@ -205,12 +364,6 @@ final class WorkbenchComparisonTests: XCTestCase {
         })
         store.sourceImageURL = URL(fileURLWithPath: "/photo.png")
         store.checkpoints = [try checkpoint(sha: "height", target: "height"), try checkpoint(sha: "normal", target: "normal")]
-        store.comparisonCheckpointIds = ["height"]
-        store.comparisonIncludesBase = false
-        store.compare()
-        XCTAssertNotNil(store.error)
-        XCTAssertFalse(store.isBusy)
-        store.error = nil
         store.comparisonIncludesBase = true
         store.comparisonCheckpointIds = ["height", "normal"]
         store.compare()
@@ -282,8 +435,8 @@ final class WorkbenchComparisonTests: XCTestCase {
         """)
     }
 
-    private func waitForOperation(_ store: WorkbenchStore) async throws {
-        let deadline = Date().addingTimeInterval(5)
+    private func waitForOperation(_ store: WorkbenchStore, timeout: TimeInterval = 5) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
         while store.isBusy, Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertFalse(store.isBusy)
     }

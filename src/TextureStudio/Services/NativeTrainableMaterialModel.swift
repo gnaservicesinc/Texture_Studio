@@ -30,10 +30,15 @@ final class NativeTrainableMaterialModel {
                   let seed = recorded["initialization_seed"] as? UInt64, seed == options.seed else {
                 throw StudioError("The compact comparison must use its checkpoint's recorded family, target, width and initialization seed.")
             }
-            return try .init(NativeCompactMaterialModel(target: target, width: width, seed: seed))
+            let model = try NativeCompactMaterialModel(target: target, width: width, seed: seed, family: options.modelFamily)
+            if options.modelFamily == .depthProHeightRefiner {
+                model.configuration["depthpro_model_sha256"] = recorded["depthpro_model_sha256"]
+            }
+            return .init(model)
         }
         return try .init(NativeCompactMaterialModel.load(checkpointURL: options.baseline ? nil : options.checkpoint,
-            expectedSHA256: options.expectedSHA256, target: options.target, width: options.compactWidth, seed: options.seed))
+            expectedSHA256: options.expectedSHA256, target: options.target, width: options.compactWidth, seed: options.seed,
+            family: options.modelFamily))
     }
 
     var configuration: [String: Any] {

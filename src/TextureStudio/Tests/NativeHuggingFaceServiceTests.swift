@@ -23,6 +23,17 @@ final class NativeHuggingFaceServiceTests: XCTestCase {
         XCTAssertFalse(account.authenticated)
     }
 
+    func testExistingNativeHubLoginWhenRequested() async throws {
+        guard let username = ProcessInfo.processInfo.environment["TEXTURE_STUDIO_VERIFY_HF_ACCOUNT"], !username.isEmpty else {
+            throw XCTSkip("Opt in with the expected account name to verify an existing login without uploading.")
+        }
+        let service = NativeHuggingFaceService()
+        XCTAssertTrue(service.token != nil, "The native service should discover an existing credential.")
+        let account = try await service.account()
+        XCTAssertTrue(account.authenticated, account.message)
+        XCTAssertEqual(account.username, username)
+    }
+
     func testDiscoveryMergesSavedAndRemoteModelsAndRetainsCatalogOnFailure() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -49,11 +60,49 @@ final class NativeHuggingFaceServiceTests: XCTestCase {
         XCTAssertEqual(retained.models.map(\.repository), ["artist/saved"])
     }
 
-    func testCredentialDiscoveryUsesEnvironmentOrNativeKeychain() {
+    func testCredentialDiscoveryUsesEnvironmentKeychainOrCLIActiveToken() {
         XCTAssertEqual(NativeHuggingFaceService.savedToken(environment: [:], keychain: { " test-token\n" }), "test-token")
         XCTAssertEqual(NativeHuggingFaceService.savedToken(environment: ["HF_TOKEN": " override\n"], keychain: { "saved" }), "override")
         XCTAssertEqual(NativeHuggingFaceService.savedToken(environment: ["HF_TOKEN": " \n"], keychain: { "saved" }), "saved")
-        XCTAssertNil(NativeHuggingFaceService.savedToken(environment: [:], keychain: { nil }))
+        XCTAssertEqual(NativeHuggingFaceService.savedToken(environment: ["HUGGING_FACE_HUB_TOKEN": " legacy\n"], keychain: { "saved" }), "legacy")
+        XCTAssertEqual(NativeHuggingFaceService.savedToken(environment: [:], keychain: { "saved" }, readTokenFile: { _ in "cli" }), "saved")
+        XCTAssertEqual(NativeHuggingFaceService.savedToken(environment: [:], keychain: { nil }, readTokenFile: { _ in " cli\n" }), "cli")
+        XCTAssertNil(NativeHuggingFaceService.savedToken(environment: [:], keychain: { nil }, readTokenFile: { _ in nil }))
+    }
+
+    func testCLIActiveTokenPathHonorsHubEnvironmentAndDefaultHome() {
+        let home = URL(fileURLWithPath: "/test/home")
+        func path(_ environment: [String: String]) -> String {
+            NativeHubCredentials.tokenFileURL(environment: environment, homeDirectory: home).path
+        }
+        XCTAssertEqual(path([:]), "/test/home/.cache/huggingface/token")
+        XCTAssertEqual(path(["XDG_CACHE_HOME": "/shared/cache"]), "/shared/cache/huggingface/token")
+        XCTAssertEqual(path(["HF_HOME": "/shared/hub", "XDG_CACHE_HOME": "/shared/cache"]), "/shared/hub/token")
+        XCTAssertEqual(path(["HF_TOKEN_PATH": "/shared/active", "HF_HOME": "/shared/hub"]), "/shared/active")
+        XCTAssertEqual(path(["HF_HOME": "~/hf"]), "/test/home/hf/token")
+        XCTAssertEqual(path(["HF_TOKEN_PATH": "${HOME}/auth/$ACCOUNT-token", "HOME": home.path, "ACCOUNT": "artist"]), "/test/home/auth/artist-token")
+        XCTAssertEqual(path(["HF_HOME": "", "HF_TOKEN_PATH": " \n"]), "/test/home/.cache/huggingface/token")
+    }
+
+    func testCLIFileLoginIsReadNativelyAndFollowsAccountSwitches() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let tokenURL = NativeHubCredentials.tokenFileURL(environment: [:], homeDirectory: home)
+        try FileManager.default.createDirectory(at: tokenURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        XCTAssertNil(NativeHuggingFaceService.savedToken(environment: [:], keychain: { nil }, homeDirectory: home))
+        try Data("first-test-login\n".utf8).write(to: tokenURL)
+        XCTAssertEqual(NativeHuggingFaceService.savedToken(environment: [:], keychain: { nil }, homeDirectory: home), "first-test-login")
+        try Data("second-test-login\n".utf8).write(to: tokenURL, options: .atomic)
+        XCTAssertEqual(NativeHuggingFaceService.savedToken(environment: [:], keychain: { nil }, homeDirectory: home), "second-test-login")
+        // An explicit token path does not silently choose a different account
+        // from the default cache when it is missing.
+        XCTAssertNil(NativeHuggingFaceService.savedToken(environment: ["HF_TOKEN_PATH": home.appendingPathComponent("missing").path], keychain: { nil }, homeDirectory: home))
+        try Data(" \n".utf8).write(to: tokenURL)
+        XCTAssertNil(NativeHuggingFaceService.savedToken(environment: [:], keychain: { nil }, homeDirectory: home))
+        try Data(repeating: 65, count: 16_385).write(to: tokenURL)
+        XCTAssertNil(NativeHubCredentials.readTokenFile(tokenURL))
+        try Data([0xff, 0xfe]).write(to: tokenURL)
+        XCTAssertNil(NativeHubCredentials.readTokenFile(tokenURL))
     }
 
     func testExplicitTransportCancellationIsNeverReportedAsMissingCredentials() async throws {

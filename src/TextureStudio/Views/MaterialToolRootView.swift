@@ -170,7 +170,7 @@ struct MaterialToolRootView: View {
                 Spacer()
                 Button("Choose Checkpoints…") { store.chooseCheckpoint() }
                     .disabled(store.isBusy)
-                    .help("Select one checkpoint to compare with its material base, or multiple saved checkpoints predicting the same map type. Their exact hashes are recorded with the results.")
+                    .help("Select one or more checkpoints predicting the same map type. Inspect an output on its own or beside the source map and optional untrained initialization / material base. Exact model hashes are recorded with the results.")
                 Button("Run Comparison", systemImage: "play.fill") { store.compare() }
                     .buttonStyle(.glassProminent).disabled(store.isBusy || !comparisonReady)
                     .help("Run checked candidates one at a time on Metal, then inspect their matching full-resolution outputs.")
@@ -258,12 +258,12 @@ struct WorkbenchRuntimeView: View {
                             do { try NativeHubCredentials.save(hubToken); hubToken = ""; credentialMessage = "Token saved in Keychain."; store.refreshUploadAccount() }
                             catch { credentialMessage = error.localizedDescription }
                         }.disabled(hubToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.isBusy)
-                        Button("Sign Out") {
-                            do { try NativeHubCredentials.save(""); credentialMessage = "Saved token removed."; store.refreshUploadAccount() }
+                        Button("Remove Saved Token") {
+                            do { try NativeHubCredentials.save(""); credentialMessage = "App token removed. Your hf CLI login remains available."; store.refreshUploadAccount() }
                             catch { credentialMessage = error.localizedDescription }
                         }.disabled(store.isBusy)
                     }
-                    Text(credentialMessage.isEmpty ? "Store a token with the permissions needed for your model repositories. Credentials are saved in Apple Keychain." : credentialMessage)
+                    Text(credentialMessage.isEmpty ? "Your hf auth login is used automatically. You can also save a token with model repository permissions in Apple Keychain." : credentialMessage)
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Settings") {

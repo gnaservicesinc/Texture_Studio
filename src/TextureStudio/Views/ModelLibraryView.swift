@@ -1,9 +1,11 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct ModelLibraryView: View {
     @Bindable var models: ModelManager
     let adviser: OllamaDecisionService?
+    let materialStore: WorkbenchStore
     var workspace: TextureWorkspace?
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismiss) private var dismiss
@@ -11,9 +13,10 @@ struct ModelLibraryView: View {
     @State private var selectedModels = SelectedMaterialCheckpoint.readAll()
     @AppStorage(StudioPreferences.developerModeKey, store: StudioPreferences.defaults) private var developerMode = false
 
-    init(models: ModelManager, adviser: OllamaDecisionService? = nil,
+    init(models: ModelManager, materialStore: WorkbenchStore, adviser: OllamaDecisionService? = nil,
          workspace: TextureWorkspace? = nil) {
         self.models = models
+        self.materialStore = materialStore
         self.adviser = adviser
         self.workspace = workspace
     }
@@ -80,12 +83,45 @@ struct ModelLibraryView: View {
                     }
                 }
             } else {
-                Text("Select a trained material model in Model Training, or attach your own surface maps.")
+                Text("Locate a trained material safetensors model or its exported package, or select one in Model Training.")
                     .font(.callout).foregroundStyle(.secondary)
             }
-            Button("Open Model Training…") { openWindow(id: "model-training") }
+            HStack {
+                Button("Locate Material Model…") { locateMaterialModel() }
+                    .disabled(materialStore.isBusy)
+                    .help("Use a trained height, roughness or normal safetensors model. Its files stay in place.")
+                Button("Open Model Training…") { openWindow(id: "model-training") }
+            }
+            if materialStore.isBusy {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text(materialStore.activity).font(.caption).foregroundStyle(.secondary)
+                }
+            } else if let error = materialStore.error {
+                Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+            }
         }
         Divider()
+    }
+
+    private func locateMaterialModel() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "safetensors") ?? .data]
+        panel.message = "Choose a Texture Studio material .safetensors file or its exported package folder. Height, roughness and normal models use the native material runtime. The selected files stay in place."
+        panel.prompt = "Use Material Model"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            materialStore.operation("Opening material model…") {
+                let checkpoint = try await MaterialCheckpointImporter.activate(url, using: materialStore)
+                models.lastError = nil
+                models.refresh()
+                selectedModels = SelectedMaterialCheckpoint.readAll()
+                workspace?.reloadSelectedCheckpoint(activate: true, target: checkpoint.target)
+            }
+        }
     }
 }
 
@@ -131,7 +167,7 @@ struct ModelRow: View {
                     if descriptor.downloadable && models.availableURL(for: descriptor.id) == nil {
                         Button("Download Model") { models.download(id: descriptor.id) }.buttonStyle(.borderedProminent)
                     }
-                    Button("Locate Model…") { locateModel(descriptor: descriptor, models: models) }
+                    Button("Locate Core ML Model…") { locateModel(descriptor: descriptor, models: models) }
                     if models.records[descriptor.id] != nil { Button("Remove…", role: .destructive, action: remove) }
                 }
             }
@@ -185,6 +221,7 @@ private func locateModel(descriptor: LocalModelDescriptor, models: ModelManager)
     panel.canChooseDirectories = true
     panel.canChooseFiles = true
     panel.allowsMultipleSelection = false
+    panel.allowedContentTypes = ["mlpackage", "mlmodel", "mlmodelc"].compactMap { UTType(filenameExtension: $0) }
     panel.message = "Choose a compatible image-to-depth Core ML .mlpackage, .mlmodel or .mlmodelc. The selected model stays in place."
     panel.prompt = "Use Model"
     panel.begin { response in

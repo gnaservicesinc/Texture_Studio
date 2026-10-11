@@ -32,6 +32,7 @@ struct HuggingFaceUploadResponse: Decodable, Sendable {
     let `private`: Bool
     let url: String
     let commitUrl: String?
+    let catalogWarning: String?
     let sourceCheckpointSha256: String
     let packagePath: String
 }

@@ -4,11 +4,13 @@ struct ContentView: View {
     @Environment(\.openWindow) private var openWindow
     let models: ModelManager
     let adviser: OllamaDecisionService
+    let materialStore: WorkbenchStore
     @State private var workspace: TextureWorkspace
 
-    init(models: ModelManager, adviser: OllamaDecisionService) {
+    init(models: ModelManager, adviser: OllamaDecisionService, materialStore: WorkbenchStore) {
         self.models = models
         self.adviser = adviser
+        self.materialStore = materialStore
         self._workspace = State(initialValue: TextureWorkspace(preferences: StudioPreferences.defaults))
     }
 
@@ -61,7 +63,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $workspace.showModels) {
-            ModelLibraryView(models: models, adviser: adviser, workspace: workspace)
+            ModelLibraryView(models: models, materialStore: materialStore, adviser: adviser, workspace: workspace)
                 .frame(width: 660, height: 570)
         }
         .sheet(isPresented: $workspace.showModelRecovery) {

@@ -92,6 +92,33 @@ final class HuggingFaceUploadTests: XCTestCase {
         XCTAssertTrue(reopened.uploadPublic)
     }
 
+    func testCommittedUploadKeepsExactLinkAndSurfacesLocalCatalogWarning() async throws {
+        let fixture = try UploadFixture()
+        defer { fixture.remove() }
+        let selected = try fixture.checkpoint(hash: "selected-sha", directory: "Saved Run")
+        let warning = "The model was uploaded, but the local Hub catalog could not be updated: simulated disk failure"
+        let store = fixture.store { args, _ in
+            if args.first == "hub-models" { return "{\"models\":[]}" }
+            if args.first == "hub-account" {
+                return "{\"authenticated\":true,\"username\":\"artist\",\"message\":\"Signed in as artist\"}"
+            }
+            XCTAssertEqual(args.first, "upload-selected")
+            return try fixture.uploadResponse(repository: "artist/confirmed-model", checksum: selected.sha256,
+                path: try XCTUnwrap(self.value("--output", in: args)), isPrivate: true, catalogWarning: warning)
+        }
+        store.checkpoints = [selected]
+        store.selectedCheckpointId = selected.id
+        store.uploadRepo = "artist/confirmed-model"
+        store.refreshUploadAccount()
+        try await settled(store)
+        store.uploadPackage()
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.lastUploadURL?.absoluteString, "https://huggingface.co/artist/confirmed-model/commit/verified")
+        XCTAssertTrue(store.activity.contains("Uploaded"))
+        XCTAssertTrue(store.activity.contains(warning))
+    }
+
     func testUploadResponseMustMatchTheCapturedSelectedCheckpoint() async throws {
         let fixture = try UploadFixture()
         defer { fixture.remove() }
@@ -156,9 +183,11 @@ final class HuggingFaceUploadTests: XCTestCase {
             "compatible": true, "variant": "lora"])
         return try WorkbenchResult.decode(WorkbenchCheckpoint.self, output: String(decoding: data, as: UTF8.self))
     }
-    func uploadResponse(repository: String, checksum: String, path: String, isPrivate: Bool) throws -> String {
-        String(decoding: try JSONSerialization.data(withJSONObject: ["repository": repository, "private": isPrivate,
+    func uploadResponse(repository: String, checksum: String, path: String, isPrivate: Bool, catalogWarning: String? = nil) throws -> String {
+        var response: [String: Any] = ["repository": repository, "private": isPrivate,
             "url": "https://huggingface.co/\(repository)", "commit_url": "https://huggingface.co/\(repository)/commit/verified",
-            "source_checkpoint_sha256": checksum, "package_path": path]), as: UTF8.self)
+            "source_checkpoint_sha256": checksum, "package_path": path]
+        if let catalogWarning { response["catalog_warning"] = catalogWarning }
+        return String(decoding: try JSONSerialization.data(withJSONObject: response), as: UTF8.self)
     }
 }

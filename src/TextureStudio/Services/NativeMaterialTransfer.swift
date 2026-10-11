@@ -112,7 +112,7 @@ struct NativeMaterialTransfer: Sendable {
 
     func upload(package: URL, repository: String, isPublic: Bool) async throws -> String {
         guard HuggingFaceUpload.validRepository(repository), token != nil else {
-            throw StudioError("Save a Hugging Face token and choose an owner/model repository.")
+            throw StudioError("Sign in with hf auth login or save a Hugging Face token, and choose an owner/model repository.")
         }
         let (configuration, hashes) = try NativeMaterialPackage.verify(package)
         let manifestDigest = try Self.hash(package.appendingPathComponent("SHA256SUMS.json"))
@@ -170,12 +170,19 @@ struct NativeMaterialTransfer: Sendable {
               let revision = commit["commitOid"] as? String, Self.isRevision(revision) else { throw StudioError("The Hub did not return a completed model commit.") }
         let name = configuration["checkpoint_filename"] as? String ?? "adapter.safetensors"
         let digest = hashes[name] as? String ?? ""
-        try register(["repository": repository, "revision": revision, "target": configuration["target"] ?? NSNull(),
-            "architecture": configuration["architecture"] ?? NSNull(), "model_family": configuration["model_family"] ?? "pbrnxt",
-            "checkpoint_filename": name, "sha256": digest])
-        return try Self.json(["repository": repository, "revision": revision, "url": "https://huggingface.co/\(repository)",
+        var receipt: [String: Any] = ["repository": repository, "revision": revision, "url": "https://huggingface.co/\(repository)",
             "commit_url": commit["commitUrl"] ?? "https://huggingface.co/\(repository)/commit/\(revision)",
-            "sha256": digest, "private": !isPublic, "source_photos_uploaded": false])
+            "sha256": digest, "private": !isPublic, "source_photos_uploaded": false]
+        do {
+            try register(["repository": repository, "revision": revision, "target": configuration["target"] ?? NSNull(),
+                "architecture": configuration["architecture"] ?? NSNull(), "model_family": configuration["model_family"] ?? "pbrnxt",
+                "checkpoint_filename": name, "sha256": digest])
+        } catch {
+            // The Hub has verified the commit. A local catalog failure cannot
+            // invalidate publication or hide the exact remote receipt.
+            receipt["catalog_warning"] = "The model was uploaded, but the local Hub catalog could not be updated: \(error.localizedDescription)"
+        }
+        return try Self.json(receipt)
     }
 
     private func uploadLFS(_ file: URL, repository: String, checksum: String, size: Int) async throws {

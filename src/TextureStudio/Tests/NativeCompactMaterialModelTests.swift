@@ -4,6 +4,58 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeCompactMaterialModelTests: XCTestCase {
+    func testDepthProRefinerUsesDistinctSingleChannelArchitectureAndCheckpointContract() throws {
+        let model = try NativeCompactMaterialModel(target: "height", width: 16, seed: 19, family: .depthProHeightRefiner)
+        let repeated = try NativeCompactMaterialModel(target: "height", width: 16, seed: 19, family: .depthProHeightRefiner)
+        let rgb = try NativeCompactMaterialModel(target: "height", width: 16, seed: 19)
+        XCTAssertEqual(model.architectureID, NativeCompactMaterialModel.depthProRefinerArchitecture)
+        XCTAssertEqual(model.modelFamily, .depthProHeightRefiner)
+        XCTAssertEqual(model.inputChannels, 1); XCTAssertEqual(model.outputChannels, 1)
+        XCTAssertEqual(model.weights["input.weight"]?.shape, [16, 1, 3, 3])
+        XCTAssertEqual(model.baseSHA256, repeated.baseSHA256)
+        XCTAssertNotEqual(model.baseSHA256, rgb.baseSHA256)
+        XCTAssertThrowsError(try model.updateWeights(rgb.weights))
+        XCTAssertThrowsError(try NativeCompactMaterialModel(target: "roughness", family: .depthProHeightRefiner))
+        XCTAssertThrowsError(try NativeCompactMaterialModel(target: "normal", family: .depthProHeightRefiner))
+        model.configuration["depthpro_model_sha256"] = String(repeating: "a", count: 64)
+        let configuration = try model.checkpointConfiguration(size: 256, step: 1)
+        let snapshot = try NativeSafetensors(bytes: NativeSafetensors.encoded(tensors: model.weights,
+            metadata: ["configuration": NativeMaterialTransfer.json(configuration)]))
+        XCTAssertNoThrow(try NativeCompactMaterialModel.validateCheckpoint(snapshot, configuration: configuration))
+        for field in ["depthpro_model_sha256", "depthpro_preparation_contract", "input_kind", "input_transfer", "target_transfer"] {
+            var missing = configuration; missing.removeValue(forKey: field)
+            XCTAssertThrowsError(try NativeCompactMaterialModel.validateCheckpoint(snapshot, configuration: missing), field)
+        }
+        for (field, value) in [("model_family", "compact-scalar" as Any), ("input_channels", 3),
+                               ("depthpro_model_sha256", "wrong"), ("depthpro_preparation_contract", "display-grayscale"),
+                               ("input_transfer", "sRGB diffuse codes / code maximum")] {
+            var wrong = configuration; wrong[field] = value
+            XCTAssertThrowsError(try NativeCompactMaterialModel.validateCheckpoint(snapshot, configuration: wrong), field)
+        }
+        let rgbSnapshot = try NativeSafetensors(bytes: NativeSafetensors.encoded(tensors: rgb.weights, metadata: [:]))
+        XCTAssertThrowsError(try NativeCompactMaterialModel.validateCheckpoint(rgbSnapshot, configuration: configuration))
+    }
+
+    func testDepthProRefinerPredictsAndDifferentiatesOneScalarChannel() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        try await Task.detached {
+            let depth = (0..<64 * 64).map { Float(($0 * 7) % 251) / 250 }
+            let target = (0..<64 * 64).map { Float(($0 * 3) % 251) / 250 }
+            let model = try NativeCompactMaterialModel(target: "height", width: 16, seed: 23, family: .depthProHeightRefiner)
+            let prediction = try model.predict(rgb: depth, width: 64, height: 64, target: "height")
+            XCTAssertEqual(prediction.channels, 1); XCTAssertEqual(prediction.values.count, depth.count)
+            XCTAssertTrue(prediction.values.allSatisfy(\.isFinite))
+            let program = try model.program(width: 64, height: 64, target: "height")
+            let execution = try program.execute(rgb: depth, weights: model.weights, reference: target, gradientsOnly: true)
+            XCTAssertEqual(Set(execution.gradients.keys), Set(model.weights.keys))
+            XCTAssertTrue(try XCTUnwrap(execution.loss).isFinite)
+            for tensor in execution.gradients.values { XCTAssertTrue(try tensor.floatValues().allSatisfy(\.isFinite)) }
+            XCTAssertThrowsError(try model.predict(rgb: depth + depth + depth, width: 64, height: 64, target: "height"))
+            var invalid = depth; invalid[0] = -.infinity
+            XCTAssertThrowsError(try model.predict(rgb: invalid, width: 64, height: 64, target: "height"))
+        }.value
+    }
+
     func testScratchInitializationAndOutputFamiliesHaveDeterministicSeparateIdentities() throws {
         let height = try NativeCompactMaterialModel(target: "height", width: 16, seed: 19)
         let repeated = try NativeCompactMaterialModel(target: "height", width: 16, seed: 19)

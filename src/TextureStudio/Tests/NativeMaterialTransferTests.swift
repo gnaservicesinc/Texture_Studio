@@ -39,12 +39,37 @@ final class NativeMaterialTransferTests: XCTestCase {
         let result = try NativeMaterialTransfer.object(Data(try await transfer.upload(package: package, repository: "fixture/material", isPublic: true).utf8))
         XCTAssertEqual(result["revision"] as? String, MaterialHubMock.revision)
         XCTAssertEqual(result["source_photos_uploaded"] as? Bool, false)
+        XCTAssertNil(result["catalog_warning"])
         let stats = await mock.statistics()
         XCTAssertEqual(stats.uploaded, try Data(contentsOf: package.appendingPathComponent("adapter.safetensors")))
         XCTAssertEqual(stats.commits, 1); XCTAssertEqual(stats.verifications, 1)
         let catalogRecord = try XCTUnwrap((NativeMaterialTransfer.object(catalog)["models"] as? [[String: Any]])?.first)
         XCTAssertEqual(catalogRecord["revision"] as? String, MaterialHubMock.revision)
         XCTAssertEqual(catalogRecord["sha256"] as? String, try NativeMaterialTransfer.hash(package.appendingPathComponent("adapter.safetensors")))
+    }
+
+    func testVerifiedCommitReceiptSurvivesLocalCatalogWriteFailure() async throws {
+        let fixture = try NativeMaterialPackageFixture()
+        defer { fixture.remove() }
+        let package = try fixture.package()
+        let mock = MaterialHubMock(files: try fixture.files(package))
+        let blocker = fixture.root.appendingPathComponent("catalog-parent-is-a-file")
+        let original = Data("Keep this existing file".utf8)
+        try original.write(to: blocker)
+        let transfer = NativeMaterialTransfer(token: "fixture-token", send: { try await mock.send($0, file: $1) },
+            catalogURL: blocker.appendingPathComponent("catalog.json"))
+        let result = try NativeMaterialTransfer.object(Data(try await transfer.upload(package: package, repository: "fixture/material", isPublic: true).utf8))
+        let stats = await mock.statistics()
+        XCTAssertEqual(stats.commits, 1)
+        XCTAssertEqual(result["repository"] as? String, "fixture/material")
+        XCTAssertEqual(result["revision"] as? String, MaterialHubMock.revision)
+        XCTAssertEqual(result["commit_url"] as? String, "https://huggingface.co/fixture/material/commit/" + MaterialHubMock.revision)
+        XCTAssertEqual(result["sha256"] as? String, try NativeMaterialTransfer.hash(package.appendingPathComponent("adapter.safetensors")))
+        XCTAssertEqual(result["private"] as? Bool, false)
+        XCTAssertEqual(result["source_photos_uploaded"] as? Bool, false)
+        XCTAssertTrue((result["catalog_warning"] as? String)?.contains("local Hub catalog could not be updated") == true)
+        XCTAssertEqual(try Data(contentsOf: blocker), original)
+        XCTAssertEqual(stats.uploaded, try Data(contentsOf: package.appendingPathComponent("adapter.safetensors")))
     }
 
     func testMultipartLFSStreamsOriginalBytesAndRequiresAllReceipts() async throws {

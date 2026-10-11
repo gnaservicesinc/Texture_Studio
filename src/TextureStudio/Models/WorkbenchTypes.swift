@@ -100,14 +100,18 @@ struct WorkbenchDataset: Decodable, Sendable {
     func readyForTraining(size: Int, material: String?, target: String? = nil) -> Bool {
         guard hasNativeSize(size), let policy = automaticValidation,
               policy.policy == "subject-extra-crops-v2",
-              target == nil || policy.target == nil || policy.target == target else { return false }
+              target == nil || policy.target == nil || policy.target == target,
+              policy.quickFitMaterialId == material else { return false }
         if let target {
-            let candidates = materials.filter { material == nil || $0.id == material }.flatMap(\.samples)
+            // Preparation has already selected the source folder across its
+            // resolution tiers. The requested original ID may be too small to
+            // appear among the resulting native-size pairs.
+            let selected = preparation == nil ? materials.filter { material == nil || $0.id == material }.flatMap(\.samples) : samples
+            let candidates = selected
                 .filter { !["excluded", "rejected"].contains($0.status) }
             guard !candidates.isEmpty, candidates.allSatisfy({ Set($0.maps.keys) == Set(["input", target]) }) else { return false }
         }
-        if let material { return policy.quickFitMaterialId == material }
-        return policy.quickFitMaterialId == nil
+        return true
     }
     func hasNativeSize(_ size: Int) -> Bool {
         !samples.isEmpty && samples.allSatisfy { sample in
@@ -280,7 +284,7 @@ struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
         return schema != "texture-studio-material-lora-v1" ||
             target == options.target && (scope ?? "final-map") == options.scope
     }
-    var availabilityLabel: String { modelFamily?.isCompact == true ? "Full compact model" : variant == "full" ? "Full material checkpoint" : "Material LoRA" }
+    var availabilityLabel: String { modelFamily == .depthProHeightRefiner ? "Full DepthPro Height Refiner" : modelFamily?.isCompact == true ? "Full compact model" : variant == "full" ? "Full material checkpoint" : "Material LoRA" }
     var id: String { sha256 }
     var url: URL { URL(fileURLWithPath: checkpointPath) }
     var title: String {
@@ -288,7 +292,7 @@ struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
         return (name.isEmpty ? url.deletingLastPathComponent().lastPathComponent : name) + " · " + url.lastPathComponent
     }
     var trainingBaseLabel: String {
-        architecture ?? "PBRnxt material model"
+        modelFamily == .depthProHeightRefiner ? "DepthPro Height Refiner" : architecture ?? "PBRnxt material model"
     }
     var modelSummary: String {
         let map = target == "height" ? "Surface height / displacement" : target.capitalized
@@ -303,10 +307,25 @@ enum MaterialTrainingIntervalUnit: String, Codable, CaseIterable, Hashable, Send
     var label: String { rawValue }
 }
 
+enum MaterialTrainingCropRandomization: String, Codable, CaseIterable, Hashable, Sendable {
+    case never
+    case run
+    case epoch
+
+    var label: String {
+        switch self {
+        case .never: "Never"
+        case .run: "At the start of a new training run"
+        case .epoch: "Every epoch"
+        }
+    }
+}
+
 enum MaterialTrainingModelFamily: String, Codable, CaseIterable, Hashable, Sendable {
     case pbrnxt
     case compactScalar = "compact-scalar"
     case compactNormal = "compact-normal"
+    case depthProHeightRefiner = "depthpro-height-refiner"
 
     var isCompact: Bool { self != .pbrnxt }
     var label: String {
@@ -314,6 +333,7 @@ enum MaterialTrainingModelFamily: String, Codable, CaseIterable, Hashable, Senda
         case .pbrnxt: "PBRnxt refinement"
         case .compactScalar: "Compact scalar"
         case .compactNormal: "Compact normals"
+        case .depthProHeightRefiner: "DepthPro Height Refiner"
         }
     }
     var defaultLearningRate: Double { isCompact ? 0.001 : 0.00001 }
@@ -322,6 +342,7 @@ enum MaterialTrainingModelFamily: String, Codable, CaseIterable, Hashable, Senda
         case .pbrnxt: nil
         case .compactScalar: "texture-studio-compact-scalar-native-v1"
         case .compactNormal: "texture-studio-compact-normal-native-v1"
+        case .depthProHeightRefiner: "texture-studio-depthpro-height-refiner-native-v1"
         }
     }
     init?(architecture: String?) {
@@ -333,6 +354,7 @@ enum MaterialTrainingModelFamily: String, Codable, CaseIterable, Hashable, Senda
         case .pbrnxt: ["height", "roughness", "normal"].contains(target)
         case .compactScalar: ["height", "roughness"].contains(target)
         case .compactNormal: target == "normal"
+        case .depthProHeightRefiner: target == "height"
         }
     }
 }
@@ -347,6 +369,9 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
     var maxMinutes = 30.0
     var useSelectedMaterialOnly = false
     var useWarmStart = false
+    var randomizeCrops: MaterialTrainingCropRandomization = .run
+    var randomFlip = false
+    var randomSpinCentercut = false
     var loraRank = 8
     var loraAlpha = 8.0
     var learningRate = 0.00001
@@ -371,6 +396,7 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case modelName, modelFamily, target, scope, size, updatesPerCrop, maxMinutes, useSelectedMaterialOnly, useWarmStart, loraRank, loraAlpha, validationEvery, checkpointEvery
         case validationUnit, checkpointUnit
+        case randomizeCrops, randomFlip, randomSpinCentercut
         case learningRate, gradientAccumulationSteps, optimizer, optimizerBeta1, optimizerBeta2, optimizerEpsilon, weightDecay, maxGradientNorm, learningRateSchedule, minimumLearningRateRatio, warmupUpdates, seed
     }
 
@@ -386,6 +412,9 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
         maxMinutes = try values.decodeIfPresent(Double.self, forKey: .maxMinutes) ?? maxMinutes
         useSelectedMaterialOnly = try values.decodeIfPresent(Bool.self, forKey: .useSelectedMaterialOnly) ?? useSelectedMaterialOnly
         useWarmStart = try values.decodeIfPresent(Bool.self, forKey: .useWarmStart) ?? useWarmStart
+        randomizeCrops = try values.decodeIfPresent(MaterialTrainingCropRandomization.self, forKey: .randomizeCrops) ?? randomizeCrops
+        randomFlip = try values.decodeIfPresent(Bool.self, forKey: .randomFlip) ?? randomFlip
+        randomSpinCentercut = try values.decodeIfPresent(Bool.self, forKey: .randomSpinCentercut) ?? randomSpinCentercut
         loraRank = try values.decodeIfPresent(Int.self, forKey: .loraRank) ?? loraRank
         loraAlpha = try values.decodeIfPresent(Double.self, forKey: .loraAlpha) ?? loraAlpha
         learningRate = try values.decodeIfPresent(Double.self, forKey: .learningRate) ?? modelFamily.defaultLearningRate
@@ -439,6 +468,13 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
     }
 
     var effectiveScope: String { modelFamily.isCompact ? "full-model" : scope }
+    var cropAugmentationEnabled: Bool { randomizeCrops != .never }
+    var cropArguments: [String] {
+        var arguments = ["--randomize-crops", randomizeCrops.rawValue]
+        if cropAugmentationEnabled && randomFlip { arguments.append("--random-flip") }
+        if cropAugmentationEnabled && randomSpinCentercut { arguments.append("--random-spin-centercut") }
+        return arguments
+    }
 
     /// Both controls and the launcher reject values the Float32 trainer cannot represent.
     var configurationIssue: String? {
@@ -495,6 +531,7 @@ struct MaterialInferenceResponse: Decodable, Sendable {
     struct Output: Decodable, Sendable { let path: String }
     let outputs: [String: Output]
     let checkpointSha256: String
+    var preparedInputPath: String? = nil
 }
 
 struct SelectedMaterialCheckpoint: Codable, Sendable {

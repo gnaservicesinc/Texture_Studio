@@ -554,12 +554,47 @@ final class TextureWorkspace {
 
     func materialCheckpointProvenance() throws -> Data {
         let checkpoint = try currentMaterialCheckpoint()
-        return try JSONSerialization.data(withJSONObject: [
+        let inspection = try NativeMaterialTransfer.object(Data(NativeMaterialCheckpoint.inspect(
+            at: URL(fileURLWithPath: checkpoint.checkpointPath), expectedSHA256: checkpoint.sha256).utf8))
+        let recorded = try WorkbenchResult.decode(WorkbenchCheckpoint.self,
+            output: NativeMaterialTransfer.json(inspection))
+        guard recorded.target == checkpoint.target, let family = recorded.modelFamily else {
+            throw StudioError("The selected material model identity does not match its recorded target and family.")
+        }
+        var metadata: [String: Any] = [
             "backend": "Apple MPSGraph / Metal", "model_type": "PBRnxt material refinement",
             "input": "Prepared diffuse map shared with material rendering", "checkpoint_path": checkpoint.checkpointPath,
             "checkpoint_sha256": checkpoint.sha256, "target": checkpoint.target,
             "model_name": checkpoint.title, "height_interpretation": "surface height; no camera-depth normalization"
-        ], options: [.prettyPrinted, .sortedKeys])
+        ]
+        if family != .pbrnxt {
+            metadata["model_type"] = family.label
+            metadata["model_family"] = family.rawValue
+            metadata["architecture"] = recorded.architecture
+            metadata["input_channels"] = inspection["input_channels"]
+            metadata["output_channels"] = inspection["output_channels"]
+        }
+        if family == .depthProHeightRefiner {
+            let grid = [settings.outputSize, settings.outputSize]
+            metadata["backend"] = "Core ML DepthPro followed by Apple MPSGraph / Metal"
+            metadata["input"] = "One-channel normalized inverse DepthPro depth from the shared prepared diffuse map"
+            metadata["height_interpretation"] = "surface height; original linear height codes / code maximum"
+            metadata["depthpro_model_sha256"] = inspection["depthpro_model_sha256"]
+            metadata["depthpro_preparation_contract"] = inspection["depthpro_preparation_contract"]
+            metadata["prepared_diffuse_dimensions"] = grid
+            metadata["depthpro_input_dimensions"] = [NativeDepthProService.inputSize, NativeDepthProService.inputSize]
+            metadata["depthpro_output_dimensions"] = [NativeDepthProService.inputSize, NativeDepthProService.inputSize]
+            metadata["refiner_input_dimensions"] = grid
+            metadata["refiner_output_dimensions"] = grid
+            metadata["depthpro_original_width"] = settings.outputSize
+            metadata["source_pixels_resized"] = settings.outputSize != NativeDepthProService.inputSize
+            metadata["source_pixels_discarded"] = false
+            metadata["refiner_input_resized"] = false
+            metadata["complete_prepared_diffuse_field_of_view"] = true
+            metadata["depthpro_output_preparation"] = "pixel-center bilinear meters to paired grid, then reciprocal and full-field min-max"
+            metadata["refiner_precision"] = "Float32"
+        }
+        return try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys])
     }
 
     func chooseRecipe() {

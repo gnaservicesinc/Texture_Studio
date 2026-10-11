@@ -1,0 +1,29 @@
+{
+  "checkpoint_sha256" : "319284532c9cc4ec75da74d00168d4aa37763749a7cad861b93a92e22df32ed0",
+  "checkpoint_step" : 1,
+  "depthpro_model_sha256" : "e62c68496d25c76e099fbbcfb7a39814a201a1f2d9a6a9411e37feec2d5d94ec",
+  "depthpro_preparation_contract" : "texture-studio-depthpro-inverse-depth-v1",
+  "fixture" : "original white_stucco_02 2K diffuse prepared through TextureEngine at256",
+  "input_channels" : 1,
+  "maximum" : 2.9480836391448975,
+  "minimum" : 0.25766700506210327,
+  "model_and_source_unchanged" : true,
+  "model_family" : "depthpro-height-refiner",
+  "numeric_readback_bitwise_equal" : true,
+  "output_channels" : 1,
+  "output_dimensions" : [
+    256,
+    256
+  ],
+  "output_sha256" : "0f1437663a63d60329966a1aac3b94a630c76f1e27132b1ae9605284f608b694",
+  "output_storage" : "FLOAT32",
+  "prepared_sha256" : "e889de642eb15b921dda3888fb5d7ea63257890b38e1de7c22770befd55f3fd4",
+  "quality_qualification" : false,
+  "shared_model_preference_and_selection_unchanged" : true,
+  "source_dimensions" : [
+    2048,
+    2048
+  ],
+  "source_path" : "\/opt\/ipde\/sources_mats\/white_stucco_02\/white_stucco_02_diff_2k.png",
+  "source_sha256" : "c1d34a64fa62b613e62d24a81c20e9d1f612e555525a1476742fea6b98e563ac"
+}
