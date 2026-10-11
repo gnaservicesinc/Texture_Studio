@@ -6,6 +6,30 @@ import XCTest
 
 @MainActor
 final class TrainingPreparationTests: XCTestCase {
+    func testStartingTrainingRechecksRepositoryPathAndDispatchesRunIntoUserStorage() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let checkout = fixture.root.appendingPathComponent("checkout")
+        try FileManager.default.createDirectory(at: checkout.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        let store = fixture.store()
+        store.uploadAfterTraining = false
+        store.selectTrainingModelFamily(.compactScalar)
+        try await store.loadTrainingCapabilities()
+        try await store.loadDataset(fixture.original)
+        store.training.size = 1024
+        store.workspacePath = checkout.path
+        store.startTraining()
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.workspacePath, fixture.root.path)
+        XCTAssertEqual(fixture.defaults.string(forKey: "workspace"), fixture.root.path)
+        let call = try XCTUnwrap(fixture.calls.first { $0.first == "train" })
+        let output = try XCTUnwrap(value("--output", in: call))
+        XCTAssertTrue(output.hasPrefix(fixture.root.appendingPathComponent("out/material-training").path + "/"), output)
+        XCTAssertFalse(output.hasPrefix(checkout.path + "/"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: checkout.appendingPathComponent("out").path))
+        XCTAssertEqual(try Data(contentsOf: fixture.original.appendingPathComponent("dataset.json")), Data("original".utf8))
+    }
+
     func testCompactFamiliesDispatchFullTrainingWithoutPBRDependencyOrLoRASettings() async throws {
         for family in [MaterialTrainingModelFamily.compactScalar, .compactNormal] {
             let fixture = try Fixture()

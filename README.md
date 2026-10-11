@@ -50,3 +50,5 @@ See [training workflow](docs/material-training-workflow.md), [data contract](doc
 The app exports auxiliary buffers exposed by Apple's ImageIO API as original bytes with their data descriptions and checksums. Known scalar formats also receive a lossless NumPy array file; this binary format does not require an interpreter. The exporter applies no gamma, normalization or tone mapping. Its report identifies the API's coverage; original photographs remain unchanged.
 
 Datasets, model weights, generated outputs and app bundles stay outside Git. This repository is in development before V1; removed experiments are not released features and have no compatibility support in the material app. See [release requirements](docs/releasing.md) and [license](LICENSE).
+
+Application work defaults to `~/Library/Application Support/Texture Studio/Material Workspace`; saved paths inside a source checkout migrate there before new output is created. Missing DepthPro weights are acquired and verified automatically when the refiner is used. [Project working principles](AGENTS.md) require completing available recovery paths before reporting an error.

@@ -238,13 +238,18 @@ final class WorkbenchStore {
         self.workerOverride = workerOverride
         self.managedWorkspaceURL = (managedWorkspaceURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Texture Studio/Material Workspace")).standardizedFileURL
-        let local = Bundle.main.object(forInfoDictionaryKey: "IPDEWorkspace") as? String ?? ""
-        let configuredWorkspace = defaults.string(forKey: "workspace") ?? local
-        let workspace = configuredWorkspace.isEmpty ? self.managedWorkspaceURL.path : URL(fileURLWithPath: configuredWorkspace).standardizedFileURL.path
+        let workspace = Self.userWorkspaceURL(configured: defaults.string(forKey: "workspace"), managed: self.managedWorkspaceURL).path
         workspacePath = workspace
+        defaults.set(workspace, forKey: "workspace")
         let cache = URL(fileURLWithPath: workspace).appendingPathComponent("out/material-training/transfer-models")
-        let materialBasePath = defaults.string(forKey: "materialModelDirectory") ?? cache.appendingPathComponent("pbrnxt-base").path
+        let configuredBase = defaults.string(forKey: "materialModelDirectory")
+        let materialBasePath: String
+        if let configuredBase, !FileManager.default.fileExists(atPath: configuredBase),
+           Self.userWorkspaceURL(configured: configuredBase, managed: self.managedWorkspaceURL).path != URL(fileURLWithPath: configuredBase).standardizedFileURL.path {
+            materialBasePath = cache.appendingPathComponent("pbrnxt-base").path
+        } else { materialBasePath = configuredBase ?? cache.appendingPathComponent("pbrnxt-base").path }
         modelDirectory = materialBasePath
+        defaults.set(materialBasePath, forKey: "materialModelDirectory")
         depthProModelPath = NativeDepthProContract.configuredModelURL(in: depthProPreferences, migrating: defaults).path
         let saved = WorkbenchPreferences.load(from: defaults)
         if let options = saved.training {
@@ -1036,6 +1041,15 @@ final class WorkbenchStore {
                 if trainingProgress == nil { trainingProgress = WorkbenchTrainingProgress() }
                 trainingProgress?.consume(event)
             }
+            if kind == "depthpro_model_setup" {
+                if event["ready"] as? Bool == true, let path = event["model_path"] as? String {
+                    depthProModelPath = path
+                }
+                if isBusy, !isStopping {
+                    activity = [event["operation"] as? String, trainingProgress?.operationDetail].compactMap { $0 }.joined(separator: " · ")
+                }
+                continue
+            }
             if ["source_recovery_started", "source_recovery_progress", "source_recovery_completed"].contains(kind) {
                 if let completed = event["completed"] as? Int, let total = event["total"] as? Int {
                     sourceRecoverySummary = "Tier setup: \(completed) / \(total) maps checked"
@@ -1355,7 +1369,29 @@ final class WorkbenchStore {
             }
         }
     }
+    /// Installed and development app builds share a user-owned output default.
+    /// Older builds saved the bundled source checkout as their working folder.
+    private static func userWorkspaceURL(configured: String?, managed: URL) -> URL {
+        guard let configured, !configured.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return managed }
+        let candidate = URL(fileURLWithPath: configured).standardizedFileURL
+        let resolved = candidate.resolvingSymlinksInPath()
+        if let bundled = Bundle.main.object(forInfoDictionaryKey: "IPDEWorkspace") as? String, bundled.hasPrefix("/") {
+            let source = URL(fileURLWithPath: bundled).standardizedFileURL.resolvingSymlinksInPath()
+            if resolved == source || resolved.path.hasPrefix(source.path + "/") { return managed }
+        }
+        var ancestor = resolved
+        while true {
+            if FileManager.default.fileExists(atPath: ancestor.appendingPathComponent(".git").path) { return managed }
+            let parent = ancestor.deletingLastPathComponent()
+            if parent == ancestor { break }
+            ancestor = parent
+        }
+        return candidate
+    }
+
     private func newOutputURL(prefix: String) throws -> URL {
+        let outputWorkspace = Self.userWorkspaceURL(configured: workspacePath, managed: managedWorkspaceURL)
+        if outputWorkspace != workspaceURL { workspacePath = outputWorkspace.path }
         if workspaceURL == managedWorkspaceURL, !FileManager.default.fileExists(atPath: workspacePath) {
             try FileManager.default.createDirectory(at: managedWorkspaceURL, withIntermediateDirectories: true)
         }

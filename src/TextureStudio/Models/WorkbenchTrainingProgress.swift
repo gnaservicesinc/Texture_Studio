@@ -83,6 +83,13 @@ struct WorkbenchTrainingProgress: Equatable, Sendable {
         if let value = event["workflow_phase"] as? Int, (1...phaseCount).contains(value) { phaseIndex = value }
 
         switch kind {
+        case "depthpro_model_setup":
+            state = .modelSetup; phaseIndex = 2
+            operationLabel = event["operation"] as? String ?? "Preparing DepthPro model"
+            clearStageAndSample()
+            if let bytes = event["bytes_completed"] as? Int, let total = event["bytes_total"] as? Int, bytes >= 0, total > 0 {
+                operationDetail = "\(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file))"
+            } else { operationDetail = "" }
         case "preparation_started", "preparation_progress", "preparation_completed":
             state = .preparing; phaseIndex = 1
             operationLabel = "Preparing native training maps"

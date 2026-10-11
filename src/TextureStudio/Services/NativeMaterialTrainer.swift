@@ -19,12 +19,20 @@ final class NativeMaterialTrainingControl: @unchecked Sendable {
 /// locks, iteration, validation and bit-preserving checkpoint publication.
 enum NativeMaterialTrainer {
     typealias Event = @Sendable (String) -> Void
-    static func run(arguments: [String], onEvent: @escaping Event = { _ in }, control: NativeMaterialTrainingControl = .init()) async throws -> String {
+    static func run(arguments: [String], onEvent: @escaping Event = { _ in }, control: NativeMaterialTrainingControl = .init(),
+                    depthProResources: NativeDepthProResources = .init()) async throws -> String {
         try Task.checkCancellation()
         let job = Task.detached(priority: .userInitiated) {
             var arguments = arguments
             var options = try Options(arguments)
-            if options.command == "infer" { return try infer(options, control: control) }
+            let depthProCache: NativeDepthProInputCache?
+            if options.modelFamily == .depthProHeightRefiner {
+                try control.check()
+                let modelURL = try await depthProResources.ensureAvailable(requestedURL: options.depthProModelURL, onEvent: onEvent)
+                try control.check()
+                depthProCache = try NativeDepthProInputCache(modelURL: modelURL, directory: options.depthProCacheURL)
+            } else { depthProCache = nil }
+            if options.command == "infer" { return try infer(options, control: control, depthProCache: depthProCache) }
             if let dataset = options.dataset,
                let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: dataset.appendingPathComponent("dataset.json"))) as? [String: Any],
                (manifest["storage_policy"] as? String == "original-source-references-v1" ||
@@ -44,7 +52,7 @@ enum NativeMaterialTrainer {
                 }
                 options = try Options(arguments)
             }
-            return try train(options, onEvent: onEvent, control: control)
+            return try train(options, onEvent: onEvent, control: control, depthProCache: depthProCache)
         }
         return try await withTaskCancellationHandler { try await job.value } onCancel: { control.stop(); job.cancel() }
     }

@@ -1,0 +1,264 @@
+{
+  "completed_optimizer_updates" : 1,
+  "crop_rectangle" : [
+    896,
+    896,
+    256,
+    256
+  ],
+  "download_events" : 6,
+  "missing_selection_recovered" : true,
+  "model_bytes" : 1902515337,
+  "model_path" : "\/Users\/andrewsmith\/Library\/Application Support\/Texture Studio\/DepthPro\/DepthPro.mlpackage",
+  "numeric_inference_result" : {
+    "architecture" : "texture-studio-depthpro-height-refiner-native-v1",
+    "checkpoint_sha256" : "e0833e0fe93dc078c6f6a4d91c06c0b4515ebb607fdfc977ae704891c6a1ea72",
+    "checkpoint_step" : 1,
+    "depthpro_model_sha256" : "e62c68496d25c76e099fbbcfb7a39814a201a1f2d9a6a9411e37feec2d5d94ec",
+    "depthpro_preparation_contract" : "texture-studio-depthpro-inverse-depth-v1",
+    "diffuse_path" : "\/Users\/andrewsmith\/Library\/Application Support\/Texture Studio\/DepthPro\/verification-FDAE0304-9EE0-4239-A74E-26E63C40475D\/dataset\/samples\/train\/diffuse.png",
+    "generation" : {
+      "depthpro_full_source_field_of_view" : true,
+      "depthpro_grid_preparation" : "pixel-center bilinear meters to paired grid; inverse-depth full-field min-max",
+      "depthpro_input_dimensions" : [
+        1536,
+        1536
+      ],
+      "depthpro_original_width" : 256,
+      "depthpro_preparation_contract" : "texture-studio-depthpro-inverse-depth-v1",
+      "model_input_dimensions" : [
+        256,
+        256
+      ],
+      "refiner_input_channels" : 1,
+      "refiner_input_resized" : false,
+      "runtime" : "Core ML DepthPro followed by Apple MPSGraph Float32",
+      "source_pixels_discarded" : false,
+      "source_pixels_resized" : true,
+      "tiled" : false
+    },
+    "image_sha256" : "a09043d67e23746c5551769df730c1bf712f7de234a2ea7f4c53fa0d8f0f1d98",
+    "input_channels" : 1,
+    "input_kind" : "depthpro",
+    "model_family" : "depthpro-height-refiner",
+    "native_dimensions" : [
+      256,
+      256
+    ],
+    "output_channels" : 1,
+    "outputs" : {
+      "height" : {
+        "blender_color_space" : "Non-Color",
+        "encoding" : "linear_data",
+        "path" : "\/Users\/andrewsmith\/Library\/Application Support\/Texture Studio\/DepthPro\/verification-FDAE0304-9EE0-4239-A74E-26E63C40475D\/inference\/height.float32.exr",
+        "sha256" : "f730c13823d6eec6ba367a7e4fd20798be3f4944230f4f90dd0603eb3e046427",
+        "storage" : "FLOAT32"
+      }
+    },
+    "prepared_input_path" : "\/Users\/andrewsmith\/Library\/Application Support\/Texture Studio\/DepthPro\/verification-FDAE0304-9EE0-4239-A74E-26E63C40475D\/inference\/depthpro-input.float32.exr",
+    "source_bits" : 16,
+    "source_bytes_modified" : false,
+    "target" : "height",
+    "untrained_initialization" : false
+  },
+  "original_height" : "\/opt\/ipde\/sources_mats\/white_stucco_02\/white_stucco_02_disp_2k.png",
+  "output_path" : "\/Users\/andrewsmith\/Library\/Application Support\/Texture Studio\/DepthPro\/verification-FDAE0304-9EE0-4239-A74E-26E63C40475D\/inference",
+  "package_sha256" : "e62c68496d25c76e099fbbcfb7a39814a201a1f2d9a6a9411e37feec2d5d94ec",
+  "quality_qualification" : false,
+  "source_photo" : "\/opt\/ipde\/sources_mats\/white_stucco_02\/white_stucco_02_diff_2k.png",
+  "training_result" : {
+    "baseline_validation" : {
+      "context" : "baseline",
+      "event" : "validation",
+      "mae" : null,
+      "pool_count" : 0,
+      "reference" : "Teacher\/source agreement, not measured material accuracy",
+      "sample_count" : 0,
+      "samples" : [
+
+      ],
+      "scope" : "full",
+      "status" : "disabled",
+      "step" : 0,
+      "validation_skipped_sample_count" : 0
+    },
+    "checkpoint_path" : "\/Users\/andrewsmith\/Library\/Application Support\/Texture Studio\/DepthPro\/verification-FDAE0304-9EE0-4239-A74E-26E63C40475D\/trained\/export\/model.safetensors",
+    "checkpoints" : [
+      {
+        "architecture" : "texture-studio-depthpro-height-refiner-native-v1",
+        "base" : null,
+        "base_required" : false,
+        "checkpoint_path" : "\/Users\/andrewsmith\/Library\/Application Support\/Texture Studio\/DepthPro\/verification-FDAE0304-9EE0-4239-A74E-26E63C40475D\/trained\/checkpoint-step-00000001.safetensors",
+        "compatible" : true,
+        "depthpro_model_sha256" : "e62c68496d25c76e099fbbcfb7a39814a201a1f2d9a6a9411e37feec2d5d94ec",
+        "depthpro_preparation_contract" : "texture-studio-depthpro-inverse-depth-v1",
+        "from_scratch" : true,
+        "initial_weights_sha256" : "93b71d9790b6a36afd501254dfc538bf420f91517ad4fcd7e3d2bf11bfa86815",
+        "initialization_seed" : 17,
+        "input_channels" : 1,
+        "input_kind" : "depthpro",
+        "model_family" : "depthpro-height-refiner",
+        "model_name" : null,
+        "network_width" : 16,
+        "output_channels" : 1,
+        "refinement_policy" : "native_compact_full_training",
+        "schema" : "texture-studio-compact-material-v1",
+        "scope" : "full-model",
+        "sha256" : "e0833e0fe93dc078c6f6a4d91c06c0b4515ebb607fdfc977ae704891c6a1ea72",
+        "step" : 1,
+        "supports_studio_inference" : true,
+        "supports_training_warm_start" : true,
+        "target" : "height",
+        "training_size" : 256,
+        "validation" : {
+          "context" : "final",
+          "event" : "validation",
+          "mae" : null,
+          "pool_count" : 0,
+          "reference" : "Teacher\/source agreement, not measured material accuracy",
+          "sample_count" : 0,
+          "samples" : [
+
+          ],
+          "scope" : "full",
+          "status" : "disabled",
+          "step" : 1,
+          "validation_skipped_sample_count" : 0
+        },
+        "variant" : "full"
+      }
+    ],
+    "completed_epochs" : 1,
+    "completed_updates" : 1,
+    "dataset_manifest_sha256" : "f6bea476b1476ee8db8acd07c038537c4b373856d6c805ea836281dd79a024cf",
+    "elapsed_training_seconds" : 0.38637870800000002,
+    "final_validation" : {
+      "context" : "final",
+      "event" : "validation",
+      "mae" : null,
+      "pool_count" : 0,
+      "reference" : "Teacher\/source agreement, not measured material accuracy",
+      "sample_count" : 0,
+      "samples" : [
+
+      ],
+      "scope" : "full",
+      "status" : "disabled",
+      "step" : 1,
+      "validation_skipped_sample_count" : 0
+    },
+    "image_padding" : false,
+    "image_resizing" : false,
+    "last_checkpoint" : "\/Users\/andrewsmith\/Library\/Application Support\/Texture Studio\/DepthPro\/verification-FDAE0304-9EE0-4239-A74E-26E63C40475D\/trained\/checkpoint-step-00000001.safetensors",
+    "max_minutes" : 30,
+    "model_family" : "depthpro-height-refiner",
+    "native_dimensions" : [
+      256,
+      256
+    ],
+    "output_channels" : 1,
+    "package_path" : "\/Users\/andrewsmith\/Library\/Application Support\/Texture Studio\/DepthPro\/verification-FDAE0304-9EE0-4239-A74E-26E63C40475D\/trained\/export",
+    "requested_updates" : 1,
+    "runtime" : "Apple MPSGraph Float32",
+    "sample_evaluations" : 1,
+    "skipped_sample_count" : 0,
+    "skipped_samples" : [
+
+    ],
+    "status" : "completed",
+    "time_limit_policy" : "Do not start an update after the deadline. The clock starts after setup; baseline validation, an active update, and final validation and saving finish before returning.",
+    "training_configuration" : {
+      "checkpoint_every" : 0,
+      "checkpoint_unit" : "epoch",
+      "dataset_manifest_sha256" : "f6bea476b1476ee8db8acd07c038537c4b373856d6c805ea836281dd79a024cf",
+      "depthpro_generated_inputs" : 1,
+      "depthpro_model_sha256" : "e62c68496d25c76e099fbbcfb7a39814a201a1f2d9a6a9411e37feec2d5d94ec",
+      "depthpro_preparation_contract" : "texture-studio-depthpro-inverse-depth-v1",
+      "depthpro_remapped_inputs" : 0,
+      "depthpro_reused_inputs" : 1,
+      "detail_loss_weight" : 4,
+      "effective_batch_size" : 1,
+      "gradient_accumulation_policy" : "Average gradients over evaluated maps, then clip once and apply one optimizer update; stop-and-save and the deadline flush a partial group.",
+      "gradient_accumulation_steps" : 1,
+      "initial_step" : 0,
+      "input_channels" : 1,
+      "learning_rate" : 0.0010000000474974513,
+      "learning_rate_schedule" : "constant",
+      "material_filter" : [
+
+      ],
+      "max_gradient_norm" : 1,
+      "max_minutes" : 30,
+      "microbatch_size" : 1,
+      "minimum_learning_rate" : 0.00010000000474974513,
+      "minimum_learning_rate_ratio" : 0.10000000149011612,
+      "model_family" : "depthpro-height-refiner",
+      "optimizer" : "adamw",
+      "optimizer_beta1" : 0.89999997615814209,
+      "optimizer_beta2" : 0.99900001287460327,
+      "optimizer_epsilon" : 9.9999999392252903e-09,
+      "optimizer_state_restored" : false,
+      "output_channels" : 1,
+      "precision" : "Float32",
+      "quick_validation_count" : 0,
+      "random_flip" : false,
+      "random_spin_centercut" : false,
+      "randomize_crops" : "run",
+      "requested_updates" : 1,
+      "sample_failure_policy" : "Quarantine unreadable, changed, malformed or nonfinite samples for this run; continue with valid samples and save without requiring successful validation.",
+      "scheduling_step_origin" : "current_run",
+      "scope" : "full-model",
+      "seed" : 17,
+      "target" : "height",
+      "trainable_parameter_count" : 255969,
+      "trainable_parameters" : "complete compact network",
+      "training_map_count" : 1,
+      "training_size" : 256,
+      "updates_per_map" : 1,
+      "validation_enabled" : false,
+      "validation_every" : 0,
+      "validation_map_count" : 0,
+      "validation_unit" : "epoch",
+      "value_loss_weight" : 1,
+      "warmup_updates" : 0,
+      "weight_decay" : 0,
+      "weight_decay_mode" : "decoupled"
+    },
+    "training_performed" : true,
+    "updates_per_map" : 1,
+    "validation_history" : [
+      {
+        "context" : "baseline",
+        "event" : "validation",
+        "mae" : null,
+        "pool_count" : 0,
+        "reference" : "Teacher\/source agreement, not measured material accuracy",
+        "sample_count" : 0,
+        "samples" : [
+
+        ],
+        "scope" : "full",
+        "status" : "disabled",
+        "step" : 0,
+        "validation_skipped_sample_count" : 0
+      },
+      {
+        "context" : "final",
+        "event" : "validation",
+        "mae" : null,
+        "pool_count" : 0,
+        "reference" : "Teacher\/source agreement, not measured material accuracy",
+        "sample_count" : 0,
+        "samples" : [
+
+        ],
+        "scope" : "full",
+        "status" : "disabled",
+        "step" : 1,
+        "validation_skipped_sample_count" : 0
+      }
+    ]
+  },
+  "training_started" : true,
+  "wall_seconds" : 141.03616094589233
+}

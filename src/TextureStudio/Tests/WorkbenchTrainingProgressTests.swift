@@ -2,6 +2,30 @@ import XCTest
 @testable import TextureStudio
 
 final class WorkbenchTrainingProgressTests: XCTestCase {
+    @MainActor func testDepthProDownloadShowsByteProgressAndPersistsReadyPathBeforeTrainingStarts() async throws {
+        let suite = "depthpro-download-progress-\(UUID())", defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = WorkbenchStore(preferences: defaults)
+        store.operation("Training DepthPro Height Refiner", training: true) {
+            store.recordTrainingProgress("{\"event\":\"depthpro_model_setup\",\"operation\":\"Downloading DepthPro model\",\"bytes_completed\":100000000,\"bytes_total\":1902515337}\n")
+            XCTAssertEqual(store.activity, "Downloading DepthPro model · 100 MB / 1.9 GB")
+            XCTAssertEqual(store.trainingProgress?.state, .modelSetup)
+            XCTAssertEqual(store.trainingProgress?.completedUpdates, 0)
+            XCTAssertNil(store.trainingProgress?.stageSummary)
+            XCTAssertFalse(store.hasTrainingStarted)
+            let path = NativeDepthProContract.managedModelURL.path
+            let event: [String: Any] = ["event": "depthpro_model_setup", "operation": "DepthPro model ready", "ready": true, "model_path": path]
+            store.recordTrainingProgress(String(decoding: try JSONSerialization.data(withJSONObject: event), as: UTF8.self) + "\n")
+            XCTAssertEqual(store.depthProModelPath, path)
+            XCTAssertFalse(store.hasTrainingStarted)
+            store.recordTrainingProgress("{\"event\":\"training_started\",\"requested_updates\":1}\n")
+            XCTAssertTrue(store.hasTrainingStarted)
+            XCTAssertEqual(store.trainingProgress?.operationDetail, "")
+        }
+        while store.isBusy { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(WorkbenchStore(preferences: defaults).depthProModelPath, NativeDepthProContract.managedModelURL.path)
+    }
+
     func testCropPreparationUsesSetupThenTrainingWithoutResettingOptimizerPosition() {
         var progress = WorkbenchTrainingProgress()
         progress.consume(["event": "training_setup", "requested_updates": 12, "updates_per_map": 4,

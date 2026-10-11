@@ -10,6 +10,8 @@ Hugging Face account, catalog, download and upload requests use HTTPS through UR
 
 The migration is checked with synthetic complete-operation Metal fixtures, real dataset metadata and exact numeric export fixtures. Full pretrained-weight quality, peak memory and production-grid throughput must be measured with the actual pinned model installed. Smaller fixture results are not an image-quality or full-model performance claim.
 
+DepthPro Height Refiner operations automatically install the pinned compatible Core ML package when the selected model is missing. Downloads use native URLSession, verify individual files and the complete package identity, retain verified files for retry, and publish only a complete package in user Application Support. Model setup progress and cancellation remain available during acquisition. See [DepthPro setup and input contract](depthpro-height-refiner.md).
+
 ## Upstream training resolution
 
 At the pinned revision, the published [base-generator training script](https://github.com/aaf6aa/PBRnxt/blob/73ab49a0cc0de5ea70e7aa94fb1a7234dd59ab35/train.py#L325-L356) uses 128 × 128 random patches. The separate [4× upscaler script](https://github.com/aaf6aa/PBRnxt/blob/73ab49a0cc0de5ea70e7aa94fb1a7234dd59ab35/train_sr.py#L264-L297) uses 192 × 192 targets and 48 × 48 inputs. These published configurations do not establish the complete training history of `pbrnxt_402236.pth`.

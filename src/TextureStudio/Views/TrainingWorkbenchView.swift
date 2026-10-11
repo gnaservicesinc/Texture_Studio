@@ -232,7 +232,7 @@ struct TrainingModelFamilyField: View {
                 TextField("DepthPro Core ML package", text: $store.depthProModelPath)
                 Button("Locate DepthPro…") { store.chooseDepthProModel() }
             }
-            Text("Production runs DepthPro once, then this refiner. Cached float data uses the same depth preparation as inference.")
+            Text("DepthPro downloads automatically when needed and is verified before use. Production runs it once, then this refiner. Cached float data uses the same depth preparation as inference.")
                 .font(.caption).foregroundStyle(.secondary)
         } else if store.training.modelFamily == .compactScalar {
             Text("RGB diffuse input has 3 channels. The model predicts one displacement or roughness value per pixel. New compact models start from scratch; review their learned quality before use.")

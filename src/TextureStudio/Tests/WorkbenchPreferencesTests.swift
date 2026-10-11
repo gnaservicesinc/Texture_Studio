@@ -4,6 +4,65 @@ import XCTest
 
 @MainActor
 final class WorkbenchPreferencesTests: XCTestCase {
+    func testFreshWorkspaceUsesUserStorageAndPersistsDefaultWithoutCreatingRepositoryOutput() throws {
+        let fixture = try PreferencesFixture(); defer { fixture.remove() }
+        fixture.defaults.removeObject(forKey: "workspace")
+        let managed = fixture.root.appendingPathComponent("user-support/Material Workspace")
+        let store = WorkbenchStore(preferences: fixture.defaults, managedWorkspaceURL: managed)
+        XCTAssertEqual(store.workspacePath, managed.path)
+        XCTAssertEqual(fixture.defaults.string(forKey: "workspace"), managed.path)
+        XCTAssertEqual(store.modelDirectory, managed.appendingPathComponent("out/material-training/transfer-models/pbrnxt-base").path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: managed.path), "Opening settings alone need not create output")
+    }
+
+    func testRepositoryWorkspacePreferencesIncludingNestedPathsAndAliasesMigrateWithoutMovingOldRuns() throws {
+        let fixture = try PreferencesFixture(); defer { fixture.remove() }
+        let checkout = fixture.root.appendingPathComponent("checkout"), managed = fixture.root.appendingPathComponent("user-support")
+        try FileManager.default.createDirectory(at: checkout.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        let oldRun = checkout.appendingPathComponent("out/material-training/previous/model.safetensors")
+        try FileManager.default.createDirectory(at: oldRun.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let original = Data("previous completed run".utf8); try original.write(to: oldRun)
+        let alias = fixture.root.appendingPathComponent("checkout-alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: checkout)
+        for path in [checkout, checkout.appendingPathComponent("out"), alias, alias.appendingPathComponent("missing/nested")] {
+            fixture.defaults.set(path.path, forKey: "workspace")
+            let store = WorkbenchStore(preferences: fixture.defaults, managedWorkspaceURL: managed)
+            XCTAssertEqual(store.workspacePath, managed.path, path.path)
+            XCTAssertEqual(fixture.defaults.string(forKey: "workspace"), managed.path)
+            XCTAssertEqual(try Data(contentsOf: oldRun), original)
+        }
+        let worktree = fixture.root.appendingPathComponent("worktree")
+        try FileManager.default.createDirectory(at: worktree, withIntermediateDirectories: true)
+        try Data("gitdir: ../checkout/.git/worktrees/development\n".utf8).write(to: worktree.appendingPathComponent(".git"))
+        fixture.defaults.set(worktree.path, forKey: "workspace")
+        XCTAssertEqual(WorkbenchStore(preferences: fixture.defaults, managedWorkspaceURL: managed).workspacePath, managed.path)
+    }
+
+    func testExplicitUserWorkspaceOutsideRepositoryIsPreserved() throws {
+        let fixture = try PreferencesFixture(); defer { fixture.remove() }
+        let custom = fixture.root.appendingPathComponent("chosen-folder")
+        try FileManager.default.createDirectory(at: custom, withIntermediateDirectories: true)
+        fixture.defaults.set(custom.path, forKey: "workspace")
+        let managed = fixture.root.appendingPathComponent("user-support")
+        XCTAssertEqual(WorkbenchStore(preferences: fixture.defaults, managedWorkspaceURL: managed).workspacePath, custom.path)
+        XCTAssertEqual(fixture.defaults.string(forKey: "workspace"), custom.path)
+    }
+
+    func testMissingRepositoryModelDownloadLocationMigratesWhileExistingDeveloperWeightsRemainSelected() throws {
+        let fixture = try PreferencesFixture(); defer { fixture.remove() }
+        let checkout = fixture.root.appendingPathComponent("checkout"), managed = fixture.root.appendingPathComponent("user-support")
+        try FileManager.default.createDirectory(at: checkout.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        let oldBase = checkout.appendingPathComponent("out/material-training/transfer-models/pbrnxt-base")
+        fixture.defaults.set(checkout.path, forKey: "workspace")
+        fixture.defaults.set(oldBase.path, forKey: "materialModelDirectory")
+        let migrated = WorkbenchStore(preferences: fixture.defaults, managedWorkspaceURL: managed)
+        XCTAssertEqual(migrated.modelDirectory, managed.appendingPathComponent("out/material-training/transfer-models/pbrnxt-base").path)
+        XCTAssertEqual(fixture.defaults.string(forKey: "materialModelDirectory"), migrated.modelDirectory)
+        try FileManager.default.createDirectory(at: oldBase, withIntermediateDirectories: true)
+        fixture.defaults.set(oldBase.path, forKey: "materialModelDirectory")
+        XCTAssertEqual(WorkbenchStore(preferences: fixture.defaults, managedWorkspaceURL: managed).modelDirectory, oldBase.path)
+    }
+
     func testCropTimingAndOrientationChoicesPersistWhileNeverSuppressesEffectiveFlags() throws {
         let fixture = try PreferencesFixture()
         defer { fixture.remove() }

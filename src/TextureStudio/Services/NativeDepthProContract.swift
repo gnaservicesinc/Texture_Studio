@@ -8,6 +8,10 @@ import ImageIO
 enum NativeDepthProContract {
     static let identifier = "texture-studio-depthpro-inverse-depth-v1"
     static let modelPathKey = "depthProModelPath"
+    static var managedModelURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("Texture Studio/DepthPro/DepthPro.mlpackage")
+    }
     static var configuredModelURL: URL {
         configuredModelURL(in: StudioPreferences.defaults)
     }
@@ -18,8 +22,7 @@ enum NativeDepthProContract {
             preferences.set(path, forKey: modelPathKey)
         }
         if !path.isEmpty { return URL(fileURLWithPath: path) }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Texture Studio/DepthPro/DepthPro.mlpackage")
+        return managedModelURL
     }
     static var cacheURL: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
