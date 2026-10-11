@@ -1,10 +1,238 @@
 import CryptoKit
 import Foundation
 import XCTest
+import zlib
 @testable import TextureStudio
 
 @MainActor
 final class NativeMaterialSourceRecoveryTests: XCTestCase {
+    func testPolyHavenLeatherColorAliasRecoversExactPublishedVariantAndRetainsProof() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let rgb = try rgbFixturePNG(width: 256, height: 256), other = try rgbFixturePNG(width: 256, height: 257)
+        for asset in ["leather_red_02", "leather_red_03"] {
+            let colorURL = URL(string: "https://dl.polyhaven.org/file/ph-assets/Textures/png/1k/\(asset)/\(asset)_coll1_1k.png")!
+            let secondURL = URL(string: "https://dl.polyhaven.org/file/ph-assets/Textures/png/1k/\(asset)/\(asset)_coll2_1k.png")!
+            let metadata = try JSONSerialization.data(withJSONObject: [
+                "coll1": ["1k": ["png": ["url": colorURL.absoluteString, "md5": md5(rgb), "size": rgb.count]]],
+                "coll2": ["1k": ["png": ["url": secondURL.absoluteString, "md5": md5(other), "size": other.count]]]
+            ])
+            let recovery = NativeMaterialSourceRecovery(transport: .init(fetchMetadata: { url in
+                .init(data: metadata, statusCode: 200, url: url)
+            }, download: { url, staged in
+                XCTAssertEqual(url, colorURL, "Restore primary coll1; never silently switch to coll2")
+                try rgb.write(to: staged); return .init(statusCode: 200, url: url)
+            }))
+            for (offset, item) in [("col_1", Optional<String>.none), ("COL_1", Optional(sha256(rgb))), ("coll1", Optional(sha256(rgb)))].enumerated() {
+                let (role, expected) = item
+                let destination = root.appendingPathComponent("\(asset)_alias\(offset)_1k.png")
+                let result = try await recovery.recover(.init(asset: asset, resolution: "1k", target: "input", destination: destination,
+                    width: 256, height: 256, expectedSHA256: expected, publishedRole: role))
+                guard case .recovered(let proof) = result else { XCTFail("Resolve \(role) to exact published coll1"); continue }
+                XCTAssertEqual(proof.downloadURL, colorURL)
+                XCTAssertEqual(try Data(contentsOf: destination), rgb)
+                XCTAssertNotNil(NativeMaterialSourceRecovery.sourceProvenance(for: destination,
+                    sha256: sha256(rgb), bytes: rgb.count, width: 256, height: 256))
+            }
+        }
+    }
+
+    func testPolyHavenInputRoleLookupIgnoresCaseAndRejectsCompetingAliases() async throws {
+        let bytes = try rgbFixturePNG(width: 256, height: 256)
+        for competing in [false, true] {
+            let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+            let base = "https://dl.polyhaven.org/file/ph-assets/Textures/png/1k/ribbed_corduroy/"
+            let url = URL(string: base + "ribbed_corduroy_col_1_1k.png")!
+            var catalog: [String: Any] = ["Col_1": ["1k": ["png": ["url": url.absoluteString, "md5": md5(bytes), "size": bytes.count]]]]
+            if competing { catalog["coll1"] = ["1k": ["png": ["url": base + "ribbed_corduroy_coll1_1k.png", "md5": md5(bytes), "size": bytes.count]]] }
+            let metadata = try JSONSerialization.data(withJSONObject: catalog)
+            let recovery = NativeMaterialSourceRecovery(transport: .init(fetchMetadata: { requested in
+                .init(data: metadata, statusCode: 200, url: requested)
+            }, download: { requested, staged in
+                XCTAssertFalse(competing, "Ambiguous aliases must fail before a download")
+                try bytes.write(to: staged); return .init(statusCode: 200, url: requested)
+            }))
+            let destination = root.appendingPathComponent("ribbed_corduroy_col_1_1k.png")
+            let result = try await recovery.recover(request(destination, target: "input", publishedRole: "col_1"))
+            if competing {
+                guard case .failed(let reason) = result else { XCTFail("Competing color aliases cannot choose arbitrary pixels"); continue }
+                XCTAssertTrue(reason.contains("competing")); XCTAssertEqual(try filenames(root), [])
+            } else {
+                guard case .recovered = result else { XCTFail("Case-insensitive color roles must resolve"); continue }
+                XCTAssertEqual(try Data(contentsOf: destination), bytes)
+            }
+        }
+    }
+
+    func testRecoveryProofSurvivesReopenAndOnlyAttachesToItsExactSource() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let bytes = try fixturePNG(width: 32, height: 33)
+        let archive = try ambientZIP([("Wicker013_1K-PNG_Displacement.png", bytes)], deflated: true)
+        let destination = root.appendingPathComponent("Wicker013_1K-PNG_Displacement.png")
+        let recovery = NativeMaterialSourceRecovery(transport: try ambientTransport(archive))
+        let result = try await recovery.recover(ambientRequest(destination, target: "height"))
+        guard case .recovered(let proof) = result else { return XCTFail("The complete original and durable proof must be saved") }
+        let sidecar = NativeMaterialSourceRecovery.provenanceSidecar(for: destination)
+        XCTAssertEqual(proof.provenanceSidecarURL, sidecar); XCTAssertNil(proof.provenanceWarning)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sidecar.path))
+        let persisted = try object(sidecar)
+        XCTAssertEqual(persisted["source_sha256"] as? String, sha256(bytes))
+        XCTAssertEqual(persisted["source_bytes"] as? Int, bytes.count)
+        XCTAssertEqual(persisted["archive_sha256"] as? String, sha256(archive))
+        let rebound = try XCTUnwrap(NativeMaterialSourceRecovery.sourceProvenance(for: destination,
+            sha256: sha256(bytes), bytes: bytes.count, width: 32, height: 33))
+        XCTAssertEqual(rebound["provider"] as? String, "ambientCG")
+        XCTAssertEqual(rebound["published_recovery_proof_path"] as? String, sidecar.path)
+        let savedEvidence = try XCTUnwrap(rebound["source_recovery_provenance"] as? [String: Any])
+        XCTAssertEqual(savedEvidence["archive_member"] as? String, "Wicker013_1K-PNG_Displacement.png")
+        XCTAssertNil(NativeMaterialSourceRecovery.sourceProvenance(for: destination, sha256: sha256(bytes),
+            bytes: bytes.count, width: 32, height: 32), "The proof cannot be attached to another grid")
+        let changed = Data("replaced source".utf8); try changed.write(to: destination)
+        XCTAssertNil(NativeMaterialSourceRecovery.sourceProvenance(for: destination, sha256: sha256(changed),
+            bytes: changed.count, width: 32, height: 33), "Stale proof must not identify edited source bytes")
+        XCTAssertEqual(try Data(contentsOf: sidecar), try JSONSerialization.data(withJSONObject: persisted, options: [.sortedKeys]))
+    }
+
+    func testRecoveryProofWriteFailureReportsSavedOriginalTruthfully() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let bytes = try fixturePNG(), destination = root.appendingPathComponent("ribbed_corduroy_disp_1k.png")
+        let sidecar = NativeMaterialSourceRecovery.provenanceSidecar(for: destination)
+        try FileManager.default.createDirectory(at: sidecar, withIntermediateDirectories: false)
+        let recovery = NativeMaterialSourceRecovery(transport: fixtureTransport(bytes: bytes))
+        let result = try await recovery.recover(request(destination))
+        guard case .recovered(let proof) = result else { return XCTFail("The original was saved even though the proof location is unavailable") }
+        XCTAssertEqual(try Data(contentsOf: destination), bytes)
+        XCTAssertNil(proof.provenanceSidecarURL)
+        XCTAssertTrue(try XCTUnwrap(proof.provenanceWarning).contains("Saved the original map"))
+        XCTAssertNil(NativeMaterialSourceRecovery.sourceProvenance(for: destination,
+            sha256: sha256(bytes), bytes: bytes.count, width: 256, height: 256))
+    }
+
+    func testAmbientCGStoredAndDeflatedPackagesPreservePairedPNGBytesAndDownloadOnce() async throws {
+        for deflated in [false, true] {
+            let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+            let color = try rgbFixturePNG(width: 32, height: 33)
+            let height = try NativePNG(header: .init(width: 32, height: 33, bits: 16, channels: 1, color: 0, interlace: 0),
+                pixels: Data((0..<32 * 33 * 2).map { UInt8(truncatingIfNeeded: $0 * 97) }), colorChunks: []).encoded()
+            let unrelated = try fixturePNG(width: 32, height: 33, bits: 8)
+            let archive = try ambientZIP([("Wicker013_1K-PNG_Color.png", color),
+                                          ("Wicker013_1K-PNG_Displacement.png", height),
+                                          ("Wicker013_1K-PNG_Roughness.png", unrelated)], deflated: deflated)
+            let probe = RecoveryTransportProbe(), recovery = NativeMaterialSourceRecovery(transport: try ambientTransport(archive, probe: probe))
+            for (target, bytes) in [("input", color), ("height", height)] {
+                let destination = root.appendingPathComponent("Wicker013_\(target)_1k.png")
+                let result = try await recovery.recover(ambientRequest(destination, target: target))
+                guard case .recovered(let proof) = result else { XCTFail("Recover the exact \(target) archive member"); continue }
+                XCTAssertEqual(try Data(contentsOf: destination), bytes)
+                XCTAssertEqual(proof.provider, .ambientCG)
+                XCTAssertEqual(proof.apiURL.absoluteString, "https://ambientcg.com/api/v2/full_json?include=downloadData&id=Wicker013")
+                XCTAssertEqual(proof.downloadURL.absoluteString, "https://ambientcg.com/get?file=Wicker013_1K-PNG.zip")
+                XCTAssertEqual(proof.publishedMD5, "", "ambientCG's API does not publish an MD5; it must not be fabricated")
+                XCTAssertEqual(proof.publishedBytes, archive.count)
+                XCTAssertEqual(proof.archiveSHA256, sha256(archive))
+                XCTAssertEqual(proof.archiveSHA1, sha1(archive))
+                XCTAssertEqual(proof.archiveMember, "Wicker013_1K-PNG_\(target == "input" ? "Color" : "Displacement").png")
+                XCTAssertEqual(proof.archiveMemberBytes, bytes.count)
+                XCTAssertEqual(proof.archiveMemberCRC32, String(format: "%08x", crc(bytes)))
+                XCTAssertEqual(proof.sha256, sha256(bytes)); XCTAssertNil(proof.cropRectangle)
+                XCTAssertEqual(proof.sourceWidth, 32); XCTAssertEqual(proof.sourceHeight, 33)
+            }
+            let calls = await probe.counts()
+            XCTAssertEqual(calls.metadata, 1); XCTAssertEqual(calls.downloads, 1)
+            XCTAssertEqual(try filenames(root), ["Wicker013_height_1k.png", "Wicker013_input_1k.png"],
+                           "Do not publish unrelated maps or retain archive/staging copies")
+            let numeric = try NativePNG.decode(Data(contentsOf: root.appendingPathComponent("Wicker013_height_1k.png")))
+            XCTAssertEqual(numeric.header.bits, 16)
+            XCTAssertEqual(numeric.pixels, try NativePNG.decode(height).pixels, "Every original 16-bit code remains exact")
+        }
+    }
+
+    func testAmbientCGRejectsInvalidPackageProofAndMapContractWithoutPublishing() async throws {
+        let height = try fixturePNG(width: 32, height: 33)
+        let valid = try ambientZIP([("Wicker013_1K-PNG_Displacement.png", height)], deflated: true)
+        let crcInvalid = try ambientZIP([("Wicker013_1K-PNG_Displacement.png", height)], deflated: true, incorrectCRC: true)
+        let lowPrecision = try ambientZIP([("Wicker013_1K-PNG_Displacement.png", try fixturePNG(width: 32, height: 33, bits: 8))])
+        let unsafe = try ambientZIP([("../Wicker013_1K-PNG_Displacement.png", height)])
+        for (name, archive, length, digest, requestedWidth, expectedSHA) in [
+            ("member CRC", crcInvalid, Optional<Int>.none, Optional<String>.none, 32, Optional<String>.none),
+            ("package length", valid, valid.count + 1, nil, 32, nil),
+            ("published package SHA1", valid, nil, String(repeating: "0", count: 40), 32, nil),
+            ("native displacement precision", lowPrecision, nil, nil, 32, nil),
+            ("unsafe archive member", unsafe, nil, nil, 32, nil),
+            ("paired dimensions", valid, nil, nil, 31, nil),
+            ("historical source SHA256", valid, nil, nil, 32, String(repeating: "0", count: 64))
+        ] {
+            let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+            let destination = root.appendingPathComponent("height.png")
+            let recovery = NativeMaterialSourceRecovery(transport: try ambientTransport(archive, length: length, publishedSHA1: digest))
+            let result = try await recovery.recover(ambientRequest(destination, target: "height", width: requestedWidth, expectedSHA256: expectedSHA))
+            guard case .failed = result else { XCTFail("Reject \(name)"); continue }
+            XCTAssertEqual(try filenames(root), [], "Rejected \(name) must not leave partial sources or downloads")
+        }
+    }
+
+    func testAmbientCGUnpublishedTargetKeepsAvailableColorAndNormalUsable() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let color = try rgbFixturePNG(width: 32, height: 33), normal = try rgbFixturePNG(width: 32, height: 33)
+        let archive = try ambientZIP([("Wicker013_1K-PNG_Color.png", color),
+                                     ("Wicker013_1K-PNG_NormalGL.png", normal),
+                                     ("Wicker013_1K-PNG_NormalDX.png", color)])
+        let probe = RecoveryTransportProbe(), recovery = NativeMaterialSourceRecovery(transport: try ambientTransport(archive, probe: probe))
+        let missing = try await recovery.recover(ambientRequest(root.appendingPathComponent("height.png"), target: "height"))
+        guard case .notPublished = missing else { return XCTFail("A missing displacement member must be reported as unpublished") }
+        for target in ["input", "normal", "normal_dx"] {
+            let destination = root.appendingPathComponent(target + ".png")
+            let result = try await recovery.recover(ambientRequest(destination, target: target))
+            guard case .recovered(let proof) = result else { XCTFail("Keep \(target) usable"); continue }
+            XCTAssertEqual(try Data(contentsOf: destination), color)
+            XCTAssertEqual(proof.archiveMember, "Wicker013_1K-PNG_\(["input": "Color", "normal": "NormalGL", "normal_dx": "NormalDX"][target]!).png")
+        }
+        let calls = await probe.counts(); XCTAssertEqual(calls.metadata, 1); XCTAssertEqual(calls.downloads, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("height.png").path))
+    }
+
+    func testNewTiersPreserveFullProviderDimensionsInsteadOfCroppingToNominalSquare() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let bytes = try fixturePNG(width: 32, height: 40), archive = try ambientZIP([("Wicker013_1K-PNG_Displacement.png", bytes)])
+        let recovery = NativeMaterialSourceRecovery(transport: try ambientTransport(archive))
+        let destination = root.appendingPathComponent("ambient-height.png")
+        let result = try await recovery.recover(.init(asset: "Wicker013", resolution: "1k", target: "height",
+            destination: destination, width: 32, height: 32, provider: .ambientCG, preserveOriginalDimensions: true))
+        guard case .recovered(let proof) = result else { return XCTFail("New source tiers must preserve complete provider fields") }
+        XCTAssertEqual(try Data(contentsOf: destination), bytes)
+        XCTAssertEqual(proof.sourceHeight, 40); XCTAssertNil(proof.cropRectangle)
+        let polyBytes = try fixturePNG(width: 256, height: 300)
+        let poly = NativeMaterialSourceRecovery(transport: fixtureTransport(bytes: polyBytes))
+        let polyDestination = root.appendingPathComponent("poly-height.png")
+        let polyResult = try await poly.recover(.init(asset: "ribbed_corduroy", resolution: "1k", target: "height",
+            destination: polyDestination, width: 256, height: 256, preserveOriginalDimensions: true))
+        guard case .recovered(let polyProof) = polyResult else { return XCTFail("Both providers preserve full fields for new tiers") }
+        XCTAssertEqual(try Data(contentsOf: polyDestination), polyBytes)
+        XCTAssertEqual(polyProof.sourceHeight, 300); XCTAssertNil(polyProof.cropRectangle)
+    }
+
+    func testAmbientCGCancellationCleansArchiveStageAndLeavesExistingFilesUnchanged() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let destination = root.appendingPathComponent("height.png"), original = Data("existing original".utf8)
+        try original.write(to: destination)
+        let archive = try ambientZIP([("Wicker013_1K-PNG_Displacement.png", try fixturePNG(width: 32, height: 33))])
+        let probe = RecoveryTransportProbe(), recovery = NativeMaterialSourceRecovery(transport: try ambientTransport(archive, probe: probe))
+        let existing = try await recovery.recover(ambientRequest(destination, target: "height"))
+        guard case .alreadyPresent = existing else { return XCTFail("Existing originals remain authoritative") }
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+        let calls = await probe.counts(); XCTAssertEqual(calls.metadata, 0); XCTAssertEqual(calls.downloads, 0)
+        let metadata = try ambientMetadata(archive.count)
+        let cancellation = NativeMaterialSourceRecovery(transport: .init(fetchMetadata: { url in
+            .init(data: metadata, statusCode: 200, url: url)
+        }, download: { url, staged in
+            try archive.write(to: staged); throw CancellationError()
+        }))
+        do {
+            _ = try await cancellation.recover(ambientRequest(root.appendingPathComponent("new-height.png"), target: "height"))
+            XCTFail("Cancellation must propagate")
+        } catch is CancellationError {}
+        XCTAssertEqual(try filenames(root), ["height.png"])
+    }
+
     func testRecoveryPublishesVerifiedOriginalIntoSourceFolder() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let bytes = try fixturePNG(), destination = root.appendingPathComponent("ribbed_corduroy_disp_1k.png")
@@ -311,15 +539,20 @@ final class NativeMaterialSourceRecoveryTests: XCTestCase {
         _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Existing incomplete material", "--training-size", "256"], recovery: recovery)
         let imported = try await output(["add-material", "--dataset", dataset.path, "--name", "ribbed_corduroy",
                                          "--input", input.path, "--normal", normal.path], recovery: recovery)
+        let importedMaterials = try XCTUnwrap(imported["materials"] as? [[String: Any]])
+        XCTAssertEqual(importedMaterials.count, 1)
+        let importedSamples = try XCTUnwrap(importedMaterials.first?["samples"] as? [[String: Any]])
+        XCTAssertEqual(importedSamples.count, 1)
+        let indexedSampleID = try XCTUnwrap(importedSamples.first?["sample_id"] as? String)
         let reviewHash = try XCTUnwrap(imported["review_sha256"] as? String)
-        _ = try await output(["curate", "--dataset", dataset.path, "--sample", "ribbed_corduroy_1k_center",
+        _ = try await output(["curate", "--dataset", dataset.path, "--sample", indexedSampleID,
                               "--review-size", "256", "--status", "approved", "--note", "Keep the reviewed crop",
                               "--expected-review-sha256", reviewHash], recovery: recovery)
         let unpublished = unpublishedRecovery()
         let cached = try await output(["prepare-size", "--dataset", dataset.path, "--size", "256", "--target", "normal"], recovery: unpublished)
         let cachedURL = URL(fileURLWithPath: try XCTUnwrap(cached["dataset_path"] as? String))
         let original = try await output(["dataset", "--dataset", dataset.path, "--review-size", "256"], recovery: recovery)
-        let updated = try await output(["curate", "--dataset", dataset.path, "--sample", "ribbed_corduroy_1k_center",
+        let updated = try await output(["curate", "--dataset", dataset.path, "--sample", indexedSampleID,
                               "--review-size", "256", "--status", "approved", "--note", "Edited after cached normal preparation",
                               "--expected-review-sha256", try XCTUnwrap(original["review_sha256"] as? String)], recovery: recovery)
         let prepared = try await output(["prepare-size", "--dataset", cachedURL.path, "--size", "256", "--target", "height",
@@ -330,6 +563,7 @@ final class NativeMaterialSourceRecoveryTests: XCTestCase {
         XCTAssertEqual(inspected["material_count"] as? Int, 1, "Adding a target must enrich the existing source set without a name collision")
         let material = try XCTUnwrap((inspected["materials"] as? [[String: Any]])?.first)
         let sample = try XCTUnwrap((material["samples"] as? [[String: Any]])?.first)
+        XCTAssertEqual(sample["sample_id"] as? String, indexedSampleID)
         XCTAssertEqual(sample["status"] as? String, "approved")
         XCTAssertEqual(sample["note"] as? String, "Edited after cached normal preparation",
                        "An old prepared dataset must not overwrite current original reviews when a recovered map enriches the source binding")
@@ -435,6 +669,84 @@ final class NativeMaterialSourceRecoveryTests: XCTestCase {
         }
     }
 
+    private func ambientRequest(_ destination: URL, target: String, width: Int = 32,
+                                expectedSHA256: String? = nil) -> NativeMaterialSourceRecovery.Request {
+        .init(asset: "Wicker013", resolution: "1k", target: target, destination: destination,
+              width: width, height: 33, expectedSHA256: expectedSHA256, provider: .ambientCG)
+    }
+    private func ambientMetadata(_ length: Int) throws -> Data {
+        let download: [String: Any] = ["downloadLink": "https://ambientcg.com/get?file=Wicker013_1K-PNG.zip",
+            "fileName": "Wicker013_1K-PNG.zip", "size": length, "filetype": "zip", "attribute": "1K-PNG"]
+        let folder: [String: Any] = ["downloadFiletypeCategories": ["zip": ["downloads": [download]]]]
+        let asset: [String: Any] = ["assetId": "Wicker013", "downloadFolders": ["default": folder]]
+        return try JSONSerialization.data(withJSONObject: ["foundAssets": [asset]])
+    }
+    private func ambientTransport(_ archive: Data, length: Int? = nil, publishedSHA1: String? = nil,
+                                  probe: RecoveryTransportProbe = RecoveryTransportProbe()) throws -> NativeMaterialSourceRecovery.Transport {
+        let metadata = try ambientMetadata(length ?? archive.count), expected = publishedSHA1 ?? sha1(archive)
+        return .init(fetchMetadata: { url in
+            await probe.recordMetadata()
+            return .init(data: metadata, statusCode: 200, url: url)
+        }, download: { url, staged in
+            await probe.recordDownload(staged)
+            try archive.write(to: staged)
+            let final = URL(string: "https://acg-download.struffelproductions.com/file/ambientCG-Web/download/Wicker013_fixture/Wicker013_1K-PNG.zip")!
+            return .init(statusCode: 200, url: final, publishedSHA1: expected)
+        })
+    }
+    private func ambientZIP(_ members: [(String, Data)], deflated: Bool = false, incorrectCRC: Bool = false) throws -> Data {
+        var archive = Data(), directory = Data()
+        func number<T: FixedWidthInteger>(_ value: T, to data: inout Data) {
+            var little = value.littleEndian
+            withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
+        }
+        for (filename, bytes) in members {
+            let name = Data(filename.utf8), offset = UInt32(archive.count), method: UInt16 = deflated ? 8 : 0
+            var compressed = bytes
+            if deflated {
+                var stream = z_stream()
+                guard deflateInit2_(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY,
+                                    ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
+                    throw NSError(domain: "ZIP fixture", code: 1)
+                }
+                defer { deflateEnd(&stream) }
+                var storage = Data(count: Int(deflateBound(&stream, uLong(bytes.count))))
+                let status = storage.withUnsafeMutableBytes { output in bytes.withUnsafeBytes { input in
+                    stream.next_in = UnsafeMutablePointer(mutating: input.bindMemory(to: Bytef.self).baseAddress)
+                    stream.avail_in = uInt(bytes.count)
+                    stream.next_out = output.bindMemory(to: Bytef.self).baseAddress
+                    stream.avail_out = uInt(output.count)
+                    return deflate(&stream, Z_FINISH)
+                } }
+                guard status == Z_STREAM_END else { throw NSError(domain: "ZIP fixture", code: 2) }
+                storage.count = Int(stream.total_out); compressed = storage
+            }
+            let checksum = crc(bytes) ^ (incorrectCRC ? 1 : 0)
+            number(UInt32(0x04034b50), to: &archive); number(UInt16(20), to: &archive)
+            number(UInt16(0), to: &archive); number(method, to: &archive)
+            number(UInt32(0), to: &archive); number(checksum, to: &archive)
+            number(UInt32(compressed.count), to: &archive); number(UInt32(bytes.count), to: &archive)
+            number(UInt16(name.count), to: &archive); number(UInt16(0), to: &archive)
+            archive.append(name); archive.append(compressed)
+            number(UInt32(0x02014b50), to: &directory); number(UInt16(20), to: &directory); number(UInt16(20), to: &directory)
+            number(UInt16(0), to: &directory); number(method, to: &directory)
+            number(UInt32(0), to: &directory); number(checksum, to: &directory)
+            number(UInt32(compressed.count), to: &directory); number(UInt32(bytes.count), to: &directory)
+            number(UInt16(name.count), to: &directory)
+            for _ in 0..<4 { number(UInt16(0), to: &directory) }
+            number(UInt32(0), to: &directory); number(offset, to: &directory); directory.append(name)
+        }
+        let start = UInt32(archive.count); archive.append(directory)
+        number(UInt32(0x06054b50), to: &archive); number(UInt32(0), to: &archive)
+        number(UInt16(members.count), to: &archive); number(UInt16(members.count), to: &archive)
+        number(UInt32(directory.count), to: &archive); number(start, to: &archive); number(UInt16(0), to: &archive)
+        return archive
+    }
+    private func crc(_ bytes: Data) -> UInt32 {
+        bytes.withUnsafeBytes { UInt32(crc32_z(0, $0.bindMemory(to: Bytef.self).baseAddress, bytes.count)) }
+    }
+    private func sha1(_ bytes: Data) -> String { Insecure.SHA1.hash(data: bytes).map { String(format: "%02x", $0) }.joined() }
+
     private func fixtureTransport(bytes: Data, target: String = "height", publishedRole: String? = nil,
                                   publishedMD5: String? = nil, publishedLength: Int? = nil,
                                   probe: RecoveryTransportProbe = RecoveryTransportProbe()) -> NativeMaterialSourceRecovery.Transport {
@@ -490,7 +802,10 @@ final class NativeMaterialSourceRecoveryTests: XCTestCase {
     }
     private func sha256(_ bytes: Data) -> String { SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined() }
     private func md5(_ bytes: Data) -> String { Insecure.MD5.hash(data: bytes).map { String(format: "%02x", $0) }.joined() }
-    private func filenames(_ folder: URL) throws -> [String] { try FileManager.default.contentsOfDirectory(atPath: folder.path).sorted() }
+    private func filenames(_ folder: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: folder.path)
+            .filter { !$0.hasPrefix(".texture-studio-source-proof-") }.sorted()
+    }
     private func temporary() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("native-source-recovery-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)

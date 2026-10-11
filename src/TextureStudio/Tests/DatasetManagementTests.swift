@@ -76,9 +76,23 @@ final class DatasetManagementTests: XCTestCase {
         try await settled(store)
         XCTAssertNil(store.error)
         XCTAssertEqual(fixture.calls.map { $0[0] }, ["cleanup-size", "dataset", "edit-dataset"])
+        XCTAssertTrue(fixture.calls[1].contains("--skip-source-recovery"), "Snapshot reconnection must not add new source tiers before checking its proof")
         XCTAssertEqual(fixture.value("--dataset", in: fixture.calls.last!), fixture.dataset.path)
         XCTAssertEqual(store.datasetFolderURL?.path, fixture.dataset.path)
         XCTAssertEqual(store.datasetName, "Source renamed")
+    }
+
+    func testPreparedManagementRejectsChangedDurableIndexBeforeCleanupOrSourceRead() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let store = fixture.store()
+        store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: fixture.document(prepared: true))
+        try Data("changed durable dataset".utf8).write(to: fixture.dataset.appendingPathComponent("dataset.json"))
+        store.updateDatasetInfo(name: "Source renamed", description: "")
+        try await settled(store)
+        XCTAssertTrue(store.error?.contains("changed since preparation") == true)
+        XCTAssertTrue(fixture.calls.isEmpty, "A stale source snapshot must be rejected before any cleanup, recovery or edit")
+        XCTAssertNotNil(store.dataset?.preparation)
     }
 
     func testTrashUsesVerifiedMetadataScopeAndClearsLibraryOnlyAfterSuccess() async throws {
@@ -202,7 +216,7 @@ final class DatasetManagementTests: XCTestCase {
         var edited = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: indexURL)) as? [String: Any])
         edited["description"] = "Changed in another window"
         try JSONSerialization.data(withJSONObject: edited).write(to: indexURL, options: .atomic)
-        store.commitFolderImport(size: 256)
+        store.commitFolderImport(size: store.folderImportSize)
         try await settled(store)
         XCTAssertNotNil(store.error)
         XCTAssertTrue(store.showImportFolderSheet)
@@ -387,7 +401,7 @@ final class DatasetManagementTests: XCTestCase {
                                 name: "folder-target-precision", size: NSSize(width: 700, height: 600))
     }
 
-    func testFolderScanRetainsResolutionEditsWithoutRepeatingScan() async throws {
+    func testFolderScanRetainsResolutionEditsAndRefreshesTiersBeforeProofImport() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         fixture.trainingSize = 2048
@@ -422,8 +436,71 @@ final class DatasetManagementTests: XCTestCase {
         try await settled(store)
         XCTAssertNil(store.error)
         XCTAssertEqual(store.datasetResolution, 512)
-        XCTAssertEqual(fixture.calls.filter { $0[0] == "scan-folder" }.count, 1)
+        let scans = fixture.calls.filter { $0[0] == "scan-folder" }
+        XCTAssertEqual(scans.count, 2)
+        XCTAssertEqual(fixture.value("--size", in: scans[0]), "2048")
+        XCTAssertEqual(fixture.value("--size", in: scans[1]), "512")
+        XCTAssertEqual(fixture.value("--target", in: scans[1]), "height")
         XCTAssertEqual(fixture.value("--folder", in: fixture.calls.last!), folder.path)
+    }
+
+    func testNewDatasetSetsUpChosenTiersBeforeImportPreviewWithoutStartingTraining() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let folder = fixture.root.appendingPathComponent("Original subjects")
+        var scans: [[String]] = []
+        let store = WorkbenchStore(preferences: fixture.defaults, workerOverride: { args, _ in
+            fixture.calls.append(args)
+            if args[0] == "create-dataset" { fixture.trainingSize = Int(fixture.value("--training-size", in: args)!)! }
+            if args[0] == "scan-folder" {
+                scans.append(args)
+                let document: [String: Any] = ["folder_path": folder.path, "plan_path": "/tmp/tier-plan.json",
+                    "plan_sha256": "tier-proof", "index_sha256": "post-recovery-hash", "source_set_count": 3,
+                    "added_material_count": 3, "duplicate_material_count": 0, "ignored_file_count": 0,
+                    "warnings": [], "plans": [:], "recovered_map_count": 4,
+                    "source_recovery": ["completed": 4, "total": 4, "training_size": 1024, "recovered": 4,
+                        "not_published": 0, "failed": 0, "already_present": 0]]
+                return String(decoding: try JSONSerialization.data(withJSONObject: document), as: UTF8.self)
+            }
+            return try fixture.document()
+        })
+        store.training.useSelectedMaterialOnly = true
+        store.pendingSourceFolder = folder
+        store.createDataset(name: "Balanced", description: "", parentURL: fixture.root, size: 1024)
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(scans.count, 1)
+        XCTAssertEqual(fixture.value("--size", in: scans[0]), "1024")
+        XCTAssertEqual(store.folderImportScannedSize, 1024)
+        XCTAssertEqual(store.folderImport?.sourceSetCount, 3)
+        XCTAssertTrue(store.sourceRecoverySummary.contains("4 fetched"))
+        XCTAssertTrue(store.training.useSelectedMaterialOnly, "Dataset creation preserves the selected-folder preference")
+        XCTAssertFalse(fixture.calls.contains { ["train", "prepare-size"].contains($0[0]) })
+        store.commitFolderImport(size: 1024)
+        try await settled(store)
+        XCTAssertNil(store.error)
+        let imported = try XCTUnwrap(fixture.calls.first { $0[0] == "import-folder" })
+        XCTAssertEqual(fixture.value("--expected-index-sha256", in: imported), "post-recovery-hash",
+                       "Proof import uses the index bound after authorized source recovery")
+        XCTAssertEqual(scans.count, 1)
+    }
+
+    func testRecoveryProgressShowsPendingCountsAndRetainsActualFailures() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let store = fixture.store()
+        store.operation("Setting up tiers") {
+            store.recordTrainingProgress("{\"event\":\"source_recovery_started\",\"completed\":0,\"total\":6,\"training_size\":1024}\n")
+            XCTAssertEqual(store.sourceRecoverySummary, "Tier setup: 0 / 6 maps checked")
+            store.recordTrainingProgress("{\"event\":\"source_recovery_progress\",\"completed\":2,\"total\":6,\"message\":\"Fetching stone 4k height\"}\n")
+            XCTAssertEqual(store.sourceRecoverySummary, "Tier setup: 2 / 6 maps checked")
+            XCTAssertEqual(store.activity, "Fetching stone 4k height")
+            store.recordTrainingProgress("{\"event\":\"source_recovery_completed\",\"completed\":6,\"total\":6,\"recovered\":3,\"not_published\":2,\"failed\":1}\n")
+            XCTAssertEqual(store.sourceRecoverySummary, "Tier setup: 6 / 6 maps checked · 3 fetched · 2 unavailable · 1 failed")
+            XCTAssertEqual(store.activity, store.sourceRecoverySummary)
+        }
+        try await settled(store)
+        XCTAssertTrue(store.sourceRecoverySummary.contains("1 failed"))
     }
 
     func testChangingTrainingTargetDoesNotReloadOrReassignDataset() async throws {
@@ -497,10 +574,10 @@ final class DatasetManagementTests: XCTestCase {
             guard let i = args.firstIndex(of: flag), args.indices.contains(i + 1) else { return nil }
             return args[i + 1]
         }
-        func document(prepared: Bool = false) throws -> String {
+        func document(prepared: Bool = false, indexHash: String = "source-hash") throws -> String {
             var object: [String: Any] = ["dataset_path": prepared ? root.appendingPathComponent("prepared").path : dataset.path,
-                "index_sha256": "source-hash", "name": name, "description": description, "training_size": trainingSize, "materials": []]
-            if prepared { object["preparation"] = ["source_dataset_path": dataset.path, "source_index_sha256": "source-hash",
+                "index_sha256": indexHash, "name": name, "description": description, "training_size": trainingSize, "materials": []]
+            if prepared { object["preparation"] = ["source_dataset_path": dataset.path, "source_index_sha256": hash,
                 "prepared_dataset_path": root.appendingPathComponent("prepared").path, "crop_size": 1024,
                 "reused": false, "target_resized": false, "original_dataset_modified": false] }
             return String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
@@ -523,6 +600,7 @@ final class DatasetManagementTests: XCTestCase {
                         "trash_paths": [self.dataset.appendingPathComponent("dataset.json").path]]), as: UTF8.self)
                 }
                 if args.first == "cleanup-size" { return "{\"removed\":true}" }
+                if args.first == "dataset", args.contains("--skip-source-recovery") { return try self.document(indexHash: self.hash) }
                 return try self.document()
             })
         }

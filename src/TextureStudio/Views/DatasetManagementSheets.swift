@@ -396,11 +396,21 @@ struct ImportDatasetFolderSheet: View {
                         Text("Found \(preview.sourceSetCount) paired source sets · \(preview.addedMaterialCount) new · \(preview.duplicateMaterialCount) already present")
                             .font(.headline)
                         if let recoveredCount = preview.recoveredMapCount, recoveredCount > 0 {
-                            Label("Added \(recoveredCount) missing \(recoveredCount == 1 ? "map" : "maps") from Poly Haven to the source folder.", systemImage: "checkmark.circle")
+                            Label("Added \(recoveredCount) missing \(recoveredCount == 1 ? "map" : "maps") from material providers to the source folder.", systemImage: "checkmark.circle")
                                 .font(.callout).foregroundStyle(.green)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
-                        if let plans = preview.plans[String(store.folderImportSize)] { DatasetPlanSummary(plans: plans) }
+                        if let summary = preview.sourceRecovery?.summary { Text(summary).font(.callout).monospacedDigit() }
+                        if let scannedSize = store.folderImportScannedSize, scannedSize != store.folderImportSize {
+                            Text("The current preview was set up at \(scannedSize) × \(scannedSize). Import will refresh the paired tiers at \(store.folderImportSize) × \(store.folderImportSize) before registering them.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        if let plans = preview.plans[String(store.folderImportScannedSize ?? store.folderImportSize)] { DatasetPlanSummary(plans: plans) }
+                        ForEach((preview.sourceRecoveryResults ?? []).filter { ["not_published", "failed"].contains($0.status) }) { result in
+                            Text("\(result.asset) · \(result.resolution) \(result.target): \(result.reason ?? result.status)")
+                                .font(.caption).foregroundStyle(result.status == "failed" ? Color.red : Color.secondary)
+                                .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                        }
                         if !preview.warnings.isEmpty {
                             VStack(alignment: .leading, spacing: 10) {
                                 Text("Source file details").font(.headline)
@@ -416,9 +426,10 @@ struct ImportDatasetFolderSheet: View {
                                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         }
                     } else if store.isBusy {
-                        Text("Scanning source maps and obtaining missing Poly Haven maps when published. Source sets without a published map continue with their available targets. You can change resolution while the scan continues.")
+                        Text("Setting up the 1×, 2× and 4× paired source tiers when published, then scanning exact crop counts. Source sets without a published map continue with their available targets. Resolution changes are applied by a fresh setup before import.")
                             .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
+                    if store.isBusy, !store.sourceRecoverySummary.isEmpty { Text(store.sourceRecoverySummary).font(.caption).monospacedDigit() }
                 }.padding(4)
             }
             DatasetSheetOperationNotice(store: store)

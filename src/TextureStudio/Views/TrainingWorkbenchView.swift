@@ -22,7 +22,7 @@ struct TrainingWorkbenchView: View {
                         Text(store.datasetName).font(.headline).textSelection(.enabled)
                         Text(store.datasetDisplayURL?.path ?? dataset.datasetPath)
                             .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                        Text("\(dataset.materials.count) materials · \(dataset.samples.count) material sets")
+                        Text(store.datasetInventorySummary)
                         Text(store.datasetNativeSizeLabel).font(.caption).foregroundStyle(.secondary)
                     } else {
                         Text("Create a dataset in Manage Datasets, add paired material maps, then open its folder here.")
@@ -34,14 +34,29 @@ struct TrainingWorkbenchView: View {
                             Text("\(size) × \(size)").tag(size)
                         }
                     }.disabled(store.isBusy || store.supportedTrainingSizes.isEmpty)
-                    if let plans = store.dataset?.trainingPlans { DatasetPlanSummary(plans: plans) }
+                    if !store.training.useSelectedMaterialOnly, let plans = store.dataset?.resolutionPlans?[String(store.training.size)] ?? store.dataset?.trainingPlans {
+                        DatasetPlanSummary(plans: plans)
+                    }
+                    Text(store.trainingCurrentCropSummary).font(.callout).monospacedDigit()
                     Text("Every diffuse and target map uses this exact grid. Matching sources are referenced directly; each crop is saved once in temporary training storage; smaller source sets are excluded.")
                         .font(.caption).foregroundStyle(.secondary)
                     TrainingCropSelectionFields(options: $store.training)
-                    Toggle("Train only selected material", isOn: $store.training.useSelectedMaterialOnly)
-                    if store.training.useSelectedMaterialOnly {
-                        Text(store.selectedMaterialName.map { "Selected material: \($0)" } ?? "Select a material in Dataset.")
-                            .font(.caption).foregroundStyle(.secondary)
+                    Toggle("Train only selected source folder", isOn: $store.training.useSelectedMaterialOnly)
+                    Text(store.trainingScopeSummary).font(.caption).foregroundStyle(.secondary)
+                    Text("Setup obtains the 1×, 2× and 4× paired tiers when published before training. The counts above reflect files currently available; unavailable tiers are reported explicitly.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Refresh Training Tiers") { store.refreshTrainingTiers() }.disabled(store.dataset == nil)
+                    if !store.sourceRecoverySummary.isEmpty {
+                        Text(store.sourceRecoverySummary).font(.caption).foregroundStyle(.secondary)
+                    }
+                    let unavailable = store.sourceRecoveryResults.filter { ["not_published", "failed"].contains($0.status) }
+                    if !unavailable.isEmpty {
+                        DisclosureGroup("Unavailable source tiers (\(unavailable.count))") {
+                            ForEach(unavailable) { result in
+                                Text("\(result.asset) · \(result.resolution) \(result.target): \(result.reason ?? result.status)")
+                                    .font(.caption).textSelection(.enabled)
+                            }
+                        }
                     }
                     if !store.datasetPreparationSummary.isEmpty {
                         Text(store.datasetPreparationSummary).font(.caption).foregroundStyle(.secondary)
@@ -248,7 +263,7 @@ struct TrainingCropSelectionFields: View {
             .disabled(!options.cropAugmentationEnabled)
             .accessibilityIdentifier("training.random-spin-centercut")
             .help("Rotate the original source by a random whole degree from 1 to 179, then take its center crop. Each spin starts from the original source; an optional flip follows.")
-        Text("Never keeps the current crops and pauses both options. A new run or epoch replaces the cached crops; DepthPro predictions are reused for unchanged inputs.")
+        Text("Never uses the deterministic crop selection and pauses both options. A new run or epoch replaces the cached crops; DepthPro predictions are reused for unchanged inputs.")
             .font(.caption).foregroundStyle(.secondary)
     }
 }

@@ -220,7 +220,7 @@ struct DatasetWorkbenchView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(store.dataset == nil ? "Your datasets" : store.datasetName).font(.title3.bold()).lineLimit(1)
                 if let dataset = store.dataset {
-                    Text("\(dataset.sourceSetCount ?? dataset.materials.count) source sets · \(dataset.sampleCount ?? dataset.samples.count) review items · \(store.datasetResolution) × \(store.datasetResolution)")
+                    Text("\(store.datasetInventorySummary) · \(dataset.sampleCount ?? dataset.samples.count) review items · \(store.datasetResolution) × \(store.datasetResolution)")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
                     Text("Set a resolution, then add a folder of paired material maps. You can also drop a folder here.").font(.caption).foregroundStyle(.secondary)

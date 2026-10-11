@@ -6,6 +6,326 @@ import XCTest
 
 @MainActor
 final class NativeMaterialDatasetTests: XCTestCase {
+    func testAutomaticTierRecoveryDoesNotResurrectRemovedFamiliesAndKeepsFreshDiscoveryAndExplicitImport() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), sources = dataset.appendingPathComponent("sources/Stone")
+        let unavailable = NativeMaterialSourceRecovery(transport: .init(fetchMetadata: { url in
+            .init(data: Data(), statusCode: 404, url: url)
+        }, download: { _, _ in throw StudioError("An unpublished fixture must not download.") }))
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Removal scope", "--training-size", "1024"], sourceRecovery: unavailable)
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: true)
+        var originals: [URL: Data] = [:]
+        for (width, label) in [(1024, "1k"), (2048, "2k"), (4096, "4k")] {
+            for (suffix, bits, channels) in [("diff", 8, 3), ("disp", 16, 1)] {
+                let path = sources.appendingPathComponent("stone_\(suffix)_\(label).png")
+                let bytes = try constantPNG(width: width, height: 1024, bits: bits, channels: channels)
+                try bytes.write(to: path); originals[path] = bytes
+            }
+        }
+        let imported = try await output(["import-folder", "--dataset", dataset.path, "--folder", sources.path, "--size", "256"], sourceRecovery: unavailable)
+        XCTAssertEqual(imported["source_set_count"] as? Int, 3)
+        for id in ["stone_1k", "stone_2k", "stone_4k"] {
+            _ = try await output(["remove-material", "--dataset", dataset.path, "--material", id], sourceRecovery: unavailable)
+        }
+        let probe = DatasetRecoveryMetadataProbe()
+        let automatic = NativeMaterialSourceRecovery(transport: .init(fetchMetadata: { url in
+            await probe.record(url); return .init(data: Data(), statusCode: 404, url: url)
+        }, download: { _, _ in throw StudioError("Removed source families cannot start a download.") }))
+        let changed = try await output(["edit-dataset", "--dataset", dataset.path, "--training-size", "2048"], sourceRecovery: automatic)
+        XCTAssertEqual(changed["source_set_count"] as? Int, 0)
+        let read = try await output(["dataset", "--dataset", dataset.path], sourceRecovery: automatic)
+        XCTAssertEqual(read["source_set_count"] as? Int, 0)
+        let requestedAfterChange = await probe.urls()
+        XCTAssertEqual(requestedAfterChange, [], "A larger training grid must not fetch another tier for a fully removed family")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sources.appendingPathComponent("stone_diff_8k.png").path))
+
+        // A new on-disk tier cannot bypass removal during ordinary discovery.
+        // Fresh untombstoned families remain visible without a manual import.
+        for (family, width, height, label) in [("stone", 8192, 256, "8k"), ("fresh", 256, 256, "1k")] {
+            for (suffix, bits, channels) in [("diff", 8, 3), ("disp", 16, 1)] {
+                let path = sources.appendingPathComponent("\(family)_\(suffix)_\(label).png")
+                let bytes = try constantPNG(width: width, height: height, bits: bits, channels: channels)
+                try bytes.write(to: path); originals[path] = bytes
+            }
+        }
+        let discovered = try await output(["dataset", "--dataset", dataset.path], sourceRecovery: automatic)
+        let materials = try XCTUnwrap(discovered["materials"] as? [[String: Any]])
+        XCTAssertEqual(Set(materials.compactMap { $0["material_id"] as? String }), ["fresh_1k"])
+        let requestedAfterDiscovery = await probe.urls()
+        XCTAssertEqual(requestedAfterDiscovery, [], "Retained removed fields do not authorize automatic tier recovery")
+
+        // Existing tombstones from before this change still block the family.
+        let indexURL = dataset.appendingPathComponent("dataset.json")
+        var legacy = try object(indexURL)
+        legacy["removed_materials"] = (legacy["removed_materials"] as? [[String: Any]] ?? []).map {
+            ["material_id": $0["material_id"]!, "source_set_id": "opaque-historical-source-id"]
+        }
+        try JSONSerialization.data(withJSONObject: legacy, options: [.sortedKeys]).write(to: indexURL, options: .atomic)
+        let legacyRead = try await output(["dataset", "--dataset", dataset.path], sourceRecovery: automatic)
+        XCTAssertEqual(legacyRead["source_set_count"] as? Int, 1)
+        let legacyRequests = await probe.urls(); XCTAssertEqual(legacyRequests, [])
+
+        let unrelated = root.appendingPathComponent("Unrelated")
+        try FileManager.default.createDirectory(at: unrelated, withIntermediateDirectories: false)
+        for (suffix, bits, channels) in [("diff", 8, 3), ("disp", 16, 1)] {
+            try constantPNG(width: 256, height: 256, bits: bits, channels: channels)
+                .write(to: unrelated.appendingPathComponent("another_\(suffix)_1k.png"))
+        }
+        _ = try await output(["scan-folder", "--dataset", dataset.path, "--folder", unrelated.path,
+            "--plan", root.appendingPathComponent("unrelated-preview.json").path], sourceRecovery: automatic)
+        let unrelatedRequests = await probe.urls()
+        XCTAssertEqual(unrelatedRequests, [], "An unrelated explicit folder does not authorize removed owned families")
+
+        let explicit = try await output(["import-folder", "--dataset", dataset.path, "--folder", sources.path], sourceRecovery: unavailable)
+        XCTAssertEqual(explicit["source_set_count"] as? Int, 5, "An explicit import can add the removed family back")
+        for (path, bytes) in originals { XCTAssertEqual(try Data(contentsOf: path), bytes) }
+    }
+
+    func testProviderTierIdentityAcceptsOriginalAspectRatioAndKeepsCropEligibilitySeparate() throws {
+        for (dimensions, resolution) in [([4096, 3893], "4k"), ([4096, 4005], "4k"), ([2048, 2538], "2k"), ([4096, 5076], "4k")] {
+            XCTAssertTrue(NativeMaterialDatasetService.isProviderResolutionField(dimensions: dimensions, resolution: resolution))
+            XCTAssertEqual(NativeMaterialDatasetService.cropLayout(dimensions, size: 1024).count, 1)
+        }
+        XCTAssertTrue(NativeMaterialDatasetService.isProviderResolutionField(dimensions: [3893, 4096], resolution: "4k"))
+        XCTAssertTrue(NativeMaterialDatasetService.isProviderResolutionField(dimensions: [1024, 973], resolution: "1k"))
+        XCTAssertTrue(NativeMaterialDatasetService.cropLayout([1024, 973], size: 1024).isEmpty,
+                      "A genuine nominal tier can be too short for this crop; its original pixels must not be resized")
+        XCTAssertTrue(NativeMaterialDatasetService.isProviderResolutionField(dimensions: [1024, 1024], resolution: "1k"))
+        XCTAssertTrue(NativeMaterialDatasetService.cropLayout([1024, 1024], size: 2048).isEmpty,
+                      "An existing1k field still identifies its provider for acquiring usable2k/4k/8k tiers")
+        for dimensions in [[256, 256], [512, 512], [0, 1024], [1024, 0], [-1, 1024]] {
+            XCTAssertFalse(NativeMaterialDatasetService.isProviderResolutionField(dimensions: dimensions, resolution: "1k"))
+        }
+        XCTAssertFalse(NativeMaterialDatasetService.isProviderResolutionField(dimensions: [2048, 2538], resolution: "4k"))
+        XCTAssertFalse(NativeMaterialDatasetService.isProviderResolutionField(dimensions: [1024, 1024], resolution: "999999999999999k"))
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let input = root.appendingPathComponent("wool_boucle_diff_2k.png")
+        try constantPNG(width: 2048, height: 2538, bits: 8, channels: 3).write(to: input)
+        let requests = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input], size: 1024, target: "height")
+        XCTAssertEqual(Set(requests.map { $0.resolution + "|" + $0.target }), ["1k|input", "1k|height", "2k|height", "4k|input", "4k|height"])
+        let paired = try XCTUnwrap(requests.first { $0.resolution == "2k" })
+        XCTAssertEqual(paired.width, 2048); XCTAssertEqual(paired.height, 2538); XCTAssertTrue(paired.preserveOriginalDimensions)
+        let largerGrid = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input], size: 2048, target: "height")
+        XCTAssertEqual(Set(largerGrid.map { $0.resolution }), ["2k", "4k", "8k"])
+    }
+
+    func testSetupScanRecoversThreePairedTiersBeforeProofImportAndMaintainsEveryTarget() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), folder = root.appendingPathComponent("stone")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let fixture = try setupTierRecovery(), probe = fixture.probe
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Three tiers", "--training-size", "1024", "--subject-validation", "disabled"], sourceRecovery: fixture.recovery)
+        let input = folder.appendingPathComponent("stone_diff_2k.png"), height = folder.appendingPathComponent("stone_disp_2k.png")
+        let inputBytes = try XCTUnwrap(fixture.files["stone_diff_2k.png"]), heightBytes = try XCTUnwrap(fixture.files["stone_disp_2k.png"])
+        try inputBytes.write(to: input); try heightBytes.write(to: height)
+        let events = PreparationEventRecorder(), planURL = root.appendingPathComponent("preview.json")
+        let text = try await NativeMaterialDatasetService.run(arguments: ["scan-folder", "--dataset", dataset.path, "--folder", folder.path,
+            "--size", "1024", "--target", "height", "--plan", planURL.path], sourceRecovery: fixture.recovery, onEvent: { events.append($0) })
+        let preview = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(try XCTUnwrap(text).utf8)) as? [String: Any])
+        XCTAssertEqual(preview["source_set_count"] as? Int, 3)
+        XCTAssertEqual(preview["added_material_count"] as? Int, 3)
+        let plans = try XCTUnwrap(preview["plans"] as? [String: [String: [String: Any]]])
+        for target in ["height", "roughness", "normal"] {
+            XCTAssertEqual(plans["1024"]?[target]?["train_count"] as? Int, 3, "Choosing height in preview must still maintain all dataset maps")
+            XCTAssertEqual(plans["1024"]?[target]?["crop_count"] as? Int, 3)
+        }
+        let plan = try object(planURL), pending = try XCTUnwrap(plan["materials"] as? [[String: Any]])
+        XCTAssertEqual(Set(pending.compactMap { $0["resolution_label"] as? String }), ["1k", "2k", "4k"])
+        let recoveredMaterial = try XCTUnwrap(pending.first { $0["resolution_label"] as? String == "1k" })
+        let recoveredMaps = try XCTUnwrap(recoveredMaterial["maps"] as? [String: [String: Any]])
+        let recoveredHeight = try XCTUnwrap(recoveredMaps["height"])
+        let durableProof = try XCTUnwrap(recoveredHeight["source_recovery_provenance"] as? [String: Any])
+        XCTAssertEqual(durableProof["source_sha256"] as? String, recoveredHeight["file_sha256"] as? String)
+        XCTAssertEqual(durableProof["source_width"] as? Int, 1024); XCTAssertEqual(durableProof["source_height"] as? Int, 1024)
+        XCTAssertEqual(recoveredHeight["provider"] as? String, "Poly Haven")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(recoveredHeight["published_recovery_proof_path"] as? String)))
+        XCTAssertEqual((plan["inventory"] as? [[Any]])?.count, 12, "The proof must capture every downloaded original before import")
+        let summary = try XCTUnwrap(preview["source_recovery"] as? [String: Any])
+        XCTAssertEqual(summary["training_size"] as? Int, 1024); XCTAssertEqual(summary["recovered"] as? Int, 10)
+        XCTAssertEqual(summary["failed"] as? Int, 0); XCTAssertEqual(summary["not_published"] as? Int, 0)
+        let progress = try events.objects()
+        XCTAssertEqual(progress.first?["event"] as? String, "source_recovery_started")
+        XCTAssertEqual(progress.last?["event"] as? String, "source_recovery_completed")
+        XCTAssertEqual(progress.last?["completed"] as? Int, 10); XCTAssertEqual(progress.last?["total"] as? Int, 10)
+        let beforeImportRequests = await probe.urls()
+        let imported = try await output(["import-folder", "--dataset", dataset.path, "--folder", folder.path, "--plan", planURL.path,
+            "--expected-plan-sha256", try XCTUnwrap(preview["plan_sha256"] as? String),
+            "--expected-index-sha256", try XCTUnwrap(preview["index_sha256"] as? String)], sourceRecovery: fixture.recovery)
+        let afterImportRequests = await probe.urls()
+        XCTAssertEqual(afterImportRequests, beforeImportRequests, "An approved import proof must not initiate more network recovery")
+        XCTAssertEqual(imported["source_set_count"] as? Int, 3)
+        let read = try await output(["dataset", "--dataset", dataset.path, "--target", "height"], sourceRecovery: fixture.recovery)
+        XCTAssertEqual(read["source_set_count"] as? Int, 3)
+        XCTAssertEqual(((read["training_plans"] as? [String: [String: Any]])?["height"])?["train_count"] as? Int, 3)
+        XCTAssertEqual(try Data(contentsOf: input), inputBytes); XCTAssertEqual(try Data(contentsOf: height), heightBytes)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dataset.appendingPathComponent(".training-data").path), "Dataset setup must already expose the tiers without Trainer preparation")
+    }
+
+    func testColorOnlyProviderRecoversPrimaryNumberedInputBeforeThreeTierPreview() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), folder = root.appendingPathComponent("External")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let fixture = try setupTierRecovery(inputSuffix: "coll1", inputPublishedRole: "CoLl1")
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Numbered color", "--training-size", "1024"], sourceRecovery: fixture.recovery)
+        var originals: [URL: Data] = [:]
+        for label in ["2k", "4k"] {
+            for suffix in ["coll1", "disp", "rough", "nor_gl"] {
+                let name = "stone_\(suffix)_\(label).png", url = folder.appendingPathComponent(name), bytes = try XCTUnwrap(fixture.files[name])
+                try bytes.write(to: url); originals[url] = bytes
+            }
+            let second = folder.appendingPathComponent("stone_coll2_\(label).png")
+            let dimension = label == "2k" ? 2048 : 4096
+            let secondBytes = try NativePNG(header: .init(width: dimension, height: dimension, bits: 8, channels: 3, color: 2, interlace: 0),
+                pixels: Data(repeating: 99, count: dimension * dimension * 3), colorChunks: []).encoded()
+            try secondBytes.write(to: second); originals[second] = secondBytes
+        }
+        _ = try await output(["add-material", "--dataset", dataset.path, "--name", "stone", "--input", folder.appendingPathComponent("stone_coll1_2k.png").path,
+            "--height", folder.appendingPathComponent("stone_disp_2k.png").path], sourceRecovery: fixture.recovery)
+        let unrelated = folder.appendingPathComponent("unrelated_coll1_1k.png")
+        try XCTUnwrap(fixture.files["stone_coll1_1k.png"]).write(to: unrelated)
+        let planner = NativeMaterialDatasetService.croppingRecoveryRequests(files: Array(originals.keys.reversed()), size: 1024, target: "height")
+        let inputRequest = try XCTUnwrap(planner.first { $0.target == "input" })
+        XCTAssertEqual(inputRequest.resolution, "1k"); XCTAssertEqual(inputRequest.publishedRole, "col_1")
+        XCTAssertEqual(inputRequest.destination.lastPathComponent, "stone_col_1_1k.png")
+        let planURL = root.appendingPathComponent("preview.json")
+        let preview = try await output(["scan-folder", "--dataset", dataset.path, "--folder", folder.path, "--material", "stone_2k", "--size", "1024", "--target", "height", "--plan", planURL.path], sourceRecovery: fixture.recovery)
+        // Dataset-owned records authorize recovery only for their own family;
+        // this fixture scans an explicitly selected source family.
+        let requestedURLs = await fixture.probe.urls()
+        XCTAssertEqual(requestedURLs, ["https://api.polyhaven.com/files/stone"])
+        let results = try XCTUnwrap(preview["source_recovery_results"] as? [[String: Any]])
+        XCTAssertEqual(results.filter { $0["target"] as? String == "input" }.count, 1)
+        XCTAssertEqual((preview["source_recovery"] as? [String: Any])?["not_published"] as? Int, 0)
+        let plan = try object(planURL), registered = try object(dataset.appendingPathComponent("dataset.json"))
+        let entries = try XCTUnwrap(registered["samples"] as? [[String: Any]])
+        XCTAssertEqual(entries.count, 3)
+        let first = try object(dataset.appendingPathComponent("samples/stone_1k_full/sample.json"))
+        let variants = try XCTUnwrap(first["input_variants"] as? [[String: Any]])
+        XCTAssertEqual(variants.compactMap { $0["variant_id"] as? String }, ["color_1"])
+        let source = try XCTUnwrap(variants.first?["source"] as? [String: Any])
+        XCTAssertEqual(source["suffix"] as? String, "col_1")
+        XCTAssertEqual(source["file_sha256"] as? String, SHA256.hash(data: try XCTUnwrap(fixture.files["stone_coll1_1k.png"])).map { String(format: "%02x", $0) }.joined())
+        let plans = try XCTUnwrap(preview["plans"] as? [String: [String: [String: Any]]])
+        XCTAssertEqual(plans["1024"]?["height"]?["crop_count"] as? Int, 3)
+        XCTAssertEqual(plans["1024"]?["height"]?["train_count"] as? Int, 3)
+        XCTAssertEqual((plan["materials"] as? [[String: Any]])?.count, 0, "Recovered authorized tiers must already be registered before preview")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("stone_diff_1k.png").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("unrelated_disp_1k.png").path))
+        for (url, bytes) in originals { XCTAssertEqual(try Data(contentsOf: url), bytes) }
+    }
+
+    func testDatasetReadRegistersRecoveredExternalTiersAndPreservesExistingSourceReview() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), folder = root.appendingPathComponent("External")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let fixture = try setupTierRecovery()
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "External tiers", "--training-size", "1024", "--subject-validation", "disabled"], sourceRecovery: fixture.recovery)
+        let input = folder.appendingPathComponent("stone_diff_2k.png"), height = folder.appendingPathComponent("stone_disp_2k.png")
+        try XCTUnwrap(fixture.files[input.lastPathComponent]).write(to: input); try XCTUnwrap(fixture.files[height.lastPathComponent]).write(to: height)
+        _ = try await output(["add-material", "--dataset", dataset.path, "--name", "stone", "--input", input.path, "--height", height.path], sourceRecovery: fixture.recovery)
+        _ = try await output(["curate", "--dataset", dataset.path, "--sample", "stone_2k_center", "--status", "approved", "--note", "Retain reviewed pixels", "--review-size", "1024"], sourceRecovery: fixture.recovery)
+        let sourcePath = dataset.appendingPathComponent("samples/stone_2k_full/sample.json"), original = try object(sourcePath)
+        let oldIndex = try Data(contentsOf: dataset.appendingPathComponent("dataset.json"))
+        let proofRead = try await output(["dataset", "--dataset", dataset.path, "--skip-source-recovery"], sourceRecovery: fixture.recovery)
+        XCTAssertEqual(proofRead["source_set_count"] as? Int, 1)
+        let proofRequests = await fixture.probe.urls()
+        XCTAssertTrue(proofRequests.isEmpty, "Prepared-source management can inspect its existing snapshot before an authorized setup scan")
+        XCTAssertEqual(try Data(contentsOf: dataset.appendingPathComponent("dataset.json")), oldIndex)
+        let read = try await output(["dataset", "--dataset", dataset.path, "--target", "height"], sourceRecovery: fixture.recovery)
+        XCTAssertEqual(read["source_set_count"] as? Int, 3, "Registered folders outside owned sources must receive their recovered tiers during native reads")
+        let samples = try XCTUnwrap(read["materials"] as? [[String: Any]]).flatMap { $0["samples"] as? [[String: Any]] ?? [] }
+        let reviewed = try XCTUnwrap(samples.first { $0["sample_id"] as? String == "stone_2k_center" })
+        XCTAssertEqual(reviewed["status"] as? String, "approved"); XCTAssertEqual(reviewed["note"] as? String, "Retain reviewed pixels")
+        let updated = try object(sourcePath)
+        let originalMaps = try XCTUnwrap(original["map_metadata"] as? [String: [String: Any]]), updatedMaps = try XCTUnwrap(updated["map_metadata"] as? [String: [String: Any]])
+        for role in ["input", "height"] {
+            XCTAssertTrue(NSDictionary(dictionary: try XCTUnwrap(originalMaps[role])).isEqual(to: try XCTUnwrap(updatedMaps[role])))
+        }
+        XCTAssertEqual(Set(updated["available_targets"] as? [String] ?? []), ["height", "roughness", "normal"])
+        for target in ["height", "roughness", "normal"] { XCTAssertEqual((read["training_plans"] as? [String: [String: Any]])?[target]?["train_count"] as? Int, 3) }
+        XCTAssertEqual(try Data(contentsOf: input), fixture.files[input.lastPathComponent])
+        XCTAssertEqual(try Data(contentsOf: height), fixture.files[height.lastPathComponent])
+    }
+
+    func testDirectImportAndFreshOwnedSourceReadRecoverSetupTiersWithoutTrainer() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try setupTierRecovery()
+        for owned in [false, true] {
+            let dataset = root.appendingPathComponent(owned ? "Owned" : "Imported")
+            _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Setup path", "--training-size", "1024"], sourceRecovery: fixture.recovery)
+            let folder = owned ? dataset.appendingPathComponent("sources/stone") : root.appendingPathComponent("External")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            for suffix in ["diff", "disp"] { let name = "stone_\(suffix)_2k.png"; try XCTUnwrap(fixture.files[name]).write(to: folder.appendingPathComponent(name)) }
+            let arguments = owned ? ["dataset", "--dataset", dataset.path, "--target", "height"]
+                : ["import-folder", "--dataset", dataset.path, "--folder", folder.path, "--target", "height", "--training-size", "1024"]
+            let result = try await output(arguments, sourceRecovery: fixture.recovery)
+            XCTAssertEqual(result["source_set_count"] as? Int, 3, "\(owned ? "The first owned-source read" : "Direct import") must register recovered tiers before reporting counts")
+            for target in ["height", "roughness", "normal"] { XCTAssertEqual((result["training_plans"] as? [String: [String: Any]])?[target]?["train_count"] as? Int, 3) }
+            XCTAssertEqual((result["source_recovery"] as? [String: Any])?["recovered"] as? Int, 10)
+            let manifest = try object(dataset.appendingPathComponent("dataset.json"))
+            XCTAssertEqual((manifest["samples"] as? [[String: Any]])?.count, 3)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: dataset.appendingPathComponent(".training-data").path))
+        }
+    }
+
+    func testAmbientSetupIdentifiesOfficialAndRenamedInputsAndReportsUnavailableTiers() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), folder = root.appendingPathComponent("External")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let probe = DatasetRecoveryMetadataProbe()
+        let recovery = NativeMaterialSourceRecovery(transport: .init(fetchMetadata: { url in
+            await probe.record(url); return .init(data: Data(), statusCode: 404, url: url)
+        }, download: { _, _ in throw StudioError("Unavailable ambient fixture must not download.") }))
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Ambient tiers", "--training-size", "1024", "--subject-validation", "disabled"], sourceRecovery: recovery)
+        let input = folder.appendingPathComponent("Snow013_2K-PNG_Color.png"), normal = folder.appendingPathComponent("Snow013_2K-PNG_NormalDX.png")
+        let rgb = try constantPNG(width: 2048, height: 2048, bits: 8, channels: 3)
+        try rgb.write(to: input); try rgb.write(to: normal)
+        _ = try await output(["add-material", "--dataset", dataset.path, "--name", "Snow013", "--input", input.path, "--normal", normal.path, "--normal-convention", "directx"], sourceRecovery: recovery)
+        let sourcePath = dataset.appendingPathComponent("samples/snow013_2k_full/sample.json"), original = try object(sourcePath)
+        let height = folder.appendingPathComponent("Snow013_disp_2k.png"), heightBytes = try constantPNG(width: 2048, height: 2048, bits: 16, channels: 1)
+        try heightBytes.write(to: height)
+        let requests = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input, normal, height], size: 1024, target: "height")
+        XCTAssertEqual(requests.count, 4)
+        XCTAssertTrue(requests.allSatisfy { $0.provider == .ambientCG && $0.asset == "Snow013" && $0.preserveOriginalDimensions })
+        XCTAssertEqual(Set(requests.map { $0.resolution }), ["1k", "4k"])
+        XCTAssertEqual(Set(requests.map { $0.destination.lastPathComponent }), ["Snow013_1K-PNG_Color.png", "Snow013_1K-PNG_Displacement.png", "Snow013_4K-PNG_Color.png", "Snow013_4K-PNG_Displacement.png"])
+        let paths = [input, normal, height]
+        let aliasedRequests = NativeMaterialDatasetService.croppingRecoveryRequests(files: paths + paths.map { $0.resolvingSymlinksInPath().standardizedFileURL }, size: 1024, target: "height")
+        XCTAssertEqual(aliasedRequests.count, 4, "A recorded canonical path and a directory-inventory alias identify the same physical field")
+        XCTAssertEqual(Set(aliasedRequests.map { $0.destination.path }).count, 4)
+        let renamed = folder.appendingPathComponent("Wicker013_diff_1k.png")
+        try constantPNG(width: 1024, height: 1024, bits: 8, channels: 3).write(to: renamed)
+        let renamedRequests = NativeMaterialDatasetService.croppingRecoveryRequests(files: [renamed], size: 1024, target: "height")
+        XCTAssertTrue(renamedRequests.allSatisfy { $0.provider == .ambientCG && $0.asset == "Wicker013" })
+        let read = try await output(["dataset", "--dataset", dataset.path, "--target", "height"], sourceRecovery: recovery)
+        XCTAssertEqual(read["source_set_count"] as? Int, 1, "Unpublished tiers cannot be counted as ready crops")
+        let requestsMade = await probe.urls()
+        XCTAssertFalse(requestsMade.isEmpty)
+        XCTAssertTrue(requestsMade.allSatisfy { URL(string: $0)?.host == "ambientcg.com" && $0.contains("id=Snow013") })
+        XCTAssertFalse(requestsMade.contains { $0.contains("polyhaven") || $0.contains("Wicker013") }, "An unregistered sibling is outside the authorized read scope")
+        let summary = try XCTUnwrap(read["source_recovery"] as? [String: Any])
+        let unavailable = try XCTUnwrap(read["source_recovery_results"] as? [[String: Any]])
+        let requestedIdentities = unavailable.map { "\($0["asset"] ?? "")|\($0["resolution"] ?? "")|\($0["target"] ?? "")" }.sorted()
+        let expectedIdentities = ["Snow013|1k|input", "Snow013|1k|height", "Snow013|1k|roughness", "Snow013|1k|normal",
+                                  "Snow013|2k|roughness", "Snow013|4k|input", "Snow013|4k|height", "Snow013|4k|roughness", "Snow013|4k|normal"].sorted()
+        XCTAssertEqual(requestedIdentities, expectedIdentities, "Full setup maintains every map once at each authorized missing tier: \(unavailable)")
+        let canonicalFolder = folder.resolvingSymlinksInPath().standardizedFileURL
+        let expectedDestinations = ["Snow013_1K-PNG_Color.png", "Snow013_1K-PNG_Displacement.png", "Snow013_1K-PNG_Roughness.png", "Snow013_1K-PNG_NormalGL.png",
+                                    "Snow013_2K-PNG_Roughness.png", "Snow013_4K-PNG_Color.png", "Snow013_4K-PNG_Displacement.png", "Snow013_4K-PNG_Roughness.png", "Snow013_4K-PNG_NormalGL.png"]
+            .map { canonicalFolder.appendingPathComponent($0).path }.sorted()
+        XCTAssertEqual(unavailable.compactMap { $0["source_path"] as? String }.sorted(), expectedDestinations)
+        XCTAssertEqual(summary["training_size"] as? Int, 1024); XCTAssertEqual(summary["not_published"] as? Int, expectedIdentities.count)
+        XCTAssertEqual(summary["failed"] as? Int, 0); XCTAssertEqual(summary["recovered"] as? Int, 0)
+        XCTAssertEqual(unavailable.count, expectedIdentities.count); XCTAssertTrue(unavailable.allSatisfy { $0["status"] as? String == "not_published" })
+        XCTAssertEqual(Set(unavailable.compactMap { $0["provider"] as? String }), ["ambientCG"])
+        let updated = try object(sourcePath), updatedMaps = try XCTUnwrap(updated["map_metadata"] as? [String: [String: Any]])
+        XCTAssertEqual((updatedMaps["height"]?["source"] as? [String: Any])?["path"] as? String, height.path)
+        let originalMaps = try XCTUnwrap(original["map_metadata"] as? [String: [String: Any]])
+        XCTAssertTrue(NSDictionary(dictionary: try XCTUnwrap(originalMaps["input"])).isEqual(to: try XCTUnwrap(updatedMaps["input"])))
+        XCTAssertEqual((updatedMaps["normal"]?["source"] as? [String: Any])?["suffix"] as? String, "nor_dx")
+        XCTAssertEqual(try Data(contentsOf: input), rgb); XCTAssertEqual(try Data(contentsOf: normal), rgb); XCTAssertEqual(try Data(contentsOf: height), heightBytes)
+    }
+
     func testBalancedCropLayoutUsesOneSampleAtEveryResolutionTier() throws {
         func crop(_ dimensions: [Int], seed: UInt64 = 0, source: String = "stone") throws -> (String, [Int]) {
             let selected = NativeMaterialDatasetService.cropLayout(dimensions, size: 1024, subject: "/sources/stone", sourceSet: source, seed: seed)
@@ -1271,6 +1591,33 @@ final class NativeMaterialDatasetTests: XCTestCase {
         XCTAssertEqual(png.pixels, codes)
         XCTAssertThrowsError(try png.modelFloatSamples(role: "height"))
         XCTAssertThrowsError(try png.modelFloatSamples(role: "input", encoding: "unknown"))
+    }
+    private func constantPNG(width: Int, height: Int, bits: Int, channels: Int) throws -> Data {
+        try NativePNG(header: .init(width: width, height: height, bits: bits, channels: channels,
+                                   color: channels == 1 ? 0 : 2, interlace: 0),
+                      pixels: Data(repeating: 97, count: width * height * channels * bits / 8), colorChunks: []).encoded()
+    }
+    private func setupTierRecovery(inputSuffix: String = "diff", inputPublishedRole: String = "Diffuse") throws -> (recovery: NativeMaterialSourceRecovery, files: [String: Data], probe: DatasetRecoveryMetadataProbe) {
+        let probe = DatasetRecoveryMetadataProbe()
+        var files: [String: Data] = [:], catalog: [String: [String: [String: [String: Any]]]] = [:], downloaded: [String: Data] = [:]
+        for dimension in [1024, 2048, 4096] {
+            let label = "\(dimension / 1024)k"
+            for (suffix, role, bits, channels) in [(inputSuffix, inputPublishedRole, 8, 3), ("disp", "Displacement", 16, 1), ("rough", "Rough", 8, 1), ("nor_gl", "nor_gl", 8, 3)] {
+                let name = "stone_\(suffix)_\(label).png", bytes = try constantPNG(width: dimension, height: dimension, bits: bits, channels: channels)
+                let url = "https://dl.polyhaven.org/file/ph-assets/Textures/png/\(label)/stone/\(name)"
+                files[name] = bytes; downloaded[url] = bytes
+                catalog[role, default: [:]][label] = ["png": ["url": url, "size": bytes.count,
+                    "md5": Insecure.MD5.hash(data: bytes).map { String(format: "%02x", $0) }.joined()]]
+            }
+        }
+        let metadata = try JSONSerialization.data(withJSONObject: catalog), immutableDownloads = downloaded
+        let recovery = NativeMaterialSourceRecovery(transport: .init(fetchMetadata: { url in
+            await probe.record(url); return .init(data: metadata, statusCode: 200, url: url)
+        }, download: { url, destination in
+            guard let bytes = immutableDownloads[url.absoluteString] else { throw StudioError("Unexpected fixture provider download.") }
+            try bytes.write(to: destination); return .init(statusCode: 200, url: url)
+        }))
+        return (recovery, files, probe)
     }
     private func fixturePNG(width: Int, height: Int, bits: Int, channels: Int) throws -> Data {
         let pixels = Data((0..<width * height * channels * bits / 8).map { UInt8(truncatingIfNeeded: $0 * 97) })

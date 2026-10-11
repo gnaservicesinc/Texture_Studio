@@ -83,8 +83,13 @@ extension WorkbenchStore {
     private func sourceDatasetForManagement() async throws -> WorkbenchDataset {
         guard let current = dataset else { throw StudioError("Create or open a dataset first.") }
         if let preparation = current.preparation {
+            let sourceURL = URL(fileURLWithPath: preparation.sourceDatasetPath)
+            let indexURL = sourceURL.lastPathComponent == "dataset.json" ? sourceURL : sourceURL.appendingPathComponent("dataset.json")
+            guard NativeMaterialTrainer.checksum(try Data(contentsOf: indexURL)) == preparation.sourceIndexSha256 else {
+                throw StudioError("The original dataset changed since preparation. Review its current information before editing.")
+            }
             _ = try await worker(["cleanup-size", "--dataset", current.datasetPath])
-            try await loadDataset(URL(fileURLWithPath: preparation.sourceDatasetPath))
+            try await loadDataset(sourceURL, recoverSources: false)
             guard dataset?.indexSha256 == preparation.sourceIndexSha256 else {
                 throw StudioError("The original dataset changed since preparation. Review its current information before editing.")
             }
@@ -147,15 +152,19 @@ extension WorkbenchStore {
         if dataset == nil { pendingSourceFolder = url; showNewDatasetSheet = true; return }
         operation("Scanning material folders and verifying original maps…") { try await self.scanMaterialFolder(url) }
     }
-    private func scanMaterialFolder(_ url: URL) async throws {
+    private func scanMaterialFolder(_ url: URL, size: Int? = nil) async throws {
         let continuingImport = showImportFolderSheet
         let source = try await sourceDatasetForManagement()
         // A rescan is also recovery from another window changing membership or
         // reviews. Reconnect the durable index before binding a new preview.
-        try await loadDataset(URL(fileURLWithPath: source.datasetPath))
+        try await loadDataset(URL(fileURLWithPath: source.datasetPath), recoverSources: false)
         guard let current = dataset else { throw StudioError("Open a dataset before importing material maps.") }
         clearFolderImport()
         if !continuingImport { folderImportSize = datasetResolution }
+        if let size { folderImportSize = size }
+        let scannedSize = folderImportSize
+        sourceRecoverySummary = "Checking balanced source tiers at \(scannedSize) × \(scannedSize)…"
+        sourceRecoveryResults = []
         folderImportURL = url
         isScanningFolder = true
         defer { isScanningFolder = false }
@@ -164,20 +173,27 @@ extension WorkbenchStore {
         let planURL = FileManager.default.temporaryDirectory.appendingPathComponent("material-import-\(UUID().uuidString).json")
         folderImportPlanURL = planURL
         folderImport = try WorkbenchResult.decode(WorkbenchFolderImport.self, output: await worker([
-            "scan-folder", "--dataset", current.datasetPath, "--folder", url.path,
+            "scan-folder", "--dataset", current.datasetPath, "--folder", url.path, "--size", String(scannedSize), "--target", training.target,
             "--expected-index-sha256", current.indexSha256, "--plan", planURL.path]))
-        activity = "Folder scan complete. Review the resolution, training crops and validation checks, then import."
+        folderImportScannedSize = scannedSize
+        sourceRecoverySummary = folderImport?.sourceRecovery?.summary ?? ""
+        sourceRecoveryResults = folderImport?.sourceRecoveryResults ?? []
+        activity = "Balanced tier setup complete at \(scannedSize) × \(scannedSize). Review the registered crops and any unavailable maps, then import."
     }
     func clearFolderImport() {
         if let folderImportPlanURL { try? FileManager.default.removeItem(at: folderImportPlanURL) }
         folderImportPlanURL = nil
         folderImport = nil
+        folderImportScannedSize = nil
     }
     func commitFolderImport(size: Int) {
-        guard !isBusy, let preview = folderImport, let current = dataset else { return }
+        guard !isBusy, let preview = folderImport, dataset != nil else { return }
         guard preview.addedMaterialCount > 0 else { return }
         operation("Registering verified original material maps…") {
-            guard current.indexSha256 == preview.indexSha256 else { throw StudioError("The dataset changed. Scan the folder again before importing.") }
+            if self.folderImportScannedSize != size {
+                try await self.scanMaterialFolder(URL(fileURLWithPath: preview.folderPath), size: size)
+            }
+            guard let preview = self.folderImport, let current = self.dataset else { throw StudioError("Scan the material folder before importing.") }
             let previous = Set(self.samples.map(\.id))
             let result = try self.adoptManagedDataset(await self.worker(["import-folder", "--dataset", current.datasetPath,
                 "--folder", preview.folderPath, "--expected-index-sha256", preview.indexSha256,
@@ -185,6 +201,8 @@ extension WorkbenchStore {
                 "--training-size", String(size), "--review-size", String(size)]))
             self.selectedSampleId = self.samples.first { !previous.contains($0.id) }?.id ?? self.selectedSampleId
             self.showImportFolderSheet = false
+            self.sourceRecoverySummary = preview.sourceRecovery?.summary ?? ""
+            self.sourceRecoveryResults = preview.sourceRecoveryResults ?? []
             self.clearFolderImport()
             self.activity = "Imported \(result.addedMaterialCount ?? 0) source sets at \(size) × \(size); \(preview.duplicateMaterialCount) already present. Original maps remain in their source folder."
         }

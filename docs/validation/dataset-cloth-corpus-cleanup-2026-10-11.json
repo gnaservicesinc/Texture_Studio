@@ -1,0 +1,34 @@
+{
+  "authorization" : "User explicitly requested removal of the problem cloth originals from this downloadable corpus.",
+  "dataset_path" : "\/Users\/andrewsmith\/Documents\/Texture Studio Datasets\/PolyMat",
+  "remaining_resolution_sets_before_leather_recovery" : 359,
+  "removed_resolution_sets" : [
+    "fabric_pattern_05_2k",
+    "fabric_pattern_05_4k",
+    "fabric_pattern_07_2k",
+    "fabric_pattern_07_4k",
+    "jersey_melange_1k",
+    "jersey_melange_2k",
+    "jersey_melange_4k",
+    "polar_fleece_1k",
+    "polar_fleece_2k",
+    "polar_fleece_4k",
+    "scuba_suede_1k",
+    "scuba_suede_2k",
+    "scuba_suede_4k",
+    "waffle_pique_cotton_1k",
+    "waffle_pique_cotton_2k",
+    "waffle_pique_cotton_4k"
+  ],
+  "removed_source_folders" : [
+    "\/opt\/ipde\/sources_mats\/Fabric Pattern 05",
+    "\/opt\/ipde\/sources_mats\/Fabric Pattern 07",
+    "\/opt\/ipde\/sources_mats\/jersey_melange",
+    "\/opt\/ipde\/sources_mats\/scuba_suede",
+    "\/opt\/ipde\/sources_mats\/Waffle Pique Cotton",
+    "\/opt\/ipde\/sources_mats\/polar_fleece"
+  ],
+  "source_files_deleted" : true,
+  "source_pixels_resampled" : false,
+  "training_started" : false
+}

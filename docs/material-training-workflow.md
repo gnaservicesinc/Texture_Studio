@@ -2,7 +2,7 @@
 
 Open a dataset in Dataset Studio, select the material or complete dataset you want to use, and send it to Model Training. Choose height, normal or roughness and the native grid. The app checks that every input and target has the declared dimensions. It references matching originals and creates exact crops when needed; it does not resize or pad training maps.
 
-Each source resolution contributes one paired training sample. For square sources, the tier relative to the selected training size determines its initial crop:
+Each source resolution contributes one spatial crop, shared by its paired targets and available diffuse variants. Each diffuse variant supplies its own input example with the matching target crop. For square sources, the tier relative to the selected training size determines its initial crop:
 
 | Source tier | Initial training sample |
 | --- | --- |
@@ -11,7 +11,15 @@ Each source resolution contributes one paired training sample. For square source
 | 4× | One choice among top left, top right, bottom left, bottom right and center |
 | Existing sources larger than 4× | Random crop position within the original |
 
-Preparation keeps the diffuse and selected target aligned at each tier. For supported Poly Haven sources, missing 1×, 2× and 4× original pairs are fetched into the source folder. Larger diffuse tiers already present remain usable, and their missing selected target can be fetched without downloading a new larger diffuse tier. Selecting a folder includes its eligible resolution tiers even when the selected original is smaller than the training grid.
+Dataset setup obtains published, contract-compatible missing 1×, 2× and 4× original tiers before the import preview. At 1024, a supported square source folder can therefore supply a 1K field, a 2K center crop and one 4K corner-or-center crop. This happens when scanning or directly importing sources, opening an original dataset, and changing its training size. Confirmation imports the completed preview without new downloads. The app reports unavailable provider maps and separates nominal tier counts from usable crop counts. The 4× position is chosen once per source folder and shared across its variants and targets.
+
+Poly Haven and ambientCG sources are fetched from their respective providers and saved in the original source folder for reuse. Setup maintains diffuse, displacement, roughness and normal maps, retaining each published PNG's original dimensions and bytes. For numbered Poly Haven color inputs, a missing tier uses the lowest compatible existing color variant; published `coll1` and normalized `col_1` identify the same role, recorded as native variant `color_1`. Rectangular source fields remain rectangular: either axis can identify their filename's nominal tier, while exact crop preparation requires enough pixels on both axes. Download proofs are retained beside recovered originals and bound to their source hashes. Existing diffuse tiers above 4× contribute one random-position crop per usable tier; only their missing target maps are fetched. For example, an existing usable 8K field adds a fourth spatial crop at a 1K training grid.
+
+Ordinary app setup preserves existing user source files. The local PolyMat validation corpus has a separate, user-authorized cleanup of six problem families whose available maps cannot supply the requested paired crop plan. That cleanup removes their files and dataset records without pixel correction or resizing. Its scope and final audit are recorded in the [dataset tier setup validation](validation/dataset-tier-setup-2026-10-11.md).
+
+When every registered tier of a material family has been removed from a dataset, automatic recovery and discovery keep that family removed even if its originals remain in the dataset's source storage. Changing the training grid does not fetch a new tier to restore it. An explicit folder import can add it again; unrelated imports retain its removal.
+
+Preparation keeps the diffuse and selected target aligned at each tier. Selecting a source folder includes all its eligible resolution tiers, even when the selected original is smaller than the training grid. The Trainer shows the active folder scope and its crop count separately from the complete dataset plan. Import confirmation binds the repaired inventory, chosen grid and dataset snapshot; changing the grid refreshes the preview before import.
 
 **Randomize Crops when** chooses **Never**, **At the start of a new training run** (the default), or **Every epoch**. New runs reselect balanced initial crop positions. Every epoch refreshes their selected orientation augmentations. **Randomly Flip Crop** and **Randomly Spin Centercut Crops** are optional and default off. Selecting Never grays out both controls and suppresses their effects while remembering their checked states; it reuses the deterministic seed-zero prepared crop cache.
 

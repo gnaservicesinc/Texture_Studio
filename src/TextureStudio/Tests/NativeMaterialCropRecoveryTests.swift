@@ -16,7 +16,7 @@ final class NativeMaterialCropRecoveryTests: XCTestCase {
             let pixels = try XCTUnwrap(Int(request.resolution.dropLast())) * 1024
             XCTAssertEqual(request.width, pixels); XCTAssertEqual(request.height, pixels)
             XCTAssertEqual(request.asset, Fixture.asset)
-            XCTAssertEqual(request.destination.deletingLastPathComponent().path, fixture.root.path)
+            XCTAssertEqual(request.destination.deletingLastPathComponent().path, fixture.root.resolvingSymlinksInPath().standardizedFileURL.path)
             XCTAssertEqual(request.destination.lastPathComponent,
                 "\(Fixture.asset)_\(request.target == "input" ? "diff" : "rough")_\(request.resolution).png")
         }

@@ -313,6 +313,9 @@ final class WorkbenchPreferencesTests: XCTestCase {
         store.selectTrainingModelFamily(.compactScalar)
         store.training.size = 2048
         XCTAssertEqual(Set(store.trainingFolderSamples.map(\.id)), ["stone_1k_sample", "stone_2k_sample"])
+        XCTAssertEqual(store.datasetInventorySummary, "1 material folder · 2 resolution sets")
+        XCTAssertEqual(store.trainingCurrentCropSummary, "Currently available: 1 height training crop at 2048 × 2048")
+        XCTAssertTrue(store.trainingScopeSummary.contains("includes all resolution tiers"))
         XCTAssertNil(store.trainingConfigurationIssue,
                      "An undersized selected original must not discard another eligible tier in its source folder")
     }
@@ -363,8 +366,11 @@ final class WorkbenchPreferencesTests: XCTestCase {
         store.training.size = 2048
         store.training.useSelectedMaterialOnly = true
         XCTAssertEqual(store.trainingFolderSamples.map(\.id), ["stone_1k_sample"])
+        XCTAssertEqual(store.datasetInventorySummary, "2 material folders · 2 resolution sets")
+        XCTAssertEqual(store.trainingCurrentCropSummary, "Currently available: 0 height training crops at 2048 × 2048")
         XCTAssertNotNil(store.trainingConfigurationIssue)
         store.training.useSelectedMaterialOnly = false
+        XCTAssertEqual(store.trainingCurrentCropSummary, "Currently available: 1 height training crop at 2048 × 2048")
         XCTAssertNil(store.trainingConfigurationIssue, "The unrelated target remains eligible when the full dataset is selected")
     }
 
@@ -381,6 +387,74 @@ final class WorkbenchPreferencesTests: XCTestCase {
         XCTAssertFalse(store.supportedTrainingSizes.contains(2048))
         XCTAssertNotNil(store.trainingConfigurationIssue,
                         "Provider naming alone cannot establish a genuine original resolution")
+    }
+
+    func testAmbientColorOriginalCanRecoverTiersOnlyAtItsVerifiedNominalDimensions() throws {
+        let fixture = try PreferencesFixture()
+        defer { fixture.remove() }
+        let store = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
+        let folder = fixture.root.appendingPathComponent("sources/Wicker013").path
+        store.selectTrainingModelFamily(.compactScalar)
+        store.adoptDataset(try Self.sourceDataset(materials: [
+            Self.sourceMaterial(id: "wicker_1k", folder: folder, filename: "Wicker013_1K-PNG_Color.png",
+                pixels: 1024, height: false)], sizes: []))
+        store.training.size = 2048
+        XCTAssertTrue(store.supportedTrainingSizes.contains(2048))
+        XCTAssertNil(store.trainingConfigurationIssue)
+        store.adoptDataset(try Self.sourceDataset(materials: [
+            Self.sourceMaterial(id: "wicker_1k", folder: folder, filename: "Wicker013_1K-PNG_Color.png",
+                pixels: 256, height: false)], sizes: []))
+        XCTAssertFalse(store.supportedTrainingSizes.contains(2048))
+        XCTAssertNotNil(store.trainingConfigurationIssue)
+    }
+
+    func testPublishedRectangularProviderFieldsCanRecoverMissingCropTiers() throws {
+        let fixture = try PreferencesFixture()
+        defer { fixture.remove() }
+        let store = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
+        store.selectTrainingModelFamily(.compactScalar)
+        let fields = [("jersey_diff_4k.png", 4096, 3893), ("scuba_diff_4k.png", 4096, 4005),
+                      ("wool_diff_2k.png", 2048, 2538), ("wool_diff_4k.png", 4096, 5076),
+                      ("portrait_diff_4k.png", 3893, 4096)]
+        for (filename, width, height) in fields {
+            store.adoptDataset(try Self.sourceDataset(materials: [
+                Self.sourceMaterial(id: "field", folder: fixture.root.appendingPathComponent("sources/field").path,
+                    filename: filename, pixels: width, height: false, heightPixels: height)], sizes: []))
+            store.training.size = 2048
+            XCTAssertTrue(store.supportedTrainingSizes.contains(2048), filename)
+            XCTAssertNil(store.trainingConfigurationIssue, filename)
+        }
+    }
+
+    func testPreparedInventoryCountsResolutionGroupsSeparatelyFromDiagnosticCrops() throws {
+        let fixture = try PreferencesFixture()
+        defer { fixture.remove() }
+        let folder = fixture.root.appendingPathComponent("sources/stone").path
+        var materials = [1, 2, 4].map { tier in
+            Self.sourceMaterial(id: "stone_\(tier)k", folder: folder, filename: "stone_diff_\(tier)k.png",
+                pixels: 1024, height: true)
+        }
+        var larger = materials[2]
+        var samples = try XCTUnwrap(larger["samples"] as? [[String: Any]])
+        var diagnostic = samples[0]
+        diagnostic["sample_id"] = "stone_4k_validation"
+        diagnostic["split"] = "validation"
+        samples.append(diagnostic)
+        larger["samples"] = samples
+        materials[2] = larger
+        let document: [String: Any] = ["dataset_path": "/dataset/prepared", "index_sha256": "prepared-sha",
+            "source_set_count": 4, "training_size": 1024, "materials": materials,
+            "preparation": ["source_dataset_path": "/dataset", "source_index_sha256": "source-sha",
+                "prepared_dataset_path": "/dataset/prepared", "crop_size": 1024,
+                "reused": false, "target_resized": false, "original_dataset_modified": false]]
+        let dataset = try WorkbenchResult.decode(WorkbenchDataset.self,
+            output: String(decoding: JSONSerialization.data(withJSONObject: document), as: UTF8.self))
+        let store = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
+        store.adoptDataset(dataset)
+        store.selectTrainingModelFamily(.compactScalar)
+        store.training.useSelectedMaterialOnly = false
+        XCTAssertEqual(store.datasetInventorySummary, "1 material folder · 3 resolution sets")
+        XCTAssertEqual(store.trainingCurrentCropSummary, "Prepared: 3 height training crops at 1024 × 1024")
     }
 
     func testRuntimeAndUploadEditsSaveImmediately() throws {
@@ -521,12 +595,14 @@ final class WorkbenchPreferencesTests: XCTestCase {
         while store.isBusy, Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
         XCTAssertFalse(store.isBusy)
     }
-    private static func sourceMaterial(id: String, folder: String, filename: String, pixels: Int, height: Bool) -> [String: Any] {
-        var maps: [String: Any] = ["input": ["path": folder + "/" + filename, "width": pixels, "height": pixels,
-            "original_source_path": folder + "/" + filename, "original_source_width": pixels, "original_source_height": pixels]]
-        if height { maps["height"] = ["path": folder + "/height.png", "width": pixels, "height": pixels, "source_bits": 16] }
+    private static func sourceMaterial(id: String, folder: String, filename: String, pixels: Int, height: Bool,
+                                       heightPixels: Int? = nil) -> [String: Any] {
+        let imageHeight = heightPixels ?? pixels
+        var maps: [String: Any] = ["input": ["path": folder + "/" + filename, "width": pixels, "height": imageHeight,
+            "original_source_path": folder + "/" + filename, "original_source_width": pixels, "original_source_height": imageHeight]]
+        if height { maps["height"] = ["path": folder + "/height.png", "width": pixels, "height": imageHeight, "source_bits": 16] }
         return ["material_id": id, "source_directory": folder, "samples": [["sample_id": id + "_sample",
-            "source_family_id": "stone", "status": "approved", "split": "train", "width": pixels, "height": pixels,
+            "source_family_id": "stone", "status": "approved", "split": "train", "width": pixels, "height": imageHeight,
             "maps": maps, "available_targets": height ? ["height"] : [String]()]]]
     }
     private static func sourceDataset(materials: [[String: Any]], sizes: [Int]) throws -> WorkbenchDataset {

@@ -113,17 +113,24 @@ enum NativeMaterialDatasetService {
             let context = try recoveryContext(arguments)
             let recovery = sourceRecovery ?? NativeMaterialSourceRecovery()
             var attempts: [RecoveryAttempt] = []
-            for request in context.requests {
+            if !context.requests.isEmpty, let event = try? jsonString(["event": "source_recovery_started", "completed": 0, "total": context.requests.count, "training_size": context.trainingSize as Any? ?? NSNull()]) { onEvent(event + "\n") }
+            for (offset, request) in context.requests.enumerated() {
                 try Task.checkCancellation()
                 let result = try await recovery.recover(request) { message in
-                    if let event = try? jsonString(["event": "source_recovery_progress", "message": message]) { onEvent(event + "\n") }
+                    if let event = try? jsonString(["event": "source_recovery_progress", "message": message, "completed": offset, "total": context.requests.count, "asset": request.asset, "resolution": request.resolution, "target": request.target]) { onEvent(event + "\n") }
                 }
                 attempts.append(RecoveryAttempt(request: request, result: result))
+                if let event = try? jsonString(["event": "source_recovery_progress", "message": "Checked \(request.asset) \(request.resolution) \(request.target)", "completed": offset + 1, "total": context.requests.count, "asset": request.asset, "resolution": request.resolution, "target": request.target]) { onEvent(event + "\n") }
+            }
+            if !attempts.isEmpty {
+                var event = recoverySummary(attempts, trainingSize: context.trainingSize)
+                event["event"] = "source_recovery_completed"
+                if let text = try? jsonString(event) { onEvent(text + "\n") }
             }
             try Task.checkCancellation()
             let revised = try attachRecoveredTargets(arguments, context: context)
             let result = try runSynchronously(revised, preparationPolicy: preparationPolicy, onEvent: onEvent)
-            return try recoveryResponse(result, attempts: attempts)
+            return try recoveryResponse(result, attempts: attempts, trainingSize: context.trainingSize)
         }
         return try await withTaskCancellationHandler {
             let result = try await operation.value
@@ -230,7 +237,12 @@ enum NativeMaterialDatasetService {
                 index["samples"] = (index["samples"] as? [Object] ?? []).filter { $0["material_id"] as? String != options["--material"] }
                 var tombstones = index["removed_materials"] as? [Object] ?? []
                 for record in selected {
-                    let removed: Object = ["material_id": record.sample["material_id"] ?? NSNull(), "source_set_id": record.sample["source_set_id"] ?? NSNull()]
+                    let providerFamilies = Set(sources(record.sample).compactMap { source -> String? in
+                        guard let path = source["path"] as? String, let name = recoveryProviderName(URL(fileURLWithPath: path)) else { return nil }
+                        return identifier(name.asset)
+                    }).sorted()
+                    let removed: Object = ["material_id": record.sample["material_id"] ?? NSNull(), "source_set_id": record.sample["source_set_id"] ?? NSNull(),
+                        "source_family_id": familyID(record.sample), "subject_id": subjectID(record.sample), "provider_families": providerFamilies]
                     if !tombstones.contains(where: { NSDictionary(dictionary: $0).isEqual(to: removed) }) { tombstones.append(removed) }
                 }
                 index["removed_materials"] = tombstones; index["updated_utc"] = timestamp()
@@ -248,6 +260,7 @@ enum NativeMaterialDatasetService {
         var original: URL?
         var indexSHA256: String?
         var reviewSHA256: String?
+        var trainingSize: Int?
     }
     private struct RecoveryAttempt: Sendable {
         let request: NativeMaterialSourceRecovery.Request
@@ -256,18 +269,52 @@ enum NativeMaterialDatasetService {
     private static func parsedOptions(_ arguments: [String]) throws -> [String: String] {
         var options: [String: String] = [:], cursor = 1
         while cursor < arguments.count {
-            if arguments[cursor] == "--automatic-validation" { options[arguments[cursor]] = "true"; cursor += 1; continue }
+            if ["--automatic-validation", "--skip-source-recovery"].contains(arguments[cursor]) { options[arguments[cursor]] = "true"; cursor += 1; continue }
             guard cursor + 1 < arguments.count, arguments[cursor].hasPrefix("--") else { throw StudioError("Invalid native dataset arguments.") }
             options[arguments[cursor]] = arguments[cursor + 1]; cursor += 2
         }
         return options
     }
+    private struct RemovedSourceFamilies {
+        var scoped: Set<String> = [], legacy: Set<String> = []
+        func excludes(family: String, subject: String) -> Bool { legacy.contains(family) || scoped.contains(subject + "|" + family) }
+    }
+    /// Removal covers automatic zoom expansion until the user explicitly adds
+    /// the family again. Retained originals alone do not authorize new tiers.
+    private static func removedSourceFamilies(index: Object, records: [Record]) -> RemovedSourceFamilies {
+        func families(_ sample: Object) -> Set<String> {
+            var result: Set<String> = [familyID(sample)]
+            for source in sources(sample) {
+                if let path = source["path"] as? String, let name = recoveryProviderName(URL(fileURLWithPath: path)) { result.insert(identifier(name.asset)) }
+            }
+            return result
+        }
+        let active = Set(records.flatMap { record in families(record.sample).map { subjectID(record.sample) + "|" + $0 } })
+        let activeFamilies = Set(records.flatMap { families($0.sample) })
+        var result = RemovedSourceFamilies()
+        for removed in index["removed_materials"] as? [Object] ?? [] {
+            let materialID = removed["material_id"] as? String ?? "", sourceSetID = removed["source_set_id"] as? String ?? ""
+            let materialFamily = materialID.range(of: #"_(?:\d+k|\d+x\d+)$"#, options: .regularExpression).map { String(materialID[..<$0.lowerBound]) }
+            let sourceSetFamily = sourceSetID.range(of: #"_\d+x\d+$"#, options: .regularExpression).map { String(sourceSetID[..<$0.lowerBound]) }
+            let legacyFamily = materialFamily ?? sourceSetFamily ?? materialID
+            let family = removed["source_family_id"] as? String ?? legacyFamily
+            let removedFamilies = Set([family] + (removed["provider_families"] as? [String] ?? []))
+            if let subject = removed["subject_id"] as? String {
+                for family in removedFamilies where !family.isEmpty && !active.contains(subject + "|" + family) { result.scoped.insert(subject + "|" + family) }
+            } else {
+                for family in removedFamilies where !family.isEmpty && !activeFamilies.contains(family) { result.legacy.insert(family) }
+            }
+        }
+        return result
+    }
     /// Inspect and download before taking the manifest transaction lock or
     /// capturing an import preview. The preview then binds the repaired files.
     private static func recoveryContext(_ arguments: [String]) throws -> RecoveryContext {
         let options = try parsedOptions(arguments), command = arguments[0]
-        guard ["scan-folder", "import-folder", "prepare-size"].contains(command),
-              !(command == "import-folder" && options["--plan"] != nil),
+        if command == "dataset", options["--skip-source-recovery"] == "true" { return RecoveryContext() }
+        let setup = ["dataset", "scan-folder", "import-folder", "prepare-size"].contains(command)
+            || (command == "edit-dataset" && options["--training-size"] != nil)
+        guard setup, !(command == "import-folder" && options["--plan"] != nil),
               let requested = options["--dataset"] else { return RecoveryContext() }
         let supplied = canonical(URL(fileURLWithPath: requested))
         let initial = try locked(supplied) {
@@ -283,121 +330,166 @@ enum NativeMaterialDatasetService {
         } else { original = supplied }
         var context = RecoveryContext(original: original)
         var files: [URL] = [], recorded: [NativeMaterialSourceRecovery.Request] = []
+        var removedFamilies = RemovedSourceFamilies()
         try locked(original) {
             let index = try object(original.appendingPathComponent("dataset.json"))
+            context.trainingSize = try checkedSize(options["--size"] ?? options["--training-size"] ?? options["--review-size"]
+                ?? (index["training_size"] as? Int).map(String.init) ?? options["--default-review-size"] ?? "1024")
             context.indexSHA256 = try digest(original.appendingPathComponent("dataset.json"))
             context.reviewSHA256 = try optionalDigest(original.appendingPathComponent(".material-size-reviews.json")) ?? hash(Data())
             if let expected = options["--expected-review-sha256"], expected != context.reviewSHA256 { throw StudioError("Dataset reviews changed; reload before preparing native crops.") }
-            for record in try readRecords(original, index: index) {
-                if let selected = options["--material"], record.sample["material_id"] as? String != selected { continue }
+            let records = try readRecords(original, index: index)
+            removedFamilies = removedSourceFamilies(index: index, records: records)
+            let selected = options["--material"].flatMap { id in records.first { $0.sample["material_id"] as? String == id } }
+            for record in records {
+                if options["--material"] != nil {
+                    guard let selected, subjectID(record.sample) == subjectID(selected.sample), familyID(record.sample) == familyID(selected.sample) else { continue }
+                }
                 for source in sources(record.sample) {
                     guard let path = source["path"] as? String else { continue }
                     let url = URL(fileURLWithPath: path)
                     files.append(url)
-                    if !FileManager.default.fileExists(atPath: path),
-                       let (asset, suffix, resolution) = polyHavenName(url), let role = providerRole(suffix),
-                       let sha = source["file_sha256"] as? String {
-                        recorded.append(.init(asset: asset, resolution: resolution,
-                            target: suffix == "nor_dx" ? "normal_dx" : role, destination: url,
+                    if !FileManager.default.fileExists(atPath: path), let name = recoveryProviderName(url),
+                       let role = providerRole(name.suffix), let sha = source["file_sha256"] as? String {
+                        recorded.append(.init(asset: name.asset, resolution: name.resolution,
+                            target: name.suffix == "nor_dx" ? "normal_dx" : role, destination: url,
                             width: source["width"] as? Int ?? 0, height: source["height"] as? Int ?? 0,
-                            expectedSHA256: sha, publishedRole: role == "input" && suffix.hasPrefix("col_") ? suffix : nil))
+                            expectedSHA256: sha, publishedRole: role == "input" && name.suffix.hasPrefix("col_") ? name.suffix : nil,
+                            provider: name.provider))
                     }
                 }
             }
         }
+        // Existing records authorize only their own provider asset in each
+        // folder. Other assets beside a selected source remain outside scope.
+        var authorizedFolders: [URL: Set<String>] = [:]
+        for file in files {
+            guard let name = recoveryProviderName(file) else { continue }
+            authorizedFolders[canonical(file.deletingLastPathComponent()), default: []].insert(providerAssetKey(name))
+        }
+        for folder in authorizedFolders.keys.sorted(by: { $0.path < $1.path }) {
+            let allowed = authorizedFolders[folder]!
+            let siblings = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+            files += siblings.filter { recoveryProviderName($0).map { allowed.contains(providerAssetKey($0)) } ?? false }
+        }
         if command != "prepare-size", let folder = options["--folder"] {
             let url = canonical(URL(fileURLWithPath: folder))
             if !FileManager.default.fileExists(atPath: url.appendingPathComponent("dataset.json").path) {
-                files += try inventory(url, dataset: original).compactMap { ($0.first as? String).map { URL(fileURLWithPath: $0) } }
-            }
-        }
-        if command == "prepare-size" {
-            var authorizedFolders: [URL: Set<String>] = [:]
-            for file in files {
-                guard let (asset, _, _) = polyHavenName(file) else { continue }
-                authorizedFolders[canonical(file.deletingLastPathComponent()), default: []].insert(asset)
-            }
-            for folder in authorizedFolders.keys.sorted(by: { $0.path < $1.path }) {
-                let allowed = authorizedFolders[folder]!
-                let siblings = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
-                files += siblings.filter {
-                    guard let (asset, _, _) = polyHavenName($0) else { return false }
-                    return allowed.contains(asset)
+                let candidates = try inventory(url, dataset: original).compactMap { ($0.first as? String).map { URL(fileURLWithPath: $0) } }
+                files += candidates.filter { file in
+                    guard options["--material"] != nil else { return true }
+                    guard let name = recoveryProviderName(file) else { return false }
+                    return authorizedFolders[canonical(file.deletingLastPathComponent())]?.contains(providerAssetKey(name)) == true
                 }
             }
         }
-        var groups: [String: (asset: String, resolution: String, folder: URL, width: Int, height: Int, roles: Set<String>)] = [:]
-        for file in Set(files) {
-            guard let (asset, suffix, resolution) = polyHavenName(file), let role = providerRole(suffix),
-                  let header = try? NativePNG.inspect(file), let scale = Int(resolution.dropLast()) else { continue }
-            let nominal = scale * 1024, tolerance = max(2, Int(ceil(Double(nominal) * 0.02)))
-            // A provider label alone is insufficient evidence: small fixtures,
-            // resized copies and unrelated manual sets must not trigger downloads.
-            guard abs(header.width - nominal) <= tolerance, abs(header.height - nominal) <= tolerance else { continue }
-            let folder = file.deletingLastPathComponent(), key = folder.path + "|" + asset + "|" + resolution + "|\(header.width)x\(header.height)"
-            var group = groups[key] ?? (asset, resolution, folder, header.width, header.height, [])
-            group.roles.insert(role); groups[key] = group
+        // Fresh owned sources also need their zoom tiers before the first
+        // native read discovers and registers them.
+        let ownedSources = original.appendingPathComponent("sources")
+        if options["--material"] == nil, FileManager.default.fileExists(atPath: ownedSources.path) {
+            files += try inventory(ownedSources, dataset: original).compactMap { ($0.first as? String).map { URL(fileURLWithPath: $0) } }.filter { file in
+                guard let name = recoveryProviderName(file) else { return true }
+                return !removedFamilies.excludes(family: identifier(name.asset), subject: canonical(file.deletingLastPathComponent()).path)
+            }
         }
         var requests = Dictionary(recorded.map { ($0.destination.path, $0) }, uniquingKeysWith: { first, _ in first })
-        for key in groups.keys.sorted() where command != "prepare-size" {
-            let group = groups[key]!
-            for target in ["input", "height", "roughness", "normal"] where !group.roles.contains(target) {
-                let suffix = ["input": "diff", "height": "disp", "roughness": "rough", "normal": "nor_gl"][target]!
-                let destination = group.folder.appendingPathComponent("\(group.asset)_\(suffix)_\(group.resolution).png")
-                if requests[destination.path] == nil {
-                    requests[destination.path] = .init(asset: group.asset, resolution: group.resolution, target: target,
-                        destination: destination, width: group.width, height: group.height)
-                }
-            }
-        }
-        if command == "prepare-size", let size = Int(options["--size"] ?? ""),
-           let target = options["--target"], ["height", "roughness", "normal"].contains(target) {
-            for request in croppingRecoveryRequests(files: files, size: size, target: target) {
+        let targets = command == "prepare-size" ? [options["--target"] ?? "height"] : ["height", "roughness", "normal"]
+        for target in targets {
+            for request in croppingRecoveryRequests(files: files, size: context.trainingSize!, target: target) {
                 if requests[request.destination.path] == nil { requests[request.destination.path] = request }
             }
         }
-        context.requests = requests.keys.sorted().map { requests[$0]! }
+        // Ambient archives are shared by all maps of one tier. Group requests
+        // so a bounded archive cache needs only the active tier.
+        context.requests = requests.values.sorted {
+            ($0.provider.rawValue, $0.asset, $0.resolution, $0.target, $0.destination.path)
+                < ($1.provider.rawValue, $1.asset, $1.resolution, $1.target, $1.destination.path)
+        }
         return context
     }
-    /// Fetch the three balanced zoom tiers, then repair targets only for larger
-    /// diffuse fields already on disk. Published originals stay in their folder.
     static func croppingRecoveryRequests(files: [URL], size: Int, target: String) -> [NativeMaterialSourceRecovery.Request] {
-        let suffix = ["input": "diff", "height": "disp", "roughness": "rough", "normal": "nor_gl"]
-        guard suffix[target] != nil, size > 0 else { return [] }
+        guard ["height", "roughness", "normal"].contains(target), size > 0, size <= Int.max / 4 else { return [] }
         struct Field { var roles: Set<String>; let width: Int; let height: Int }
-        var fields: [String: [Int: Field]] = [:], locations: [String: (String, URL)] = [:]
+        var fields: [String: [Int: Field]] = [:], locations: [String: (ProviderSourceName, URL)] = [:]
+        var inputRoles: [String: Set<String>] = [:]
         for file in Set(files) {
-            guard let (asset, map, resolution) = polyHavenName(file), let role = providerRole(map),
-                  let scale = Int(resolution.dropLast()), let header = try? NativePNG.inspect(file) else { continue }
-            let nominal = scale * 1024, tolerance = max(2, Int(ceil(Double(nominal) * 0.02)))
-            guard abs(header.width - nominal) <= tolerance, abs(header.height - nominal) <= tolerance else { continue }
-            let folder = file.deletingLastPathComponent(), key = folder.path + "|" + asset
-            locations[key] = (asset, folder)
+            guard let name = recoveryProviderName(file), let role = providerRole(name.suffix),
+                  let scale = Int(name.resolution.dropLast()), let header = try? NativePNG.inspect(file) else { continue }
+            guard isProviderResolutionField(dimensions: [header.width, header.height], resolution: name.resolution) else { continue }
+            let nominal = scale * 1024
+            let folder = file.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
+            let key = folder.path + "|" + providerAssetKey(name)
+            locations[key] = (name, folder)
             var field = fields[key]?[nominal] ?? Field(roles: [], width: header.width, height: header.height)
             field.roles.insert(role); fields[key, default: [:]][nominal] = field
+            if role == "input", name.provider == .polyHaven { inputRoles[key, default: []].insert(name.suffix) }
         }
         var requests: [NativeMaterialSourceRecovery.Request] = []
         for key in fields.keys.sorted() {
-            let (asset, folder) = locations[key]!, current = fields[key]!
+            let (name, folder) = locations[key]!, current = fields[key]!
+            let inputSuffix = inputRoles[key]?.sorted { left, right in
+                func variant(_ value: String) -> Int {
+                    let digits = value.replacingOccurrences(of: #"^(?:diffuse|diff|color|col|albedo)_?"#, with: "", options: .regularExpression)
+                    return Int(digits) ?? 0
+                }
+                return (variant(left), left) < (variant(right), right)
+            }.first
             let requested = Set([size, size * 2, size * 4].filter { [1024, 2048, 4096, 8192, 16384].contains($0) })
             let tiers = requested.union(current.keys.filter { $0 > size * 4 && current[$0]!.roles.contains("input") })
             for pixels in tiers.sorted() {
                 let field = current[pixels], roles = field?.roles ?? []
                 for role in ["input", target] where !roles.contains(role) {
-                    // Never obtain a new higher-tier diffuse merely to add zoom.
                     if role == "input", pixels > size * 4 { continue }
                     let label = "\(pixels / 1024)k"
-                    requests.append(.init(asset: asset, resolution: label, target: role,
-                        destination: folder.appendingPathComponent("\(asset)_\(suffix[role]!)_\(label).png"),
-                        width: field?.width ?? pixels, height: field?.height ?? pixels))
+                    let selectedInput = role == "input" ? inputSuffix : nil
+                    let publishedRole = selectedInput.flatMap { ["diff", "diffuse"].contains($0) ? nil : $0 }
+                    requests.append(.init(asset: name.asset, resolution: label, target: role,
+                        destination: providerDestination(folder: folder, name: name, resolution: label, target: role, inputSuffix: selectedInput),
+                        width: field?.width ?? pixels, height: field?.height ?? pixels, publishedRole: publishedRole,
+                        provider: name.provider, preserveOriginalDimensions: true))
                 }
             }
         }
         return requests
     }
-    private static func polyHavenName(_ file: URL) -> (String, String, String)? {
-        guard !file.lastPathComponent.lowercased().contains("-png_"), let (asset, suffix, resolution) = parsedProvider(file.lastPathComponent) else { return nil }
-        return (identifier(asset), suffix, resolution)
+    /// Published native fields can have a different aspect ratio. A matching
+    /// nominal edge establishes the provider tier; actual crop eligibility is
+    /// checked separately against both original dimensions.
+    static func isProviderResolutionField(dimensions: [Int], resolution: String) -> Bool {
+        guard dimensions.count == 2, dimensions.allSatisfy({ $0 > 0 }),
+              ["1k", "2k", "4k", "8k", "16k"].contains(resolution.lowercased()),
+              let scale = Int(resolution.dropLast()) else { return false }
+        let nominal = scale * 1024, tolerance = max(2, Int(ceil(Double(nominal) * 0.02)))
+        return dimensions.contains { abs($0 - nominal) <= tolerance }
+    }
+    private struct ProviderSourceName {
+        let provider: NativeMaterialSourceRecovery.Provider
+        let asset: String
+        let suffix: String
+        let resolution: String
+    }
+    private static func recoveryProviderName(_ file: URL) -> ProviderSourceName? {
+        guard let (_, suffix, resolution) = parsedProvider(file.lastPathComponent) else { return nil }
+        let stem = file.deletingPathExtension().lastPathComponent
+        for (offset, expression) in providerFilenameExpressions.enumerated() {
+            guard let match = expression.firstMatch(in: stem, range: NSRange(stem.startIndex..., in: stem)),
+                  let range = Range(match.range(at: 1), in: stem) else { continue }
+            let originalAsset = String(stem[range])
+            let ambient = offset == 1 || originalAsset.range(of: #"^[A-Z][A-Za-z]+[0-9]{3,}[A-Za-z]?$"#, options: .regularExpression) != nil
+            return ProviderSourceName(provider: ambient ? .ambientCG : .polyHaven,
+                asset: ambient ? originalAsset : identifier(originalAsset), suffix: suffix, resolution: resolution)
+        }
+        return nil
+    }
+    private static func providerAssetKey(_ name: ProviderSourceName) -> String { name.provider.rawValue + "|" + identifier(name.asset) }
+    private static func providerDestination(folder: URL, name: ProviderSourceName, resolution: String, target: String, inputSuffix: String? = nil) -> URL {
+        if name.provider == .ambientCG {
+            let map = ["input": "Color", "height": "Displacement", "roughness": "Roughness", "normal": "NormalGL"] [target]!
+            return folder.appendingPathComponent("\(name.asset)_\(resolution.uppercased())-PNG_\(map).png")
+        }
+        let suffix = target == "input" && inputSuffix != nil && !["diff", "diffuse"].contains(inputSuffix!) ? inputSuffix!
+            : ["input": "diff", "height": "disp", "roughness": "rough", "normal": "nor_gl"] [target]!
+        return folder.appendingPathComponent("\(name.asset)_\(suffix)_\(resolution).png")
     }
     /// Add only absent roles. Previously recorded pixels and their reviews stay
     /// authoritative; a download never replaces changed or competing originals.
@@ -422,19 +514,26 @@ enum NativeMaterialDatasetService {
             for record in authorized {
                 var metadata = record.sample["map_metadata"] as? [String: Object] ?? [:]
                 guard let input = metadata["input"]?["source"] as? Object, let path = input["path"] as? String,
-                      let (asset, _, resolution) = polyHavenName(URL(fileURLWithPath: path)),
+                      let name = recoveryProviderName(URL(fileURLWithPath: path)),
                       let dimensions = record.sample["source_pixel_dimensions"] as? [Int], dimensions.count == 2 else { continue }
                 let folder = URL(fileURLWithPath: path).deletingLastPathComponent()
-                authorizedFolders[canonical(folder), default: []].insert(asset)
+                authorizedFolders[canonical(folder), default: []].insert(identifier(name.asset))
                 var additions: [String: Object] = [:]
+                let siblings = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
                 for target in ["height", "roughness", "normal"] where metadata[target] == nil {
-                    let suffix = ["height": "disp", "roughness": "rough", "normal": "nor_gl"][target]!
-                    let url = folder.appendingPathComponent("\(asset)_\(suffix)_\(resolution).png")
-                    guard var source = try? sourceSummary(url), [source["width"] as? Int ?? 0, source["height"] as? Int ?? 0] == dimensions,
-                          target != "height" || source["sample_bits"] as? Int == 16,
-                          target != "normal" || [3, 4].contains(source["channels"] as? Int ?? 0) else { continue }
-                    source["path"] = canonical(url).path
-                    additions[target] = source
+                    let preferred = providerDestination(folder: folder, name: name, resolution: name.resolution, target: target)
+                    let candidates = [preferred] + siblings.sorted { $0.path < $1.path }.filter { url in
+                        guard let candidate = recoveryProviderName(url) else { return false }
+                        return providerAssetKey(candidate) == providerAssetKey(name) && candidate.resolution == name.resolution && providerRole(candidate.suffix) == target
+                    }
+                    for url in candidates {
+                        guard var source = try? sourceSummary(url), [source["width"] as? Int ?? 0, source["height"] as? Int ?? 0] == dimensions,
+                              target != "height" || source["sample_bits"] as? Int == 16,
+                              target != "normal" || [3, 4].contains(source["channels"] as? Int ?? 0) else { continue }
+                        source["path"] = canonical(url).path
+                        source["suffix"] = recoveryProviderName(url)?.suffix
+                        additions[target] = source; break
+                    }
                 }
                 guard !additions.isEmpty else { continue }
                 guard sources(record.sample).allSatisfy({ source in
@@ -443,8 +542,8 @@ enum NativeMaterialDatasetService {
                 }) else { continue }
                 var sample = record.sample, maps = sample["maps"] as? [String: String] ?? [:]
                 for (role, summary) in additions {
-                    var source = summary; source["suffix"] = ["height": "disp", "roughness": "rough", "normal": "nor_gl"][role]
-                    source["resolution_label"] = resolution; source["source_family_id"] = asset; source["asset_family_id"] = asset
+                    var source = summary
+                    source["resolution_label"] = name.resolution; source["source_family_id"] = identifier(name.asset); source["asset_family_id"] = identifier(name.asset)
                     let path = source["path"] as! String; maps[role] = path
                     metadata[role] = ["source": source, "storage": "source_reference", "filename": path, "sample_sha256": source["file_sha256"]!, "sample_bits": source["sample_bits"]!, "channels": source["channels"]!, "encoding": "linear_data", "transforms": [Object](), "exact_source_crop": true]
                 }
@@ -466,7 +565,7 @@ enum NativeMaterialDatasetService {
             // Imported folders remain authoritative outside root/sources too.
             // Register only new sets for assets already authorized by the
             // original selection; existing records retain their exact evidence.
-            if arguments.first == "prepare-size" {
+            if context.trainingSize != nil {
                 var records = try readRecords(root, index: index)
                 var registered = Set(records.compactMap { $0.sample["material_id"] as? String })
                 let removed = Set((index["removed_materials"] as? [Object] ?? []).compactMap { $0["material_id"] as? String })
@@ -497,19 +596,29 @@ enum NativeMaterialDatasetService {
             return revised
         }
     }
-    private static func recoveryResponse(_ text: String?, attempts: [RecoveryAttempt]) throws -> String? {
+    private static func recoverySummary(_ attempts: [RecoveryAttempt], trainingSize: Int?) -> Object {
+        var summary: Object = ["completed": attempts.count, "total": attempts.count, "training_size": trainingSize as Any? ?? NSNull(),
+                               "recovered": 0, "not_published": 0, "failed": 0, "already_present": 0]
+        for attempt in attempts {
+            let key: String
+            switch attempt.result { case .recovered: key = "recovered"; case .notPublished: key = "not_published"; case .failed: key = "failed"; case .alreadyPresent: key = "already_present" }
+            summary[key] = (summary[key] as! Int) + 1
+        }
+        return summary
+    }
+    private static func recoveryResponse(_ text: String?, attempts: [RecoveryAttempt], trainingSize: Int?) throws -> String? {
         guard let text, !attempts.isEmpty, var result = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? Object else { return text }
         func annotate(_ value: Any) -> Any {
             if let array = value as? [Any] { return array.map(annotate) }
             guard var object = value as? Object else { return value }
             if object["code"] as? String == "missing_target", let target = object["target"] as? String,
-               let path = object["source_path"] as? String, let (asset, _, resolution) = polyHavenName(URL(fileURLWithPath: path)),
-               let attempt = attempts.first(where: { $0.request.asset == asset && $0.request.resolution == resolution && $0.request.target == target && canonical($0.request.destination.deletingLastPathComponent()).path == canonical(URL(fileURLWithPath: path).deletingLastPathComponent()).path }) {
+               let path = object["source_path"] as? String, let name = recoveryProviderName(URL(fileURLWithPath: path)),
+               let attempt = attempts.first(where: { $0.request.provider == name.provider && $0.request.asset == name.asset && $0.request.resolution == name.resolution && $0.request.target == target && canonical($0.request.destination.deletingLastPathComponent()).path == canonical(URL(fileURLWithPath: path).deletingLastPathComponent()).path }) {
                 let label = target == "height" ? "displacement" : target
                 switch attempt.result {
                 case .notPublished:
                     object["code"] = "not_published"
-                    object["reason"] = "Poly Haven does not publish a \(label) map for this source set. Import continues with its available maps; only \(label) training skips this set."
+                    object["reason"] = "\(name.provider == .ambientCG ? "ambientCG" : "Poly Haven") does not publish a \(label) map for this source set. Import continues with its available maps; only \(label) training skips this set."
                 case .failed(let reason):
                     object["code"] = "recovery_failed"
                     object["reason"] = "\(label.capitalized) is unavailable: \(reason) Other maps remain usable; recovery will retry on the next scan."
@@ -520,11 +629,27 @@ enum NativeMaterialDatasetService {
             return object
         }
         result = annotate(result) as! Object
+        result["source_recovery"] = recoverySummary(attempts, trainingSize: trainingSize)
+        result["source_recovery_results"] = attempts.map { attempt -> Object in
+            var item: Object = ["provider": attempt.request.provider.rawValue, "asset": attempt.request.asset, "resolution": attempt.request.resolution,
+                               "target": attempt.request.target, "source_path": attempt.request.destination.path]
+            switch attempt.result {
+            case .recovered: item["status"] = "recovered"
+            case .alreadyPresent: item["status"] = "already_present"
+            case .notPublished: item["status"] = "not_published"; item["reason"] = "The provider does not publish this map at the requested tier."
+            case .failed(let reason): item["status"] = "failed"; item["reason"] = reason
+            }
+            return item
+        }
         result["recovered_map_count"] = attempts.filter { if case .recovered = $0.result { return true }; return false }.count
         result["recovered_sources"] = attempts.compactMap { attempt -> Object? in
             guard case .recovered(let proof) = attempt.result else { return nil }
             return ["source_path": proof.destination.path, "download_url": proof.downloadURL.absoluteString, "published_md5": proof.publishedMD5,
-                    "published_bytes": proof.publishedBytes, "sha256": proof.sha256, "crop_rectangle": proof.cropRectangle as Any? ?? NSNull()]
+                    "published_bytes": proof.publishedBytes, "sha256": proof.sha256, "crop_rectangle": proof.cropRectangle as Any? ?? NSNull(),
+                    "provider": proof.provider.rawValue, "archive_sha256": proof.archiveSHA256 as Any? ?? NSNull(), "archive_sha1": proof.archiveSHA1 as Any? ?? NSNull(),
+                    "archive_member": proof.archiveMember as Any? ?? NSNull(), "archive_member_crc32": proof.archiveMemberCRC32 as Any? ?? NSNull(), "archive_member_bytes": proof.archiveMemberBytes as Any? ?? NSNull(),
+                    "published_bytes_kind": proof.provider == .ambientCG ? "archive" : "image",
+                    "provenance_sidecar_path": proof.provenanceSidecarURL?.path as Any? ?? NSNull(), "provenance_warning": proof.provenanceWarning as Any? ?? NSNull()]
         }
         return try jsonString(result)
     }
@@ -1126,8 +1251,13 @@ enum NativeMaterialDatasetService {
         var result = try NativePNG.sourceMetadata(data)
         let after = try fileState(path)
         guard NSDictionary(dictionary: before).isEqual(to: after) else { throw StudioError("Original map changed while inspecting: \(path.path)") }
-        result["file_sha256"] = hash(data)
+        let sha256 = hash(data)
+        result["file_sha256"] = sha256
         result["filename"] = path.lastPathComponent; result["file_bytes"] = after["size"]; result["source_stat"] = after
+        if let evidence = NativeMaterialSourceRecovery.sourceProvenance(for: path, sha256: sha256, bytes: data.count,
+                width: result["width"] as? Int ?? 0, height: result["height"] as? Int ?? 0) {
+            result.merge(evidence) { _, new in new }
+        }
         return result
     }
     private static func publishedMD5(_ url: URL) throws -> String {
@@ -1547,7 +1677,11 @@ enum NativeMaterialDatasetService {
         let (materials, _) = try discover(root.appendingPathComponent("sources"), dataset: root, records: records)
         let removed = Set((index["removed_materials"] as? [Object] ?? []).compactMap { $0["material_id"] as? String })
         let currentIDs = Set(records.compactMap { $0.sample["material_id"] as? String })
-        let fresh = materials.filter { !removed.contains($0["material_id"] as? String ?? "") && !currentIDs.contains($0["material_id"] as? String ?? "") }
+        let removedFamilies = removedSourceFamilies(index: index, records: records)
+        let fresh = materials.filter {
+            !removed.contains($0["material_id"] as? String ?? "") && !currentIDs.contains($0["material_id"] as? String ?? "")
+                && !removedFamilies.excludes(family: $0["source_family_id"] as? String ?? "", subject: $0["source_directory"] as? String ?? "")
+        }
         guard try sourceInventoryDigest(root) == inventoryBefore else { throw StudioError("Original source inventory changed while it was inspected. Reload the dataset.") }
         if !fresh.isEmpty { _ = try register(root, index: index, records: records, materials: fresh, options: [:]) }
         var refreshed = try object(root.appendingPathComponent("dataset.json"))

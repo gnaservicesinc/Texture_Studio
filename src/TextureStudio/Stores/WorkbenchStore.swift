@@ -25,6 +25,7 @@ final class WorkbenchStore {
     var pendingSourceFolder: URL?
     var folderImport: WorkbenchFolderImport?
     var folderImportSize = 1024
+    var folderImportScannedSize: Int?
     var isScanningFolder = false
     var folderImportURL: URL?
     @ObservationIgnored var folderImportPlanURL: URL?
@@ -74,6 +75,8 @@ final class WorkbenchStore {
     @ObservationIgnored private var trainingEventBuffer = ""
     private(set) var isPreparingDataset = false
     var datasetPreparationSummary = ""
+    var sourceRecoverySummary = ""
+    var sourceRecoveryResults: [WorkbenchSourceRecoveryResult] = []
     private(set) var trainingPreferenceNotice: String?
     var lastOutputURL: URL? { didSet { saveUserSettings() } }
     var lastLogURL: URL? { didSet { saveUserSettings() } }
@@ -164,6 +167,39 @@ final class WorkbenchStore {
               let width = first.width, let height = first.height else { return "Map dimensions not verified" }
         let matching = dataset.samples.allSatisfy { !$0.maps.isEmpty && $0.maps.values.allSatisfy { $0.width == width && $0.height == height } }
         return matching ? "\(width.formatted()) × \(height.formatted()) native maps" : "Mixed native map sizes"
+    }
+
+    var datasetSourceFolderCount: Int {
+        Set(dataset?.materials.compactMap { sourceFolder(for: $0) } ?? []).count
+    }
+    var datasetInventorySummary: String {
+        guard let dataset else { return "No dataset selected" }
+        let folders = datasetSourceFolderCount
+        let sets = dataset.preparation == nil ? dataset.sourceSetCount ?? dataset.materials.count : dataset.materials.count
+        return "\(folders) material \(folders == 1 ? "folder" : "folders") · \(sets) resolution \(sets == 1 ? "set" : "sets")"
+    }
+    var trainingScopeSummary: String {
+        training.useSelectedMaterialOnly ? selectedMaterialName.map { "Selected source folder: \($0) · includes all resolution tiers" }
+            ?? "Select a source folder in Dataset." : "Training scope: all \(datasetSourceFolderCount) material folders"
+    }
+    var trainingCurrentCropSummary: String {
+        guard let dataset else { return "No training crops registered" }
+        let scoped = training.useSelectedMaterialOnly ? trainingFolderSamples : samples
+        let count: Int
+        if !training.useSelectedMaterialOnly, let plan = (dataset.resolutionPlans?[String(training.size)] ?? dataset.trainingPlans)?[training.target], plan.size == training.size {
+            count = plan.trainCount
+        } else { count = scoped.filter { $0.split == "train" && sampleIsTrainable($0) }.count }
+        let stage = dataset.preparation == nil ? "Currently available" : "Prepared"
+        return "\(stage): \(count) \(training.target) training \(count == 1 ? "crop" : "crops") at \(training.size) × \(training.size)"
+    }
+
+    private func sourceFolder(for material: WorkbenchMaterial) -> String? {
+        if let path = material.sourceDirectory ?? material.subjectId {
+            return URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+        }
+        guard let input = material.samples.first?.maps["input"] else { return nil }
+        return URL(fileURLWithPath: input.originalSourcePath ?? input.path).deletingLastPathComponent()
+            .standardizedFileURL.resolvingSymlinksInPath().path
     }
     var workspaceURL: URL { URL(fileURLWithPath: workspacePath).standardizedFileURL }
     var dependencyArguments: [String] { ["--model-directory", modelDirectory] }
@@ -373,12 +409,13 @@ final class WorkbenchStore {
         }
     }
 
-    func loadDataset(_ url: URL) async throws {
+    func loadDataset(_ url: URL, recoverSources: Bool = true) async throws {
         let result: WorkbenchDataset = try WorkbenchResult.decode(WorkbenchDataset.self,
             output: await worker(["dataset", "--dataset", url.path, "--target", training.target,
-                                  "--default-review-size", String(training.size)]))
+                                  "--default-review-size", String(training.size)] + (recoverSources ? [] : ["--skip-source-recovery"])))
         adoptDataset(result)
         datasetPreparationSummary = ""
+        sourceRecoverySummary = result.sourceRecovery?.summary ?? ""
         saveDatasetLocation(result, requested: url)
     }
 
@@ -395,6 +432,8 @@ final class WorkbenchStore {
     func adoptDataset(_ result: WorkbenchDataset, preferredMaterial: String? = nil) {
         let material = preferredMaterial ?? selectedMaterialId
         dataset = result
+        sourceRecoverySummary = result.sourceRecovery?.summary ?? ""
+        sourceRecoveryResults = result.sourceRecoveryResults ?? []
         if let size = result.trainingSize {
             training.size = size
         }
@@ -447,6 +486,20 @@ final class WorkbenchStore {
         operation("Preparing \(size) × \(size) complete training maps…") {
             _ = try await self.ensureTrainingDataset(options: options, selectedMaterial: selectedMaterial)
             self.activity = self.datasetPreparationSummary
+        }
+    }
+
+    func refreshTrainingTiers() {
+        guard !isBusy, let source = datasetFolderURL else { return }
+        let size = training.size, target = training.target
+        operation("Refreshing balanced source tiers…") {
+            let result = try WorkbenchResult.decode(WorkbenchDataset.self, output: await self.worker([
+                "dataset", "--dataset", source.path, "--size", String(size), "--review-size", String(size), "--target", target]))
+            self.adoptDataset(result)
+            self.training.size = size
+            self.sourceRecoverySummary = result.sourceRecovery?.summary ?? "Source tier check completed."
+            self.datasetPreparationSummary = ""
+            self.activity = self.sourceRecoverySummary
         }
     }
 
@@ -736,15 +789,10 @@ final class WorkbenchStore {
     /// which preparation will obtain from the registered provider when absent.
     var trainingFolderSamples: [WorkbenchSample] {
         guard let materials = dataset?.materials, let selected = materials.first(where: { $0.id == selectedMaterialId }) else { return [] }
-        func folder(_ material: WorkbenchMaterial) -> String? {
-            if let path = material.sourceDirectory ?? material.subjectId { return URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path }
-            guard let input = material.samples.first?.maps["input"] else { return nil }
-            return URL(fileURLWithPath: input.originalSourcePath ?? input.path).deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath().path
-        }
-        guard let selectedFolder = folder(selected) else { return selected.samples }
+        guard let selectedFolder = sourceFolder(for: selected) else { return selected.samples }
         let family = selected.samples.first?.sourceFamilyId
         return materials.filter { material in
-            folder(material) == selectedFolder && (family == nil || material.samples.first?.sourceFamilyId == nil || material.samples.first?.sourceFamilyId == family)
+            sourceFolder(for: material) == selectedFolder && (family == nil || material.samples.first?.sourceFamilyId == nil || material.samples.first?.sourceFamilyId == family)
         }.flatMap(\.samples)
     }
 
@@ -752,11 +800,20 @@ final class WorkbenchStore {
         guard let input = sample.maps["input"] else { return false }
         let source = URL(fileURLWithPath: input.originalSourcePath ?? input.path)
         let filename = source.lastPathComponent.lowercased()
-        guard filename.range(of: #"_(?:diff|col(?:_.+)?)_(?:1|2|4|8|16)k\.png$"#, options: .regularExpression) != nil,
-              let scale = source.deletingPathExtension().lastPathComponent.split(separator: "_").last.flatMap({ Int($0.dropLast()) }) else { return false }
+        let scale: Int?
+        if filename.range(of: #"_(?:diff|col(?:_.+)?)_(?:1|2|4|8|16)k\.png$"#, options: .regularExpression) != nil {
+            scale = source.deletingPathExtension().lastPathComponent.split(separator: "_").last.flatMap { Int($0.dropLast()) }
+        } else if filename.range(of: #"^[a-z][a-z0-9]*_[1248]k-png_color\.png$"#, options: .regularExpression) != nil,
+                  let tier = filename.range(of: #"(?<=_)[1248](?=k-png_color\.png$)"#, options: .regularExpression) {
+            scale = Int(filename[tier])
+        } else { return false }
+        guard let scale else { return false }
         let pixels = scale * 1024, tolerance = max(2, Int(ceil(Double(pixels) * 0.02)))
-        return abs((input.originalSourceWidth ?? sample.width) - pixels) <= tolerance &&
-            abs((input.originalSourceHeight ?? sample.height) - pixels) <= tolerance
+        let width = input.originalSourceWidth ?? sample.width, height = input.originalSourceHeight ?? sample.height
+        // Published source fields can be rectangular. A verified nominal axis
+        // identifies their tier; preparation checks the final crop's short edge.
+        return width > 0 && height > 0 &&
+            (abs(width - pixels) <= tolerance || abs(height - pixels) <= tolerance)
     }
 
     func startTraining() {
@@ -979,7 +1036,14 @@ final class WorkbenchStore {
                 if trainingProgress == nil { trainingProgress = WorkbenchTrainingProgress() }
                 trainingProgress?.consume(event)
             }
-            if kind == "source_recovery_progress" {
+            if ["source_recovery_started", "source_recovery_progress", "source_recovery_completed"].contains(kind) {
+                if let completed = event["completed"] as? Int, let total = event["total"] as? Int {
+                    sourceRecoverySummary = "Tier setup: \(completed) / \(total) maps checked"
+                    if kind == "source_recovery_completed" {
+                        sourceRecoverySummary += " · \(event["recovered"] as? Int ?? 0) fetched · \(event["not_published"] as? Int ?? 0) unavailable · \(event["failed"] as? Int ?? 0) failed"
+                    }
+                    if isBusy, !isStopping { activity = sourceRecoverySummary }
+                }
                 if isBusy, !isStopping, let message = event["message"] as? String { activity = message }
                 continue
             }
@@ -1195,7 +1259,7 @@ final class WorkbenchStore {
         try Task.checkCancellation()
         guard !WorkbenchLifecycle.shared.isTerminating else { throw CancellationError() }
         let trainingWorker = ["train", "refine"].contains(args.first ?? "")
-        let progressWorker = trainingWorker || ["prepare-size", "scan-folder", "import-folder"].contains(args.first ?? "")
+        let progressWorker = trainingWorker || ["dataset", "prepare-size", "scan-folder", "import-folder", "edit-dataset"].contains(args.first ?? "")
         if progressWorker { trainingEventBuffer = "" }
         if trainingWorker { hasTrainingStarted = false }
         defer { if trainingWorker { hasTrainingStarted = false } }

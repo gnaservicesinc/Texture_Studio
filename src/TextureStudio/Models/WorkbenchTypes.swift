@@ -96,6 +96,8 @@ struct WorkbenchDataset: Decodable, Sendable {
     var resolutionPlans: [String: [String: WorkbenchDatasetPlan]]? = nil
     var validation: WorkbenchValidationSettings? = nil
     var subjects: [WorkbenchSubject]? = nil
+    var sourceRecovery: WorkbenchSourceRecovery? = nil
+    var sourceRecoveryResults: [WorkbenchSourceRecoveryResult]? = nil
     var samples: [WorkbenchSample] { materials.flatMap(\.samples) }
     func readyForTraining(size: Int, material: String?, target: String? = nil) -> Bool {
         guard hasNativeSize(size), let policy = automaticValidation,
@@ -212,6 +214,32 @@ struct WorkbenchFolderImport: Decodable, Sendable {
     let warnings: [String]
     let plans: [String: [String: WorkbenchDatasetPlan]]
     var recoveredMapCount: Int? = nil
+    var sourceRecovery: WorkbenchSourceRecovery? = nil
+    var sourceRecoveryResults: [WorkbenchSourceRecoveryResult]? = nil
+}
+
+struct WorkbenchSourceRecovery: Decodable, Sendable {
+    let completed: Int
+    let total: Int
+    let trainingSize: Int
+    let recovered: Int
+    let notPublished: Int
+    let failed: Int
+    let alreadyPresent: Int
+
+    var summary: String {
+        "Tier setup: \(completed) / \(total) maps checked · \(recovered) fetched · \(notPublished) unavailable · \(failed) failed"
+    }
+}
+
+struct WorkbenchSourceRecoveryResult: Decodable, Identifiable, Sendable {
+    let asset: String
+    let resolution: String
+    let target: String
+    let sourcePath: String
+    let status: String
+    let reason: String?
+    var id: String { [asset, resolution, target, sourcePath].joined(separator: "|") }
 }
 
 struct WorkbenchDatasetLocation: Codable, Identifiable, Equatable, Sendable {

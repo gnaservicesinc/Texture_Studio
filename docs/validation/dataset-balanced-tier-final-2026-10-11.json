@@ -1,0 +1,3134 @@
+{
+  "dataset_path" : "\/Users\/andrewsmith\/Documents\/Texture Studio Datasets\/PolyMat",
+  "folders_with_required_tiers" : 117,
+  "height_training_crops" : 361,
+  "original_source_bytes_unchanged" : true,
+  "original_source_sets" : 359,
+  "registered_source_sets" : 361,
+  "reviews_unchanged" : true,
+  "source_folders" : 117,
+  "source_recovery" : {
+    "already_present" : 0,
+    "completed" : 2,
+    "failed" : 0,
+    "not_published" : 0,
+    "recovered" : 2,
+    "total" : 2,
+    "training_size" : 1024
+  },
+  "source_recovery_results" : [
+    {
+      "asset" : "leather_red_02",
+      "provider" : "polyHaven",
+      "resolution" : "1k",
+      "source_path" : "\/opt\/ipde\/sources_mats\/Leather Red 02\/leather_red_02_col_1_1k.png",
+      "status" : "recovered",
+      "target" : "input"
+    },
+    {
+      "asset" : "leather_red_03",
+      "provider" : "polyHaven",
+      "resolution" : "1k",
+      "source_path" : "\/opt\/ipde\/sources_mats\/Leather Red 03\/leather_red_03_col_1_1k.png",
+      "status" : "recovered",
+      "target" : "input"
+    }
+  ],
+  "subjects" : [
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Anti Skid Tiles",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Asphalt 07",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Bark Brown 02",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 4,
+      "registered_resolution_sets" : 4,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k",
+        "8k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1042
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ],
+        [
+          8007,
+          8150
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Crepe Satin",
+      "usable_resolution_sets" : 4
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Denim Fabric 02",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 4,
+      "registered_resolution_sets" : 4,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k",
+        "8k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ],
+        [
+          8192,
+          8192
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Farm Furrows",
+      "usable_resolution_sets" : 4
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Floor Tiles 06",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Flour",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Granite Tile 04",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 4,
+      "registered_resolution_sets" : 4,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k",
+        "8k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ],
+        [
+          8192,
+          8192
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Gravel",
+      "usable_resolution_sets" : 4
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 4,
+      "registered_resolution_sets" : 4,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k",
+        "8k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ],
+        [
+          8192,
+          8192
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Gravel Floor 03",
+      "usable_resolution_sets" : 4
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Leaf Scattered Gravel",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Leather Red 02",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Leather Red 03",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Leaves Forest Ground",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 4,
+      "registered_resolution_sets" : 4,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k",
+        "8k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ],
+        [
+          8192,
+          8192
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Macro Flour",
+      "usable_resolution_sets" : 4
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Patterned Paving 02",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 4,
+      "registered_resolution_sets" : 4,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k",
+        "8k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ],
+        [
+          8192,
+          8192
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Patterned Terracotta Tiling",
+      "usable_resolution_sets" : 4
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 4,
+      "registered_resolution_sets" : 4,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k",
+        "8k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ],
+        [
+          8192,
+          8192
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Red Mud Stones",
+      "usable_resolution_sets" : 4
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 4,
+      "registered_resolution_sets" : 4,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k",
+        "8k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ],
+        [
+          8192,
+          8192
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Rock Face 04",
+      "usable_resolution_sets" : 4
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Rusty Metal",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Square Pavers",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 4,
+      "registered_resolution_sets" : 4,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k",
+        "8k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ],
+        [
+          8192,
+          8192
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Stone Tile Wall",
+      "usable_resolution_sets" : 4
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 4,
+      "registered_resolution_sets" : 4,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k",
+        "8k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ],
+        [
+          8192,
+          8192
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Tiger Rock",
+      "usable_resolution_sets" : 4
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/Trident Maple Bark",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/White Rough Plaster",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/asphalt_snow",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/bamboo_wall",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/bamboo_wall_02",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/bamboo_wall_03",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/baseball_playground",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/blue_metal_plate",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/box_profile_metal_sheet",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/brick_wall_005",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/brick_wall_006",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/brick_wall_10",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/brick_wall_11",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/broken_brick_wall",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/brown_floor_tiles",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/clay_plaster",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/coated_pine",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/coated_pine_02",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/concrete_layers",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/concrete_pavement_02",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/concrete_slab_wall",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1025
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/cotton_jersey",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/damaged_concrete_floor",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/dark_paneled_wood",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/dirt",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/dry_decay_leaves",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/dry_river_pebbles",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/dry_riverbed_rock",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/excavated_soil_wall",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/farm_soil",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/forest_floor",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/forest_ground_05",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/forest_ground_06",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/forest_leaves_03",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/green_metal_rust",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/grey_tiles",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/hinoki_planks",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/interior_tiles",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/japanese_cedar_planks",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/knotted_pine_bark",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/long_white_tiles",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/marble_cliff_03",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/marble_rock_01",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/marble_tiles",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/metal_plate",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/mud_forest",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/multicolored_pebble_floor",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/old_linoleum_flooring_01",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/old_wooden_floor_02",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/oriented_strand_board",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/painted_worn_brick",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/pine_bark",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/plastered_wall",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/plastered_wall_05",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/playground_sand",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/raw_plank_wall",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/red_brick",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/red_brick_03",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/rocks_ground_01",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/rough_pine_door",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/rusty_metal_03",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/rusty_metal_grid",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/rusty_metal_shutter",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/seaworn_sandstone_brick",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/seaworn_stone_tiles",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/snow013",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/snow014",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/snow015",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/snow_01",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/snow_02",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/snow_floor",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/sparse_grass",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/square_tiles_03",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/stacked_brick_wall",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/stacked_stone_wall",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/stained_pine",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/terracotta_floor_tiles",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/weathered_peeling_timber",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/weathered_plank_siding",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/white_stucco",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/white_stucco_02",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/whitewashed_brick",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/wicker013",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/winter_leaves",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/wood_chip_path",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/wood_inlaid_stone_wall",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/wood_planks",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/wood_shutter",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/wood_table",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/wooden_barrel",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/wooden_floor_01",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1024
+        ],
+        [
+          2048,
+          2048
+        ],
+        [
+          4096,
+          4096
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/wooden_floor_02",
+      "usable_resolution_sets" : 3
+    },
+    {
+      "has_required_tiers" : true,
+      "height_resolution_sets" : 3,
+      "registered_resolution_sets" : 3,
+      "resolution_labels" : [
+        "1k",
+        "2k",
+        "4k"
+      ],
+      "source_dimensions" : [
+        [
+          1024,
+          1269
+        ],
+        [
+          2048,
+          2538
+        ],
+        [
+          4096,
+          5076
+        ]
+      ],
+      "source_folder" : "\/opt\/ipde\/sources_mats\/wool_boucle",
+      "usable_resolution_sets" : 3
+    }
+  ],
+  "training_size" : 1024,
+  "training_started" : false,
+  "wall_seconds" : 106.09532999992371
+}
