@@ -8,6 +8,9 @@ final class NativeMaterialCropAugmentation {
     let target: String
     private var random: NativeMaterialRandom
     private(set) var history: [[String: Any]] = []
+    private var activeEpoch: Int?
+    private var decisions: [String: (Int, Bool, Bool, Bool)] = [:]
+    private var targets: [String: (URL, String, String)] = [:]
 
     init(directory: URL, target: String, seed: UInt64) {
         self.directory = directory; self.target = target
@@ -15,14 +18,20 @@ final class NativeMaterialCropAugmentation {
     }
 
     func refresh(_ samples: [Sample], epoch: Int, flip: Bool, spin: Bool,
-                 depthProCache: NativeDepthProInputCache?, check: () throws -> Void) throws -> [Sample] {
+                 depthProCache: NativeDepthProInputCache?, check: () throws -> Void,
+                 onProgress: (_ completed: Int, _ total: Int, _ sampleID: String) throws -> Void = { _, _, _ in },
+                 onOperation: (_ operation: String, _ sampleID: String) throws -> Void = { _, _ in }) throws -> [Sample] {
         try check()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        var decisions: [String: (Int, Bool, Bool, Bool)] = [:]
-        var targets: [String: (URL, String, String)] = [:]
+        if activeEpoch != epoch {
+            activeEpoch = epoch
+            decisions.removeAll(keepingCapacity: true)
+            targets.removeAll(keepingCapacity: true)
+        }
         var refreshed: [Sample] = []
         for sample in samples {
             try check()
+            try onOperation("Reading cached crop", sample.id)
             // All color variants share target geometry and orientation.
             let geometry = String(sample.id.split(separator: "|", maxSplits: 1)[0])
             if decisions[geometry] == nil {
@@ -55,63 +64,112 @@ final class NativeMaterialCropAugmentation {
                     throw StudioError("Center spinning needs both original diffuse and target source bindings.")
                 }
             }
-            var input: NativePNG
+            var input: NativePNG?
+            var beforeBytes: Data?
+            var beforeSHA = sample.inputSHA256
             var convention = sample.targetConvention
             if degrees > 0, let source = sample.augmentationSourceInputURL,
                let sha = sample.augmentationSourceInputSHA256 {
+                try onOperation("Spinning center crop", sample.id)
                 input = try Self.spunCenter(source: source, expectedSHA256: sha, size: sample.width, degrees: degrees)
-            } else { input = try read(sample.inputURL, expected: sample.inputSHA256) }
-            let beforeFlip = try input.encoded(), beforeSHA = NativeMaterialTrainer.checksum(beforeFlip)
+            } else {
+                // An unchanged crop keeps its exact compressed bytes and cache
+                // identity. Decode only when a pixel permutation is requested.
+                beforeBytes = try readBytes(sample.inputURL, expected: sample.inputSHA256)
+            }
             if let cache = depthProCache, flip {
                 // Predict a newly spun field before orientation-only permutations.
-                let beforeURL = directory.appendingPathComponent(stem + "-before-flip.png")
-                try beforeFlip.write(to: beforeURL, options: .atomic)
+                let beforeURL: URL
+                if let input {
+                    beforeBytes = try input.encoded()
+                    beforeSHA = NativeMaterialTrainer.checksum(beforeBytes!)
+                    beforeURL = directory.appendingPathComponent(stem + "-before-flip.png")
+                    try beforeBytes!.write(to: beforeURL, options: .atomic)
+                } else { beforeURL = sample.inputURL }
+                defer { if beforeURL != sample.inputURL { try? FileManager.default.removeItem(at: beforeURL) } }
+                try onOperation("Caching DepthPro input for crop", sample.id)
                 _ = try cache.input(imageURL: beforeURL, expectedSHA256: beforeSHA, width: sample.width,
                     height: sample.height, checkCancellation: check)
-                try FileManager.default.removeItem(at: beforeURL)
             }
-            input = try Self.flipped(input, horizontal: horizontal, vertical: vertical)
-            let inputBytes = try input.encoded(), inputSHA = NativeMaterialTrainer.checksum(inputBytes)
+            try check()
+            try onOperation("Applying paired crop transform", sample.id)
+            let inputBytes: Data
+            if horizontal || vertical {
+                let decoded = try input ?? NativePNG.decode(beforeBytes!)
+                inputBytes = try Self.flipped(decoded, horizontal: horizontal, vertical: vertical).encoded()
+            } else { inputBytes = try beforeBytes ?? input!.encoded() }
+            let inputSHA = NativeMaterialTrainer.checksum(inputBytes)
             if let cache = depthProCache, flip {
                 _ = try cache.remapFlips(fromSourceSHA256: beforeSHA, toSourceSHA256: inputSHA,
                     width: sample.width, height: sample.height, horizontal: horizontal, vertical: vertical,
                     checkCancellation: check)
             }
             if targets[geometry] == nil {
-                var output: NativePNG
+                var output: NativePNG?
+                var originalBytes: Data?
                 if degrees > 0, let source = sample.augmentationSourceTargetURL,
                    let sha = sample.augmentationSourceTargetSHA256 {
                     output = try Self.spunCenter(source: source, expectedSHA256: sha, size: sample.width,
                         degrees: degrees, normal: target == "normal", normalConvention: sample.augmentationSourceTargetConvention ?? sample.targetConvention)
                     if target == "normal" { convention = "opengl" }
-                } else { output = try read(sample.targetURL, expected: sample.targetSHA256) }
-                output = try Self.flipped(output, horizontal: horizontal, vertical: vertical, normal: target == "normal")
-                let bytes = try output.encoded()
-                try bytes.write(to: targetURL, options: .atomic)
+                } else { originalBytes = try readBytes(sample.targetURL, expected: sample.targetSHA256) }
+                let bytes: Data
+                if horizontal || vertical {
+                    let decoded = try output ?? NativePNG.decode(originalBytes!)
+                    bytes = try Self.flipped(decoded, horizontal: horizontal, vertical: vertical, normal: target == "normal").encoded()
+                } else { bytes = try originalBytes ?? output!.encoded() }
+                try check()
+                try onOperation("Saving cached crop", sample.id)
+                if targetURL != sample.targetURL || bytes != originalBytes { try bytes.write(to: targetURL, options: .atomic) }
                 targets[geometry] = (targetURL, NativeMaterialTrainer.checksum(bytes), convention)
             }
             try check()
-            try inputBytes.write(to: inputURL, options: .atomic)
+            try onOperation("Saving cached crop", sample.id)
+            if inputURL != sample.inputURL || degrees > 0 || inputBytes != beforeBytes { try inputBytes.write(to: inputURL, options: .atomic) }
             let paired = targets[geometry]!
             var changed = sample
             changed.inputURL = inputURL; changed.inputSHA256 = inputSHA
             changed.targetURL = paired.0; changed.targetSHA256 = paired.1; changed.targetConvention = paired.2
             refreshed.append(changed)
-            history.append(["sample_id": sample.id, "epoch": epoch, "source_center_spin_degrees": degrees,
+            let receipt: [String: Any] = ["sample_id": sample.id, "epoch": epoch, "source_center_spin_degrees": degrees,
                 "horizontal_flip": horizontal, "vertical_flip": vertical,
                 "input_sha256": inputSHA, "target_sha256": paired.1,
                 "center_spin_skipped_insufficient_support": insufficientSupport,
-                "progressive_cached_flip": degrees == 0, "original_sources_modified": false])
+                "progressive_cached_flip": degrees == 0, "original_sources_modified": false]
+            try appendHistory(receipt)
+            history.append(receipt)
+            try onProgress(refreshed.count, samples.count, sample.id)
         }
-        try JSONSerialization.data(withJSONObject: ["schema": "texture-studio-progressive-crops-v1", "history": history],
-            options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("crop-history.json"), options: .atomic)
         return refreshed
     }
 
-    private func read(_ url: URL, expected: String) throws -> NativePNG {
+    /// Append bounded records during an update; serialize the full history only
+    /// at checkpoint/return boundaries, rather than once per requested crop.
+    private func appendHistory(_ receipt: [String: Any]) throws {
+        let url = directory.appendingPathComponent("crop-history.jsonl")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+                throw StudioError("Crop history could not be created.")
+            }
+        }
+        let file = try FileHandle(forWritingTo: url)
+        defer { try? file.close() }
+        try file.seekToEnd()
+        var record = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+        record.append(10)
+        try file.write(contentsOf: record)
+    }
+
+    func saveHistory() throws {
+        guard !history.isEmpty else { return }
+        try JSONSerialization.data(withJSONObject: ["schema": "texture-studio-progressive-crops-v1", "history": history],
+            options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("crop-history.json"), options: .atomic)
+    }
+
+    private func readBytes(_ url: URL, expected: String) throws -> Data {
         let bytes = try Data(contentsOf: url)
         guard NativeMaterialTrainer.checksum(bytes) == expected else { throw StudioError("A crop changed before augmentation.") }
-        return try NativePNG.decode(bytes)
+        return bytes
     }
 
     /// Integer pixel permutations preserve every scalar/color code exactly.

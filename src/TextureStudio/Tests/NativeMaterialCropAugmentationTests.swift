@@ -3,6 +3,79 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeMaterialCropAugmentationTests: XCTestCase {
+    func testUnchangedCropCopiesExactBytesAndReusesOriginalDepthProIdentity() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let input = root.appendingPathComponent("input.png"), target = root.appendingPathComponent("height.png")
+        let original = png(width: 4, height: 4, channels: 3, codes: (0..<16).flatMap { [$0 * 1000, $0 * 1000, $0 * 1000] })
+        let diffuse = NativePNG(header: original.header, pixels: original.pixels,
+            colorChunks: [("tEXt", Data("note\0keep original compressed crop".utf8))])
+        let inputBytes = try diffuse.encoded()
+        let targetBytes = try png(width: 4, height: 4, channels: 1, codes: (0..<16).map { $0 * 1000 }).encoded()
+        try inputBytes.write(to: input); try targetBytes.write(to: target)
+        let sample = Sample(id: "paired", split: "train", width: 4, height: 4,
+            inputURL: input, targetURL: target, inputSHA256: NativeMaterialTrainer.checksum(inputBytes),
+            targetSHA256: NativeMaterialTrainer.checksum(targetBytes), inputEncoding: "srgb", targetConvention: "opengl")
+        let seed = try XCTUnwrap((UInt64(0)..<100).first { seed in
+            var random = NativeMaterialRandom(seed: seed ^ 0x63726f70732d7632)
+            return random.next() % 4 == 0
+        })
+        var predictions = 0
+        let cache = NativeDepthProInputCache(modelSHA256: String(repeating: "a", count: 64), directory: root.appendingPathComponent("depth")) { _ in
+            predictions += 1
+            return .init(width: 4, height: 4, values: (1...16).map { Float($0) }, outputName: "depthMeters", interpretation: "Camera depth in meters")
+        }
+        _ = try cache.input(imageURL: input, expectedSHA256: sample.inputSHA256, width: 4, height: 4)
+        let augmentation = NativeMaterialCropAugmentation(directory: root.appendingPathComponent("crop-cache"), target: "height", seed: seed)
+        var completed: [Int] = []
+        let refreshed = try augmentation.refresh([sample], epoch: 1, flip: true, spin: false, depthProCache: cache, check: {},
+            onProgress: { done, total, id in
+                completed.append(done); XCTAssertEqual(total, 1); XCTAssertEqual(id, sample.id)
+            })
+        XCTAssertEqual(completed, [1])
+        XCTAssertEqual(try Data(contentsOf: refreshed[0].inputURL), inputBytes)
+        XCTAssertEqual(try Data(contentsOf: refreshed[0].targetURL), targetBytes)
+        XCTAssertEqual(refreshed[0].inputSHA256, sample.inputSHA256)
+        _ = try cache.input(imageURL: refreshed[0].inputURL, expectedSHA256: refreshed[0].inputSHA256, width: 4, height: 4)
+        XCTAssertEqual(predictions, 1, "Copying unchanged bytes must keep the existing prediction identity")
+    }
+
+    func testOnePairAtATimeKeepsColorVariantsAlignedWithinEachEpoch() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let input = root.appendingPathComponent("input.png"), target = root.appendingPathComponent("height.png")
+        let inputBytes = try png(width: 4, height: 4, channels: 3, codes: (0..<16).flatMap { [$0 * 1000, $0 * 1000, $0 * 1000] }).encoded()
+        let targetBytes = try png(width: 4, height: 4, channels: 1, codes: (0..<16).map { $0 * 1000 }).encoded()
+        try inputBytes.write(to: input); try targetBytes.write(to: target)
+        var samples = ["a", "b"].map { variant in
+            Sample(id: "paired|" + variant, split: "train", width: 4, height: 4,
+                inputURL: input, targetURL: target, inputSHA256: NativeMaterialTrainer.checksum(inputBytes),
+                targetSHA256: NativeMaterialTrainer.checksum(targetBytes), inputEncoding: "srgb", targetConvention: "opengl")
+        }
+        let augmentation = NativeMaterialCropAugmentation(directory: root.appendingPathComponent("crop-cache"), target: "height", seed: 17)
+        for epoch in 1...3 {
+            for index in samples.indices {
+                samples[index] = try augmentation.refresh([samples[index]], epoch: epoch, flip: true, spin: false, depthProCache: nil, check: {})[0]
+            }
+            XCTAssertEqual(samples[0].targetSHA256, samples[1].targetSHA256)
+            XCTAssertEqual(samples[0].targetURL, samples[1].targetURL)
+            for sample in samples {
+                let rgb = try NativePNG.decode(Data(contentsOf: sample.inputURL))
+                let scalar = try NativePNG.decode(Data(contentsOf: sample.targetURL))
+                XCTAssertEqual(stride(from: 0, to: 48, by: 3).map { codes(rgb)[$0] }, codes(scalar))
+            }
+        }
+        XCTAssertEqual(augmentation.history.count, 6)
+        let journal = try String(contentsOf: augmentation.directory.appendingPathComponent("crop-history.jsonl"), encoding: .utf8)
+        XCTAssertEqual(journal.split(separator: "\n").count, 6)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: augmentation.directory.appendingPathComponent("crop-history.json").path))
+        try augmentation.saveHistory()
+        let saved = try NativeMaterialTransfer.object(augmentation.directory.appendingPathComponent("crop-history.json"))
+        XCTAssertEqual((saved["history"] as? [[String: Any]])?.count, 6)
+        XCTAssertEqual(try Data(contentsOf: input), inputBytes)
+        XCTAssertEqual(try Data(contentsOf: target), targetBytes)
+    }
+
+    private typealias Sample = NativeMaterialDatasetService.TrainingSample
+
     func testIntegerFlipsPreserveCodesAndReflectNormalAxes() throws {
         let image = png(width: 3, height: 2, channels: 1, codes: [1, 2, 65535, 4, 32768, 6])
         let result = try NativeMaterialCropAugmentation.flipped(image, horizontal: true, vertical: true)

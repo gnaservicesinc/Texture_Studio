@@ -2,6 +2,34 @@ import XCTest
 @testable import TextureStudio
 
 final class WorkbenchTrainingProgressTests: XCTestCase {
+    func testOnDemandCropAndDepthProPreparationKeepTheActiveUpdateVisible() {
+        var progress = WorkbenchTrainingProgress()
+        progress.consume(["event": "training_started", "requested_updates": 365, "updates_per_map": 1])
+        progress.consume(["event": "update_started", "completed_updates": 0, "current_update": 1,
+            "sample_id": "stone", "sample_position": 1, "sample_total": 365])
+        progress.consume(["event": "crop_preparation", "operation": "Caching DepthPro input for crop",
+            "completed": 0, "total": 1, "sample_id": "stone", "sample_position": 1, "sample_total": 1,
+            "epoch": 1, "workflow_phase": 3])
+        XCTAssertEqual(progress.state, .training)
+        XCTAssertEqual(progress.phaseIndex, 3)
+        XCTAssertEqual(progress.currentUpdateSummary, "Running step 1 of 365")
+        XCTAssertEqual(progress.operationLabel, "Caching DepthPro input for crop")
+        XCTAssertEqual(progress.operationDetail, "0 / 1 cached crops refreshed")
+        XCTAssertEqual(progress.sampleID, "stone")
+        XCTAssertEqual(progress.sampleSummary, "Training map 1 / 1")
+        progress.consume(["event": "depthpro_preparation", "phase": "training", "workflow_phase": 3,
+            "operation": "Caching DepthPro input for training map", "completed": 0, "total": 1,
+            "sample_id": "stone", "sample_position": 1])
+        XCTAssertEqual(progress.state, .training)
+        XCTAssertEqual(progress.phaseIndex, 3)
+        XCTAssertEqual(progress.currentUpdateSummary, "Running step 1 of 365")
+        XCTAssertEqual(progress.operationLabel, "Caching DepthPro input for training map")
+        progress.consume(["event": "depthpro_preparation", "phase": "validation", "workflow_phase": 4,
+            "completed": 1, "total": 1, "sample_id": "check"])
+        XCTAssertEqual(progress.state, .validation)
+        XCTAssertEqual(progress.phaseIndex, 4)
+    }
+
     @MainActor func testDepthProDownloadShowsByteProgressAndPersistsReadyPathBeforeTrainingStarts() async throws {
         let suite = "depthpro-download-progress-\(UUID())", defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }

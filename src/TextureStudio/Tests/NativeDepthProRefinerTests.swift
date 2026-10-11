@@ -161,6 +161,9 @@ final class NativeDepthProRefinerTests: XCTestCase {
             XCTAssertEqual(trained["sample_evaluations"] as? Int, 2)
             XCTAssertEqual(trained["skipped_sample_count"] as? Int, 0)
             XCTAssertEqual(recorder.events.filter { $0["event"] as? String == "update" }.count, 2)
+            let firstUpdate = try XCTUnwrap(recorder.events.firstIndex { $0["event"] as? String == "update_started" })
+            let firstCrop = try XCTUnwrap(recorder.events.firstIndex { $0["event"] as? String == "crop_preparation" })
+            XCTAssertLessThan(firstUpdate, firstCrop, "DepthPro crop work begins only after its optimizer update is scheduled")
             XCTAssertEqual(counter.value, 1)
             XCTAssertEqual(cache.generatedCount, 1)
             XCTAssertEqual(cache.remappedCount, 2)
@@ -202,6 +205,8 @@ final class NativeDepthProRefinerTests: XCTestCase {
             XCTAssertEqual(training["randomize_crops"] as? String, "epoch")
             XCTAssertEqual(training["random_flip"] as? Bool, true)
             XCTAssertEqual(training["random_spin_centercut"] as? Bool, false)
+            XCTAssertEqual(training["crop_preparation"] as? String, "per-map-on-demand-v1")
+            XCTAssertEqual(training["depthpro_predictor_lifetime"] as? String, "current_run")
             XCTAssertEqual(training["depthpro_generated_inputs"] as? Int, cache.generatedCount)
             XCTAssertEqual(training["depthpro_reused_inputs"] as? Int, cache.reusedCount)
             XCTAssertEqual(training["depthpro_remapped_inputs"] as? Int, cache.remappedCount)
@@ -210,7 +215,8 @@ final class NativeDepthProRefinerTests: XCTestCase {
             for step in 1...2 {
                 let saved = try Self.trainingConfiguration(output.appendingPathComponent(String(format: "checkpoint-step-%08d.safetensors", step)))
                 XCTAssertEqual(saved["depthpro_generated_inputs"] as? Int, 1)
-                XCTAssertEqual(saved["depthpro_reused_inputs"] as? Int, step == 1 ? 2 : 5)
+                XCTAssertEqual(saved["depthpro_reused_inputs"] as? Int, step * 2 - 1,
+                    "Only the requested crop's pre-flip field and active training input access the DepthPro cache")
                 XCTAssertEqual(saved["depthpro_remapped_inputs"] as? Int, step)
             }
             for (url, bytes) in protectedBytes { XCTAssertEqual(try Data(contentsOf: url), bytes, url.path) }
@@ -256,7 +262,8 @@ final class NativeDepthProRefinerTests: XCTestCase {
             for step in 1...2 {
                 let saved = try Self.trainingConfiguration(output.appendingPathComponent(String(format: "checkpoint-step-%08d.safetensors", step)))
                 XCTAssertEqual(saved["depthpro_generated_inputs"] as? Int, step)
-                XCTAssertEqual(saved["depthpro_reused_inputs"] as? Int, step)
+                XCTAssertEqual(saved["depthpro_reused_inputs"] as? Int, 0,
+                    "A spun crop generates its first DepthPro input directly in its active optimizer step")
                 XCTAssertEqual(saved["depthpro_remapped_inputs"] as? Int, 0)
             }
             let checkpoint = URL(fileURLWithPath: try XCTUnwrap(trained["checkpoint_path"] as? String))
@@ -604,7 +611,8 @@ final class NativeDepthProRefinerTests: XCTestCase {
         }
         func record(_ line: String) {
             guard let event = try? NativeMaterialTransfer.object(Data(line.utf8)),
-                  event["event"] as? String == "update_started", let id = event["sample_id"] as? String else { return }
+                  event["event"] as? String == "crop_preparation", event["operation"] as? String == "Cached paired crop",
+                  let id = event["sample_id"] as? String else { return }
             do {
                 let stem = NativeMaterialTrainer.checksum(Data(id.utf8))
                 let geometry = String(id.split(separator: "|", maxSplits: 1)[0])

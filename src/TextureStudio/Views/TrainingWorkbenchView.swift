@@ -226,7 +226,7 @@ struct TrainingModelFamilyField: View {
         }
         .accessibilityIdentifier("training.model-family")
         if store.training.modelFamily == .depthProHeightRefiner {
-            Text("One DepthPro depth channel → one surface-height channel. Diffuse color is used once to cache DepthPro predictions before training. Evaluate the learned relief on held-out materials.")
+            Text("One DepthPro depth channel → one surface-height channel. Each crop gets a cached DepthPro prediction when needed for its update. Evaluate the learned relief on held-out materials.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 TextField("DepthPro Core ML package", text: $store.depthProModelPath)
@@ -263,7 +263,7 @@ struct TrainingCropSelectionFields: View {
             .disabled(!options.cropAugmentationEnabled)
             .accessibilityIdentifier("training.random-spin-centercut")
             .help("Rotate the original source by a random whole degree from 1 to 179, then take its center crop. Each spin starts from the original source; an optional flip follows.")
-        Text("Never uses the deterministic crop selection and pauses both options. A new run or epoch replaces the cached crops; DepthPro predictions are reused for unchanged inputs.")
+        Text("Never uses the deterministic crop selection and pauses both options. Each crop refreshes when its update needs it, once per run or epoch. DepthPro predictions are reused for unchanged inputs.")
             .font(.caption).foregroundStyle(.secondary)
     }
 }

@@ -2,7 +2,7 @@
 
 **DepthPro Height Refiner** is a separate native restoration experiment. It takes one prepared DepthPro depth channel and predicts one material-height channel. The original diffuse photograph generates the DepthPro map beforehand; the refiner receives no RGB channels. This differs from **Compact scalar**, which learns the complete RGB-to-height mapping.
 
-Inference runs DepthPro once for the prepared source field, then the refiner. Training prepares and caches DepthPro predictions, then unloads the large model before optimizing the small network, so it does not run inside every training epoch. The refiner trains all its weights with Apple MPSGraph Float32 and uses the same directly editable optimizer controls as the other compact families.
+Inference runs DepthPro once for the prepared source field, then the refiner. Training prepares each crop pair and its DepthPro input when an update or validation check first needs it. It does not generate predictions for every training crop before the first update. Unchanged fields and orientation-only flips reuse cached predictions; new center spins need a prediction. One predictor remains available during the run to avoid reloading the model for each new field, and is released when the run returns. This trades overlapping model memory for prompt first-update scheduling. The refiner trains all its weights with Apple MPSGraph Float32 and uses the same directly editable optimizer controls as the other compact families.
 
 ## Pairing and numeric preparation
 

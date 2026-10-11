@@ -424,7 +424,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
         try datasetFixture(dataset)
         let model = try trainerModel(), original = model.adapterWeights
         let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
-            "--size", "256", "--updates-per-map", "3", "--max-minutes", "1"])
+            "--size", "256", "--updates-per-map", "3", "--max-minutes", "1", "--randomize-crops", "epoch", "--random-flip"])
         let clock = ManualTrainingClock(), events = Recorder()
         let text = try await Task.detached { try NativeMaterialTrainer.train(options, onEvent: { line in
             events.append(line)
@@ -438,6 +438,8 @@ final class NativeMaterialTrainerTests: XCTestCase {
         XCTAssertEqual(result["training_performed"] as? Bool, false)
         XCTAssertEqual(result["elapsed_training_seconds"] as? Double, 61)
         XCTAssertEqual(events.updates, 0, "An expired baseline must not start another whole-grid training step")
+        XCTAssertFalse(events.events.contains { $0["event"] as? String == "crop_preparation" },
+            "An expired baseline must not prepare any training crops")
         let stopped = try XCTUnwrap(events.events.first { $0["event"] as? String == "training_stopped" })
         XCTAssertEqual(stopped["stopped_reason"] as? String, "time_limit")
         let saved = try NativeSafetensors(contentsOf: output.appendingPathComponent("checkpoint-step-00000000.safetensors"))
@@ -446,6 +448,80 @@ final class NativeMaterialTrainerTests: XCTestCase {
         let recorded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: output.appendingPathComponent("run.json"))) as? [String: Any])
         XCTAssertEqual(recorded["status"] as? String, "stopped")
         XCTAssertEqual(recorded["stopped_reason"] as? String, "time_limit")
+    }
+    func testCropRandomizationPreparesRequestedPairsOncePerSelectedInterval() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("dataset")
+        try datasetFixture(dataset, validationCount: 0, trainingCount: 3)
+        for timing in ["run", "epoch"] {
+            let output = root.appendingPathComponent("lazy-crops-" + timing)
+            let model = try trainerModel(), events = Recorder()
+            let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
+                "--size", "256", "--updates-per-map", "2", "--randomize-crops", timing, "--random-flip"])
+            let text = try await Task.detached {
+                try NativeMaterialTrainer.train(options, onEvent: { events.append($0) }, control: .init(), model: model)
+            }.value
+            let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+            XCTAssertEqual(result["status"] as? String, "completed")
+            XCTAssertEqual(result["completed_updates"] as? Int, 6)
+            let recorded = events.events
+            let starts = recorded.enumerated().filter { $0.element["event"] as? String == "crop_preparation" && $0.element["operation"] as? String == "Refreshing cached crops" && $0.element["completed"] as? Int == 0 }
+            XCTAssertEqual(starts.count, timing == "run" ? 3 : 6)
+            for start in starts {
+                let previous = recorded[..<start.offset].last { $0["event"] as? String == "update_started" }
+                XCTAssertEqual(previous?["current_update"] as? Int, start.element["current_update"] as? Int)
+                XCTAssertEqual(previous?["sample_id"] as? String, start.element["sample_id"] as? String)
+                XCTAssertEqual(start.element["total"] as? Int, 1)
+                XCTAssertEqual(start.element["workflow_phase"] as? Int, 3)
+            }
+            let policy = try XCTUnwrap(result["training_configuration"] as? [String: Any])
+            XCTAssertEqual(policy["crop_preparation"] as? String, "per-map-on-demand-v1")
+        }
+    }
+    func testCropPreparationFinishesOnlyActivePairBeforeDeadlineOrStop() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("dataset")
+        try datasetFixture(dataset, validationCount: 0, trainingCount: 3)
+        for stopAndSave in [false, true] {
+            let output = root.appendingPathComponent(stopAndSave ? "stop-after-active-crop" : "deadline-after-active-crop")
+            let model = try trainerModel(), clock = ManualTrainingClock(), events = Recorder()
+            let control = NativeMaterialTrainingControl()
+            let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
+                "--size", "256", "--updates-per-map", "1", "--max-minutes", "1", "--random-flip"])
+            let text = try await Task.detached { try NativeMaterialTrainer.train(options, onEvent: { line in
+                events.append(line)
+                if line.contains("\"event\":\"crop_preparation\"") {
+                    if stopAndSave { control.stopAndSave() } else { clock.advanceOnce(by: .seconds(61)) }
+                }
+            }, control: control, model: model, now: { clock.now }) }.value
+            let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+            XCTAssertEqual(result["status"] as? String, "stopped")
+            XCTAssertEqual(result["stopped_reason"] as? String, stopAndSave ? "user_stop" : "time_limit")
+            XCTAssertEqual(result["completed_updates"] as? Int, 1, "The active paired crop finishes, without preparing any later pair")
+            XCTAssertEqual(result["requested_updates"] as? Int, 3)
+            XCTAssertEqual(result["elapsed_training_seconds"] as? Double, stopAndSave ? 0 : 61)
+            let recorded = events.events
+            let start = try XCTUnwrap(recorded.firstIndex { $0["event"] as? String == "update_started" })
+            let preparation = try XCTUnwrap(recorded.firstIndex { $0["event"] as? String == "crop_preparation" })
+            XCTAssertLessThan(start, preparation, "Only a scheduled update requests crop preparation")
+            XCTAssertEqual(recorded.filter { $0["event"] as? String == "update_started" }.count, 1)
+            let progress = recorded.filter {
+                $0["event"] as? String == "crop_preparation" && $0["operation"] as? String == "Refreshing cached crops" && $0["completed"] as? Int == 1
+            }
+            XCTAssertEqual(progress.count, 1)
+            XCTAssertTrue(recorded.filter { $0["event"] as? String == "crop_preparation" }.allSatisfy { $0["total"] as? Int == 1 })
+            let cache = output.appendingPathComponent("crop-cache")
+            let cached = try FileManager.default.contentsOfDirectory(atPath: cache.path)
+            XCTAssertEqual(cached.filter { $0.hasSuffix("-diffuse.png") }.count, 1)
+            XCTAssertEqual(cached.filter { $0.hasSuffix("-height.png") }.count, 1)
+            let history = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: cache.appendingPathComponent("crop-history.json"))) as? [String: Any])
+            XCTAssertEqual((history["history"] as? [[String: Any]])?.count, 1)
+            let update = try XCTUnwrap(recorded.first { $0["event"] as? String == "update" })
+            XCTAssertEqual(update["update_duration_seconds"] as? Double, stopAndSave ? 0 : 61)
+            XCTAssertNoThrow(try NativeMaterialPackage.verify(output.appendingPathComponent("export")))
+        }
     }
     func testTimeLimitDuringUpdateFinishesCurrentStepAndReportsDuration() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)

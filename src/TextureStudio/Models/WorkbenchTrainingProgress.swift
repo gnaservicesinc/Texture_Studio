@@ -105,15 +105,19 @@ struct WorkbenchTrainingProgress: Equatable, Sendable {
             setStage(event)
         case "crop_preparation":
             preparingCrops = true
-            state = epoch > 1 ? .training : .modelSetup
-            phaseIndex = epoch > 1 ? 3 : 2
+            let duringTraining = phaseIndex == 3 || currentUpdate > completedUpdates || epoch > 1
+            state = duringTraining ? .training : .modelSetup
+            phaseIndex = duringTraining ? 3 : 2
             operationLabel = event["operation"] as? String ?? "Refreshing cached crops"
             clearStageAndSample()
             setStage(event)
+            setSample(event)
             operationDetail = stageSummary ?? ""
         case "depthpro_preparation":
-            state = .modelSetup; phaseIndex = 2
-            operationLabel = "Caching DepthPro inputs"
+            let phase = event["phase"] as? String
+            state = phase == "training" ? .training : phase == "validation" ? .validation : .modelSetup
+            phaseIndex = phase == nil ? 2 : (event["workflow_phase"] as? Int ?? 3)
+            operationLabel = event["operation"] as? String ?? "Caching DepthPro inputs"
             setStage(event)
             operationDetail = "\(stageCompleted.formatted()) / \(stageTotal.formatted()) inputs processed"
             sampleID = event["sample_id"] as? String
