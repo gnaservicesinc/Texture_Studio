@@ -371,7 +371,7 @@ enum NativeMaterialDatasetService {
     /// capturing an import preview. The preview then binds the repaired files.
     private static func recoveryContext(_ arguments: [String]) throws -> RecoveryContext {
         let options = try parsedOptions(arguments), command = arguments[0]
-        if command == "dataset", options["--skip-source-recovery"] == "true" { return RecoveryContext() }
+        if options["--skip-source-recovery"] == "true" { return RecoveryContext() }
         let setup = ["dataset", "scan-folder", "import-folder", "prepare-size"].contains(command)
             || (command == "edit-dataset" && options["--training-size"] != nil)
         guard setup, !(command == "import-folder" && options["--plan"] != nil),
@@ -1683,8 +1683,19 @@ enum NativeMaterialDatasetService {
                 var maps = group["maps"] as? [String: Object] ?? [:]; if let input = variants.first { maps["input"] = input }; group["maps"] = maps
             }
             let maps = group["maps"] as? [String: Object] ?? [:]
-            guard maps["input"] != nil, ["height", "normal", "roughness"].contains(where: { maps[$0] != nil }) else { continue }
             let id = group["material_id"] as! String
+            let targetRoles = ["height", "normal", "roughness"].filter { maps[$0] != nil }
+            if maps["input"] == nil || targetRoles.isEmpty {
+                let dimensions = group["common_pixel_dimensions"] as? [Int] ?? []
+                let size = dimensions.count == 2 ? " (\(dimensions[0]) × \(dimensions[1]))" : ""
+                let paths = (group["source_files"] as? [Object] ?? Array(maps.values))
+                    .compactMap { $0["path"] as? String }.sorted()
+                let reason = maps["input"] == nil
+                    ? "The \(targetRoles.joined(separator: ", ")) maps were recognized, but a matching diffuse map at these pixel dimensions is missing."
+                    : "The diffuse map was recognized, but matching height, normal or roughness maps at these pixel dimensions are missing."
+                warnings.append("Not imported: \(id)\(size). \(reason) Sources: " + paths.joined(separator: ", "))
+                continue
+            }
             if !seen.insert(id).inserted { warnings.append("Skipped \(id): duplicate normalized material identity."); continue }
             let problems = group["problems"] as? [String] ?? []
             if !problems.isEmpty { warnings.append("Skipped \(id): " + problems.joined(separator: "; ")); continue }
@@ -1735,10 +1746,11 @@ enum NativeMaterialDatasetService {
         let ignored = ignoredFiles.count
         for file in ignoredFiles {
             let path = file[0] as? String ?? ""
+            let resolvedPath = file[1] as? String ?? path
             // Providers include ancillary PBR maps that this trainer does not
             // consume. Their presence is expected, not a broken source pair.
             if let (_, suffix, _) = parsedProvider(URL(fileURLWithPath: path).lastPathComponent), providerRole(suffix) == nil { continue }
-            if !warnings.contains(where: { $0.contains(path) }) {
+            if !warnings.contains(where: { $0.contains(path) || $0.contains(resolvedPath) }) {
                 warnings.append("Not imported: \(path). No recognized paired diffuse and surface map set includes this file. Assign its maps with Add Materials.")
             }
         }

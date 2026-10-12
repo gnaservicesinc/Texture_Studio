@@ -146,6 +146,86 @@ final class NativeMaterialSourceRecoveryTests: XCTestCase {
         }
     }
 
+    func testAmbientCGGrayscaleDiffuseRecoveryPreservesEightAndSixteenBitOriginalsWithAlpha() async throws {
+        for bits in [8, 16] {
+            for channels in [1, 2] {
+                let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+                let original = grayscaleFixture(width: 32, height: 33, bits: bits, channels: channels)
+                let bytes = try original.encoded()
+                let archive = try ambientZIP([("Wicker013_1K-PNG_Color.png", bytes)], deflated: true)
+                let probe = RecoveryTransportProbe()
+                let recovery = NativeMaterialSourceRecovery(transport: try ambientTransport(archive, probe: probe))
+                let destination = root.appendingPathComponent("Wicker013_1K-PNG_Color.png")
+                let result = try await recovery.recover(ambientRequest(destination, target: "input", expectedSHA256: sha256(bytes)))
+                guard case .recovered(let proof) = result else {
+                    XCTFail("Recover native \(bits)-bit grayscale diffuse with \(channels) channels"); continue
+                }
+                XCTAssertEqual(try Data(contentsOf: destination), bytes, "Do not convert, resize, or recompress a recovered grayscale source")
+                let decoded = try NativePNG.decode(Data(contentsOf: destination))
+                XCTAssertEqual(decoded.header, original.header)
+                XCTAssertEqual(decoded.pixels, original.pixels, "Retain every original grayscale and alpha code")
+                XCTAssertEqual(proof.sha256, sha256(bytes)); XCTAssertNil(proof.cropRectangle)
+                XCTAssertEqual(proof.archiveMember, "Wicker013_1K-PNG_Color.png")
+                XCTAssertEqual(proof.archiveMemberCRC32, String(format: "%08x", crc(bytes)))
+                XCTAssertNotNil(NativeMaterialSourceRecovery.sourceProvenance(for: destination,
+                    sha256: sha256(bytes), bytes: bytes.count, width: 32, height: 33))
+                let samples = try decoded.modelFloatSamples(role: "input", encoding: "srgb", inputTransfer: .linear)
+                let count = original.header.width * original.header.height
+                XCTAssertEqual(Array(samples[0..<count]), Array(samples[count..<count * 2]))
+                XCTAssertEqual(Array(samples[0..<count]), Array(samples[count * 2..<count * 3]),
+                    "RGB expansion belongs only to the model tensor")
+                let existing = try await recovery.recover(ambientRequest(destination, target: "input"))
+                guard case .alreadyPresent = existing else { XCTFail("An existing grayscale source is authoritative"); continue }
+                let calls = await probe.counts()
+                XCTAssertEqual(calls.metadata, 1); XCTAssertEqual(calls.downloads, 1)
+            }
+        }
+    }
+
+    func testPolyHavenGrayscaleDiffuseRecoveryPreservesEightAndSixteenBitOriginalsWithAlpha() async throws {
+        for bits in [8, 16] {
+            for channels in [1, 2] {
+                let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+                let original = grayscaleFixture(width: 256, height: 256, bits: bits, channels: channels)
+                let bytes = try original.encoded(), destination = root.appendingPathComponent("ribbed_corduroy_diff_1k.png")
+                let probe = RecoveryTransportProbe()
+                let recovery = NativeMaterialSourceRecovery(transport: fixtureTransport(bytes: bytes, target: "input", probe: probe))
+                let result = try await recovery.recover(request(destination, target: "input", expectedSHA256: sha256(bytes)))
+                guard case .recovered(let proof) = result else {
+                    XCTFail("Recover native \(bits)-bit grayscale diffuse with \(channels) channels"); continue
+                }
+                XCTAssertEqual(try Data(contentsOf: destination), bytes)
+                let decoded = try NativePNG.decode(Data(contentsOf: destination))
+                XCTAssertEqual(decoded.header, original.header); XCTAssertEqual(decoded.pixels, original.pixels)
+                XCTAssertEqual(proof.publishedMD5, md5(bytes)); XCTAssertEqual(proof.sha256, sha256(bytes))
+                XCTAssertEqual(proof.sourceWidth, 256); XCTAssertEqual(proof.sourceHeight, 256); XCTAssertNil(proof.cropRectangle)
+                XCTAssertNotNil(NativeMaterialSourceRecovery.sourceProvenance(for: destination,
+                    sha256: sha256(bytes), bytes: bytes.count, width: 256, height: 256))
+                let existing = try await recovery.recover(request(destination, target: "input"))
+                guard case .alreadyPresent = existing else { XCTFail("Do not download an already recovered grayscale source"); continue }
+                let calls = await probe.counts()
+                XCTAssertEqual(calls.metadata, 1); XCTAssertEqual(calls.downloads, 1)
+            }
+        }
+    }
+
+    func testAmbientCGScalarNormalRecoveryStillRejectsGrayscaleAndGrayAlphaForBothConventions() async throws {
+        for target in ["normal", "normal_dx"] {
+            for channels in [1, 2] {
+                let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+                let bytes = try grayscaleFixture(width: 32, height: 33, bits: 16, channels: channels).encoded()
+                let role = target == "normal" ? "NormalGL" : "NormalDX"
+                let archive = try ambientZIP([("Wicker013_1K-PNG_\(role).png", bytes)])
+                let recovery = NativeMaterialSourceRecovery(transport: try ambientTransport(archive))
+                let destination = root.appendingPathComponent("Wicker013_1K-PNG_\(role).png")
+                let result = try await recovery.recover(ambientRequest(destination, target: target))
+                guard case .failed(let reason) = result else { XCTFail("A scalar image cannot supply normal vectors"); continue }
+                XCTAssertTrue(reason.contains("normal map")); XCTAssertFalse(reason.contains("color or normal"))
+                XCTAssertEqual(try filenames(root), [], "Reject invalid vectors without publishing partial files")
+            }
+        }
+    }
+
     func testAmbientCGRejectsInvalidPackageProofAndMapContractWithoutPublishing() async throws {
         let height = try fixturePNG(width: 32, height: 33)
         let valid = try ambientZIP([("Wicker013_1K-PNG_Displacement.png", height)], deflated: true)
@@ -787,6 +867,12 @@ final class NativeMaterialSourceRecoveryTests: XCTestCase {
     private func fixturePNG(width: Int = 256, height: Int = 256, bits: Int = 16) throws -> Data {
         try NativePNG(header: .init(width: width, height: height, bits: bits, channels: 1, color: 0, interlace: 0),
                       pixels: Data(repeating: 97, count: width * height * (bits / 8)), colorChunks: []).encoded()
+    }
+    private func grayscaleFixture(width: Int, height: Int, bits: Int, channels: Int) -> NativePNG {
+        NativePNG(header: .init(width: width, height: height, bits: bits, channels: channels,
+                               color: channels == 1 ? 0 : 4, interlace: 0),
+                  pixels: Data((0..<width * height * channels * (bits / 8)).map { UInt8(truncatingIfNeeded: $0 * 97 + 3) }),
+                  colorChunks: [("sRGB", Data([0]))])
     }
     private func rgbFixturePNG(width: Int = 1024, height: Int = 1024) throws -> Data {
         try NativePNG(header: .init(width: width, height: height, bits: 8, channels: 3, color: 2, interlace: 0),

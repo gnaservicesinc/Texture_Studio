@@ -185,12 +185,7 @@ actor NativeMaterialSourceRecovery {
             }
             let bytes = try Data(contentsOf: staged, options: .mappedIfSafe)
             let metadata = try NativePNG.sourceMetadata(bytes)
-            guard request.target != "height" || metadata["sample_bits"] as? Int == 16 else {
-                throw RecoveryFailure("The published displacement PNG does not preserve 16-bit source precision.")
-            }
-            guard !["input", "normal", "normal_dx"].contains(request.target) || [3, 4].contains(metadata["channels"] as? Int ?? 0) else {
-                throw RecoveryFailure("The published color or normal map does not contain native RGB or RGBA channels.")
-            }
+            try Self.validateMapStorage(metadata, target: request.target)
             let width = metadata["width"] as? Int ?? 0, height = metadata["height"] as? Int ?? 0
             var cropRectangle: [Int]?, savedSHA256 = verified.sha256
             if !request.preserveOriginalDimensions && (width != request.width || height != request.height) {
@@ -303,12 +298,7 @@ actor NativeMaterialSourceRecovery {
             guard request.preserveOriginalDimensions || (width == request.width && height == request.height) else {
                 throw RecoveryFailure("The published ambientCG map has different pixel dimensions from this source set.")
             }
-            guard request.target != "height" || metadata["sample_bits"] as? Int == 16 else {
-                throw RecoveryFailure("The published displacement PNG does not preserve 16-bit source precision.")
-            }
-            guard !["input", "normal", "normal_dx"].contains(request.target) || [3, 4].contains(metadata["channels"] as? Int ?? 0) else {
-                throw RecoveryFailure("The published color or normal map does not contain native RGB or RGBA channels.")
-            }
+            try Self.validateMapStorage(metadata, target: request.target)
             _ = try NativePNG.crop(staged, rectangle: [0, 0, 1, 1])
             let verified = try Self.checksums(staged)
             if let expected = request.expectedSHA256, verified.sha256 != expected.lowercased() {
@@ -331,6 +321,19 @@ actor NativeMaterialSourceRecovery {
         catch {
             try Task.checkCancellation()
             return .failed(reason: error.localizedDescription)
+        }
+    }
+
+    private static func validateMapStorage(_ metadata: [String: Any], target: String) throws {
+        guard target != "height" || metadata["sample_bits"] as? Int == 16 else {
+            throw RecoveryFailure("The published displacement PNG does not preserve 16-bit source precision.")
+        }
+        // A grayscale diffuse is a supported color input: the trainer expands
+        // its sample into RGB in memory. Recovery must retain the provider's
+        // gray/gray-alpha PNG bytes rather than rejecting or rewriting them.
+        // Normal maps remain vector data and require actual RGB/RGBA channels.
+        guard !["normal", "normal_dx"].contains(target) || [3, 4].contains(metadata["channels"] as? Int ?? 0) else {
+            throw RecoveryFailure("The published normal map does not contain native RGB or RGBA channels.")
         }
     }
 
