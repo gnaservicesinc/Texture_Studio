@@ -1,4 +1,5 @@
 import Foundation
+import Metal
 import XCTest
 @testable import TextureStudio
 
@@ -22,6 +23,7 @@ final class WorkbenchComparisonTests: XCTestCase {
                 calls.append(arguments)
                 let input = arguments[try XCTUnwrap(arguments.firstIndex(of: "--image")) + 1]
                 inputs.append(input)
+                XCTAssertEqual(arguments[try XCTUnwrap(arguments.firstIndex(of: "--input-encoding")) + 1], "srgb")
                 XCTAssertNotEqual(input, image.path, "Only the prepared model input follows the training grid")
                 let png = try NativePNG.inspect(URL(fileURLWithPath: input))
                 XCTAssertEqual(png.width, side)
@@ -48,6 +50,60 @@ final class WorkbenchComparisonTests: XCTestCase {
             XCTAssertEqual(store.comparisonCandidates.map(\.role), ["diffuse", "base", "checkpoint"])
             XCTAssertEqual(store.comparisonCandidates.first?.sampleLabel, image.lastPathComponent)
             XCTAssertEqual(try Data(contentsOf: image), original, "Import and comparison never resize or rewrite the source")
+        }
+    }
+
+    func testComparisonPreservesSelectedDiffuseVariantEncodingForBothModels() async throws {
+        for encoding in ["linear_rgb", "source_srgb_assumed", nil] as [String?] {
+            let root = try temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let suite = "comparison-transfer-\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let input = root.appendingPathComponent("selected-variant.png")
+            let original = try NativePNG(header: .init(width: 256, height: 256, bits: 8, channels: 3, color: 2, interlace: 0),
+                pixels: Data(repeating: 128, count: 256 * 256 * 3), colorChunks: []).encoded()
+            try original.write(to: input)
+            let expectedEncoding = encoding ?? "srgb"
+            let normalized = Float(128) / 255
+            let expectedTensorValue = encoding == "linear_rgb" ? normalized : pow((normalized + 0.055) / 1.055, 2.4)
+            var inferenceCount = 0
+            let store = WorkbenchStore(preferences: defaults, managedWorkspaceURL: root, workerOverride: { arguments, _ in
+                XCTAssertEqual(arguments.first, "infer")
+                inferenceCount += 1
+                let path = arguments[try XCTUnwrap(arguments.firstIndex(of: "--image")) + 1]
+                XCTAssertEqual(path, input.path, "The selected variant supplies both model inputs")
+                let suppliedEncoding = arguments[try XCTUnwrap(arguments.firstIndex(of: "--input-encoding")) + 1]
+                XCTAssertEqual(suppliedEncoding, expectedEncoding)
+                let tensor = try NativePNG.decode(Data(contentsOf: URL(fileURLWithPath: path)))
+                    .modelFloatSamples(role: "input", encoding: suppliedEncoding, inputTransfer: .linear)
+                XCTAssertEqual(try XCTUnwrap(tensor.first), expectedTensorValue, accuracy: 0.000001,
+                    "Comparison must repeat the dataset transfer instead of decoding linear source values as sRGB")
+                let output = arguments[try XCTUnwrap(arguments.firstIndex(of: "--output")) + 1]
+                return "{\"outputs\":{\"height\":{\"path\":\"\(output)/height.exr\"}},\"checkpoint_sha256\":\"exact-sha\"}"
+            })
+            var variant: [String: Any] = ["path": input.path, "width": 256, "height": 256, "variant_id": "selected"]
+            variant["encoding"] = encoding
+            let document: [String: Any] = ["dataset_path": root.path, "index_sha256": "index", "materials": [
+                ["material_id": "soil", "samples": [["sample_id": "soil", "status": "approved", "split": "train",
+                    "width": 256, "height": 256, "maps": ["input": ["path": "/unselected-srgb.png", "encoding": "srgb"]],
+                    "input_variants": [variant]]]]]]
+            store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self,
+                output: String(decoding: JSONSerialization.data(withJSONObject: document), as: UTF8.self))
+            store.selectedSampleId = "soil"
+            store.selectedInputVariantId = "selected"
+            store.training.size = 256
+            store.checkpoints = [try checkpoint(sha: "exact-sha", target: "height")]
+            store.comparisonCheckpointIds = ["exact-sha"]
+            store.compare()
+            try await waitForOperation(store)
+            XCTAssertNil(store.error)
+            XCTAssertEqual(inferenceCount, 2)
+            let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf:
+                XCTUnwrap(store.lastOutputURL).appendingPathComponent("review-manifest.json"))) as? [String: Any]
+            let material = (manifest?["materials"] as? [[String: Any]])?.first
+            XCTAssertEqual(material?["diffuse_source_encoding"] as? String, expectedEncoding)
+            XCTAssertEqual(try Data(contentsOf: input), original)
         }
     }
 
@@ -277,6 +333,77 @@ final class WorkbenchComparisonTests: XCTestCase {
         }
     }
 
+    func testRGBCheckpointComparisonUsesOriginalSourceHeightWithoutDepthProSetupOrInputPane() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "rgb-source-height-comparison-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let size = 64, diffuse = root.appendingPathComponent("diffuse.png"), height = root.appendingPathComponent("original-height.png")
+        let diffuseBytes = try NativePNG(header: .init(width: size, height: size, bits: 8, channels: 3, color: 2, interlace: 0),
+            pixels: Data((0..<size * size * 3).map { UInt8(($0 * 7 + $0 / size) % 251) }), colorChunks: []).encoded()
+        let heightBytes = try NativePNG(header: .init(width: size, height: size, bits: 16, channels: 1, color: 0, interlace: 0),
+            pixels: Data((0..<size * size * 2).map { UInt8(($0 * 3) % 251) }), colorChunks: []).encoded()
+        try diffuseBytes.write(to: diffuse); try heightBytes.write(to: height)
+        let model = try NativeCompactMaterialModel(target: "height", width: 16, seed: 23)
+        let checkpointURL = root.appendingPathComponent("rgb-model.safetensors")
+        try NativeSafetensors.write(tensors: model.weights,
+            metadata: ["configuration": NativeMaterialTransfer.json(model.checkpointConfiguration(size: size, step: 0))], to: checkpointURL)
+        let checkpoint = try WorkbenchResult.decode(WorkbenchCheckpoint.self, output: NativeMaterialCheckpoint.inspect(at: checkpointURL))
+        let forbiddenTransfer = ForbiddenDepthProTransfer()
+        let missingResources = root.appendingPathComponent("unused-depthpro/DepthPro.mlpackage")
+        let resources = NativeDepthProResources(managedURL: missingResources, transfer: forbiddenTransfer)
+        var calls: [[String]] = []
+        let store = WorkbenchStore(preferences: defaults, managedWorkspaceURL: root, workerOverride: { arguments, _ in
+            calls.append(arguments)
+            XCTAssertEqual(arguments.first, "infer")
+            XCTAssertFalse(arguments.contains("--depthpro-model"), "RGB checkpoints have no DepthPro prerequisite")
+            XCTAssertFalse(arguments.contains("--baseline"), "Only the selected RGB checkpoint should execute")
+            let result = try await NativeMaterialTrainer.run(arguments: arguments, depthProResources: resources)
+            let object = try NativeMaterialTransfer.object(Data(result.utf8))
+            XCTAssertEqual(object["input_kind"] as? String, "diffuse")
+            XCTAssertNil(object["prepared_input_path"])
+            XCTAssertNil(object["depthpro_model_sha256"])
+            return result
+        })
+        store.depthProModelPath = missingResources.path
+        let document: [String: Any] = ["dataset_path": root.path, "index_sha256": "fixture-index", "materials": [
+            ["material_id": "bark", "samples": [["sample_id": "bark-native", "status": "approved", "split": "train",
+                "width": size, "height": size, "maps": [
+                    "input": ["path": diffuse.path, "encoding": "srgb", "width": size, "height": size],
+                    "height": ["path": height.path, "sha256": NativeMaterialTrainer.checksum(heightBytes),
+                        "source_bits": 16, "width": size, "height": size]]]]]]]
+        store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self,
+            output: String(decoding: JSONSerialization.data(withJSONObject: document), as: UTF8.self))
+        store.selectedSampleId = "bark-native"
+        store.training.size = size
+        // An unrelated saved training family must not choose inference dependencies.
+        store.training.modelFamily = .depthProHeightRefiner
+        store.checkpoints = [checkpoint]
+        store.comparisonCheckpointIds = [checkpoint.id]
+        store.comparisonIncludesBase = false
+        store.compare()
+        try await waitForOperation(store, timeout: 30)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(forbiddenTransfer.count, 0, "RGB inference cannot download or run DepthPro")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missingResources.deletingLastPathComponent().path))
+        XCTAssertEqual(store.comparisonCandidates.map(\.role), ["diffuse", "target", "checkpoint"])
+        XCTAssertFalse(store.comparisonCandidates.contains { $0.role == "model-input" || $0.label.contains("DepthPro") })
+        let reference = try XCTUnwrap(store.comparisonCandidates.first { $0.isReference })
+        XCTAssertEqual(reference.mapURL, height)
+        XCTAssertEqual(reference.sourceIdentity?.sha256, NativeMaterialTrainer.checksum(heightBytes))
+        XCTAssertEqual(reference.sourceIdentity?.bits, 16)
+        XCTAssertEqual(ReviewWorkbenchView.initialCandidates(store.comparisonCandidates).map(\.role), ["target", "checkpoint"])
+        let review = ReviewSessionStore(preferences: defaults)
+        review.load(try XCTUnwrap(store.lastOutputURL).appendingPathComponent("review-manifest.json"))
+        XCTAssertNil(review.error)
+        XCTAssertEqual(review.groups.first?.candidates.map(\.role), ["diffuse", "target", "checkpoint"])
+        XCTAssertEqual(try Data(contentsOf: diffuse), diffuseBytes)
+        XCTAssertEqual(try Data(contentsOf: height), heightBytes)
+    }
+
     func testBaselineOnlyRunsWithRecordedCheckpointOrConfiguredCompactInitialization() async throws {
         for useRecordedCheckpoint in [true, false] {
             let root = try temporaryDirectory()
@@ -433,6 +560,18 @@ final class WorkbenchComparisonTests: XCTestCase {
         try WorkbenchResult.decode(WorkbenchCheckpoint.self, output: """
         {"checkpoint_path":"/runs/material-2k/model.safetensors","sha256":"\(sha)","schema":"texture-studio-material-checkpoint-v1","target":"\(target)","step":42,"compatible":true}
         """)
+    }
+
+    private final class ForbiddenDepthProTransfer: ModelArtifactTransferring, @unchecked Sendable {
+        private let lock = NSLock()
+        private var requests = 0
+        var count: Int { lock.withLock { requests } }
+        func fetch(_ artifact: ModelDownloadArtifact, to destination: URL,
+                   progress: @escaping @Sendable (Double) -> Void) async throws {
+            lock.withLock { requests += 1 }
+            // Cancellation avoids downloader retries if family routing regresses.
+            throw CancellationError()
+        }
     }
 
     private func waitForOperation(_ store: WorkbenchStore, timeout: TimeInterval = 5) async throws {

@@ -623,6 +623,7 @@ final class WorkbenchStore {
         let photoSettings = testPhotoSettings
         let comparisonSize = training.size
         let inputIsPhoto = sourceImageURL != nil
+        let inputEncoding = diffuseMap?.encoding ?? "srgb"
         let targetLabel = target == "height" ? "Displacement" : target.capitalized
         operation("Comparing \(selected.count + (includeBase ? 1 : 0)) models on the \(comparisonSize) × \(comparisonSize) diffuse grid…") {
             let parent = try self.newOutputURL(prefix: "comparison")
@@ -677,6 +678,7 @@ final class WorkbenchStore {
                 let compact = baselineFamily.isCompact
                 self.activity = compact ? "Running untrained compact initialization" : "Running the material base model"
                 var arguments = ["infer", "--baseline", "--image", modelImage.path,
+                    "--input-encoding", inputEncoding,
                     "--output", parent.appendingPathComponent("base-untrained").path] + baselineDependencies
                 if let reference = baselineCheckpoint {
                     arguments += ["--checkpoint", reference.checkpointPath, "--expected-sha256", reference.sha256]
@@ -705,7 +707,8 @@ final class WorkbenchStore {
                 let child = parent.appendingPathComponent("candidate-\(i + 1)")
                 let result: MaterialInferenceResponse = try WorkbenchResult.decode(MaterialInferenceResponse.self, output: await self.worker([
                     "infer", "--checkpoint", checkpoint.checkpointPath, "--expected-sha256", checkpoint.sha256,
-                    "--image", modelImage.path, "--output", child.path] + self.dependencyArguments(for: checkpoint)))
+                    "--image", modelImage.path, "--input-encoding", inputEncoding,
+                    "--output", child.path] + self.dependencyArguments(for: checkpoint)))
                 if let path = result.preparedInputPath, !candidates.contains(where: { $0.role == "model-input" }) {
                     candidates.append(MapReviewCandidate(id: "depthpro|" + path, label: "DepthPro · refiner input", mapURL: URL(fileURLWithPath: path), numeric: true,
                         sampleLabel: sampleLabel, detail: "One-channel normalized inverse DepthPro depth before refinement", role: "model-input",
@@ -740,6 +743,7 @@ final class WorkbenchStore {
                         return item
                     }]
             material["diffuse_variant_id"] = diffuseMap?.variantId
+            material["diffuse_source_encoding"] = inputEncoding
             if let diffuseTransform {
                 material["diffuse_native_size"] = diffuseTransform.size
                 material["diffuse_source_sha256"] = diffuseTransform.sourceSHA256

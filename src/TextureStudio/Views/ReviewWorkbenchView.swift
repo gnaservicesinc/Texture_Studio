@@ -90,16 +90,28 @@ struct ReviewWorkbenchView: View {
                     .help("A real source displacement map must be identified explicitly in the review manifest. A model output is never substituted for it.")
             }
             inspectionControls.padding(8).background(.bar)
-            if let diffuse = diffuseCandidate, let map = qualityCandidate {
+            if let map = qualityCandidate {
                 VStack(alignment: .leading, spacing: 6) {
-                    Picker("Adviser output", selection: Binding(get: { map.id }, set: { qualityCandidateID = $0 })) {
-                        ForEach(qualityCandidates) { Text($0.label).tag($0.id) }
+                    Picker("Comparison output", selection: Binding(get: { map.id }, set: { qualityCandidateID = $0 })) {
+                        ForEach(qualityCandidates) { candidate in
+                            Text(candidate.modelIdentity?.checkpointStep.map { "\(candidate.label) · step \($0.formatted())" } ?? candidate.label)
+                                .tag(candidate.id)
+                        }
                     }.frame(maxWidth: 440)
-                    MaterialQualityReviewPanel(diffuseURL: diffuse.mapURL, mapURL: map.mapURL,
-                        mapType: map.modelIdentity?.mapType ?? "height", purpose: .result,
-                        diffuseTransform: diffuse.displayTransform, mapTransform: map.displayTransform,
-                        onApply: onConfirmReview.map { confirm in { recommendation in confirm(map.id, recommendation) } })
+                    if let diffuse = diffuseCandidate {
+                        MaterialQualityReviewPanel(diffuseURL: diffuse.mapURL, mapURL: map.mapURL,
+                            mapType: map.modelIdentity?.mapType ?? "height", purpose: .result,
+                            diffuseTransform: diffuse.displayTransform, mapTransform: map.displayTransform,
+                            onApply: onConfirmReview.map { confirm in { recommendation in confirm(map.id, recommendation) } })
+                    }
                 }.padding(.horizontal, 12).padding(.vertical, 8)
+            }
+            if let map = qualityCandidate, ["height", "roughness"].contains(map.modelIdentity?.mapType ?? ""),
+               let reference = candidates.first(where: {
+                   $0.isReference && $0.modelIdentity?.mapType == map.modelIdentity?.mapType
+               }) {
+                MaterialScalarAgreementPanel(reference: reference, prediction: map)
+                    .padding(.horizontal, 12).padding(.vertical, 8)
             }
             HStack {
                 Text("Drag or scroll to pan · Pinch or Option-scroll to zoom · 100% shows original pixels")
