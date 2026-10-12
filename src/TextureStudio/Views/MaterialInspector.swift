@@ -99,7 +99,7 @@ struct MaterialInspector: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if workspace.depthChoice == .specialists {
-                    Text("Approved models follow the diffuse classifier's category. Set up and review them in Model Training → Specialist Models.")
+                    Text("Approved models follow the diffuse classifier's category. Set up and review them in Model Training → Loom Room.")
                         .font(.caption).foregroundStyle(.secondary)
                     Picker("Missing / uncertain category", selection: $workspace.specialistFallback) {
                         Text("Flat surface").tag("flat")

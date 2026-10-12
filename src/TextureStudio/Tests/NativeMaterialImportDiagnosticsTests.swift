@@ -3,29 +3,27 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeMaterialImportDiagnosticsTests: XCTestCase {
-    func testSkippedRecognizedDuplicateGroupHasOneIdentityDiagnosticWithoutPerMapPairingErrors() async throws {
+    func testDistinctFoldersWithTheSameNormalizedFamilyBothRemainDiscoverable() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Sources")
         _ = try await create(dataset)
-        var groups: [[URL]] = []
         for name in ["Pine Bark", "pine_bark"] {
             let folder = sources.appendingPathComponent(name)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            groups.append(try writeCompleteFamily(name, folder: folder, width: 256, height: 256))
+            _ = try writeCompleteFamily(name, folder: folder, width: 256, height: 256)
         }
         for quick in [false, true] {
             var arguments = ["scan-folder", "--dataset", dataset.path, "--folder", sources.path,
                              "--plan", root.appendingPathComponent("preview.json").path, "--skip-source-recovery"]
             if quick { arguments += ["--quick-preview", "true", "--size", "256"] }
             let preview = try await command(arguments)
-            XCTAssertEqual(preview["source_set_count"] as? Int, 1, "Duplicate normalized identity behavior stays unchanged")
-            XCTAssertEqual(preview["ignored_file_count"] as? Int, 4)
-            let warnings = try XCTUnwrap(preview["warnings"] as? [String])
-            XCTAssertEqual(warnings.count, 1, "One skipped recognized set should not produce four unrecognized map errors: \(warnings)")
-            let warning = try XCTUnwrap(warnings.first)
-            XCTAssertTrue(warning.contains("duplicate normalized material identity"))
-            XCTAssertTrue(groups.contains { $0.allSatisfy { warning.contains($0.path) } }, "The specific duplicate diagnostic identifies all rejected source files")
-            assertNoMisleadingFormatDiagnostic(warnings)
+            XCTAssertEqual(preview["source_set_count"] as? Int, 2)
+            XCTAssertEqual(preview["ignored_file_count"] as? Int, 0)
+            XCTAssertEqual(preview["warnings"] as? [String], [])
+            let materials = try XCTUnwrap(try object(root.appendingPathComponent("preview.json"))["materials"] as? [[String: Any]])
+            XCTAssertEqual(Set(materials.compactMap { $0["material_id"] as? String }).count, 2)
+            XCTAssertEqual(Set(materials.compactMap { $0["source_family_id"] as? String }), ["pine_bark"])
+            XCTAssertEqual(Set(materials.compactMap { $0["source_directory"] as? String }).count, 2)
         }
     }
 
@@ -105,7 +103,7 @@ final class NativeMaterialImportDiagnosticsTests: XCTestCase {
             XCTAssertEqual(inputs.count, 1)
             XCTAssertTrue(inputs.allSatisfy { ($0["path"] as? String)?.contains("_baseColor_") == true })
         }
-        let classified = try NativeDiffuseClassifierDatasetService.discover(dataset: nil, sourceFolder: sources)
+        let classified = try NativeDiffuseClassifierDatasetService.discover(dataset: nil, sourceFolder: sources, minimumSize: 32)
         XCTAssertEqual(classified.count, 1, "Classifier discovery chooses a source tier for the same base color identity")
         XCTAssertTrue(classified.allSatisfy { $0.url.lastPathComponent.contains("_baseColor_") })
         _ = try await command(["import-folder", "--dataset", dataset.path, "--folder", sources.path,
@@ -222,7 +220,7 @@ final class NativeMaterialImportDiagnosticsTests: XCTestCase {
         let preview = try await scan(dataset, sources: sources, root: root)
         XCTAssertEqual(preview["source_set_count"] as? Int, 1)
         let warnings = try XCTUnwrap(preview["warnings"] as? [String])
-        XCTAssertTrue(warnings.contains { $0.contains("Conflicting maps") && $0.contains("multiple height maps need explicit selection") })
+        XCTAssertTrue(warnings.contains { $0.contains("Conflicting maps") && $0.localizedCaseInsensitiveContains("multiple height maps need explicit selection") })
         let plan = try object(root.appendingPathComponent("preview.json")), material = try XCTUnwrap((plan["materials"] as? [[String: Any]])?.first)
         let maps = try XCTUnwrap(material["maps"] as? [String: [String: Any]])
         XCTAssertEqual(Set(maps.keys), ["input", "height", "normal", "roughness"])

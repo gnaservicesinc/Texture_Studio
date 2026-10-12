@@ -1,13 +1,12 @@
-# Specialist material models
+# Loom Room material models
 
-Open **Material Tools → Model Training → Specialist Models**. The guided workflow
+Open **Material Tools → Model Training → Loom Room**. The guided workflow
 creates category datasets from original paired sources, then lets you train and
 review each displacement, normal or roughness model separately.
 
-1. **Create / Refresh Specialists** uses the bundled user-trained Diffuse Texture
-   Type Classifier IFPv2. Expand the settings to type or choose another Core ML
-   export, original material dataset, or specialist workspace. Additional paired
-   sources use the classifier source folder configured in Dataset Studio.
+1. **Refresh Model Categories** uses the bundled user-trained DTTC3 classifier. Expand the settings to type or choose another Core ML
+   export or model workspace. Open the source folder above; start with original folders
+   and image tags using the [source-folder workflow](source-folder-workflow.md).
 2. Choose a category and map. **Set Up Training** opens the existing Trainer with
    a native compact model, that category's dataset and a descriptive model name.
    Set resolution, updates, learning rate, optional flips and quarter-turn
@@ -16,10 +15,9 @@ review each displacement, normal or roughness model separately.
    original membership, model hash, resolution and completed updates. Finishing
    training does not approve the model. **Continue Saved Model** resumes it.
 4. **Compare with References** opens the same paired dataset and saved checkpoint.
-   Inspect relief, contrast, artifacts and consistency; return using **Specialist
-   Workflow**. **Approve for Generation** makes that reviewed model available to
+   Inspect relief, contrast, artifacts and consistency; return using **Loom Room**. **Approve for Generation** makes that reviewed model available to
    automatic routing. Changes to source membership require an updated model.
-5. **Next Specialist** advances to a category with paired targets that still needs
+5. **Next Category** advances to a category with paired targets that still needs
    a current approved model for the selected map. Selection and workspace settings
    persist across app launches.
 
@@ -31,7 +29,7 @@ and saved model histories. Each category has a regular editable Dataset Studio
 dataset under `datasets/`; originals are referenced in place and never resized.
 
 Refresh preserves user exclusions, removals, manually added paired materials,
-custom specialists, model records and classifier-only images. Unrelated occupied
+custom categories, model records and classifier-only images. Unrelated occupied
 workspace/dataset folders are rejected without replacement. The main dataset
 membership is unchanged by discovering extra source-folder pairs. New explicit
 AmbientCG and authored role filenames are supported, including
@@ -39,7 +37,7 @@ AmbientCG and authored role filenames are supported, including
 files retain their original channel layout and precision; the model receives a
 three-channel copy in memory.
 
-**Add Category / Subtype** creates another specialist from a classifier category
+**Add Category / Subtype** creates another category model from a classifier category
 and optional subtype/filename text, for example Wood plus `planks`. Descriptive
 source names and provider subtype/tag evidence select those references. A parent
 class prediction does not automatically select a narrower subtype; use the saved

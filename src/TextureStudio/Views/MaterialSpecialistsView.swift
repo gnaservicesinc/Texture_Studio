@@ -12,26 +12,27 @@ struct MaterialSpecialistsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                GroupBox("1. Prepare the specialist library") {
+                workshopSources
+                workshopClassifier
+                GroupBox("3. Organize material categories") {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Classify original diffuse maps and create one paired training dataset per category. Refresh keeps curated examples, dataset reviews and saved models.")
+                        Text("Use image labels to organize one training dataset per material category. Original files, review notes and saved models remain available.")
                             .foregroundStyle(.secondary)
                         DisclosureGroup("Classifier and source settings") {
                             VStack(alignment: .leading, spacing: 10) {
-                                pathField("Original dataset", value: $store.specialistSourceDatasetPath, kind: "source")
-                                pathField("Classifier export", value: $store.specialistClassifierPath, kind: "classifier", prompt: "Bundled Diffuse Texture Type Classifier IFPv2")
-                                pathField("Specialist workspace", value: $store.specialistWorkspacePath, kind: "workspace")
-                                Text("Additional paired maps are discovered in the classifier source folder: \(store.classifierSourceFolderPath)")
+                                pathField("Classifier export", value: $store.specialistClassifierPath, kind: "classifier", prompt: "Bundled \(NativeDiffuseTextureClassifier.bundledDisplayName) diffuse classifier")
+                                pathField("Model workspace", value: $store.specialistWorkspacePath, kind: "workspace")
+                                Text("Active originals: \(store.modelWorkshopSourcePath.isEmpty ? "Open a source folder above" : store.modelWorkshopSourcePath)")
                                     .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                                 Text("Classifier-only diffuse examples remain in \(store.classifierDatasetPath). Add matching surface maps to the source dataset when you want to use them for material training.")
                                     .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                             }.padding(.top, 8)
                         }
                         HStack {
-                            Button("Create / Refresh Specialists", systemImage: "arrow.triangle.branch") { store.refreshSpecialists() }
+                            Button("Refresh Model Categories", systemImage: "arrow.triangle.branch") { store.refreshSpecialists() }
                                 .buttonStyle(.glassProminent).disabled(store.isBusy)
                             if let registry = store.specialistRegistry {
-                                Text("\(registry.specialists.count) specialists · \(registry.familyCount) paired families · \(registry.classifierOnlyCount) classifier-only examples")
+                                Text("\(registry.specialists.count) categories · \(registry.familyCount) paired families · \(registry.classifierOnlyCount) classifier examples")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }
@@ -39,7 +40,7 @@ struct MaterialSpecialistsView: View {
                 }
                 if let registry = store.specialistRegistry {
                     HStack(alignment: .top, spacing: 20) {
-                        GroupBox("2. Choose one specialist") {
+                        GroupBox("Material categories") {
                             VStack(alignment: .leading, spacing: 4) {
                                 ForEach(registry.specialists) { item in
                                     Button {
@@ -66,11 +67,25 @@ struct MaterialSpecialistsView: View {
                         }.frame(width: 285)
                         if let specialist = store.selectedSpecialist {
                             VStack(alignment: .leading, spacing: 18) {
-                                GroupBox("3. Train \(specialist.name)") {
+                                GroupBox("4. Train each map for \(specialist.name)") {
                                     VStack(alignment: .leading, spacing: 12) {
                                         if let subtype = specialist.subtype {
                                             Text("\(specialist.classLabel) · subtype: \(subtype)").foregroundStyle(.secondary)
                                         }
+                                        ForEach(["height", "roughness", "normal"], id: \.self) { target in
+                                            HStack {
+                                                VStack(alignment: .leading, spacing: 3) {
+                                                    Text(WorkbenchStore.specialistMapTitle(target)).font(.callout.bold())
+                                                    Text(mapTrainingSummary(specialist, target: target)).font(.caption).foregroundStyle(.secondary)
+                                                }
+                                                Spacer()
+                                                Button(specialist.latestModel(for: target) == nil ? "Set Up Training" : "Continue Training") {
+                                                    store.specialistTarget = target
+                                                    store.openSpecialistTrainer(continuing: specialist.latestModel(for: target) != nil)
+                                                }.disabled(store.isBusy || (specialist.targetInfo(target)?.materialCount ?? 0) == 0)
+                                            }
+                                        }
+                                        Divider()
                                         Picker("Surface map", selection: $store.specialistTarget) {
                                             ForEach(["height", "roughness", "normal"], id: \.self) { target in
                                                 Text("\(WorkbenchStore.specialistMapTitle(target)) (\(specialist.targetInfo(target)?.materialCount ?? 0) paired sets)").tag(target)
@@ -93,7 +108,7 @@ struct MaterialSpecialistsView: View {
                                             .font(.caption).foregroundStyle(.secondary)
                                     }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
                                 }
-                                GroupBox("4. Compare and approve") {
+                                GroupBox("5. Compare and approve") {
                                     VStack(alignment: .leading, spacing: 12) {
                                         if let model = specialist.latestModel(for: store.specialistTarget) {
                                             let current = model.membershipSha256 == specialist.targetInfo(store.specialistTarget)?.membershipSha256
@@ -108,21 +123,21 @@ struct MaterialSpecialistsView: View {
                                                 }.disabled(!current && model.approved != true)
                                             }.disabled(store.isBusy)
                                         } else {
-                                            Text("Training saves this specialist's checkpoint here. Inspect detail and artifacts before approving it.")
+                                            Text("Training saves this category's checkpoint here. Inspect detail and artifacts before approving it.")
                                                 .foregroundStyle(.secondary)
                                         }
                                     }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
                                 }
-                                GroupBox("5. Generate automatically or continue") {
+                                GroupBox("6. Generate materials") {
                                     VStack(alignment: .leading, spacing: 12) {
                                         Text("In Texture Studio, choose Automatic specialist models as the height source. The diffuse classifier selects approved category models; missing or uncertain categories use the chosen fallback.")
                                             .foregroundStyle(.secondary)
                                         NumericField("Minimum classifier confidence", value: $minimumConfidence, in: 0...1)
                                         if specialist.isCustom {
-                                            Text("Subtype specialists can be trained and used directly from Saved Models. Automatic routing follows the classifier's categories; add a subtype to the classifier when you want it recognized automatically.")
+                                            Text("Subtype models can be trained and used directly from Saved Models. Automatic routing follows the classifier's categories; add a subtype to the classifier when you want it recognized automatically.")
                                                 .font(.caption).foregroundStyle(.secondary)
                                         }
-                                        Button("Next Specialist", systemImage: "arrow.right") { store.selectNextSpecialist() }
+                                        Button("Next Category", systemImage: "arrow.right") { store.selectNextSpecialist() }
                                             .disabled(store.isBusy)
                                     }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
                                 }
@@ -137,13 +152,133 @@ struct MaterialSpecialistsView: View {
                         }
                     }
                 } else {
-                    ContentUnavailableView("Create your specialist library", systemImage: "arrow.triangle.branch",
-                        description: Text("The bundled classifier is ready. Refresh to organize paired materials and set up each model."))
+                    ContentUnavailableView("Organize your model categories", systemImage: "arrow.triangle.branch",
+                        description: Text("Start with your source folders and image tags above, then refresh categories to train the available map models."))
                 }
             }.padding(24).frame(maxWidth: 1200).frame(maxWidth: .infinity)
         }
         .task { store.loadSpecialistRegistry() }
         .sheet(isPresented: $showAdd) { addSheet }
+        .sheet(isPresented: $store.showClassifierDatasetSettings) { ClassifierDatasetSettingsSheet(store: store) }
+    }
+
+    private var workshopSources: some View {
+        GroupBox("1. Organize your original folders and image tags") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(store.dataset == nil ? "Open a source folder to begin" : store.datasetName).font(.headline)
+                        Text(store.dataset == nil ? "Images and maps stay at their original dimensions. Add, inspect and label them inside this app." : store.datasetInventorySummary)
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Open Source Folder…", systemImage: "folder") { store.chooseDataset() }.disabled(store.isBusy)
+                    Button("Add Images or Folders…", systemImage: "photo.badge.plus") { store.addMaterialFolder(workshop: true) }.disabled(store.isBusy)
+                    Button("Manage Images & Tags", systemImage: "tag") { store.openModelWorkshopSources() }
+                        .disabled(store.isBusy || store.dataset == nil)
+                }
+                if !store.modelWorkshopSourceFolders.isEmpty {
+                    DisclosureGroup("Current source folders (\(store.modelWorkshopSourceFolders.count))") {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(store.modelWorkshopSourceFolders, id: \.self) { folder in
+                                    Label(folder, systemImage: "folder").font(.caption).textSelection(.enabled)
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                        }.frame(maxHeight: 130)
+                    }
+                }
+                if !store.modelWorkshopImageTags.isEmpty {
+                    DisclosureGroup("Current classified image tags (\(store.modelWorkshopImageTags.count))") {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(store.modelWorkshopImageTags) { image in
+                                    HStack(alignment: .top) {
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(image.familyId).font(.callout.bold())
+                                            Text(URL(fileURLWithPath: image.inputPath).lastPathComponent).font(.caption).foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Text(image.tags.joined(separator: " · ")).font(.callout).textSelection(.enabled)
+                                    }
+                                }
+                            }
+                        }.frame(maxHeight: 180)
+                    }
+                } else {
+                    Text("Review material tags in Manage Images & Tags. Category refresh shows the classifier's current labels here.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if !store.modelWorkshopTaggedOriginals.isEmpty {
+                    DisclosureGroup("Saved original image tags (\(store.modelWorkshopTaggedOriginals.count))") {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(store.modelWorkshopTaggedOriginals) { image in
+                                    HStack(alignment: .top) {
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(image.name).font(.callout.bold())
+                                            Text(image.folder).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                                        }
+                                        Spacer()
+                                        VStack(alignment: .trailing, spacing: 3) {
+                                            Text(image.classLabel ?? "").font(.callout)
+                                            Text(originalTagSummary(image)).font(.caption).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
+                            }
+                        }.frame(maxHeight: 180)
+                    }
+                }
+            }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var workshopClassifier: some View {
+        GroupBox("2. Teach the diffuse classifier") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Label original diffuse images by material type, prepare the labeled examples, train the classifier, then choose the exported model here. Classifier examples and surface-map training crops have separate jobs.")
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Review Image Tags", systemImage: "tag") { store.openModelWorkshopSources() }
+                        .disabled(store.isBusy || store.dataset == nil)
+                    Button("Prepare Classifier Examples", systemImage: "arrow.clockwise") { store.refreshClassifierDataset() }
+                        .disabled(store.isBusy || store.dataset == nil && !store.classifierUseSourceFolder)
+                    Button("Classifier Settings…", systemImage: "gearshape") { store.showClassifierDatasetSettings = true }
+                        .disabled(store.isBusy)
+                    Button("Choose Trained Classifier…", systemImage: "shippingbox") { store.chooseSpecialistPath("classifier") }
+                        .disabled(store.isBusy)
+                }
+                if let result = store.classifierDatasetResult {
+                    Text(result.summary).font(.caption).foregroundStyle(.secondary)
+                }
+                Text(store.specialistClassifierPath.isEmpty ? "Using the bundled diffuse classifier until you choose a trained export." : "Classifier: \(store.specialistClassifierPath)")
+                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func mapTrainingSummary(_ specialist: WorkbenchSpecialistRegistry.Specialist, target: String) -> String {
+        let count = specialist.targetInfo(target)?.materialCount ?? 0
+        guard count > 0 else { return "No paired maps available for this category" }
+        if let model = specialist.latestModel(for: target) {
+            let current = model.membershipSha256 == specialist.targetInfo(target)?.membershipSha256
+            return "\(count) paired sets · " + (!current ? "Sources changed" : model.approved == true ? "Approved model" : "Saved model needs review")
+        }
+        return "\(count) paired sets · Ready for training"
+    }
+
+    private func originalTagSummary(_ image: WorkbenchSourceInventoryItem) -> String {
+        let role: String
+        switch image.role {
+        case "input": role = "Diffuse"
+        case "height": role = "Displacement"
+        case "roughness": role = "Roughness"
+        case "normal": role = "Normal"
+        case "ancillary": role = "Additional map"
+        default: role = "Unassigned image"
+        }
+        return role + (image.sourceVerification == "verified" ? " · Verified original" : "")
     }
 
     private func pathField(_ title: String, value: Binding<String>, kind: String, prompt: String = "") -> some View {
@@ -156,18 +291,18 @@ struct MaterialSpecialistsView: View {
 
     private var addSheet: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Add a specialist").font(.title2.bold())
+            Text("Add a model category").font(.title2.bold())
             TextField("Name, e.g. Wood Planks", text: $newName)
             Picker("Classifier category", selection: $newClass) {
                 ForEach(store.specialistRegistry?.classifierLabels ?? [], id: \.self) { Text($0).tag($0) }
             }
             TextField("Subtype or filename text, e.g. planks (optional)", text: $newSubtype)
-            Text("Keep descriptive filenames. The subtype selects matching materials within the chosen category. Leave it blank to create a specialist for the whole category.")
+            Text("Keep descriptive filenames. The subtype selects matching materials within the chosen category. Leave it blank to train the whole category.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Spacer()
                 Button("Cancel") { showAdd = false }.keyboardShortcut(.cancelAction)
-                Button("Add Specialist") {
+                Button("Add Category") {
                     store.addSpecialist(name: newName, classLabel: newClass, subtype: newSubtype)
                     showAdd = false
                 }.keyboardShortcut(.defaultAction).disabled(newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

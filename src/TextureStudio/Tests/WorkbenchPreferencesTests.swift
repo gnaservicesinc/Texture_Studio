@@ -301,6 +301,81 @@ final class WorkbenchPreferencesTests: XCTestCase {
         XCTAssertEqual(next.comparisonCheckpointIds, ["second"])
     }
 
+    func testBareSourceStartupDefersSavedModelsAndKeepsSelectionsUntilModelNavigation() async throws {
+        let fixture = try PreferencesFixture(); defer { fixture.remove() }
+        let first = fixture.root.appendingPathComponent("first.safetensors")
+        let second = fixture.root.appendingPathComponent("second.safetensors")
+        let category = fixture.root.appendingPathComponent("category.safetensors")
+        for file in [first, second, category] { try Data("Stored model bytes".utf8).write(to: file) }
+        fixture.defaults.set(fixture.root.path, forKey: "dataset")
+        fixture.defaults.set([first.path, second.path], forKey: "checkpoints")
+        WorkbenchPreferences(selectedCheckpointId: "first", comparisonCheckpointIds: ["second"], comparisonIncludesBase: false).save(to: fixture.defaults)
+        var calls: [String] = []
+        let store = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources, workerOverride: { args, _ in
+            calls.append(args[0])
+            if args.first == "capabilities" { return "{\"training_sizes\":[256,512,1024,2048]}" }
+            if args.first == "dataset" { return """
+                {"dataset_path":"\(fixture.root.path)","source_folder_path":"\(fixture.root.path)","is_source_folder":true,
+                 "index_sha256":"source","training_size":2048,"materials":[]}
+                """ }
+            let path = args[try XCTUnwrap(args.firstIndex(of: "--checkpoint")) + 1]
+            let id = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+            return """
+                {"checkpoint_path":"\(path)","sha256":"\(id)","schema":"texture-studio-compact-material-v1",
+                 "target":"height","compatible":true,"step":1}
+                """
+        })
+        store.restore(arguments: ["Texture Studio", "--dataset", fixture.root.path], sourceBrowsing: true)
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(calls, ["capabilities", "dataset"], "Opening source folders cannot inspect saved model weights")
+        XCTAssertTrue(store.checkpoints.isEmpty)
+        XCTAssertEqual(store.selectedCheckpointId, "first")
+        XCTAssertEqual(store.comparisonCheckpointIds, ["second"])
+        XCTAssertEqual(fixture.defaults.stringArray(forKey: "checkpoints"), [first.path, second.path])
+        XCTAssertEqual(WorkbenchPreferences.load(from: fixture.defaults).comparisonCheckpointIds, ["second"])
+
+        try await store.loadCheckpoint(category)
+        XCTAssertEqual(fixture.defaults.stringArray(forKey: "checkpoints"), [first.path, second.path, category.path],
+                       "Loading one category model must retain deferred library paths")
+        XCTAssertEqual(store.comparisonCheckpointIds, ["second", "category"])
+        store.reconnectSavedCheckpoints()
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(calls, ["capabilities", "dataset", "checkpoint", "checkpoint", "checkpoint"])
+        XCTAssertEqual(Set(store.checkpoints.map(\.id)), ["first", "second", "category"])
+        XCTAssertEqual(store.selectedCheckpointId, "category")
+        XCTAssertEqual(store.comparisonCheckpointIds, ["second", "category"])
+        store.reconnectSavedCheckpoints()
+        XCTAssertFalse(store.isBusy, "Repeated model navigation reuses connected checkpoints")
+        XCTAssertEqual(calls.count, 5)
+    }
+
+    func testBareSourceModelStartupReconnectsOnlyWhenModelNavigationIsRequested() async throws {
+        let fixture = try PreferencesFixture(); defer { fixture.remove() }
+        let model = fixture.root.appendingPathComponent("saved.safetensors")
+        try Data("Stored model bytes".utf8).write(to: model)
+        fixture.defaults.set(fixture.root.path, forKey: "dataset")
+        fixture.defaults.set([model.path], forKey: "checkpoints")
+        var calls: [String] = []
+        let store = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources, workerOverride: { args, _ in
+            calls.append(args[0])
+            if args.first == "capabilities" { return "{\"training_sizes\":[2048]}" }
+            if args.first == "dataset" { return """
+                {"dataset_path":"\(fixture.root.path)","is_source_folder":true,"index_sha256":"source","materials":[]}
+                """ }
+            return """
+                {"checkpoint_path":"\(model.path)","sha256":"saved","schema":"texture-studio-compact-material-v1",
+                 "target":"height","compatible":true,"step":1}
+                """
+        })
+        store.restore(arguments: ["Texture Studio"], sourceBrowsing: false)
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(calls, ["capabilities", "dataset", "checkpoint"])
+        XCTAssertEqual(store.selectedCheckpointId, "saved")
+    }
+
     func testCapabilityDiscoveryPreservesSupportedResolutionSelection() async throws {
         let fixture = try PreferencesFixture()
         defer { fixture.remove() }
@@ -372,7 +447,7 @@ final class WorkbenchPreferencesTests: XCTestCase {
         store.selectTrainingModelFamily(.compactScalar)
         store.training.size = 2048
         XCTAssertEqual(Set(store.trainingFolderSamples.map(\.id)), ["stone_1k_sample", "stone_2k_sample"])
-        XCTAssertEqual(store.datasetInventorySummary, "1 material folder · 2 resolution sets")
+        XCTAssertEqual(store.datasetInventorySummary, "1 folder · 3 original files · 2 paired sets")
         XCTAssertEqual(store.trainingCurrentCropSummary, "Currently available: 1 height training crop at 2048 × 2048")
         XCTAssertTrue(store.trainingScopeSummary.contains("includes all resolution tiers"))
         XCTAssertNil(store.trainingConfigurationIssue,
@@ -425,7 +500,7 @@ final class WorkbenchPreferencesTests: XCTestCase {
         store.training.size = 2048
         store.training.useSelectedMaterialOnly = true
         XCTAssertEqual(store.trainingFolderSamples.map(\.id), ["stone_1k_sample"])
-        XCTAssertEqual(store.datasetInventorySummary, "2 material folders · 2 resolution sets")
+        XCTAssertEqual(store.datasetInventorySummary, "2 folders · 3 original files · 2 paired sets")
         XCTAssertEqual(store.trainingCurrentCropSummary, "Currently available: 0 height training crops at 2048 × 2048")
         XCTAssertNotNil(store.trainingConfigurationIssue)
         store.training.useSelectedMaterialOnly = false
@@ -512,7 +587,7 @@ final class WorkbenchPreferencesTests: XCTestCase {
         store.adoptDataset(dataset)
         store.selectTrainingModelFamily(.compactScalar)
         store.training.useSelectedMaterialOnly = false
-        XCTAssertEqual(store.datasetInventorySummary, "1 material folder · 3 resolution sets")
+        XCTAssertEqual(store.datasetInventorySummary, "1 folder · 8 original files · 3 paired sets")
         XCTAssertEqual(store.trainingCurrentCropSummary, "Prepared: 3 height training crops at 1024 × 1024")
     }
 

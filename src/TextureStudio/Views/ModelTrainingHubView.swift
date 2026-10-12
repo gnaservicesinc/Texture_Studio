@@ -1,13 +1,13 @@
 import SwiftUI
 
 private enum TrainingDestination: String, CaseIterable, Identifiable {
-    case overview, dataset, specialists, train, compare, review, checkpoints
+    case specialists, dataset, train, compare, review, checkpoints, overview
     var id: String { rawValue }
     var title: String {
         switch self {
         case .overview: "Getting Started"
         case .dataset: "Dataset"
-        case .specialists: "Specialist Models"
+        case .specialists: "Loom Room"
         case .train: "Train Material"
         case .compare: "Compare Checkpoints"
         case .review: "Review Details"
@@ -38,7 +38,7 @@ private enum TrainingDestination: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "A practical path from photographed surfaces to a reusable material model."
         case .dataset: "Create, rename and manage datasets, then inspect their original material maps."
-        case .specialists: "Classify materials, then train, compare and approve one category at a time."
+        case .specialists: "Organize source folders and image tags, teach the classifier, then train and review each material map."
         case .train: "Refine displacement, roughness or normals at the selected native pixel grid."
         case .compare: "Prepare diffuse once, then compare matching model outputs."
         case .review: "Inspect original pixels, pan together and pop maps out for a closer look."
@@ -50,7 +50,7 @@ private enum TrainingDestination: String, CaseIterable, Identifiable {
 struct ModelTrainingHubView: View {
     @Bindable var store: WorkbenchStore
     @AppStorage("trainingDestination", store: UserDefaults(suiteName: "org.ipde.material-tools"))
-    private var destinationName = TrainingDestination.overview.rawValue
+    private var destinationName = TrainingDestination.specialists.rawValue
     @State private var review = ReviewSessionStore()
 
     private var destination: TrainingDestination? {
@@ -91,7 +91,7 @@ struct ModelTrainingHubView: View {
                         }
                         Spacer()
                         if [.train, .compare].contains(item), store.specialistTrainingContext != nil {
-                            Button("Specialist Workflow") { destination = .specialists }
+                            Button("Loom Room") { destination = .specialists }
                         }
                         if let role = item.tool {
                             Button("Separate Window", systemImage: "macwindow.on.rectangle") { MaterialToolLauncher.open(role) }
@@ -103,7 +103,7 @@ struct ModelTrainingHubView: View {
                 switch destination ?? .overview {
                 case .overview: overview.modifier(DatasetManagementPresentation(store: store))
                 case .dataset: MaterialToolRootView(role: .dataset, store: store, review: review, embeddedInHub: true)
-                case .specialists: MaterialSpecialistsView(store: store)
+                case .specialists: MaterialSpecialistsView(store: store).modifier(DatasetManagementPresentation(store: store))
                 case .train: MaterialToolRootView(role: .train, store: store, review: review, embeddedInHub: true)
                 case .compare: MaterialToolRootView(role: .compare, store: store, review: review, embeddedInHub: true)
                 case .review: MaterialToolRootView(role: .review, store: store, review: review, embeddedInHub: true)
@@ -124,9 +124,28 @@ struct ModelTrainingHubView: View {
             Button("OK") { store.error = nil }
         } message: { Text(store.error ?? "") }
         .onChange(of: store.trainingNavigationRequest) { _, _ in destination = .train }
+        .onChange(of: store.datasetNavigationRequest) { _, _ in destination = .dataset }
         .onChange(of: store.specialistNavigationRequest) { _, _ in destination = .specialists }
         .onChange(of: store.comparisonNavigationRequest) { _, _ in destination = .compare }
-        .task { store.restore() }
+        .onChange(of: destinationName) { _, name in
+            if name == TrainingDestination.specialists.rawValue { store.returnToModelWorkshop() }
+            reconnectModelsForDestination()
+        }
+        .onChange(of: store.isBusy) { _, busy in
+            if !busy { reconnectModelsForDestination() }
+        }
+        .task {
+            if store.developerMode, destination == .overview { destination = .specialists }
+            let modelDestination = destination == .train || destination == .compare || destination == .checkpoints
+            store.restore(sourceBrowsing: !modelDestination)
+        }
+    }
+
+    private func reconnectModelsForDestination() {
+        let modelDestination = destination == .train || destination == .compare
+        if destination == .checkpoints || (modelDestination && store.specialistTrainingContext == nil && !store.modelWorkshopNeedsOriginalSources) {
+            store.reconnectSavedCheckpoints()
+        }
     }
 
     private var overview: some View {
@@ -135,10 +154,10 @@ struct ModelTrainingHubView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Label("MatterLoom texture pipeline", systemImage: "graduationcap")
                         .font(.largeTitle.bold())
-                    Text("Build one material pipeline with specialist models for surface height, roughness and normals. Train with paired diffuse and surface maps, then inspect the exact inputs and outputs.")
+                    Text("Build your MatterLoom pipeline with models for surface height, roughness and normals. Train with paired diffuse and surface maps, then inspect the exact inputs and outputs.")
                         .font(.title3).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
-                startCard("Train category specialists", symbol: "arrow.triangle.branch", description: "Use the diffuse classifier to organize paired materials, then train and review one category or subtype at a time.", button: "Open Specialist Workflow") {
+                startCard("Build your material models", symbol: "arrow.triangle.branch", description: "Organize your original folders and image tags, teach the classifier, then train displacement, roughness and normal models.", button: "Open Loom Room") {
                     destination = .specialists
                 }
                 HStack(alignment: .top, spacing: 18) {

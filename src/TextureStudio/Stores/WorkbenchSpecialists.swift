@@ -1,6 +1,17 @@
 import AppKit
 
 struct WorkbenchSpecialistRegistry: Decodable, Sendable {
+    struct Assignment: Decodable, Sendable, Identifiable {
+        let familyId: String
+        let inputPath: String
+        let classLabel: String
+        var subtype: String? = nil
+        var semanticTerms: [String]? = nil
+        var confidence: Double? = nil
+        var source: String? = nil
+        var id: String { inputPath }
+        var tags: [String] { [classLabel] + (subtype.map { [$0] } ?? []) }
+    }
     struct Target: Decodable, Sendable {
         let target: String
         let materialCount: Int
@@ -28,6 +39,7 @@ struct WorkbenchSpecialistRegistry: Decodable, Sendable {
         let familyIds: [String]
         let targets: [Target]
         let models: [Model]
+        var assignments: [Assignment]? = nil
         func latestModel(for target: String) -> Model? { models.last(where: { $0.target == target }) }
         func targetInfo(_ target: String) -> Target? { targets.first(where: { $0.target == target }) }
     }
@@ -55,6 +67,93 @@ struct WorkbenchSpecialistTrainingContext: Sendable {
 }
 
 extension WorkbenchStore {
+    var modelWorkshopSourcePath: String {
+        let categorySelected = dataset.map { current in
+            specialistRegistry?.specialists.contains { URL(fileURLWithPath: $0.datasetPath).standardizedFileURL.path == URL(fileURLWithPath: current.datasetPath).standardizedFileURL.path } ?? false
+        } ?? false
+        if specialistTrainingContext == nil, !categorySelected, let dataset {
+            return dataset.sourceFolderPath ?? dataset.preparation?.sourceDatasetPath ?? dataset.datasetPath
+        }
+        let remembered = specialistSourceDatasetPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        return remembered.isEmpty ? specialistRegistry?.sourceDatasetPath ?? "" : remembered
+    }
+
+    var modelWorkshopNeedsOriginalSources: Bool {
+        guard let dataset, !modelWorkshopSourcePath.isEmpty else { return false }
+        return specialistTrainingContext != nil || URL(fileURLWithPath: dataset.datasetPath).standardizedFileURL.path != URL(fileURLWithPath: modelWorkshopSourcePath).standardizedFileURL.path
+    }
+
+    func restoreModelWorkshopSourcesIfNeeded() async throws {
+        let source = modelWorkshopSourcePath
+        guard !source.isEmpty else { return }
+        if modelWorkshopNeedsOriginalSources {
+            try await loadDataset(URL(fileURLWithPath: source), recoverSources: false)
+        }
+        specialistTrainingContext = nil
+        specialistSourceDatasetPath = source
+        datasetBrowserMode = .originals
+    }
+
+    func returnToModelWorkshop() {
+        guard !isBusy else { return }
+        guard modelWorkshopNeedsOriginalSources else { specialistNavigationRequest = UUID(); return }
+        operation("Opening original source folders…") {
+            try await self.restoreModelWorkshopSourcesIfNeeded()
+            self.specialistNavigationRequest = UUID()
+            self.activity = "Original folders are ready in Loom Room."
+        }
+    }
+
+    func addModelWorkshopSourceFiles(_ urls: [URL]) {
+        guard !isBusy, !urls.isEmpty else { return }
+        guard dataset != nil else { addMaterialFolders(urls); return }
+        operation("Adding original images and folders…") {
+            try await self.restoreModelWorkshopSourcesIfNeeded()
+            if self.dataset?.isSourceFolder == true { try await self.registerSourceFiles(urls) }
+            else { try await self.registerSourceFolders(urls) }
+        }
+    }
+
+    var modelWorkshopSourceFolders: [String] {
+        let materials = dataset?.originalMaterials ?? dataset?.materials ?? []
+        let paths = materials.compactMap(\.sourceDirectory) + (dataset?.sourceInventory ?? []).map(\.folder)
+        return Array(Set(paths)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    var modelWorkshopImageTags: [WorkbenchSpecialistRegistry.Assignment] {
+        var seen = Set<String>()
+        return (specialistRegistry?.specialists ?? []).flatMap { $0.assignments ?? [] }
+            .filter { seen.insert($0.inputPath).inserted }
+            .sorted { $0.familyId.localizedStandardCompare($1.familyId) == .orderedAscending }
+    }
+
+    var modelWorkshopTaggedOriginals: [WorkbenchSourceInventoryItem] {
+        (dataset?.sourceInventory ?? []).filter { !($0.classLabel?.isEmpty ?? true) }
+            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    func useOpenSourcesInModelWorkshop() {
+        guard let dataset else { return }
+        specialistSourceDatasetPath = dataset.sourceFolderPath ?? dataset.preparation?.sourceDatasetPath ?? dataset.datasetPath
+    }
+
+    func openModelWorkshopSources() {
+        guard !isBusy else { return }
+        let source = modelWorkshopSourcePath
+        guard !source.isEmpty else { chooseDataset(); return }
+        if modelWorkshopNeedsOriginalSources {
+            operation("Opening original source folders…") {
+                try await self.restoreModelWorkshopSourcesIfNeeded()
+                self.datasetNavigationRequest = UUID()
+                self.activity = "Original images are ready for review and tagging."
+            }
+            return
+        }
+        specialistTrainingContext = nil
+        datasetBrowserMode = .originals
+        datasetNavigationRequest = UUID()
+    }
+
     var selectedSpecialist: WorkbenchSpecialistRegistry.Specialist? {
         specialistRegistry?.specialists.first(where: { $0.id == selectedSpecialistID })
             ?? specialistRegistry?.specialists.first
@@ -66,25 +165,26 @@ extension WorkbenchStore {
         do {
             specialistRegistry = try WorkbenchResult.decode(WorkbenchSpecialistRegistry.self,
                 output: String(contentsOf: url, encoding: .utf8))
-        } catch { self.error = "Could not open the specialist workspace: \(error.localizedDescription)" }
+        } catch { self.error = "Could not open the model workspace: \(error.localizedDescription)" }
     }
 
     func refreshSpecialists() {
         guard !isBusy else { return }
-        let source = specialistSourceDatasetPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !source.isEmpty else { error = "Choose the original material dataset for the specialist models."; return }
+        let source = modelWorkshopSourcePath
+        guard !source.isEmpty else { error = "Open your original source folder in Loom Room first."; return }
+        specialistSourceDatasetPath = source
         var args = ["refresh-specialists", "--dataset", source, "--workspace", specialistWorkspacePath,
                     "--classifier-dataset", classifierDatasetPath]
         let classifier = specialistClassifierPath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !classifier.isEmpty { args += ["--classifier", classifier] }
         let originals = classifierSourceFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !originals.isEmpty { args += ["--source-folder", originals] }
-        operation("Classifying materials and preparing specialist datasets…") {
+        if classifierUseSourceFolder, !originals.isEmpty { args += ["--source-folder", originals] }
+        operation("Organizing image tags and map training datasets…") {
             self.specialistRegistry = try WorkbenchResult.decode(WorkbenchSpecialistRegistry.self,
                 output: await self.worker(args))
             if self.selectedSpecialistID == nil { self.selectedSpecialistID = self.specialistRegistry?.specialists.first?.id }
             let registry = self.specialistRegistry!
-            self.activity = "\(registry.specialists.count) specialist datasets · \(registry.familyCount) source families. Choose a category and map to train."
+            self.activity = "\(registry.specialists.count) model categories · \(registry.familyCount) source families. Choose a category and map to train."
             if !registry.warnings.isEmpty { self.logText += "\n" + registry.warnings.joined(separator: "\n") }
         }
     }
@@ -92,8 +192,9 @@ extension WorkbenchStore {
     func openSpecialistTrainer(continuing: Bool = false) {
         guard let specialist = selectedSpecialist,
               (specialist.targetInfo(specialistTarget)?.materialCount ?? 0) > 0 else {
-            error = "This specialist needs paired \(specialistTarget) maps before training."; return
+            error = "This category needs paired \(specialistTarget) maps before training."; return
         }
+        specialistSourceDatasetPath = modelWorkshopSourcePath
         let target = specialistTarget, workspace = specialistWorkspacePath
         operation("Opening \(specialist.name) training dataset…") {
             let family: MaterialTrainingModelFamily = target == "normal" ? .compactNormal : .compactScalar
@@ -131,6 +232,7 @@ extension WorkbenchStore {
 
     func compareSpecialistModel() {
         guard let specialist = selectedSpecialist, let saved = specialist.latestModel(for: specialistTarget) else { return }
+        specialistSourceDatasetPath = modelWorkshopSourcePath
         let target = specialistTarget
         operation("Opening \(specialist.name) comparison…") {
             self.training.target = target

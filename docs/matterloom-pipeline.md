@@ -2,12 +2,13 @@
 
 MatterLoom presents the material specialists as one texture pipeline. Its goal is a highly detailed, visually pleasing texture that passes practical sanity checks. Professionally artist-authored 16-bit diffuse, height, roughness and normal maps are the clean training targets.
 
+Developer training starts in **Loom Room** with a bare source folder such as `/opt/ipde/sources_mats`. Add images and folders, inspect originals, edit image tags and rename material folders inside the app. Opening the folder requires no JSON or model setup and does not hash every image. New folders use a 2048 training grid; smaller originals remain visible separately from exact training crops. Teach and export the diffuse classifier in Create ML, train the category's height, roughness and normal models, then compare and approve their results. See the [source-folder guide](source-folder-workflow.md). The separate non-developer LoRA workflow is deferred.
+
 ## Implemented controls
 
 - Fresh compact models offer widths 16, 22, 32, 46 and 64. RGB-to-scalar parameter counts are 256,257; 478,017; 999,937; 2,050,497; and 3,949,569. Normals and the one-channel DepthPro refiner show their own exact counts. Resumed models inherit their recorded width.
 - Adam, AdamW and Lion are available. AdamW stays the default. Lion keeps one momentum value per parameter and uses sign updates; the UI provides an explicit lower-learning-rate setup. Follow the [original Lion implementation](https://github.com/google/automl/tree/master/lion) when tuning its smaller learning rate and larger weight decay. Fewer state values do not guarantee better texture quality.
-- Dataset Info and New Dataset let the user select one, two or three source tiers. At a 2048 grid, these fetch 2048; 2048 and 4096; or 2048, 4096 and 8192. Existing local maps remain available. Preparation creates crops at the selected training grid.
-- At 256 or 512 training grids, fetched tiers start at the smallest published provider tier, 1024 pixels. One tier still obtains the missing paired 1K maps needed to crop a smaller training grid.
+- Adding sources copies exact original bytes and keeps material families, resolution tiers and original parent folders separate. Filename and saved-tag roles distinguish diffuse from AO and surface targets. Full verification and crop preparation occur when requested for training; crops preserve native alignment and 16-bit codes without scaling.
 - Hugging Face destinations use the checkpoint's model name, map target and checksum. Model cards describe the recorded subjects, architecture, training grid, optimizer, learning-rate schedule, augmentation and map counts. For example, a named Pine Bark Height checkpoint becomes a MatterLoom surface-height / displacement specialist for Pine Bark.
 
 ## Learned photo preparation and final restoration

@@ -11,14 +11,24 @@ final class NativeDiffuseTextureClassifierTests: XCTestCase {
         XCTAssertEqual(classifier.inputWidth, 360); XCTAssertEqual(classifier.inputHeight, 360)
         XCTAssertEqual(classifier.predictedFeatureName, "target")
         XCTAssertEqual(classifier.predictedProbabilitiesName, "targetProbability")
-        XCTAssertEqual(classifier.labels.count, 15)
-        XCTAssertTrue(["Bark", "Leather", "Paper", "Drywall", "Other Diffuse Textures"].allSatisfy(classifier.labels.contains))
+        XCTAssertEqual(Set(classifier.labels), ["Bark", "Bricks", "Cement Concrete Pavement", "Drywall", "Fabric", "Ground", "Leather",
+            "Medium Particles", "Metal", "Other Diffuse Textures", "Paper", "Rock Cliff Marble", "Small Particles", "Tiles and Pavers", "Wood"])
         XCTAssertEqual(Set(classifier.labels).count, classifier.labels.count)
         XCTAssertTrue(classifier.preprocessing.contains("scaleFill"))
         let custom = try NativeDiffuseTextureClassifier(modelURL: exportedModel)
         XCTAssertEqual(custom.labels, classifier.labels, "Runtime labels come from the selected model, including classes added after the original dataset")
         XCTAssertEqual(custom.modelSHA256, classifier.modelSHA256, "The bundled identity is the exact original exported specification")
         XCTAssertEqual(try NativeDiffuseTextureClassifier.modelIdentity(at: exportedModel), classifier.modelSHA256)
+    }
+
+    func testBundledDTTC3SpecificationIsTheExactProvidedExport() throws {
+        let provided = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Classifiers/diffuse_texture_type/DTTC3.mlmodel")
+        XCTAssertEqual(try Data(contentsOf: provided), try Data(contentsOf: exportedModel))
+        XCTAssertEqual(try NativeDiffuseTextureClassifier.modelIdentity(at: provided), NativeDiffuseTextureClassifier.bundledModelSHA256)
+        XCTAssertNotEqual(NativeDiffuseTextureClassifier.bundledModelSHA256,
+            "e2936fcef0781fb4f85eb7e879cc2f7d865528415180d894afd74eddc1e048be", "Automatic predictions cached for IFPv2 cannot be reused for DTTC3")
+        XCTAssertEqual(NativeDiffuseTextureClassifier.bundledDisplayName, "DTTC3")
     }
 
     func testRealModelClassifiesKnownCorpusAndIgnoresPNGFilenameWithoutChangingImages() throws {

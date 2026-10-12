@@ -6,6 +6,12 @@ enum DatasetSheetRoute: String, Identifiable {
     var id: String { rawValue }
 }
 
+enum DatasetBrowserMode: String, CaseIterable, Identifiable {
+    case originals, crops
+    var id: String { rawValue }
+    var title: String { self == .originals ? "Originals" : "Training Crops" }
+}
+
 enum MaterialTool: String, CaseIterable, Identifiable {
     case review, compare, dataset, train
     var id: String { rawValue }
@@ -73,6 +79,27 @@ struct WorkbenchMaterial: Decodable, Identifiable, Sendable {
     var id: String { materialId }
 }
 
+struct WorkbenchSourceInventoryItem: Decodable, Identifiable, Sendable {
+    let path: String
+    var filename: String? = nil
+    var directory: String? = nil
+    var role: String? = nil
+    var width: Int? = nil
+    var height: Int? = nil
+    var bits: Int? = nil
+    var channels: Int? = nil
+    var state: String? = nil
+    var issue: String? = nil
+    var materialId: String? = nil
+    var classLabel: String? = nil
+    var sourceVerification: String? = nil
+    var tags: [String]? = nil
+    var id: String { path }
+    var url: URL { URL(fileURLWithPath: path) }
+    var folder: String { directory ?? url.deletingLastPathComponent().path }
+    var name: String { filename ?? url.lastPathComponent }
+}
+
 struct WorkbenchDataset: Decodable, Sendable {
     let datasetPath: String
     let indexSha256: String
@@ -99,7 +126,30 @@ struct WorkbenchDataset: Decodable, Sendable {
     var subjects: [WorkbenchSubject]? = nil
     var sourceRecovery: WorkbenchSourceRecovery? = nil
     var sourceRecoveryResults: [WorkbenchSourceRecoveryResult]? = nil
+    var originalMaterials: [WorkbenchMaterial]? = nil
+    var sourceInventory: [WorkbenchSourceInventoryItem]? = nil
+    var isSourceFolder: Bool? = nil
+    var sourceFolderPath: String? = nil
+    var registeredFolderCount: Int? = nil
+    var importedFileCount: Int? = nil
+    var addedFileCount: Int? = nil
+    var pendingFileCount: Int? = nil
     var samples: [WorkbenchSample] { materials.flatMap(\.samples) }
+    var originalSamples: [WorkbenchSample] { (originalMaterials ?? materials).flatMap(\.samples) }
+    func browserInventory(query: String = "") -> [WorkbenchSourceInventoryItem] {
+        let assigned = Set(originalSamples.flatMap { sample in
+            Array(sample.maps.values).map { $0.originalSourcePath ?? $0.path }
+                + (sample.inputVariants ?? []).map { $0.originalSourcePath ?? $0.path }
+        })
+        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (sourceInventory ?? []).filter { item in
+            let issue = ["header_error", "missing", "ambiguous"].contains(item.state ?? "")
+            return (!assigned.contains(item.path) || issue) && (text.isEmpty || item.path.localizedStandardContains(text))
+        }
+    }
+    func browserMaterials(_ mode: DatasetBrowserMode) -> [WorkbenchMaterial] {
+        mode == .originals ? originalMaterials ?? materials : materials
+    }
     func readyForTraining(size: Int, material: String?, target: String? = nil) -> Bool {
         if let preparation, preparation.cropSize != size || trainingSize.map({ $0 != size }) == true { return false }
         guard hasNativeSize(size), let policy = automaticValidation,

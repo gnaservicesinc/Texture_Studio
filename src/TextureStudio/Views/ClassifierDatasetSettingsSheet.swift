@@ -7,13 +7,24 @@ struct ClassifierDatasetSettingsSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Diffuse classifier dataset").font(.title2.bold())
-            Text("Move images between class folders to correct labels; refresh preserves your review. The generated Create ML training folder contains only populated classes, so empty folders can stay available for new examples. Images are copied without resizing.")
+            Text("Classifier preparation runs only when you choose Create / Refresh. Move images between class folders to correct labels; refresh preserves your review. Create ML receives images that supply the selected resolution, copied without resizing. Smaller originals stay in your folders and remain reviewable.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 6) {
+                if store.dataset != nil {
+                    Toggle("Use another original source folder", isOn: $store.classifierUseSourceFolder)
+                    if !store.classifierUseSourceFolder {
+                        Text("Open dataset: \(store.datasetName) · \(store.datasetResolution) × \(store.datasetResolution)")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                }
                 Text("Original material folder").font(.headline)
                 HStack {
-                    TextField("Leave empty to use the open material dataset", text: $store.classifierSourceFolderPath)
+                    TextField("Original diffuse source folder", text: $store.classifierSourceFolderPath)
+                        .disabled(store.dataset != nil && !store.classifierUseSourceFolder)
                     Button("Choose…") { store.chooseClassifierFolder(source: true) }
+                }
+                if store.dataset == nil || store.classifierUseSourceFolder {
+                    DatasetResolutionPicker(size: $store.classifierSourceMinimumSize)
                 }
             }
             VStack(alignment: .leading, spacing: 6) {

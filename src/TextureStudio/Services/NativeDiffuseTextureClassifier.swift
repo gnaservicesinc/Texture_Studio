@@ -9,7 +9,8 @@ import Vision
 /// Vision prepares an in-memory image for the model's declared image input;
 /// source pixels and reconstruction training files are never rewritten.
 final class NativeDiffuseTextureClassifier: @unchecked Sendable {
-    static let bundledModelSHA256 = "e2936fcef0781fb4f85eb7e879cc2f7d865528415180d894afd74eddc1e048be"
+    static let bundledModelSHA256 = "4971a8abfe6a7169b0ebb75e5462c1578557570dc885b28a85dee9a54f914086"
+    static let bundledDisplayName = "DTTC3"
     static let bundledResourceName = "DiffuseTextureTypeClassifier"
 
     struct Prediction: Codable, Sendable {

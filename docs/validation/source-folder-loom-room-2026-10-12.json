@@ -1,0 +1,79 @@
+{
+  "source_folder_snapshot": {
+    "accounted_files": 1897,
+    "exact_2048_crop_views": 324,
+    "original_sets": 462,
+    "required_source_metadata": false,
+    "seconds": 0.7201941249986703,
+    "source_folder": "/opt/ipde/sources_mats",
+    "source_tree_unchanged": true
+  },
+  "classifier_header_discovery": {
+    "discovered_diffuse_originals": 466,
+    "minimum_native_size": 2048,
+    "seconds": 0.1789243749990419,
+    "selected_native_originals": 148,
+    "source_files_modified": false,
+    "undersized_originals": 145,
+    "unreadable_originals": 0
+  },
+  "version": "0.9.25",
+  "build": 120,
+  "native_grid": 2048,
+  "regression_tests": {
+    "executed": 257,
+    "skipped": 10,
+    "failures": 0,
+    "seconds": 46.077
+  },
+  "classifier": {
+    "name": "DTTC3",
+    "source_sha256": "4971a8abfe6a7169b0ebb75e5462c1578557570dc885b28a85dee9a54f914086",
+    "image_size": [
+      360,
+      360
+    ],
+    "classes": 15,
+    "vision_compatible": true,
+    "predictions_performed": 0
+  },
+  "source_maintenance": {
+    "png_files": 1897,
+    "filename_role_tags": {
+      "height": 462,
+      "roughness": 462,
+      "input": 466,
+      "normal": 462,
+      "ancillary": 45
+    },
+    "untagged_files": 0,
+    "file_size_mtime_inode_preserved": true,
+    "representative_sha256_preserved": 10,
+    "cardboard_sha256_preserved": 8,
+    "renamed_folder": "Cardboard 01",
+    "legacy_references_rebased": 2,
+    "source_root_dataset_json_exists": false
+  },
+  "installed_catalog": {
+    "accounted_files": 1897,
+    "original_sets": 462,
+    "exact_2048_crop_views": 324,
+    "height_maps_16bit": 462,
+    "warnings": 0
+  },
+  "package": {
+    "installed_path": "/Applications/Texture Studio.app",
+    "native_bundle_verified": true,
+    "deep_strict_signatures_passed": true,
+    "hardened_runtime": true,
+    "no_test_plugins": true,
+    "built_installed_equal": true,
+    "smoke_output": "Texture Studio native smoke passed"
+  },
+  "startup_and_settings_regressions": {
+    "executed": 99,
+    "failures": 0,
+    "skipped": 0,
+    "seconds": 4.692
+  }
+}

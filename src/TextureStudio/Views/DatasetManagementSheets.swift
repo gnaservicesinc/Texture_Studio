@@ -6,7 +6,7 @@ struct NewMaterialDatasetSheet: View {
     @State private var name = ""
     @State private var description = ""
     @State private var parentURL: URL?
-    @State private var size = 1024
+    @State private var size = 2048
     @State private var sourceTierCount = 1
     @State private var validation = WorkbenchValidationSettings()
     @FocusState private var nameFocused: Bool
@@ -15,15 +15,11 @@ struct NewMaterialDatasetSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Label("New Dataset", systemImage: "folder.badge.plus").font(.title2.bold())
-            Text("Choose the resolution first, then import and review the exact material crops and validation checks.")
+            Label("New Source Folder", systemImage: "folder.badge.plus").font(.title2.bold())
+            Text("The folder is the dataset. Put each material’s original images and maps in its own subfolder.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Form {
                 TextField("Name", text: $name).focused($nameFocused)
-                TextField("Description", text: $description, axis: .vertical).lineLimit(3...5)
-                DatasetResolutionPicker(size: $size)
-                DatasetSourceTierControls(count: $sourceTierCount, size: size)
-                DatasetValidationControls(settings: $validation)
                 if let folder = store.pendingSourceFolder {
                     LabeledContent("Source folder", value: folder.path)
                 }
@@ -37,13 +33,13 @@ struct NewMaterialDatasetSheet: View {
                     }
                 }
             }.formStyle(.grouped).disabled(store.isBusy)
-            Text("A new folder will hold the dataset information. Original map files stay where they are.")
+            Text("Creates an empty folder. No dataset manifest or image conversion is needed. Choose the crop size when training.")
                 .font(.caption).foregroundStyle(.secondary)
             DatasetSheetOperationNotice(store: store)
             HStack {
                 Spacer()
-                Button("Cancel") { store.pendingSourceFolder = nil; dismiss() }.keyboardShortcut(.cancelAction).disabled(store.isBusy)
-                Button("Create Dataset") {
+                Button("Cancel") { store.pendingSourceFolder = nil; store.pendingAdditionalSourceFolders = []; dismiss() }.keyboardShortcut(.cancelAction).disabled(store.isBusy)
+                Button("Create Folder") {
                     guard let parentURL else { return }
                     store.createDataset(name: cleanName, description: description, parentURL: parentURL, size: size, sourceTierCount: sourceTierCount, validation: validation)
                 }
@@ -51,16 +47,16 @@ struct NewMaterialDatasetSheet: View {
                 .disabled(cleanName.isEmpty || parentURL == nil || store.isBusy)
             }
         }
-        .padding(24).frame(width: 660, height: 600)
+        .padding(24).frame(width: 660, height: 390)
         .interactiveDismissDisabled(store.isBusy)
-        .onDisappear { if !store.isBusy { store.pendingSourceFolder = nil } }
+        .onDisappear { if !store.isBusy { store.pendingSourceFolder = nil; store.pendingAdditionalSourceFolders = [] } }
         .onAppear {
             if parentURL == nil {
                 parentURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
                         .appendingPathComponent("Texture Studio Datasets", isDirectory: true)
             }
             name = store.pendingSourceFolder?.lastPathComponent ?? name
-            size = store.datasetResolution
+            size = 2048
             store.error = nil
             nameFocused = true
         }
@@ -94,16 +90,22 @@ struct MaterialDatasetInfoSheet: View {
             Label("Dataset Info", systemImage: "info.circle").font(.title2.bold())
             Text("Set the grid used for dataset rendering, checkpoint comparisons and training.").foregroundStyle(.secondary)
             Form {
-                TextField("Name", text: $name).focused($nameFocused)
-                TextField("Description", text: $description, axis: .vertical).lineLimit(3...5)
+                if store.dataset?.isSourceFolder == true {
+                    LabeledContent("Source folder", value: store.datasetFolderURL?.path ?? "")
+                    Text("Rename or move folders in Finder. Training reads their current contents directly.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    TextField("Name", text: $name).focused($nameFocused)
+                    TextField("Description", text: $description, axis: .vertical).lineLimit(3...5)
+                }
                 DatasetResolutionPicker(size: $size)
-                DatasetSourceTierControls(count: $sourceTierCount, size: size)
+                if store.dataset?.isSourceFolder != true { DatasetSourceTierControls(count: $sourceTierCount, size: size) }
                 DatasetValidationControls(settings: $validation)
                 if let plans = store.dataset?.resolutionPlans?[String(size)] {
                     DatasetPlanSummary(plans: plans, validation: validation)
                 }
-                if let dataset = store.dataset {
-                    LabeledContent("Contents", value: "\(dataset.sourceSetCount ?? dataset.materials.count) original source sets")
+                if store.dataset != nil {
+                    LabeledContent("Contents", value: store.datasetInventorySummary)
                 }
                 if let url = store.datasetFolderURL {
                     LabeledContent("Folder") {
@@ -153,7 +155,7 @@ struct AddDatasetMaterialSheet: View {
             Label("Add Materials", systemImage: "photo.badge.plus").font(.title2.bold())
             Text("\(store.datasetName) · Rendering & training: \(store.datasetResolution) × \(store.datasetResolution)")
                 .font(.callout.bold())
-            Text("Add a named material with a diffuse map and at least one surface map. Choose original PNG maps with matching dimensions; the dataset references their full-quality files.")
+            Text("Assign a diffuse map and available surface maps to one material. Small dimension differences are cropped during preparation; original files stay unchanged.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Form {
                 TextField("Material name", text: $name).focused($nameFocused)
@@ -172,18 +174,18 @@ struct AddDatasetMaterialSheet: View {
                 Image(systemName: "folder").foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Have a folder of material maps?").font(.callout.bold())
-                    Text("Import matching diffuse, displacement, roughness and normal maps together.")
+                    Text("Add every original image first. Review pairing and training crops afterward.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Import Folder…") { store.importMaterialFolder() }
+                Button("Add Folder…") { store.addMaterialFolder() }
                     .disabled(store.isBusy)
             }
             DatasetSheetOperationNotice(store: store)
             Divider()
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).disabled(store.isBusy)
+                Button("Cancel") { store.pendingMapAssignment = nil; dismiss() }.keyboardShortcut(.cancelAction).disabled(store.isBusy)
                 Button("Add Material") {
                     guard let inputURL else { return }
                     store.addMaterial(name: cleanName, input: inputURL, height: heightURL, roughness: roughnessURL,
@@ -194,7 +196,21 @@ struct AddDatasetMaterialSheet: View {
         }
         .padding(24).frame(width: 640)
         .interactiveDismissDisabled(store.isBusy)
-        .onAppear { store.error = nil; nameFocused = true }
+        .onAppear {
+            store.error = nil
+            if let item = store.pendingMapAssignment {
+                name = URL(fileURLWithPath: item.folder).lastPathComponent
+                switch item.role {
+                case "input": inputURL = item.url
+                case "height": heightURL = item.url
+                case "roughness": roughnessURL = item.url
+                case "normal": normalURL = item.url
+                default: break
+                }
+            }
+            nameFocused = true
+        }
+        .onDisappear { if !store.isBusy { store.pendingMapAssignment = nil } }
     }
 
     private func mapRow(_ title: String, url: Binding<URL?>, required: Bool = false) -> some View {
@@ -448,7 +464,7 @@ struct ImportDatasetFolderSheet: View {
                                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         }
                     } else if store.isBusy {
-                        Text("Setting up up to \(store.datasetSourceTierCount) paired source \(store.datasetSourceTierCount == 1 ? "tier" : "tiers") when published, then scanning exact crop counts. Change the fetch limit in Dataset Info. Existing local source resolutions remain available.")
+                        Text("Reading filenames and image dimensions to preview crop counts. Every original can also be added directly with Add Folder.")
                             .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     if store.isBusy, !store.sourceRecoverySummary.isEmpty { Text(store.sourceRecoverySummary).font(.caption).monospacedDigit() }

@@ -31,7 +31,7 @@ struct MaterialToolRootView: View {
         .frame(minWidth: 1050, minHeight: 700)
         .toolbar {
             ToolbarItemGroup {
-                Button { showModels = true } label: { Label("Checkpoints", systemImage: "shippingbox") }
+                Button { store.reconnectSavedCheckpoints(); showModels = true } label: { Label("Checkpoints", systemImage: "shippingbox") }
                     .help("Inspect saved checkpoints, compare their outputs or export a portable package.")
                 Button { showRuntime = true } label: { Label("Runtime", systemImage: "gearshape") }
                     .help("Configure the working folder and native model weights. Developer mode exposes material model controls.")

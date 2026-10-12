@@ -5,6 +5,107 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeMaterialSpecialistTests: XCTestCase {
+    func testFileTagsReusePredictionsAndManualTeachingWinsUntilTheFileChanges() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = try await dataset(root)
+        let originals = try await add("cedar", size: 256, value: 31, to: dataset, under: root)
+        let input = try XCTUnwrap(originals.first { $0.0.lastPathComponent == "input.png" }?.0)
+        let probe = PredictionProbe()
+        let classifier = fake(labels: ["Wood", "Paper"], probe: probe, choose: { _ in "Wood" })
+        let initial = try await NativeMaterialSpecialistService.refresh(datasetURL: dataset,
+            workspaceURL: root.appendingPathComponent("FirstWorkspace"), classifier: classifier)
+        XCTAssertEqual(probe.paths, [input.path])
+        XCTAssertEqual(try specialist("Wood", initial).materialIds.count, 1)
+        let automatic = try XCTUnwrap(NativeSourceFileTags.read(input))
+        XCTAssertEqual(automatic.classLabel, "Wood")
+        XCTAssertEqual(automatic.classifierIdentity, classifier.sha256)
+        XCTAssertEqual(automatic.verifiedSHA256?.count, 64)
+
+        // A fresh workspace proves reuse comes from the file, independently
+        // of any prior specialist assignment or loaded Core ML prediction.
+        let secondWorkspace = root.appendingPathComponent("SecondWorkspace")
+        let tagged = try await NativeMaterialSpecialistService.refresh(datasetURL: dataset,
+            workspaceURL: secondWorkspace, classifier: classifier)
+        XCTAssertEqual(probe.paths.count, 1)
+        XCTAssertEqual(try specialist("Wood", tagged).materialIds.count, 1)
+        try NativeSourceFileTags.update(input, classLabel: "Paper", classifierIdentity: "user")
+        let taught = try await NativeMaterialSpecialistService.refresh(datasetURL: dataset,
+            workspaceURL: secondWorkspace, classifier: classifier)
+        XCTAssertEqual(probe.paths.count, 1, "Teaching a file must override cached classifier assignments without another prediction")
+        XCTAssertEqual(try specialist("Paper", taught).assignments.first?.source, "user_file_tag")
+        XCTAssertEqual(try specialist("Paper", taught).materialIds.count, 1)
+        XCTAssertEqual(NativeSourceFileTags.read(input)?.classifierIdentity, "user")
+        XCTAssertEqual(NativeSourceFileTags.read(input)?.classLabel, "Paper")
+        XCTAssertEqual(try Data(contentsOf: input), try XCTUnwrap(originals.first { $0.0 == input }?.1))
+        try NativeSourceFileTags.update(input, classLabel: "Handmade Finish", classifierIdentity: "user")
+        let custom = try await NativeMaterialSpecialistService.refresh(datasetURL: dataset,
+            workspaceURL: root.appendingPathComponent("CustomTaughtWorkspace"), classifier: classifier)
+        XCTAssertEqual(probe.paths.count, 1)
+        XCTAssertEqual(try specialist("Handmade Finish", custom).materialIds.count, 1,
+                       "User teaching may define a class beyond the classifier's original taxonomy")
+
+        try png(size: 256, value: 103).write(to: input)
+        XCTAssertNil(NativeSourceFileTags.read(input), "Changed original bytes invalidate file teaching and cached classifier output")
+        _ = try await NativeMaterialSpecialistService.refresh(datasetURL: dataset,
+            workspaceURL: secondWorkspace, classifier: classifier)
+        XCTAssertEqual(probe.paths.count, 1, "An altered registered original must fail its source binding before any prediction")
+    }
+
+    func testBareSourceFolderClassificationChoosesTwoKOriginalAndPreservesSixteenBitTargets() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("SourceFolders"), woodFolder = source.appendingPathComponent("Wood")
+        let smallFolder = source.appendingPathComponent("SmallOnly")
+        try FileManager.default.createDirectory(at: woodFolder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: smallFolder, withIntermediateDirectories: true)
+        var originals: [URL: Data] = [:]
+        for (folder, family, dimension, label) in [(woodFolder, "wood", 1024, "1k"),
+                                                  (woodFolder, "wood", 2048, "2k"),
+                                                  (smallFolder, "small", 1024, "1k")] {
+            for (suffix, bits, channels) in [("diff", 8, 3), ("disp", 16, 1)] {
+                let path = folder.appendingPathComponent("\(family)_\(suffix)_\(label).png")
+                let bytes = try png(size: dimension, value: suffix == "disp" ? 171 : 83, bits: bits, channels: channels)
+                try bytes.write(to: path); originals[path] = bytes
+            }
+        }
+        let beforeFolders = Set(try FileManager.default.contentsOfDirectory(atPath: source.path))
+        let probe = PredictionProbe(), workspace = root.appendingPathComponent("Specialists")
+        let classifier = fake(labels: ["Wood", "Paper"], probe: probe, choose: { _ in "Wood" })
+        let registry = try await NativeMaterialSpecialistService.refresh(datasetURL: source, workspaceURL: workspace,
+            classifier: classifier)
+        XCTAssertEqual(probe.paths, [woodFolder.appendingPathComponent("wood_diff_2k.png").path],
+                       "A new source-folder dataset must not classify one-K originals when the classifier grid is two K")
+        let woodSpecialist = try specialist("Wood", registry)
+        XCTAssertEqual(Set(woodSpecialist.materialIds), ["wood_1k", "wood_2k"])
+        XCTAssertEqual(woodSpecialist.assignments.first?.inputPath, probe.paths.first)
+        XCTAssertTrue(registry.warnings.contains { $0.contains("small") && $0.contains("2048") })
+        let specialistDataset = URL(fileURLWithPath: woodSpecialist.datasetPath)
+        let index = try object(specialistDataset.appendingPathComponent("dataset.json"))
+        let entries = try XCTUnwrap(index["samples"] as? [[String: Any]])
+        XCTAssertEqual(entries.count, 2)
+        for entry in entries {
+            let sample = try object(specialistDataset.appendingPathComponent(try XCTUnwrap(entry["path"] as? String)).appendingPathComponent("sample.json"))
+            let sourceMetadata = try XCTUnwrap((sample["map_metadata"] as? [String: [String: Any]])?["height"]?["source"] as? [String: Any])
+            XCTAssertEqual(sourceMetadata["sample_bits"] as? Int, 16)
+            let originalURL = URL(fileURLWithPath: try XCTUnwrap(sourceMetadata["path"] as? String))
+            XCTAssertEqual(try NativePNG.inspect(originalURL).bits, 16)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.appendingPathComponent("dataset.json").path))
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: source.path)), beforeFolders)
+        for (path, bytes) in originals { XCTAssertEqual(try Data(contentsOf: path), bytes) }
+        let oneK = woodFolder.appendingPathComponent("wood_diff_1k.png")
+        try NativeSourceFileTags.update(oneK, classLabel: "Paper", classifierIdentity: "user")
+        let taughtFamily = try await NativeMaterialSpecialistService.refresh(datasetURL: source, workspaceURL: workspace,
+            classifier: classifier)
+        XCTAssertEqual(probe.paths.count, 1, "A user's label on another native tier overrides the cached family prediction")
+        XCTAssertEqual(Set(try specialist("Paper", taughtFamily).materialIds), ["wood_1k", "wood_2k"])
+        try NativeSourceFileTags.update(oneK, classLabel: "", classifierIdentity: "user")
+        let unlabeled = try await NativeMaterialSpecialistService.refresh(datasetURL: source, workspaceURL: workspace,
+            classifier: classifier)
+        XCTAssertEqual(probe.paths.count, 1, "Explicitly clearing a label must not trigger another automatic prediction")
+        XCTAssertTrue(unlabeled.specialists.flatMap(\.assignments).isEmpty)
+        XCTAssertTrue(unlabeled.warnings.contains { $0.contains("unlabeled") })
+    }
+
     func testRealCompactSaveRegistersApprovesAndRoutesOnlyTheIntendedSpecialist() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }

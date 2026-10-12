@@ -7,7 +7,8 @@ extension WorkbenchStore {
         if selectedSampleId != sample.id { selectedInputVariantId = nil }
         selectedSampleId = sample.id
         selectedRole = role.flatMap { sample.maps[$0] != nil ? $0 : nil }
-            ?? ["input", "height", "roughness", "normal"].first(where: { sample.maps[$0] != nil }) ?? "input"
+            ?? ["input", "height", "roughness", "normal"].first(where: { sample.maps[$0] != nil })
+            ?? sample.maps.keys.sorted().first ?? "input"
     }
 
     /// Both library and file-picker refinement use the checkpoint's recorded setup.

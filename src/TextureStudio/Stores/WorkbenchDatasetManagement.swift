@@ -4,18 +4,18 @@ import UniformTypeIdentifiers
 extension WorkbenchStore {
     var datasetFolderURL: URL? {
         guard let dataset else { return nil }
-        let url = URL(fileURLWithPath: dataset.preparation?.sourceDatasetPath ?? dataset.datasetPath)
+        let url = URL(fileURLWithPath: dataset.sourceFolderPath ?? dataset.preparation?.sourceDatasetPath ?? dataset.datasetPath)
         return url.lastPathComponent == "dataset.json" ? url.deletingLastPathComponent() : url
     }
     var datasetName: String {
         dataset?.name.flatMap { $0.isEmpty ? nil : $0 } ?? datasetFolderURL?.lastPathComponent ?? "Dataset"
     }
     var datasetDescription: String { dataset?.description ?? "" }
-    var datasetResolution: Int { dataset?.trainingSize ?? training.size }
+    var datasetResolution: Int { dataset?.trainingSize ?? 2048 }
     var datasetSourceTierCount: Int { dataset?.sourceTierCount ?? 1 }
 
     func rememberDataset(_ result: WorkbenchDataset) {
-        let source = URL(fileURLWithPath: result.preparation?.sourceDatasetPath ?? result.datasetPath)
+        let source = URL(fileURLWithPath: result.sourceFolderPath ?? result.preparation?.sourceDatasetPath ?? result.datasetPath)
         let folder = source.lastPathComponent == "dataset.json" ? source.deletingLastPathComponent() : source
         let path = folder.resolvingSymlinksInPath().standardizedFileURL.path
         recentDatasets.removeAll { $0.path == path }
@@ -55,8 +55,14 @@ extension WorkbenchStore {
             if response == .OK, let url = panel.url { completion(url) }
         }
     }
-    func createDataset(name: String, description: String, parentURL: URL, size: Int? = nil, sourceTierCount: Int = 1, validation: WorkbenchValidationSettings = .init()) {
+    func createDataset(name: String, description: String, parentURL: URL, size: Int? = nil, sourceTierCount: Int = 1, validation: WorkbenchValidationSettings = .init(), sourceFolder: Bool = true) {
         guard !isBusy else { return }
+        if sourceFolder, let existing = pendingSourceFolder {
+            pendingSourceFolder = nil; pendingAdditionalSourceFolders = []
+            showNewDatasetSheet = false
+            openDataset(existing)
+            return
+        }
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { error = "Give your dataset a name."; return }
         let folderName = title.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
@@ -65,17 +71,29 @@ extension WorkbenchStore {
         operation("Creating \(title)…") {
             let result = try WorkbenchResult.decode(WorkbenchDataset.self, output: await self.worker([
                 "create-dataset", "--dataset", destination.path, "--name", title, "--description", description,
-                "--training-size", String(size ?? self.training.size), "--source-tier-count", String(sourceTierCount)] + validation.arguments))
+                "--training-size", String(size ?? 2048), "--source-tier-count", String(sourceTierCount)]
+                + (sourceFolder ? ["--source-folder", "true"] : []) + validation.arguments))
             self.selectedSampleId = nil
             self.adoptDataset(result)
+            if sourceFolder {
+                self.classifierUseSourceFolder = false
+                self.specialistTrainingContext = nil
+                self.useOpenSourcesInModelWorkshop()
+            }
             self.saveDatasetLocation(result)
             self.datasetPreparationSummary = ""
             self.showNewDatasetSheet = false
-            self.activity = "Created \(self.datasetName). Add material maps to get started."
+            self.activity = "Created \(self.datasetName). Add a source folder to get started."
             if let folder = self.pendingSourceFolder {
                 self.pendingSourceFolder = nil
-                try await self.scanMaterialFolder(folder)
-            } else { self.showAddMaterialSheet = true }
+                let folders = [folder] + self.pendingAdditionalSourceFolders
+                self.pendingAdditionalSourceFolders = []
+                try await self.registerSourceFolders(folders)
+            } else if !self.pendingAdditionalSourceFolders.isEmpty {
+                let files = self.pendingAdditionalSourceFolders
+                self.pendingAdditionalSourceFolders = []
+                try await self.registerSourceFiles(files)
+            }
         }
     }
 
@@ -85,6 +103,11 @@ extension WorkbenchStore {
         guard let current = dataset else { throw StudioError("Create or open a dataset first.") }
         if let preparation = current.preparation {
             let sourceURL = URL(fileURLWithPath: preparation.sourceDatasetPath)
+            if current.isSourceFolder == true {
+                _ = try await worker(["cleanup-size", "--dataset", current.datasetPath])
+                try await loadDataset(sourceURL, recoverSources: false)
+                return dataset!
+            }
             let indexURL = sourceURL.lastPathComponent == "dataset.json" ? sourceURL : sourceURL.appendingPathComponent("dataset.json")
             guard NativeMaterialTrainer.checksum(try Data(contentsOf: indexURL)) == preparation.sourceIndexSha256 else {
                 throw StudioError("The original dataset changed since preparation. Review its current information before editing.")
@@ -122,12 +145,25 @@ extension WorkbenchStore {
         guard !isBusy else { return }
         operation("Adding material maps…") {
             let current = try await self.sourceDatasetForManagement()
-            var args = ["add-material", "--dataset", current.datasetPath, "--name", name, "--input", input.path,
+            var chosen = ["input": input]
+            chosen["height"] = height; chosen["roughness"] = roughness; chosen["normal"] = normal
+            if current.isSourceFolder == true {
+                let root = URL(fileURLWithPath: current.sourceFolderPath ?? current.datasetPath)
+                var folderName = name.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+                if FileManager.default.fileExists(atPath: root.appendingPathComponent(folderName).path), chosen.values.contains(where: { !$0.standardizedFileURL.path.hasPrefix(root.path + "/") }) {
+                    folderName += " " + String(UUID().uuidString.prefix(6))
+                }
+                for (role, original) in chosen where !original.standardizedFileURL.path.hasPrefix(root.path + "/") {
+                    let output = try await self.worker(["add-source", "--dataset", root.path, "--source", original.path, "--folder-name", folderName, "--defer-refresh", "true"])
+                    guard let reply = try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any],
+                          let path = reply["added_source_path"] as? String else { throw StudioError("The added map's location was not returned.") }
+                    chosen[role] = URL(fileURLWithPath: path)
+                }
+            }
+            var args = ["add-material", "--dataset", current.datasetPath, "--name", name, "--input", chosen["input"]!.path,
                         "--normal-convention", normalConvention, "--expected-index-sha256", current.indexSha256,
                         "--review-size", String(self.training.size)]
-            if let height { args += ["--height", height.path] }
-            if let roughness { args += ["--roughness", roughness.path] }
-            if let normal { args += ["--normal", normal.path] }
+            for role in ["height", "roughness", "normal"] { if let file = chosen[role] { args += ["--" + role, file.path] } }
             let previous = Set(self.samples.map(\.id))
             let result = try self.adoptManagedDataset(await self.worker(args))
             self.selectedSampleId = self.samples.first { !previous.contains($0.id) }?.id ?? self.selectedSampleId
@@ -148,6 +184,59 @@ extension WorkbenchStore {
         panel.begin { response in
             if response == .OK, let url = panel.url { self.importMaterialFolder(url) }
         }
+    }
+    func addMaterialFolder(workshop: Bool = false) {
+        guard !isBusy else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Add Images or Folders"
+        panel.message = "Add photos or material folders. Copies keep their original pixels and precision."
+        panel.prompt = "Add Sources"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.begin { response in
+            if response == .OK {
+                if workshop { self.addModelWorkshopSourceFiles(panel.urls) }
+                else { self.addMaterialFolders(panel.urls) }
+            }
+        }
+    }
+    func addMaterialFolders(_ urls: [URL]) {
+        guard !isBusy, !urls.isEmpty else { return }
+        if dataset == nil, urls.count == 1, let folder = urls.first,
+           (try? folder.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true,
+           !FileManager.default.fileExists(atPath: folder.appendingPathComponent("dataset.json").path) {
+            openDataset(folder)
+            return
+        }
+        if dataset == nil {
+            pendingSourceFolder = nil
+            pendingAdditionalSourceFolders = urls
+            showNewDatasetSheet = true
+            return
+        }
+        if dataset?.isSourceFolder == true { addSourceFiles(urls); return }
+        operation("Adding source folders…") { try await self.registerSourceFolders(urls) }
+    }
+    func registerSourceFolders(_ urls: [URL]) async throws {
+        let previous = Set(datasetBrowserSamples.map(\.id))
+        var addedFiles = 0
+        var addedSets = 0
+        for url in urls {
+            try Task.checkCancellation()
+            let current = try await sourceDatasetForManagement()
+            let result = try adoptManagedDataset(await worker([
+                "import-folder", "--dataset", current.datasetPath, "--folder", url.path,
+                "--expected-index-sha256", current.indexSha256, "--managed-import", "true",
+                "--review-size", String(datasetResolution), "--skip-source-recovery"]))
+            addedFiles += result.addedFileCount ?? 0
+            addedSets += result.addedMaterialCount ?? 0
+        }
+        datasetBrowserMode = .originals
+        selectedSampleId = datasetBrowserSamples.first { !previous.contains($0.id) }?.id ?? selectedSampleId
+        showAddMaterialSheet = false
+        showImportFolderSheet = false
+        activity = "Added \(addedFiles) original files and \(addedSets) paired sets. Every original remains available in Originals."
     }
     func importMaterialFolder(_ url: URL) {
         guard !isBusy else { return }
@@ -250,6 +339,8 @@ extension WorkbenchStore {
         // A lifecycle operation can close its own dataset after a successful
         // Trash transaction; commands disable this action while work runs.
         dataset = nil
+        sourceFolderObserver = nil
+        datasetBrowserMode = .originals
         selectedSampleId = nil
         selectedInputVariantId = nil
         datasetPreparationSummary = ""

@@ -79,6 +79,25 @@ final class StudioAppDelegate: NSObject, NSApplicationDelegate {
             }
             return
         }
+        if let index = CommandLine.arguments.firstIndex(of: "--material-dataset") {
+            NSApp.setActivationPolicy(.prohibited)
+            Task {
+                do {
+                    let arguments = Array(CommandLine.arguments.dropFirst(index + 1))
+                    guard let command = arguments.first, NativeMaterialDatasetService.commands.contains(command),
+                          let result = try await NativeMaterialDatasetService.run(arguments: arguments,
+                            onEvent: { FileHandle.standardError.write(Data($0.utf8)) }) else {
+                        throw StudioError("Usage: Texture Studio --material-dataset COMMAND --dataset FOLDER [OPTIONS]")
+                    }
+                    FileHandle.standardOutput.write(Data((result + "\n").utf8))
+                    exit(0)
+                } catch {
+                    fputs("Material dataset operation failed: \(error)\n", stderr)
+                    exit(1)
+                }
+            }
+            return
+        }
         if let index = CommandLine.arguments.firstIndex(where: { ["--refresh-classifier-dataset", "--refresh-specialists", "--specialists"].contains($0) }) {
             NSApp.setActivationPolicy(.prohibited)
             Task {
@@ -159,7 +178,7 @@ struct StudioCommands: Commands {
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             if let datasetStore {
-                Button("New Dataset…") { datasetStore.showNewDatasetSheet = true }
+                Button("New Source Folder…") { datasetStore.showNewDatasetSheet = true }
                     .keyboardShortcut("n")
                     .disabled(datasetStore.isBusy)
                 Button("Open Dataset…") { datasetStore.chooseDataset() }
@@ -189,11 +208,15 @@ struct StudioCommands: Commands {
             }
         }
         CommandMenu("Dataset") {
+            Button("Add Source Folders…") { datasetStore?.addMaterialFolder() }
+                .disabled(datasetStore?.isBusy == true)
             Button("Add Material…") { datasetStore?.showAddMaterialSheet = true }
                 .keyboardShortcut("a", modifiers: [.command, .shift])
                 .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
-            Button("Import Material Folder…") { datasetStore?.importMaterialFolder() }
-                .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
+            if datasetStore?.dataset?.isSourceFolder != true {
+                Button("Preview Folder Crops…") { datasetStore?.importMaterialFolder() }
+                    .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
+            }
             Divider()
             Button("Rename / Edit Dataset Info…") { datasetStore?.showDatasetInfoSheet = true }
                 .keyboardShortcut("i")
@@ -203,8 +226,10 @@ struct StudioCommands: Commands {
             Button("Close Dataset") { datasetStore?.closeDataset() }
                 .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
             Divider()
-            Button("Move Dataset to Trash…", role: .destructive) { datasetStore?.showTrashDatasetConfirmation = true }
-                .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
+            if datasetStore?.dataset?.isSourceFolder != true {
+                Button("Move Dataset to Trash…", role: .destructive) { datasetStore?.showTrashDatasetConfirmation = true }
+                    .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
+            }
         }
         CommandMenu("Material") {
             Button("Generate / Update Material") {

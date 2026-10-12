@@ -1,10 +1,316 @@
 import CryptoKit
 import CreateML
 import Foundation
+import ImageIO
 import XCTest
 @testable import TextureStudio
 
 final class NativeDiffuseClassifierDatasetTests: XCTestCase {
+    func testSelectedGridUsesEligibleNativeTierAndReportsEveryUnreadableOrSmallerOriginal() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let corpus = root.appendingPathComponent("Originals")
+        try FileManager.default.createDirectory(at: corpus, withIntermediateDirectories: true)
+        for (name, width, height) in [("wood_planks_diff_1k.png", 8, 8), ("wood_planks_diff_2k.png", 17, 16),
+                                     ("wood_planks_diff_4k.png", 32, 32), ("wood_planks_col_2_2k.png", 16, 17),
+                                     ("linen_diff_2k.png", 16, 8)] {
+            try png(width: width, height: height, value: 73).write(to: corpus.appendingPathComponent(name))
+        }
+        try Data("malformed PNG".utf8).write(to: corpus.appendingPathComponent("brick_diff_2k.png"))
+        try Data("ancillary".utf8).write(to: corpus.appendingPathComponent("wood_planks_ambientOcclusion_2k.png"))
+        let result = try NativeDiffuseClassifierDatasetService.discoverReport(dataset: nil, sourceFolder: corpus, minimumSize: 16)
+        XCTAssertEqual(result.minimumSize, 16)
+        XCTAssertEqual(result.discoveredCount, 6)
+        XCTAssertEqual(result.eligibleCount, 3)
+        XCTAssertEqual(result.undersizedCount, 2)
+        XCTAssertEqual(result.unreadableCount, 1)
+        XCTAssertEqual(result.sources.count, 2)
+        XCTAssertEqual(Set(result.sources.map(\.variant)), ["color_1", "color_2"])
+        XCTAssertTrue(result.sources.allSatisfy { $0.width >= 16 && $0.height >= 16 && $0.id.contains("|native_") })
+        XCTAssertEqual(result.sources.first { $0.variant == "color_1" }?.url.lastPathComponent, "wood_planks_diff_2k.png")
+        XCTAssertTrue(result.warnings.contains { $0.contains("brick_diff_2k.png") })
+    }
+
+    func testDistinctFoldersWithSameNormalizedFamilyKeepTheirOwnTiersAndCuration() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let corpus = root.appendingPathComponent("Originals"), destination = root.appendingPathComponent("Curated")
+        for (offset, folderName) in ["Pine Bark", "pine_bark"].enumerated() {
+            let folder = corpus.appendingPathComponent(folderName)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            for (tier, edge) in [("1k", 8), ("2k", 16), ("4k", 32)] {
+                try png(width: edge, height: edge, value: UInt8(25 + offset)).write(to: folder.appendingPathComponent("pine_bark_diff_" + tier + ".png"))
+            }
+        }
+        let selected = try NativeDiffuseClassifierDatasetService.discover(dataset: nil, sourceFolder: corpus, minimumSize: 16)
+        XCTAssertEqual(selected.count, 2)
+        XCTAssertEqual(Set(selected.map(\.id)).count, 2)
+        XCTAssertTrue(selected.allSatisfy { $0.width == 16 && $0.id.contains("|folder_") })
+        _ = try NativeDiffuseClassifierDatasetService.refresh(sources: selected, destination: destination, minimumSize: 16)
+        let initial = try manifest(destination)
+        let first = try XCTUnwrap(initial.entries.first), second = try XCTUnwrap(initial.entries.last)
+        let moved = destination.appendingPathComponent("Metal/first-folder-only.png")
+        try FileManager.default.moveItem(at: URL(fileURLWithPath: try XCTUnwrap(first.currentPath)), to: moved)
+        let larger = try NativeDiffuseClassifierDatasetService.discover(dataset: nil, sourceFolder: corpus, minimumSize: 32)
+        _ = try NativeDiffuseClassifierDatasetService.refresh(sources: larger, destination: destination, minimumSize: 32)
+        let updated = try manifest(destination)
+        let firstDirectory = URL(fileURLWithPath: first.sourcePath).deletingLastPathComponent().path
+        let current = updated.entries.filter { $0.width == 32 }
+        XCTAssertEqual(current.count, 2)
+        XCTAssertEqual(current.first { URL(fileURLWithPath: $0.sourcePath).deletingLastPathComponent().path == firstDirectory }?.currentClass, "metal")
+        XCTAssertEqual(current.first { URL(fileURLWithPath: $0.sourcePath).deletingLastPathComponent().path != firstDirectory }?.currentClass, "bark")
+        XCTAssertEqual(try Data(contentsOf: moved), try Data(contentsOf: URL(fileURLWithPath: first.sourcePath)))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(second.currentPath)))
+    }
+
+    func testManualOriginalFileTagOverridesFilenameSuggestionAndSurvivesRefresh() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let original = root.appendingPathComponent("wood_planks_diff_2k.png"), destination = root.appendingPathComponent("Curated")
+        let bytes = try png(width: 16, height: 16, value: 26)
+        try bytes.write(to: original)
+        try NativeSourceFileTags.update(original, classLabel: "Metal", classifierIdentity: "user", reviewStatus: "reviewed")
+        let sources = try NativeDiffuseClassifierDatasetService.discover(dataset: nil, sourceFolder: root, minimumSize: 16)
+        _ = try NativeDiffuseClassifierDatasetService.refresh(sources: sources, destination: destination, minimumSize: 16)
+        let entry = try XCTUnwrap(try manifest(destination).entries.first)
+        XCTAssertEqual(entry.currentClass, "metal")
+        XCTAssertEqual(entry.suggestedClass, "metal")
+        XCTAssertEqual(entry.confidence, "user_file_tag")
+        XCTAssertEqual(NativeSourceFileTags.read(original)?.classifierIdentity, "user")
+        XCTAssertEqual(NativeSourceFileTags.read(original)?.classLabel, "Metal")
+        _ = try NativeDiffuseClassifierDatasetService.refresh(sources: sources, destination: destination, minimumSize: 16)
+        XCTAssertEqual(try manifest(destination).entries.first?.currentClass, "metal")
+        XCTAssertEqual(try Data(contentsOf: original), bytes)
+    }
+
+    func testOpenPlainSourceFolderAndUserAssignedDiffuseRoleNeedNoDatasetManifest() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let original = root.appendingPathComponent("my-original.png"), bytes = try png(width: 16, height: 16, value: 49)
+        try bytes.write(to: original)
+        try NativeSourceFileTags.update(original, role: "input", classLabel: "Fabric", classifierIdentity: "user")
+        let report = try NativeDiffuseClassifierDatasetService.discoverReport(dataset: root, sourceFolder: nil, minimumSize: 16)
+        XCTAssertEqual(report.sources.count, 1)
+        XCTAssertEqual(report.sources.first?.url, original)
+        XCTAssertEqual(report.minimumSize, 16)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("dataset.json").path))
+        XCTAssertEqual(try Data(contentsOf: original), bytes)
+    }
+
+    func testJPEGAndTaggedTIFFOriginalsKeepDimensionsExtensionsAndExactBytes() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let corpus = root.appendingPathComponent("Originals"), destination = root.appendingPathComponent("Curated")
+        try FileManager.default.createDirectory(at: corpus, withIntermediateDirectories: true)
+        let jpeg = corpus.appendingPathComponent("cotton_basecolor_2k.jpg"), tiff = corpus.appendingPathComponent("my-photo.tiff")
+        let jpegBytes = try imageBytes(width: 256, height: 257, type: "public.jpeg")
+        let tiffBytes = try imageBytes(width: 258, height: 256, type: "public.tiff")
+        try jpegBytes.write(to: jpeg); try tiffBytes.write(to: tiff)
+        try NativeSourceFileTags.update(tiff, role: "input", classLabel: "Metal", classifierIdentity: "user")
+        let sources = try NativeDiffuseClassifierDatasetService.discover(dataset: nil, sourceFolder: corpus, minimumSize: 256)
+        XCTAssertEqual(sources.count, 2)
+        XCTAssertEqual(sources.first { $0.url == jpeg }?.width, 256)
+        XCTAssertEqual(sources.first { $0.url == jpeg }?.height, 257)
+        XCTAssertEqual(sources.first { $0.url == tiff }?.width, 258)
+        let result = try object(NativeDiffuseClassifierDatasetService.refresh(sources: sources, destination: destination, minimumSize: 256))
+        let entries = try manifest(destination).entries
+        for entry in entries {
+            let original = URL(fileURLWithPath: entry.sourcePath), copied = URL(fileURLWithPath: try XCTUnwrap(entry.currentPath))
+            XCTAssertEqual(copied.pathExtension, original.pathExtension)
+            XCTAssertEqual(try Data(contentsOf: copied), try Data(contentsOf: original))
+        }
+        XCTAssertEqual(result["training_count"] as? Int, 2)
+        let training = try trainingManifest(URL(fileURLWithPath: try XCTUnwrap(result["training_path"] as? String)))
+        XCTAssertEqual(Set(training.files.map { URL(fileURLWithPath: $0.relativePath).pathExtension }), ["jpg", "tiff"])
+        XCTAssertEqual(try Data(contentsOf: jpeg), jpegBytes)
+        XCTAssertEqual(try Data(contentsOf: tiff), tiffBytes)
+    }
+
+    func testManualUnlabeledAndNonDiffuseRolesOverrideFilenameTaxonomy() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let corpus = root.appendingPathComponent("Originals"), destination = root.appendingPathComponent("Curated")
+        try FileManager.default.createDirectory(at: corpus, withIntermediateDirectories: true)
+        let diffuse = corpus.appendingPathComponent("wood_planks_diff_2k.png")
+        let ancillary = corpus.appendingPathComponent("brick_basecolor_2k.png")
+        let bytes = try png(width: 16, height: 16, value: 61)
+        try bytes.write(to: diffuse); try bytes.write(to: ancillary)
+        try NativeSourceFileTags.update(ancillary, role: "ancillary", classLabel: "Metal", classifierIdentity: "user")
+        let sources = try NativeDiffuseClassifierDatasetService.discover(dataset: nil, sourceFolder: corpus, minimumSize: 16)
+        XCTAssertEqual(sources.map(\.url), [diffuse])
+        _ = try NativeDiffuseClassifierDatasetService.refresh(sources: sources, destination: destination, minimumSize: 16)
+        XCTAssertEqual(try manifest(destination).entries.first?.currentClass, "wood")
+        try NativeSourceFileTags.update(diffuse, role: "input", classLabel: "", classifierIdentity: "user")
+        _ = try NativeDiffuseClassifierDatasetService.refresh(sources: sources, destination: destination, minimumSize: 16)
+        let unlabeled = try XCTUnwrap(try manifest(destination).entries.first)
+        XCTAssertNil(unlabeled.currentClass)
+        XCTAssertNil(unlabeled.suggestedClass)
+        XCTAssertEqual(unlabeled.confidence, "user_file_tag")
+        XCTAssertTrue(try XCTUnwrap(unlabeled.currentPath).contains("-pending-review/"))
+        XCTAssertEqual(NativeSourceFileTags.read(diffuse)?.classLabel, "")
+        XCTAssertEqual(NativeSourceFileTags.read(diffuse)?.classifierIdentity, "user")
+        XCTAssertEqual(try Data(contentsOf: diffuse), bytes)
+        XCTAssertEqual(try Data(contentsOf: ancillary), bytes)
+    }
+
+    func testManualFileLabelAgreesWithUserMoveWithoutMovingOrConflicting() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let original = root.appendingPathComponent("wood_diff_2k.png"), destination = root.appendingPathComponent("Curated")
+        let bytes = try png(width: 16, height: 16, value: 39)
+        try bytes.write(to: original)
+        let sources = try NativeDiffuseClassifierDatasetService.discover(dataset: nil, sourceFolder: root, minimumSize: 16)
+        _ = try NativeDiffuseClassifierDatasetService.refresh(sources: sources, destination: destination, minimumSize: 16)
+        let first = try XCTUnwrap(try manifest(destination).entries.first)
+        let moved = destination.appendingPathComponent("Metal/" + first.filename)
+        try FileManager.default.moveItem(at: URL(fileURLWithPath: try XCTUnwrap(first.currentPath)), to: moved)
+        try NativeSourceFileTags.update(original, classLabel: "Metal", classifierIdentity: "user")
+        let result = try object(NativeDiffuseClassifierDatasetService.refresh(sources: sources, destination: destination, minimumSize: 16))
+        let updated = try XCTUnwrap(try manifest(destination).entries.first)
+        XCTAssertEqual(updated.currentPath, moved.path)
+        XCTAssertEqual(updated.currentClass, "metal")
+        XCTAssertEqual(updated.suggestedClass, "metal")
+        XCTAssertFalse((result["warnings"] as? [String] ?? []).contains { $0.contains("destination already") })
+        XCTAssertEqual(try Data(contentsOf: moved), bytes)
+    }
+
+    func testDatasetAndPreparedDatasetDiscoveryUseTheirOwnSelectedGrid() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), prepared = root.appendingPathComponent("Prepared")
+        var rows: [[String: Any]] = []
+        for (index, edge) in [8, 16, 32].enumerated() {
+            let path = "samples/tier\(index)", file = root.appendingPathComponent("wood_diff_\(index + 1)k.png")
+            try png(width: edge, height: edge, value: UInt8(edge)).write(to: file)
+            try FileManager.default.createDirectory(at: dataset.appendingPathComponent(path), withIntermediateDirectories: true)
+            try writeJSON(["source_family_id": "wood", "input_variants": [["variant_id": "color_1", "source": ["path": file.path]]]],
+                          to: dataset.appendingPathComponent(path + "/sample.json"))
+            rows.append(["path": path])
+        }
+        try writeJSON(["training_size": 8, "samples": rows], to: dataset.appendingPathComponent("dataset.json"))
+        try FileManager.default.createDirectory(at: prepared, withIntermediateDirectories: true)
+        try writeJSON(["crop_size": 16, "native_size_preparation": ["source_dataset_path": dataset.path]],
+                      to: prepared.appendingPathComponent("dataset.json"))
+        XCTAssertEqual(try NativeDiffuseClassifierDatasetService.discover(dataset: dataset, sourceFolder: nil).first?.width, 8)
+        XCTAssertEqual(try NativeDiffuseClassifierDatasetService.discover(dataset: prepared, sourceFolder: nil).first?.width, 16)
+        XCTAssertEqual(try NativeDiffuseClassifierDatasetService.discover(dataset: dataset, sourceFolder: nil, minimumSize: 32).first?.width, 32)
+    }
+
+    func testHigherNativeTierPreservesLegacyCurationAndFiltersAllSmallCuratedImages() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let destination = root.appendingPathComponent("Curated")
+        let families = ["wood_planks", "wood_boards", "cedar_beams"]
+        var smallSources: [NativeDiffuseClassifierDatasetService.Source] = [], largeSources: [NativeDiffuseClassifierDatasetService.Source] = []
+        for family in families {
+            let small = root.appendingPathComponent(family + "_diff_1k.png"), large = root.appendingPathComponent(family + "_diff_2k.png")
+            try png(width: 8, height: 8, value: 71).write(to: small)
+            try png(width: 16, height: 16, value: 93).write(to: large)
+            smallSources.append(.init(family: family, variant: "color_1", url: small, width: 8, height: 8, metadata: nil))
+            largeSources.append(.init(family: family, variant: "color_1", url: large, width: 16, height: 16, metadata: nil, resolutionAware: true))
+        }
+        _ = try NativeDiffuseClassifierDatasetService.refresh(sources: smallSources, destination: destination)
+        let old = try manifest(destination)
+        func oldPath(_ family: String) throws -> URL {
+            URL(fileURLWithPath: try XCTUnwrap(old.entries.first { $0.family == family }?.currentPath))
+        }
+        let moved = destination.appendingPathComponent("Metal/my-reviewed-planks.png"), edited = try oldPath("wood_boards")
+        try FileManager.default.moveItem(at: oldPath("wood_planks"), to: moved)
+        let editedBytes = try png(width: 9, height: 9, value: 116)
+        try editedBytes.write(to: edited)
+        try FileManager.default.removeItem(at: oldPath("cedar_beams"))
+        _ = try NativeDiffuseClassifierDatasetService.refresh(sources: smallSources, destination: destination)
+        let addedSmall = destination.appendingPathComponent("Bricks/my-small-image.png")
+        let addedLarge = destination.appendingPathComponent("Bricks/my-large-image.png")
+        let smallBytes = try png(width: 4, height: 16, value: 88), largeBytes = try png(width: 32, height: 16, value: 90)
+        try smallBytes.write(to: addedSmall); try largeBytes.write(to: addedLarge)
+        let output = try object(NativeDiffuseClassifierDatasetService.refresh(sources: largeSources, destination: destination, minimumSize: 16))
+        let updated = try manifest(destination)
+        XCTAssertEqual(updated.minimumNativeSize, 16)
+        XCTAssertTrue(updated.selectionPolicy.contains("at_least_16"))
+        XCTAssertEqual(try Data(contentsOf: moved), try Data(contentsOf: smallSources[0].url))
+        XCTAssertEqual(try Data(contentsOf: edited), editedBytes)
+        XCTAssertEqual(try Data(contentsOf: addedSmall), smallBytes)
+        XCTAssertEqual(try Data(contentsOf: addedLarge), largeBytes)
+        let newPlanks = try XCTUnwrap(updated.entries.first { $0.id == largeSources[0].id })
+        XCTAssertEqual(newPlanks.currentClass, "metal")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(newPlanks.currentPath))), try Data(contentsOf: largeSources[0].url))
+        XCTAssertEqual(updated.entries.first { $0.id == largeSources[2].id }?.status, "removed_by_user")
+        XCTAssertNil(updated.entries.first { $0.id == largeSources[2].id }?.currentPath)
+        XCTAssertEqual(output["training_count"] as? Int, 3)
+        XCTAssertEqual(output["training_undersized_count"] as? Int, 3)
+        let view = try trainingManifest(URL(fileURLWithPath: try XCTUnwrap(output["training_path"] as? String)))
+        XCTAssertTrue(view.files.allSatisfy { file in
+            guard let header = try? NativePNG.inspect(URL(fileURLWithPath: file.sourcePath)) else { return false }
+            return header.width >= 16 && header.height >= 16
+        })
+        let repeated = try object(NativeDiffuseClassifierDatasetService.refresh(sources: largeSources, destination: destination, minimumSize: 16))
+        XCTAssertEqual(repeated["added"] as? Int, 0)
+        XCTAssertEqual(repeated["training_count"] as? Int, 3)
+        XCTAssertEqual(try Data(contentsOf: moved), try Data(contentsOf: smallSources[0].url))
+    }
+
+    func testFolderCommandDefaultsTo2048AndDoesNotFetchProviderCatalog() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let corpus = root.appendingPathComponent("Originals"), destination = root.appendingPathComponent("Curated")
+        try FileManager.default.createDirectory(at: corpus, withIntermediateDirectories: true)
+        let small = corpus.appendingPathComponent("wood_diff_1k.png"), bytes = try png(width: 1024, height: 1024, value: 17)
+        try bytes.write(to: small)
+        ClassifierNetworkProbe.reset()
+        URLProtocol.registerClass(ClassifierNetworkProbe.self)
+        defer { URLProtocol.unregisterClass(ClassifierNetworkProbe.self) }
+        let result = try await NativeDiffuseClassifierDatasetService.run(arguments: [
+            "refresh-classifier-dataset", "--source-folder", corpus.path, "--destination", destination.path
+        ])
+        let output = try object(try XCTUnwrap(result))
+        XCTAssertEqual(output["minimum_native_size"] as? Int, 2048)
+        XCTAssertEqual(output["discovered_count"] as? Int, 1)
+        XCTAssertEqual(output["undersized_count"] as? Int, 1)
+        XCTAssertEqual(output["training_count"] as? Int, 0)
+        XCTAssertEqual(ClassifierNetworkProbe.requests, 0)
+        XCTAssertEqual(try Data(contentsOf: small), bytes)
+        let html = try String(contentsOf: root.appendingPathComponent("Curated-review.html"), encoding: .utf8)
+        XCTAssertTrue(html.contains("at least 2048 × 2048"))
+        XCTAssertTrue(html.contains("1 original diffuse images are smaller"))
+    }
+
+    func testLocalRefreshPreservesUnclassifiedOriginalAndContinuesPastAReadableHeaderWithCorruptBody() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let corpus = root.appendingPathComponent("Originals"), destination = root.appendingPathComponent("Curated")
+        try FileManager.default.createDirectory(at: corpus, withIntermediateDirectories: true)
+        let unclassified = corpus.appendingPathComponent("surface_009_diff_2k.png")
+        let bytes = try png(width: 16, height: 16, value: 17)
+        try bytes.write(to: unclassified)
+        var corrupt = bytes; corrupt[45] ^= 0x40
+        let damaged = corpus.appendingPathComponent("wood_diff_2k.png")
+        try corrupt.write(to: damaged)
+        let result = try await NativeDiffuseClassifierDatasetService.run(arguments: [
+            "refresh-classifier-dataset", "--source-folder", corpus.path, "--destination", destination.path, "--size", "16"
+        ])
+        let output = try object(try XCTUnwrap(result))
+        XCTAssertEqual(output["unclassified"] as? Int, 1)
+        XCTAssertEqual(output["unreadable_count"] as? Int, 1)
+        XCTAssertEqual(output["training_count"] as? Int, 0)
+        XCTAssertTrue(try XCTUnwrap(output["warnings"] as? [String]).contains { $0.contains(damaged.path) })
+        let entry = try XCTUnwrap(try manifest(destination).entries.first)
+        XCTAssertNil(entry.currentClass)
+        XCTAssertTrue(try XCTUnwrap(entry.currentPath).contains("pending-review"))
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(entry.currentPath))), bytes)
+        XCTAssertEqual(try Data(contentsOf: unclassified), bytes)
+        XCTAssertEqual(try Data(contentsOf: damaged), corrupt)
+    }
+
+    func testDeveloperClassifierGridDiscoveryUsesNative2048OriginalsWithoutChangingUserFolders() throws {
+        guard ProcessInfo.processInfo.environment["TEXTURE_STUDIO_CLASSIFIER_GRID_PROOF"] == "1" else {
+            throw XCTSkip("Opt-in read-only classifier source discovery against the developer corpus.")
+        }
+        let corpus = URL(fileURLWithPath: "/opt/ipde/sources_mats")
+        let started = ProcessInfo.processInfo.systemUptime
+        let report = try NativeDiffuseClassifierDatasetService.discoverReport(dataset: nil, sourceFolder: corpus, minimumSize: 2048)
+        let seconds = ProcessInfo.processInfo.systemUptime - started
+        XCTAssertTrue(report.sources.allSatisfy { $0.width >= 2048 && $0.height >= 2048 })
+        XCTAssertGreaterThan(report.sources.count, 100)
+        let evidence: [String: Any] = ["source_folder": corpus.path, "minimum_native_size": report.minimumSize,
+            "discovered_count": report.discoveredCount, "eligible_count": report.eligibleCount,
+            "undersized_count": report.undersizedCount, "unreadable_count": report.unreadableCount,
+            "selected_count": report.sources.count, "discovery_seconds": seconds, "user_folders_modified": false,
+            "selected_sources": report.sources.map { ["path": $0.url.path, "width": $0.width, "height": $0.height] as [String: Any] }]
+        try JSONSerialization.data(withJSONObject: evidence, options: [.prettyPrinted, .sortedKeys])
+            .write(to: URL(fileURLWithPath: "/tmp/texture-classifier-native-grid-proof.json"))
+        print("Classifier local header scan: \(report.sources.count) native 2048+ originals; \(report.undersizedCount) smaller images preserved; \(seconds) seconds.")
+    }
+
     func testCreateMLLoadsPopulatedTrainingViewWith120ImagesAndEmptyReservedCurationFolders() throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let destination = root.appendingPathComponent("Curated")
@@ -239,7 +545,7 @@ final class NativeDiffuseClassifierDatasetTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: barkPath), try Data(contentsOf: original))
     }
 
-    func testSmallestOriginalTierAndEveryColorVariantAreCopiedWithoutResizingOrGammaChanges() throws {
+    func testSmallestEligibleOriginalTierAndEveryColorVariantAreCopiedWithoutResizingOrGammaChanges() throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let corpus = root.appendingPathComponent("Originals"), destination = root.appendingPathComponent("CreateML")
         try FileManager.default.createDirectory(at: corpus, withIntermediateDirectories: true)
@@ -251,7 +557,7 @@ final class NativeDiffuseClassifierDatasetTests: XCTestCase {
             let file = corpus.appendingPathComponent(name), bytes = try png(width: width, height: height, value: UInt8(code))
             try bytes.write(to: file); originals[file] = bytes
         }
-        let sources = try NativeDiffuseClassifierDatasetService.discover(dataset: nil, sourceFolder: corpus)
+        let sources = try NativeDiffuseClassifierDatasetService.discover(dataset: nil, sourceFolder: corpus, minimumSize: 11)
         XCTAssertEqual(sources.count, 3)
         XCTAssertEqual(Set(sources.map(\.variant)), ["color_1", "color_2"])
         XCTAssertFalse(sources.contains { $0.url.lastPathComponent.contains("4k") || $0.url.lastPathComponent.contains("nor_gl") })
@@ -337,7 +643,7 @@ final class NativeDiffuseClassifierDatasetTests: XCTestCase {
             try writeJSON(["source_family_id": "wood_planks", "status": status, "input_variants": [map]],
                 to: dataset.appendingPathComponent("samples/\(path)/sample.json"))
         }
-        try writeJSON(["samples": [["path": "samples/wood"], ["path": "samples/excluded"]]], to: dataset.appendingPathComponent("dataset.json"))
+        try writeJSON(["training_size": 12, "samples": [["path": "samples/wood"], ["path": "samples/excluded"]]], to: dataset.appendingPathComponent("dataset.json"))
         let sources = try NativeDiffuseClassifierDatasetService.discover(dataset: dataset, sourceFolder: nil)
         XCTAssertEqual(sources.count, 1); XCTAssertEqual(sources.first?.url, original)
         XCTAssertEqual(sources.first?.width, 18); XCTAssertEqual(sources.first?.height, 14)
@@ -372,7 +678,33 @@ final class NativeDiffuseClassifierDatasetTests: XCTestCase {
         try NativePNG(header: .init(width: width, height: height, bits: 8, channels: 3, color: 2, interlace: 0),
             pixels: Data(repeating: value, count: width * height * 3), colorChunks: [("gAMA", Data([0, 0, 177, 143]))]).encoded()
     }
+    private func imageBytes(width: Int, height: Int, type: String) throws -> Data {
+        let pngBytes = try png(width: width, height: height, value: 71)
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(pngBytes as CFData, nil))
+        let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        let bytes = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(bytes, type as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        return bytes as Data
+    }
     private func object(_ text: String) throws -> [String: Any] { try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]) }
     private func writeJSON(_ value: [String: Any], to url: URL) throws { try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]).write(to: url) }
     private func sha256(_ bytes: Data) -> String { SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined() }
+}
+
+private final class ClassifierNetworkProbe: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var requestCount = 0
+    static var requests: Int { lock.lock(); defer { lock.unlock() }; return requestCount }
+    static func reset() { lock.lock(); requestCount = 0; lock.unlock() }
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == "api.polyhaven.com" && request.url?.path == "/assets"
+    }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        Self.lock.lock(); Self.requestCount += 1; Self.lock.unlock()
+        client?.urlProtocol(self, didFailWithError: StudioError("Classifier refresh must use local data."))
+    }
+    override func stopLoading() {}
 }

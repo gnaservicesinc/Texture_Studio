@@ -245,6 +245,12 @@ final class NativeMaterialDatasetTests: XCTestCase {
         let plan = try object(planURL), registered = try object(dataset.appendingPathComponent("dataset.json"))
         let entries = try XCTUnwrap(registered["samples"] as? [[String: Any]])
         XCTAssertEqual(entries.count, 3)
+        XCTAssertEqual(Set(entries.compactMap { $0["material_id"] as? String }), ["stone_1k", "stone_2k", "stone_4k"],
+                       "New alternate colors belong to the existing native tier rather than a second suffixed material")
+        let originalTier = try object(dataset.appendingPathComponent("samples/stone_2k_full/sample.json"))
+        let originalVariants = try XCTUnwrap(originalTier["input_variants"] as? [[String: Any]])
+        XCTAssertEqual(Set(originalVariants.compactMap { ($0["source"] as? [String: Any])?["path"] as? String }),
+                       [folder.appendingPathComponent("stone_coll1_2k.png").path, folder.appendingPathComponent("stone_coll2_2k.png").path])
         let first = try object(dataset.appendingPathComponent("samples/stone_1k_full/sample.json"))
         let variants = try XCTUnwrap(first["input_variants"] as? [[String: Any]])
         XCTAssertEqual(variants.compactMap { $0["variant_id"] as? String }, ["color_1"])

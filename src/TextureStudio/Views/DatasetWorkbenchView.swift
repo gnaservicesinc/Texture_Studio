@@ -9,10 +9,12 @@ struct DatasetWorkbenchView: View {
     @State private var viewport = InspectionViewport()
     @State private var showRemoveMaterial = false
     @State private var selectedNode: DatasetBrowserNode?
+    @State private var selectedInventoryPath: String?
+    @State private var unavailableSource: String?
+    @State private var tagImage: URL?
 
     private var matchingMaterials: [WorkbenchMaterial] {
-        guard let original = store.dataset?.materials else { return [] }
-        let materials = original.filter { !$0.samples.isEmpty }
+        let materials = store.datasetBrowserMaterials
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return materials }
         return materials.filter { material in
@@ -22,12 +24,32 @@ struct DatasetWorkbenchView: View {
         }
     }
 
+    private var matchingInventory: [WorkbenchSourceInventoryItem] {
+        guard store.datasetBrowserMode == .originals else { return [] }
+        return store.dataset?.browserInventory(query: query) ?? []
+    }
+
+    private var selectedInventory: WorkbenchSourceInventoryItem? {
+        store.dataset?.sourceInventory?.first { $0.path == selectedInventoryPath }
+    }
+
     private var subjectGroups: [DatasetSubjectGroup] {
-        Dictionary(grouping: matchingMaterials, by: { $0.subjectId ?? $0.id })
-            .map { key, materials in DatasetSubjectGroup(id: key,
-                name: materials.first?.sourceDirectory.map { URL(fileURLWithPath: $0).lastPathComponent }
-                    ?? materials.first?.name ?? key, materials: materials) }
-            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        var groups: [String: DatasetSubjectGroup] = [:]
+        for material in matchingMaterials {
+            let key = material.sourceDirectory ?? material.subjectId ?? material.id
+            var group = groups[key] ?? DatasetSubjectGroup(id: key,
+                name: material.sourceDirectory.map { URL(fileURLWithPath: $0).lastPathComponent } ?? material.name ?? key,
+                materials: [], inventory: [])
+            group.materials.append(material)
+            groups[key] = group
+        }
+        for item in matchingInventory {
+            var group = groups[item.folder] ?? DatasetSubjectGroup(id: item.folder,
+                name: URL(fileURLWithPath: item.folder).lastPathComponent, materials: [], inventory: [])
+            group.inventory.append(item)
+            groups[item.folder] = group
+        }
+        return groups.values.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
     var body: some View {
@@ -39,30 +61,35 @@ struct DatasetWorkbenchView: View {
             VStack(spacing: 0) {
                 if store.dataset != nil {
                     HStack {
-                        Text("Subject folders").font(.headline)
+                        Text("Source folders").font(.headline)
                         Spacer()
-                        Button { store.showAddMaterialSheet = true } label: {
-                            Label("Add Materials…", systemImage: "plus")
+                        Button { store.addMaterialFolder() } label: {
+                            Label(store.dataset?.isSourceFolder == true ? "Manage in Finder" : "Add Folder…", systemImage: "folder.badge.plus")
                         }
                         .disabled(store.isBusy)
                     }
                     .padding(12)
-                    Text("Folder → crops → images. Each folder is one subject; the folder checkbox enables one validation crop for all its maps.")
+                    Picker("Browse", selection: $store.datasetBrowserMode) {
+                        ForEach(DatasetBrowserMode.allCases) { Text($0.title).tag($0) }
+                    }.pickerStyle(.segmented).padding(.horizontal, 12).padding(.bottom, 8)
+                    Text(store.datasetBrowserMode == .originals
+                         ? (store.dataset?.isSourceFolder == true ? "Add images or folders here. Folder changes appear automatically." : "Every original file stays here. Training eligibility does not hide source images.")
+                         : "Exact \(store.datasetResolution) × \(store.datasetResolution) crops only. Folder checkboxes enable separate validation crops.")
                         .font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12).padding(.bottom, 10)
                     Divider()
                 }
                 if store.dataset == nil {
                     recentDatasets
-                } else if store.samples.isEmpty {
+                } else if store.datasetBrowserSamples.isEmpty && matchingInventory.isEmpty && query.isEmpty {
                     ContentUnavailableView {
                         Label("No materials yet", systemImage: "photo.badge.plus")
                     } description: {
-                        Text("Add your diffuse and surface maps to this dataset.")
+                        Text(store.datasetBrowserMode == .originals ? "Add a folder of original images and maps." : "No original map set can provide an exact crop at this grid. Your originals remain available in Originals.")
                     } actions: {
-                        Button("Add Materials…") { store.showAddMaterialSheet = true }
+                        Button("Add Folder…") { store.addMaterialFolder() }
                             .buttonStyle(.glassProminent).disabled(store.isBusy)
                     }
-                } else if matchingMaterials.isEmpty {
+                } else if subjectGroups.isEmpty {
                     ContentUnavailableView("No matching materials", systemImage: "line.3.horizontal.decrease", description: Text("Clear the search to see the rest of this dataset."))
                 } else {
                     ScrollViewReader { proxy in
@@ -80,7 +107,8 @@ struct DatasetWorkbenchView: View {
                                             }) {
                                                 Label(group.name, systemImage: "folder").font(.callout.bold())
                                             } accessory: {
-                                                if let subject = store.dataset?.subjects?.first(where: { $0.id == group.id }) {
+                                                if store.datasetBrowserMode == .crops,
+                                                   let subject = store.dataset?.subjects?.first(where: { $0.id == (group.materials.first?.subjectId ?? group.id) }) {
                                                     Toggle("Validation", isOn: Binding(get: { subject.selected }, set: {
                                                         store.setSubjectValidation(subject, enabled: $0)
                                                     })).labelsHidden().toggleStyle(.checkbox)
@@ -114,6 +142,15 @@ struct DatasetWorkbenchView: View {
                                                     }.id(sample.id).padding(.leading, 20)
                                                 }
                                             }
+                                            ForEach(group.inventory) { item in
+                                                MaterialSidebarRow(selected: selectedInventoryPath == item.path,
+                                                                   action: { selectInventory(item) }) {
+                                                    VStack(alignment: .leading, spacing: 2) {
+                                                        Label(item.name, systemImage: "photo").lineLimit(1)
+                                                        Text(inventorySubtitle(item)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                                    }
+                                                }.id(item.path).padding(.leading, 20)
+                                            }
                                         }
                                     }.padding(.vertical, 3)
                                 }
@@ -130,26 +167,33 @@ struct DatasetWorkbenchView: View {
                     HStack {
                         Button("Dataset Info…", systemImage: "info.circle") { store.showDatasetInfoSheet = true }
                         Spacer()
-                        Button("Delete Dataset…", role: .destructive) { store.showTrashDatasetConfirmation = true }
+                        if store.dataset?.isSourceFolder != true {
+                            Button("Delete Dataset…", role: .destructive) { store.showTrashDatasetConfirmation = true }
+                        }
                     }
                     .font(.caption).padding(12).disabled(store.isBusy)
                 }
             }
             .frame(minWidth: 290, idealWidth: 330, maxWidth: 400)
             VStack(spacing: 0) {
-                if let sample = store.selectedSample {
+                if let item = selectedInventory {
+                    inventoryInspection(item)
+                } else if let sample = store.selectedSample {
                     cropHeader(sample)
                     Divider()
                     if let map = store.selectedMap {
                         MapInspectionView(url: store.datasetReviewURL(map), numeric: store.selectedRole != "input",
                                           viewport: viewport, title: mapTitle(store.selectedRole),
                                           sourceSHA256: store.datasetReviewSHA256(map), onMissingSource: { missing in
-                                              store.removeMissingSource(missing, sampleID: sample.id)
+                                              unavailableSource = store.reportMissingDatasetSource(missing)
                                           }, displayTransform: store.datasetDisplayTransform(map, role: store.selectedRole))
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         ContentUnavailableView("Map unavailable", systemImage: "photo", description: Text("Choose a map available in this material."))
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    if let unavailableSource {
+                        Text(unavailableSource).font(.caption).foregroundStyle(.orange).textSelection(.enabled).padding(12)
                     }
                     mapControls(sample)
                     Divider()
@@ -168,11 +212,19 @@ struct DatasetWorkbenchView: View {
         .sheet(isPresented: $store.showClassifierDatasetSettings) {
             ClassifierDatasetSettingsSheet(store: store)
         }
+        .sheet(isPresented: Binding(get: { tagImage != nil }, set: { if !$0 { tagImage = nil } })) {
+            if let tagImage { SourceImageTagsSheet(store: store, url: tagImage) }
+        }
         .dropDestination(for: URL.self) { urls, _ in
-            guard !store.isBusy, let url = urls.first, urls.count == 1 else { return false }
-            var directory: ObjCBool = false
-            guard (FileManager.default.fileExists(atPath: url.path, isDirectory: &directory) && directory.boolValue) || url.lastPathComponent == "dataset.json" else { return false }
-            store.openDataset(url)
+            guard !store.isBusy, let url = urls.first else { return false }
+            if urls.count == 1 && (url.lastPathComponent == "dataset.json" || FileManager.default.fileExists(atPath: url.appendingPathComponent("dataset.json").path)) {
+                store.openDataset(url)
+                return true
+            }
+            guard urls.allSatisfy({ source in
+                FileManager.default.fileExists(atPath: source.path)
+            }) else { return false }
+            store.addMaterialFolders(urls)
             return true
         }
         .safeAreaInset(edge: .bottom) {
@@ -206,6 +258,12 @@ struct DatasetWorkbenchView: View {
                 revealSelection()
             }
         }
+        .onChange(of: store.datasetBrowserMode) { _, _ in
+            selectedInventoryPath = nil
+            unavailableSource = nil
+            selectVisibleCrop()
+            selectAvailableMap()
+        }
         .onChange(of: store.dataset?.indexSha256) { _, _ in
             selectVisibleCrop()
             selectAvailableMap()
@@ -224,10 +282,10 @@ struct DatasetWorkbenchView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(store.dataset == nil ? "Your datasets" : store.datasetName).font(.title3.bold()).lineLimit(1)
                 if let dataset = store.dataset {
-                    Text("\(store.datasetInventorySummary) · \(dataset.sampleCount ?? dataset.samples.count) review items · \(store.datasetResolution) × \(store.datasetResolution)")
+                    Text("\(store.datasetInventorySummary) · \(dataset.sampleCount ?? dataset.samples.count) training crops · \(store.datasetResolution) × \(store.datasetResolution)")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
-                    Text("Set a resolution, then add a folder of paired material maps. You can also drop a folder here.").font(.caption).foregroundStyle(.secondary)
+                    Text("Create a dataset and add source folders. You can also drop folders here.").font(.caption).foregroundStyle(.secondary)
                 }
             }
             if !store.recentDatasets.isEmpty {
@@ -239,11 +297,18 @@ struct DatasetWorkbenchView: View {
                 .help("Open a dataset from your library")
             }
             Spacer()
-            Button { store.showNewDatasetSheet = true } label: { Label("New Dataset…", systemImage: "folder.badge.plus") }
+            Button { store.showNewDatasetSheet = true } label: { Label("New Folder…", systemImage: "folder.badge.plus") }
             Button { store.chooseDataset() } label: { Label("Open Folder…", systemImage: "folder") }
             if store.dataset != nil {
-                Button("Import Folder…", systemImage: "folder.badge.plus") { store.importMaterialFolder() }
+                Button("Add Images or Folders…", systemImage: "folder.badge.plus") { store.addMaterialFolder() }
                 Menu {
+                    Button("Assign Maps Manually…", systemImage: "photo.badge.plus") { store.showAddMaterialSheet = true }
+                    if store.dataset?.isSourceFolder == true {
+                        Button("Remember Missing Map Tags", systemImage: "tag") { store.repairSourceTags() }
+                    }
+                    if store.dataset?.isSourceFolder != true {
+                        Button("Preview Folder Crops…", systemImage: "viewfinder") { store.importMaterialFolder() }
+                    }
                     Button("Show in Finder", systemImage: "folder") { store.revealDataset() }
                     Button("Close Dataset", systemImage: "xmark") { store.closeDataset() }
                 } label: { Label("Dataset", systemImage: "ellipsis.circle") }
@@ -303,12 +368,12 @@ struct DatasetWorkbenchView: View {
 
     private var datasetWelcome: some View {
         ContentUnavailableView {
-            Label(store.dataset == nil ? "Make your first dataset" : store.samples.isEmpty ? "Add your material maps" : "Select a material", systemImage: "square.stack.3d.up")
+            Label(store.dataset == nil ? "Make your first dataset" : store.datasetBrowserSamples.isEmpty && matchingInventory.isEmpty ? "Add your source folders" : "Select an original or crop", systemImage: "square.stack.3d.up")
         } description: {
             if store.dataset == nil {
-                Text("Create a named dataset, add paired diffuse and surface maps, then review and train from it.")
-            } else if store.samples.isEmpty {
-                Text("Choose a diffuse map with displacement, roughness or normal maps. You can also import a folder of matching material maps.")
+                Text("Create a named dataset and add folders. Original images remain visible while you organize maps and prepare training crops.")
+            } else if store.datasetBrowserSamples.isEmpty && matchingInventory.isEmpty {
+                Text("Add original images and material maps. Pairing, review and training settings are separate from keeping files in this dataset.")
             } else {
                 Text("Choose a material on the left to inspect its maps, inspect its crops and maps, edit its note and enable folder validation.")
             }
@@ -316,9 +381,8 @@ struct DatasetWorkbenchView: View {
             if store.dataset == nil {
                 Button("New Dataset…") { store.showNewDatasetSheet = true }.buttonStyle(.glassProminent)
                 Button("Open Dataset Folder…") { store.chooseDataset() }
-            } else if store.samples.isEmpty {
-                Button("Add Materials…") { store.showAddMaterialSheet = true }.buttonStyle(.glassProminent)
-                Button("Import Material Folder…") { store.importMaterialFolder() }
+            } else if store.datasetBrowserSamples.isEmpty && matchingInventory.isEmpty {
+                Button("Add Folder…") { store.addMaterialFolder() }.buttonStyle(.glassProminent)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity).disabled(store.isBusy)
@@ -334,7 +398,13 @@ struct DatasetWorkbenchView: View {
     }
     private func selectSubject(_ group: DatasetSubjectGroup, reveal: Bool = true) {
         let samples = group.materials.flatMap(\.samples)
-        guard let sample = samples.first(where: { $0.id == store.selectedSampleId }) ?? samples.first else { return }
+        guard let sample = samples.first(where: { $0.id == store.selectedSampleId }) ?? samples.first else {
+            if let item = group.inventory.first { selectInventory(item) }
+            if reveal { expandedFolders.insert(group.id) }
+            return
+        }
+        selectedInventoryPath = nil
+        unavailableSource = nil
         selectedNode = .subject(group.id)
         store.selectDatasetSample(sample)
         viewport.fit()
@@ -342,20 +412,26 @@ struct DatasetWorkbenchView: View {
         expandedCrops.insert(sample.id)
     }
     private func selectCrop(_ sample: WorkbenchSample, reveal: Bool = true) {
+        selectedInventoryPath = nil
+        unavailableSource = nil
         selectedNode = .crop(sample.id)
         store.selectDatasetSample(sample)
         viewport.fit()
         if reveal { expandedCrops.insert(sample.id) }
     }
     private func selectMap(_ sample: WorkbenchSample, role: String) {
+        selectedInventoryPath = nil
+        unavailableSource = nil
         selectedNode = .map(sample.id, role)
         store.selectDatasetSample(sample, role: role)
     }
     private func availableRoles(_ sample: WorkbenchSample) -> [String] {
-        ["input", "height", "roughness", "normal"].filter { sample.maps[$0] != nil }
+        let preferred = ["input", "height", "roughness", "normal", "ao", "ancillary", "unknown"]
+        return preferred.filter { sample.maps[$0] != nil } + sample.maps.keys.filter { !preferred.contains($0) }.sorted()
     }
     private func cropTitle(_ sample: WorkbenchSample) -> String {
-        sample.split == "validation" ? "Learning check" : (sample.sourceRegionId ?? "original").replacingOccurrences(of: "_", with: " ").capitalized + " crop"
+        if sample.split == "original" { return "Original \(sample.width) × \(sample.height)" }
+        return sample.split == "validation" ? "Learning check" : (sample.sourceRegionId ?? "original").replacingOccurrences(of: "_", with: " ").capitalized + " crop"
     }
     private func mapIcon(_ role: String) -> String {
         switch role {
@@ -397,8 +473,13 @@ struct DatasetWorkbenchView: View {
         if selectedNode != .subject(folder.id) { expandedCrops.insert(sample) }
     }
     private func selectVisibleCrop() {
+        if let selectedInventoryPath, matchingInventory.contains(where: { $0.path == selectedInventoryPath }) { return }
         if !matchingMaterials.flatMap(\.samples).contains(where: { $0.id == store.selectedSampleId }) {
             store.selectedSampleId = matchingMaterials.first?.samples.first?.id
+        }
+        if store.selectedSampleId == nil, let item = matchingInventory.first {
+            selectInventory(item)
+            expandedFolders.insert(item.folder)
         }
     }
     private func selectAvailableMap() {
@@ -407,8 +488,20 @@ struct DatasetWorkbenchView: View {
         store.selectedRole = role
     }
     private func moveSelection(_ direction: Int, proxy: ScrollViewProxy) {
-        let ids = matchingMaterials.flatMap(\.samples).map(\.id)
-        store.selectedSampleId = MaterialSidebarSelection.next(store.selectedSampleId, in: ids, direction: direction)
+        let ids = subjectGroups.flatMap { group in
+            group.materials.flatMap(\.samples).map(\.id) + group.inventory.map(\.path)
+        }
+        let current = selectedInventoryPath ?? store.selectedSampleId
+        guard let next = MaterialSidebarSelection.next(current, in: ids, direction: direction) else { return }
+        if let item = matchingInventory.first(where: { $0.path == next }) {
+            selectInventory(item)
+            expandedFolders.insert(item.folder)
+            proxy.scrollTo(item.path)
+            return
+        }
+        selectedInventoryPath = nil
+        unavailableSource = nil
+        store.selectedSampleId = next
         selectedNode = store.selectedSampleId.map(DatasetBrowserNode.crop)
         revealSelection()
         if let id = store.selectedSampleId { proxy.scrollTo(id) }
@@ -420,10 +513,10 @@ struct DatasetWorkbenchView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(store.selectedMaterialName ?? (store.selectedMaterialId ?? sample.id).replacingOccurrences(of: "_", with: " "))
                         .font(.headline)
-                    Text("\(sample.id) · \(sample.width) × \(sample.height) map set · \(sample.split == "validation" ? "Extra validation crop" : "Training crop")")
+                    Text("\(sample.id) · \(sample.width) × \(sample.height) · \(sample.split == "original" ? "Original source set" : sample.split == "validation" ? "Extra validation crop" : "Training crop")")
                         .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                    if min(sample.width, sample.height) < store.datasetResolution {
-                        Text("This source is smaller than the selected rendering and training resolution. Choose a smaller grid in Dataset Info to train with it.")
+                    if sample.split == "original", min(sample.width, sample.height) < store.datasetResolution {
+                        Text("Available for inspection. This original cannot supply a \(store.datasetResolution) × \(store.datasetResolution) training crop.")
                             .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                     }
                     if let map = store.selectedMap, let width = map.originalSourceWidth, let height = map.originalSourceHeight {
@@ -437,7 +530,19 @@ struct DatasetWorkbenchView: View {
                 }
                 Spacer()
                 Menu {
-                    Button("Remove Source Set…", role: .destructive) { showRemoveMaterial = true }
+                    if store.dataset?.isSourceFolder != true {
+                        Button("Remove Source Set…", role: .destructive) { showRemoveMaterial = true }
+                    } else {
+                        if let map = store.selectedMap {
+                            Button("Edit Image Tags / Folder Name…", systemImage: "tag") { tagImage = URL(fileURLWithPath: map.originalSourcePath ?? map.path) }
+                            if URL(fileURLWithPath: map.originalSourcePath ?? map.path).deletingLastPathComponent().resolvingSymlinksInPath().path != store.datasetFolderURL?.resolvingSymlinksInPath().path {
+                                Button("Move Material Folder Out…", systemImage: "folder.badge.minus") {
+                                    store.moveSourceFolderOut(URL(fileURLWithPath: map.originalSourcePath ?? map.path).deletingLastPathComponent())
+                                }
+                            }
+                        }
+                        Button("Show Source Folder in Finder") { store.revealSelectedOriginalSource() }
+                    }
                 } label: { Label("Material Actions", systemImage: "ellipsis.circle") }
                     .disabled(store.isBusy)
                 Button { store.inspectSelectedMap() } label: {
@@ -453,7 +558,7 @@ struct DatasetWorkbenchView: View {
                     }
                 }
                 .disabled(store.isBusy)
-                Text("Training randomly chooses a registered diffuse color for this same target crop.")
+                Text(sample.split == "original" ? "Original diffuse color variants for this source set." : "Training randomly chooses a registered diffuse color for this same target crop.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             HStack {
@@ -521,6 +626,75 @@ struct DatasetWorkbenchView: View {
         .disabled(store.isBusy)
     }
 
+    private func selectInventory(_ item: WorkbenchSourceInventoryItem) {
+        selectedInventoryPath = item.path
+        selectedNode = nil
+        unavailableSource = nil
+        store.selectedSampleId = nil
+        viewport.fit()
+    }
+
+    private func inventorySubtitle(_ item: WorkbenchSourceInventoryItem) -> String {
+        let dimensions = item.width.flatMap { width in item.height.map { "\(width) × \($0)" } } ?? "Dimensions unavailable"
+        let state: String
+        switch item.state {
+        case "needs_assignment": state = "Needs map assignment"
+        case "ambiguous": state = "Check map assignment"
+        case "header_error": state = "Image needs review"
+        case "missing": state = "File unavailable"
+        default: state = mapTitle(item.role ?? "unknown")
+        }
+        return "\(dimensions) · \(state)"
+    }
+
+    private func inventoryInspection(_ item: WorkbenchSourceInventoryItem) -> some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item.name).font(.headline)
+                        Text(inventorySubtitle(item)).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if store.dataset?.isSourceFolder == true {
+                        Button("Edit Tags…", systemImage: "tag") { tagImage = item.url }
+                    }
+                    Button("Assign Maps…", systemImage: "photo.badge.plus") {
+                        store.pendingMapAssignment = item
+                        store.showAddMaterialSheet = true
+                    }
+                    Menu {
+                        Button("Open Original", systemImage: "arrow.up.forward.app") { NSWorkspace.shared.open(item.url) }
+                        Button("Show in Finder", systemImage: "folder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
+                        if store.dataset?.isSourceFolder == true,
+                           let root = store.datasetFolderURL,
+                           item.url.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path != root.resolvingSymlinksInPath().standardizedFileURL.path {
+                            Divider()
+                            Button("Move Folder Out…", systemImage: "folder.badge.minus") { store.moveSourceFolderOut(item.url.deletingLastPathComponent()) }
+                        }
+                    } label: { Label("Actions", systemImage: "ellipsis.circle") }
+                }
+                Text(item.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                if let label = item.classLabel, !label.isEmpty { Label(label, systemImage: "tag").font(.callout) }
+                if item.sourceVerification == "verified" { Label("Original bytes verified", systemImage: "checkmark.seal").font(.caption).foregroundStyle(.secondary) }
+                if let issue = item.issue {
+                    Text(issue).font(.callout).foregroundStyle(.orange).textSelection(.enabled)
+                }
+                Text("Original file retained in this dataset. Map assignment and training eligibility do not change the source image.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.padding(14)
+            Divider()
+            MapInspectionView(url: item.url, numeric: ["height", "roughness", "normal", "ancillary"].contains(item.role ?? ""),
+                              viewport: viewport, title: item.name, sourceSHA256: nil, onMissingSource: { missing in
+                unavailableSource = store.reportMissingDatasetSource(missing)
+            })
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if let unavailableSource {
+                Text(unavailableSource).font(.caption).foregroundStyle(.orange).textSelection(.enabled).padding(12)
+            }
+        }
+    }
+
     private func editableStatus(_ status: String) -> String {
         ["approved", "excluded", "unreviewed"].contains(status) ? status : "unreviewed"
     }
@@ -537,6 +711,9 @@ struct DatasetWorkbenchView: View {
         case "height": "Displacement"
         case "roughness": "Roughness"
         case "normal": "OpenGL Normal"
+        case "ao": "Ambient Occlusion"
+        case "ancillary": "Additional map"
+        case "unknown": "Unassigned image"
         default: role.capitalized
         }
     }
@@ -548,8 +725,8 @@ private struct DatasetCropRow: View {
         HStack(spacing: 9) {
             Image(systemName: sample.status == "excluded" ? "eye.slash" : "photo").foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text(sample.split == "validation" ? "Learning check" : (sample.sourceRegionId ?? "original").replacingOccurrences(of: "_", with: " ").capitalized + " crop").lineLimit(1)
-                Text("\(sample.width) × \(sample.height) · \(sample.split == "validation" ? "Extra validation crop" : "Training crop")")
+                Text(sample.split == "original" ? "Original source" : sample.split == "validation" ? "Learning check" : (sample.sourceRegionId ?? "original").replacingOccurrences(of: "_", with: " ").capitalized + " crop").lineLimit(1)
+                Text("\(sample.width) × \(sample.height) · \(sample.split == "original" ? "Original pixels" : sample.split == "validation" ? "Extra validation crop" : "Training crop")")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
         }
@@ -559,5 +736,6 @@ private struct DatasetCropRow: View {
 private struct DatasetSubjectGroup: Identifiable {
     let id: String
     let name: String
-    let materials: [WorkbenchMaterial]
+    var materials: [WorkbenchMaterial]
+    var inventory: [WorkbenchSourceInventoryItem]
 }

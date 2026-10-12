@@ -235,16 +235,16 @@ enum NativeMaterialSpecialistService {
         }
         try Task.checkCancellation()
         onEvent(try event("Reading original material inventory…", completed: 0, total: 0))
-        _ = try await NativeMaterialDatasetService.run(arguments: ["dataset", "--dataset", dataset.path])
+        _ = try await NativeMaterialDatasetService.run(arguments: ["dataset", "--dataset", dataset.path, "--skip-source-recovery"])
         var materials = try readMaterials(dataset)
         var warnings: [String] = []
         let sourceFolder = sourceFolderURL.map(canonical) ?? registry.sourceFolderPath.map { canonical(URL(fileURLWithPath: $0)) }
-        if let folder = sourceFolder {
+        if let folder = sourceFolder, folder != dataset {
             let inventory = workspace.appendingPathComponent(".source-inventory-" + UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: inventory) }
             do {
                 _ = try await NativeMaterialDatasetService.run(arguments: ["create-dataset", "--dataset", inventory.path, "--name", "Specialist source inventory"])
-                _ = try await NativeMaterialDatasetService.run(arguments: ["import-folder", "--dataset", inventory.path, "--folder", canonical(folder).path])
+                _ = try await NativeMaterialDatasetService.run(arguments: ["import-folder", "--dataset", inventory.path, "--folder", canonical(folder).path, "--managed-import", "true", "--skip-source-recovery"])
                 let additional = try readMaterials(inventory)
                 var identities = Set(materials.map(sourceIdentity)), ids = Set(materials.map(\.id))
                 for material in additional where !identities.contains(sourceIdentity(material)) {
@@ -260,7 +260,19 @@ enum NativeMaterialSpecialistService {
         let curationURL = classifierDatasetURL.map(canonical) ?? registry.classifierDatasetPath.map { canonical(URL(fileURLWithPath: $0)) }
         let curation = try readCuration(curationURL, materials: materials)
         warnings.append(contentsOf: curation.warnings)
-        let labels = Array(Set(classifier.labels + curation.labels)).sorted()
+        func inputFiles(_ material: Material) -> [URL] {
+            var paths = Set([material.input.path])
+            for variant in material.sample["input_variants"] as? [Object] ?? [] {
+                if let path = (variant["source"] as? Object)?["path"] as? String { paths.insert(path) }
+            }
+            return paths.sorted().map { URL(fileURLWithPath: $0) }
+        }
+        let taughtLabels = materials.flatMap(inputFiles).compactMap { file -> String? in
+            guard let tags = NativeSourceFileTags.read(file), tags.classifierIdentity == "user",
+                  let label = tags.classLabel, !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return label
+        }
+        let labels = Array(Set(classifier.labels + curation.labels + taughtLabels)).sorted()
         // An old taxonomy manifest may mention labels whose folders were
         // removed by the user. Retire only empty automatic registry entries;
         // their owned on-disk folders and every curated/model record remain.
@@ -279,39 +291,89 @@ enum NativeMaterialSpecialistService {
         var assignments: [Assignment] = []
         for (offset, family) in groups.keys.sorted().enumerated() {
             try Task.checkCancellation()
-            let group = groups[family]!, chosen = group.sorted { $0.area == $1.area ? $0.input.path < $1.input.path : $0.area < $1.area }[0]
-            guard try fileHash(chosen.input) == chosen.inputHash else {
+            let group = groups[family]!
+            let sourceFolder = !FileManager.default.fileExists(atPath: dataset.appendingPathComponent("dataset.json").path)
+            let eligible = sourceFolder ? group.filter {
+                let dimensions = $0.sample["source_pixel_dimensions"] as? [Int] ?? []
+                return dimensions.count == 2 && dimensions.allSatisfy { $0 >= 2048 }
+            } : group
+            guard let chosen = eligible.sorted(by: { $0.area == $1.area ? $0.input.path < $1.input.path : $0.area < $1.area }).first else {
+                warnings.append("\(family): no original diffuse image supplies the 2048 classifier grid. Its source folder is retained.")
+                continue
+            }
+            let tags = NativeSourceFileTags.read(chosen.input)
+            let familyTags = group.flatMap(inputFiles).compactMap { NativeSourceFileTags.read($0) }
+                .filter { $0.classifierIdentity == "user" }
+            let familyLabels = Set(familyTags.compactMap { tag -> String? in
+                guard let label = tag.classLabel, !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                return label
+            })
+            if familyTags.contains(where: { $0.classLabel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true }) {
+                warnings.append("\(family): an original was explicitly left unlabeled; automatic classification was skipped for review.")
+                continue
+            }
+            if familyLabels.count > 1 { warnings.append("\(family): original file tags teach conflicting classes; the selected file's teaching takes precedence, otherwise classification remains available for review.") }
+            let identity = try NativeSourceFileTags.identity(chosen.input)
+            let tagHash = tags?.verifiedSHA256.flatMap { $0.count == 64 ? $0 : nil }
+            let chosenHash = try tagHash ?? fileHash(chosen.input)
+            guard chosen.inputHash.isEmpty || chosenHash == chosen.inputHash else {
                 warnings.append("\(family): original diffuse changed since registration; classification was skipped.")
                 continue
             }
+            let manualLabel = tags?.classifierIdentity == "user" ? tags?.classLabel : nil
+            let chosenTeaching = manualLabel.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+            let taught = chosenTeaching ?? (familyLabels.count == 1 ? familyLabels.first : nil)
+            let taggedPrediction = tags?.classifierIdentity == classifier.sha256 ? tags?.classLabel : nil
+            let cached = priorAssignments[family]
+            let reusable = cached.flatMap { assignment -> Assignment? in
+                guard assignment.inputSha256 == chosenHash, assignment.classifierSha256 == classifier.sha256,
+                      classifier.labels.contains(assignment.predictedLabel),
+                      Set(assignment.probabilities.keys).isSubset(of: Set(classifier.labels)) else { return nil }
+                return assignment
+            }
             let prediction: NativeDiffuseTextureClassifier.Prediction
-            if let cached = priorAssignments[family], cached.inputSha256 == chosen.inputHash,
-               cached.classifierSha256 == classifier.sha256, classifier.labels.contains(cached.predictedLabel),
-               Set(cached.probabilities.keys).isSubset(of: Set(classifier.labels)) {
-                prediction = .init(label: cached.predictedLabel, confidence: cached.confidence,
-                    probabilities: cached.probabilities, modelSHA256: classifier.sha256)
+            var performedPrediction = false
+            if let taught {
+                prediction = .init(label: taught, confidence: 1, probabilities: [taught: 1], modelSHA256: classifier.sha256)
+            } else if let taggedPrediction, classifier.labels.contains(taggedPrediction) {
+                if let reusable, reusable.predictedLabel == taggedPrediction {
+                    prediction = .init(label: reusable.predictedLabel, confidence: reusable.confidence,
+                        probabilities: reusable.probabilities, modelSHA256: classifier.sha256)
+                } else {
+                    // File tags persist the class, not a calibrated confidence.
+                    prediction = .init(label: taggedPrediction, confidence: 0, probabilities: [:], modelSHA256: classifier.sha256)
+                }
+            } else if let reusable {
+                prediction = .init(label: reusable.predictedLabel, confidence: reusable.confidence,
+                    probabilities: reusable.probabilities, modelSHA256: classifier.sha256)
             } else {
-                do { prediction = try classifier.predict(chosen.input) }
+                do { prediction = try classifier.predict(chosen.input); performedPrediction = true }
                 catch is CancellationError { throw CancellationError() }
                 catch { warnings.append("\(family): classification failed: \(error.localizedDescription)"); continue }
             }
-            guard classifier.labels.contains(prediction.label), prediction.modelSHA256 == classifier.sha256,
+            let stablePredictionBytes = performedPrediction ? try fileHash(chosen.input) == chosenHash : true
+            guard (taught != nil || classifier.labels.contains(prediction.label)), prediction.modelSHA256 == classifier.sha256,
                   prediction.confidence.isFinite, (0...1).contains(prediction.confidence),
-                  prediction.probabilities.allSatisfy({ classifier.labels.contains($0.key) && $0.value.isFinite && (0...1).contains($0.value) }),
-                  try fileHash(chosen.input) == chosen.inputHash else {
+                  prediction.probabilities.allSatisfy({ (taught != nil || classifier.labels.contains($0.key)) && $0.value.isFinite && (0...1).contains($0.value) }),
+                  try NativeSourceFileTags.identity(chosen.input) == identity, stablePredictionBytes else {
                 throw StudioError("The classifier returned an invalid prediction or the original diffuse changed during classification.")
             }
+            if performedPrediction, NativeSourceFileTags.read(chosen.input)?.classifierIdentity != "user" {
+                do { try NativeSourceFileTags.update(chosen.input, classLabel: prediction.label,
+                                                     classifierIdentity: classifier.sha256, verifiedSHA256: chosenHash) }
+                catch { warnings.append("\(family): classification was saved in the specialist workspace, but its optional file tag could not be saved: \(error.localizedDescription)") }
+            }
             let curatedLabels = Set(group.flatMap { inputHashes($0.sample).flatMap { curation.labelsByHash[$0] ?? [] } })
-            var label = prediction.label, source = "classifier"
-            if curatedLabels.count == 1, let curated = curatedLabels.first { label = curated; source = "curated_classifier_dataset" }
-            else if curatedLabels.count > 1 { warnings.append("\(family): curated color variants have different labels; retained classifier prediction for review.") }
+            var label = prediction.label, source = taught == nil ? "classifier" : "user_file_tag"
+            if taught == nil, curatedLabels.count == 1, let curated = curatedLabels.first { label = curated; source = "curated_classifier_dataset" }
+            else if taught == nil, curatedLabels.count > 1 { warnings.append("\(family): curated color variants have different labels; retained classifier prediction for review.") }
             let hint = curation.hints[family]
             let semantic = semanticTerms(chosen, hint: hint)
             let classID = NativeDiffuseClassifierDatasetService.classes.first { $0.name == label }?.id
             let subtype = hint?.subtype ?? NativeDiffuseClassifierDatasetService.subtype(family: family,
                 filename: chosen.input.lastPathComponent, metadata: hint?.providerMetadata, classID: classID)
             assignments.append(.init(familyId: family, materialIds: group.map(\.id).sorted(), inputPath: chosen.input.path,
-                inputSha256: chosen.inputHash, predictedLabel: prediction.label, classLabel: label,
+                inputSha256: chosenHash, predictedLabel: prediction.label, classLabel: label,
                 confidence: prediction.confidence, probabilities: prediction.probabilities,
                 classifierSha256: classifier.sha256, source: source, subtype: subtype, semanticTerms: semantic))
             onEvent(try event("Classified \(family) as \(label)", completed: offset + 1, total: groups.count))
@@ -503,7 +565,9 @@ enum NativeMaterialSpecialistService {
                 entries.append(entry)
             }
             try write(["schema_version": 2, "storage_policy": "original-source-references-v1", "samples": entries], to: stage.appendingPathComponent("dataset.json"))
-            _ = try await NativeMaterialDatasetService.run(arguments: ["import-folder", "--dataset", root.path, "--folder", stage.path])
+            let deferred = additions.contains { $0.inputHash.isEmpty }
+            _ = try await NativeMaterialDatasetService.run(arguments: ["import-folder", "--dataset", root.path, "--folder", stage.path]
+                + (deferred ? ["--managed-import", "true", "--skip-source-recovery"] : []))
             for material in additions { automaticRemovals.remove(material.id) }
         }
         let final = try readMaterials(root, includeExcluded: true)
@@ -536,33 +600,44 @@ enum NativeMaterialSpecialistService {
     }
 
     private static func readMaterials(_ supplied: URL, includeExcluded: Bool = false) throws -> [Material] {
-        let root = datasetRoot(supplied), index = try object(root.appendingPathComponent("dataset.json"))
-        guard index["schema_version"] as? Int == 2, index["storage_policy"] as? String == "original-source-references-v1",
-              index["native_size_preparation"] == nil else {
-            throw StudioError("Specialization needs an original source-reference dataset, not prepared crops.")
+        let root = datasetRoot(supplied)
+        let registrations: [(entry: Object, sample: Object)]
+        if !FileManager.default.fileExists(atPath: root.appendingPathComponent("dataset.json").path) {
+            registrations = try NativeMaterialDatasetService.sourceFolderRecords(root)
+        } else {
+            let index = try object(root.appendingPathComponent("dataset.json"))
+            guard index["schema_version"] as? Int == 2, index["storage_policy"] as? String == "original-source-references-v1",
+                  index["native_size_preparation"] == nil else {
+                throw StudioError("Specialization needs original sources, not prepared crops.")
+            }
+            registrations = try (index["samples"] as? [Object] ?? []).map { entry in
+                guard let path = entry["path"] as? String else { throw StudioError("Original dataset sample path is missing.") }
+                let folder = canonical(root.appendingPathComponent(path))
+                guard folder.path.hasPrefix(root.path + "/") else { throw StudioError("Original sample metadata escapes its dataset.") }
+                return (entry, try object(folder.appendingPathComponent("sample.json")))
+            }
         }
         var result: [Material] = [], seen = Set<String>()
-        for entry in index["samples"] as? [Object] ?? [] {
-            guard let path = entry["path"] as? String else { throw StudioError("Original dataset sample path is missing.") }
-            let folder = canonical(root.appendingPathComponent(path))
-            guard folder.path.hasPrefix(root.path + "/") else { throw StudioError("Original sample metadata escapes its dataset.") }
-            let sample = try object(folder.appendingPathComponent("sample.json"))
+        for registration in registrations {
+            let entry = registration.entry, sample = registration.sample
             if !includeExcluded && ["excluded", "rejected"].contains(sample["status"] as? String ?? "unreviewed") { continue }
             guard let id = sample["material_id"] as? String, seen.insert(id).inserted,
                   let metadata = sample["map_metadata"] as? [String: Object], let details = metadata["input"],
                   details["storage"] as? String == "source_reference", details["exact_source_crop"] as? Bool != false,
                   let source = details["source"] as? Object, let path = source["path"] as? String, path.hasPrefix("/"),
-                  let digest = source["file_sha256"] as? String, let width = source["width"] as? Int,
+                  let width = source["width"] as? Int,
                   let height = source["height"] as? Int, width > 0, height > 0,
-                  details["sample_sha256"] as? String == digest,
+                  ((source["file_sha256"] as? String)?.count == 64 && details["sample_sha256"] as? String == source["file_sha256"] as? String
+                    || source["source_verification"] as? String == "header_inspected" && source["source_stat"] is Object),
                   (sample["maps"] as? [String: String])?["input"] == path,
-                  sample["sample_pixel_dimensions"] as? [Int] == [width, height] else {
+                  let common = sample["sample_pixel_dimensions"] as? [Int], common.count == 2,
+                  common[0] <= width, common[1] <= height, width - common[0] <= 8, height - common[1] <= 8 else {
                 throw StudioError("Original material reference or diffuse dimensions are invalid.")
             }
             let area = width.multipliedReportingOverflow(by: height)
             guard !area.overflow else { throw StudioError("Diffuse dimensions overflow.") }
             result.append(.init(id: id, family: sample["source_family_id"] as? String ?? sample["asset_family_id"] as? String ?? id,
-                entry: entry, sample: sample, input: URL(fileURLWithPath: path), inputHash: digest, area: area.partialValue))
+                entry: entry, sample: sample, input: URL(fileURLWithPath: path), inputHash: source["file_sha256"] as? String ?? "", area: area.partialValue))
         }
         return result
     }
