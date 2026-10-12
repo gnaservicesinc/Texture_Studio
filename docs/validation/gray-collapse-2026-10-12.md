@@ -146,9 +146,13 @@ smoke passed**. The compiled runtime and source inspection are verified; native
 UI automation was unavailable because its pipe failed to start.
 
 The updated built Material Review app was launched with the fresh three-map
-manifest. The native installer's `--if-closed` check skipped installation while
-the installed Texture Studio remained open. No running installed app was
-replaced, and no installed-build smoke or live UI click-through is claimed.
+manifest. The native installer's first `--if-closed` check skipped installation
+while the installed Texture Studio remained open. After the user closed the
+apps, the native installer installed 0.9.22 (117). The installed bundle matched
+the built bundle byte for byte, recursive strict signature verification passed,
+and installed smoke printed **Texture Studio native smoke passed**. The
+installed Material Review was launched with the fresh three-map manifest.
+No running app was replaced, and no live UI click-through is claimed.
 
 The main executable SHA-256 is
 `eae2083b14b1232b6f8b90cacf10f7d2d5f99386ae14503a2bce775284a09963`.
