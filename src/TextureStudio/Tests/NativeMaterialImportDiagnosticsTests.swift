@@ -3,6 +3,163 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeMaterialImportDiagnosticsTests: XCTestCase {
+    func testSkippedRecognizedDuplicateGroupHasOneIdentityDiagnosticWithoutPerMapPairingErrors() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Sources")
+        _ = try await create(dataset)
+        var groups: [[URL]] = []
+        for name in ["Pine Bark", "pine_bark"] {
+            let folder = sources.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            groups.append(try writeCompleteFamily(name, folder: folder, width: 256, height: 256))
+        }
+        for quick in [false, true] {
+            var arguments = ["scan-folder", "--dataset", dataset.path, "--folder", sources.path,
+                             "--plan", root.appendingPathComponent("preview.json").path, "--skip-source-recovery"]
+            if quick { arguments += ["--quick-preview", "true", "--size", "256"] }
+            let preview = try await command(arguments)
+            XCTAssertEqual(preview["source_set_count"] as? Int, 1, "Duplicate normalized identity behavior stays unchanged")
+            XCTAssertEqual(preview["ignored_file_count"] as? Int, 4)
+            let warnings = try XCTUnwrap(preview["warnings"] as? [String])
+            XCTAssertEqual(warnings.count, 1, "One skipped recognized set should not produce four unrecognized map errors: \(warnings)")
+            let warning = try XCTUnwrap(warnings.first)
+            XCTAssertTrue(warning.contains("duplicate normalized material identity"))
+            XCTAssertTrue(groups.contains { $0.allSatisfy { warning.contains($0.path) } }, "The specific duplicate diagnostic identifies all rejected source files")
+            assertNoMisleadingFormatDiagnostic(warnings)
+        }
+    }
+
+    func testNamedAmbientOcclusionDoesNotHideStandaloneBaseColorAndHeightMaps() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Carpet")
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: false)
+        _ = try await create(dataset)
+        let input = try writeMap("BaseColor.png", folder: sources, width: 256, height: 256, bits: 8, channels: 3)
+        _ = try writeMap("Height.png", folder: sources, width: 256, height: 256, bits: 16, channels: 1)
+        // A named ancillary map must not select a different discovery mode
+        // from the valid standalone maps in the same authored source folder.
+        try Data([1, 2, 3]).write(to: sources.appendingPathComponent("carpet_ao_2k.png"))
+        let preview = try await scan(dataset, sources: sources, root: root)
+        XCTAssertEqual(preview["source_set_count"] as? Int, 1)
+        XCTAssertEqual(preview["warnings"] as? [String], [])
+        XCTAssertEqual(preview["ignored_file_count"] as? Int, 1)
+        let plan = try object(root.appendingPathComponent("preview.json"))
+        let material = try XCTUnwrap((plan["materials"] as? [[String: Any]])?.first)
+        let maps = try XCTUnwrap(material["maps"] as? [String: [String: Any]])
+        XCTAssertEqual(Set(maps.keys), ["input", "height"])
+        XCTAssertEqual(maps["input"]?["path"] as? String, input.path)
+    }
+
+    func testImportedDatasetQuickPreviewReadsHeadersAndRejectsCorruptChunksAtImport() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Destination"), importedDataset = root.appendingPathComponent("Registered Dataset")
+        let sources = root.appendingPathComponent("Originals")
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: false)
+        _ = try await create(dataset); _ = try await create(importedDataset)
+        let input = try writeMap("BaseColor.png", folder: sources, width: 256, height: 256, bits: 8, channels: 3)
+        let height = try writeMap("Height.png", folder: sources, width: 256, height: 256, bits: 16, channels: 1)
+        _ = try await command(["add-material", "--dataset", importedDataset.path, "--name", "Carpet",
+                               "--input", input.path, "--height", height.path, "--skip-source-recovery"])
+        let validBytes = try Data(contentsOf: input)
+        var corruptBytes = validBytes; corruptBytes[45] ^= 1
+        try corruptBytes.write(to: input)
+        let plan = root.appendingPathComponent("imported-preview.json")
+        let preview = try await command(["scan-folder", "--dataset", dataset.path, "--folder", importedDataset.path,
+                                         "--plan", plan.path, "--size", "256", "--quick-preview", "true", "--skip-source-recovery"])
+        XCTAssertEqual(preview["added_material_count"] as? Int, 1, "Quick imported-dataset inspection reads IHDR without hashing or validating IDAT")
+        XCTAssertEqual(preview["warnings"] as? [String], [])
+        XCTAssertEqual(try object(plan)["source_verification"] as? String, "headers-only-v1")
+        do {
+            _ = try await command(["import-folder", "--dataset", dataset.path, "--folder", importedDataset.path,
+                                   "--plan", plan.path, "--expected-plan-sha256", try XCTUnwrap(preview["plan_sha256"] as? String),
+                                   "--skip-source-recovery"])
+            XCTFail("A header preview cannot register corrupted source bytes referenced by another dataset")
+        } catch { XCTAssertTrue(String(describing: error).contains("checksum")) }
+        XCTAssertEqual((try object(dataset.appendingPathComponent("dataset.json"))["samples"] as? [Any])?.count, 0)
+        XCTAssertEqual(try Data(contentsOf: input), corruptBytes, "Verification does not rewrite the source")
+    }
+
+    func testCarpetAmbientOcclusionIsSupplementalAndBaseColorAloneSuppliesAllDiffuseInputs() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("CarpetSubstance001")
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: false)
+        _ = try await create(dataset)
+        var originals: [URL: Data] = [:]
+        for (offset, label) in ["1k", "2k", "4k", "8k"].enumerated() {
+            for (role, bits, channels) in [("baseColor", 8, 3), ("height", 16, 1), ("normal", 8, 3), ("roughness", 8, 1), ("ambientOcclusion", 8, 1)] {
+                let path = try writeMap("CarpetSubstance001_COMPILED_" + role + "_" + label + ".png", folder: sources,
+                                        width: 256 + offset * 16, height: 256 + offset * 16, bits: bits, channels: channels)
+                originals[path] = try Data(contentsOf: path)
+            }
+        }
+        let preview = try await scan(dataset, sources: sources, root: root)
+        XCTAssertEqual(preview["source_set_count"] as? Int, 4)
+        XCTAssertEqual(preview["warnings"] as? [String], [])
+        XCTAssertEqual(preview["ignored_file_count"] as? Int, 4, "AO remains visible in the inventory as an unused supplemental map")
+        let plan = try object(root.appendingPathComponent("preview.json")), materials = try XCTUnwrap(plan["materials"] as? [[String: Any]])
+        for material in materials {
+            let maps = try XCTUnwrap(material["maps"] as? [String: [String: Any]])
+            XCTAssertEqual(Set(maps.keys), ["input", "height", "normal", "roughness"])
+            XCTAssertTrue(try XCTUnwrap(maps["input"]?["path"] as? String).contains("_baseColor_"))
+            let inputs = try XCTUnwrap(material["input_variants"] as? [[String: Any]])
+            XCTAssertEqual(inputs.count, 1)
+            XCTAssertTrue(inputs.allSatisfy { ($0["path"] as? String)?.contains("_baseColor_") == true })
+        }
+        let classified = try NativeDiffuseClassifierDatasetService.discover(dataset: nil, sourceFolder: sources)
+        XCTAssertEqual(classified.count, 1, "Classifier discovery chooses a source tier for the same base color identity")
+        XCTAssertTrue(classified.allSatisfy { $0.url.lastPathComponent.contains("_baseColor_") })
+        _ = try await command(["import-folder", "--dataset", dataset.path, "--folder", sources.path,
+                               "--plan", root.appendingPathComponent("preview.json").path,
+                               "--expected-plan-sha256", try XCTUnwrap(preview["plan_sha256"] as? String),
+                               "--expected-index-sha256", try XCTUnwrap(preview["index_sha256"] as? String), "--skip-source-recovery"])
+        for (path, bytes) in originals { XCTAssertEqual(try Data(contentsOf: path), bytes, "Supplemental and training source bytes remain unchanged") }
+    }
+
+    func testNearSizedMapsPairAtCommonCropRectangleWithoutJoiningDifferentExplicitTiers() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: false)
+        _ = try await create(dataset)
+        let originalDimensions = ["baseColor": [264, 266], "height": [260, 262], "normal": [262, 264], "roughness": [261, 263]]
+        var originals: [URL: Data] = [:]
+        for label in ["1K", "2K"] {
+            let offset = label == "1K" ? 0 : 16
+            for (role, bits, channels) in [("baseColor", 8, 3), ("height", 16, 1), ("normal", 8, 3), ("roughness", 8, 1)] {
+                let dimensions = try XCTUnwrap(originalDimensions[role])
+                let path = try writeMap("authored_near_" + role + "_" + label + ".png", folder: sources,
+                                        width: dimensions[0] + offset, height: dimensions[1] + offset, bits: bits, channels: channels)
+                originals[path] = try Data(contentsOf: path)
+            }
+        }
+        let preview = try await scan(dataset, sources: sources, root: root)
+        XCTAssertEqual(preview["source_set_count"] as? Int, 2)
+        XCTAssertEqual(preview["warnings"] as? [String], [])
+        let plan = try object(root.appendingPathComponent("preview.json")), materials = try XCTUnwrap(plan["materials"] as? [[String: Any]])
+        XCTAssertEqual(Set(materials.compactMap { $0["resolution_label"] as? String }), ["1k", "2k"])
+        for material in materials {
+            let label = try XCTUnwrap(material["resolution_label"] as? String), offset = label == "1k" ? 0 : 16
+            XCTAssertEqual(material["common_pixel_dimensions"] as? [Int], [260 + offset, 262 + offset])
+            let maps = try XCTUnwrap(material["maps"] as? [String: [String: Any]])
+            XCTAssertEqual(maps["input"]?["width"] as? Int, 264 + offset, "Original dimensions remain recorded beside the common crop rectangle")
+        }
+        let imported = try await command(["import-folder", "--dataset", dataset.path, "--folder", sources.path,
+                                           "--plan", root.appendingPathComponent("preview.json").path,
+                                           "--expected-plan-sha256", try XCTUnwrap(preview["plan_sha256"] as? String),
+                                           "--expected-index-sha256", try XCTUnwrap(preview["index_sha256"] as? String), "--skip-source-recovery"])
+        XCTAssertEqual(imported["added_material_count"] as? Int, 2)
+        let prepared = try await command(["prepare-size", "--dataset", dataset.path, "--size", "256", "--target", "height", "--skip-source-recovery"])
+        let preparedURL = URL(fileURLWithPath: try XCTUnwrap(prepared["dataset_path"] as? String))
+        let samples = try NativeMaterialDatasetService.trainingSamples(datasetURL: preparedURL, size: 256, target: "height")
+        XCTAssertEqual(samples.count, 2)
+        for sample in samples {
+            let inputSource = try XCTUnwrap(sample.augmentationSourceInputURL), targetSource = try XCTUnwrap(sample.augmentationSourceTargetURL)
+            let rectangle = try XCTUnwrap(sample.cropRectangle)
+            XCTAssertEqual(try NativePNG.decode(Data(contentsOf: sample.inputURL)).pixels, try NativePNG.crop(inputSource, rectangle: rectangle).pixels)
+            XCTAssertEqual(try NativePNG.decode(Data(contentsOf: sample.targetURL)).pixels, try NativePNG.crop(targetSource, rectangle: rectangle).pixels)
+        }
+        for (path, bytes) in originals { XCTAssertEqual(try Data(contentsOf: path), bytes) }
+    }
+
     func testFabricSubstanceAndPineBarkNamingStylesImportEveryResolutionWithoutChangingSources() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Sources")
@@ -147,7 +304,7 @@ final class NativeMaterialImportDiagnosticsTests: XCTestCase {
         _ = try await create(dataset)
         _ = try writeCompleteFamily("complete_surface", folder: sources, width: 256, height: 256)
         let diffuse = try writeMap("authored_mismatch_color_1K.png", folder: sources,
-                                   width: 264, height: 266, bits: 8, channels: 1)
+                                   width: 272, height: 274, bits: 8, channels: 1)
         let height = try writeMap("authored_mismatch_height_1K.png", folder: sources,
                                   width: 260, height: 262, bits: 16, channels: 1)
         let preview = try await scan(dataset, sources: sources, root: root)
@@ -155,7 +312,7 @@ final class NativeMaterialImportDiagnosticsTests: XCTestCase {
         let warnings = try XCTUnwrap(preview["warnings"] as? [String])
         XCTAssertEqual(warnings.count, 2, "\(warnings)")
         XCTAssertTrue(warnings.contains { $0.contains("260 × 262") && $0.contains(height.path) && $0.contains("matching diffuse map") })
-        XCTAssertTrue(warnings.contains { $0.contains("264 × 266") && $0.contains(diffuse.path) && $0.contains("matching height, normal or roughness") })
+        XCTAssertTrue(warnings.contains { $0.contains("272 × 274") && $0.contains(diffuse.path) && $0.contains("matching height, normal or roughness") })
         assertNoMisleadingFormatDiagnostic(warnings)
     }
 

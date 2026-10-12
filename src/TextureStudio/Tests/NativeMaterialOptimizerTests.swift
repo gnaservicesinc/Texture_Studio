@@ -3,6 +3,18 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeMaterialOptimizerTests: XCTestCase {
+    func testBulkFloatDecodingPreservesExactCodesAndUnalignedSlices() throws {
+        let codes: [UInt32] = [0, 0x80000000, 0x3f800000, 0x00000001, 0x7f7fffff, 0x7f800000, 0xff800000, 0x7fc00031]
+        let values = codes.map(Float.init(bitPattern:))
+        let original = NativeTensor.floats(values, shape: [values.count])
+        var prefixed = Data([0xff]); prefixed.append(original.bytes)
+        let slice = NativeTensor(dtype: "F32", shape: [values.count], bytes: prefixed.dropFirst())
+        XCTAssertEqual(try slice.floatValues().map(\.bitPattern), codes)
+        XCTAssertEqual(try NativeTensor(dtype: "F32", shape: [0], bytes: Data()).floatValues(), [])
+        XCTAssertThrowsError(try NativeTensor(dtype: "F32", shape: [1], bytes: Data([0, 0, 0])).floatValues())
+        XCTAssertThrowsError(try NativeTensor(dtype: "I32", shape: [1], bytes: Data(repeating: 0, count: 4)).floatValues())
+    }
+
     private let arguments = ["train", "--dataset", "/dataset", "--output", "/output"]
 
     func testSampleNumericalOverflowIsRecoverableAndDoesNotChangeWeightsOrAccumulation() throws {

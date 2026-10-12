@@ -1,0 +1,24 @@
+{
+  "folder" : "\/opt\/ipde\/sources_mats",
+  "seconds" : [
+    0.65683604166588339,
+    0.6202202499989653,
+    0.61768858333198295
+  ],
+  "source_sets" : [
+    456,
+    456,
+    456
+  ],
+  "training_size" : 2048,
+  "warning_counts" : [
+    3,
+    3,
+    3
+  ],
+  "warnings" : [
+    "Skipped pine_bark_1k: duplicate normalized material identity. Sources: \/opt\/ipde\/sources_mats\/pine_bark\/pine_bark_diff_1k.png, \/opt\/ipde\/sources_mats\/pine_bark\/pine_bark_disp_1k.png, \/opt\/ipde\/sources_mats\/pine_bark\/pine_bark_nor_gl_1k.png, \/opt\/ipde\/sources_mats\/pine_bark\/pine_bark_rough_1k.png",
+    "Skipped pine_bark_2k: duplicate normalized material identity. Sources: \/opt\/ipde\/sources_mats\/pine_bark\/pine_bark_diff_2k.png, \/opt\/ipde\/sources_mats\/pine_bark\/pine_bark_disp_2k.png, \/opt\/ipde\/sources_mats\/pine_bark\/pine_bark_nor_gl_2k.png, \/opt\/ipde\/sources_mats\/pine_bark\/pine_bark_rough_2k.png",
+    "Skipped pine_bark_4k: duplicate normalized material identity. Sources: \/opt\/ipde\/sources_mats\/pine_bark\/pine_bark_diff_4k.png, \/opt\/ipde\/sources_mats\/pine_bark\/pine_bark_disp_4k.png, \/opt\/ipde\/sources_mats\/pine_bark\/pine_bark_nor_gl_4k.png, \/opt\/ipde\/sources_mats\/pine_bark\/pine_bark_rough_4k.png"
+  ]
+}

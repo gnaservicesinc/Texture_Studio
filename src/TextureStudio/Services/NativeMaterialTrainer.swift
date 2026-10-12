@@ -362,6 +362,10 @@ enum NativeMaterialTrainer {
         effectiveConfiguration["output_channels"] = options.target == "normal" ? 3 : 1
         effectiveConfiguration["crop_preparation_policy"] = "Prepare only the paired crop requested by the active optimizer update; reuse it until its next requested epoch."
         effectiveConfiguration["crop_preparation"] = "per-map-on-demand-v1"
+        if model.isCompact {
+            effectiveConfiguration["training_prediction_readback"] = false
+            effectiveConfiguration["parameter_feed_reuse"] = "unchanged-validated-tensor-bytes-v1"
+        }
         effectiveConfiguration["center_spin_sampling"] = NativeMaterialCropAugmentation.centerSpinSampling
         if let depthProCache {
             effectiveConfiguration["depthpro_model_sha256"] = depthProCache.modelSHA256
@@ -610,6 +614,7 @@ enum NativeMaterialTrainer {
                     var evaluatedSamples: [NativeMaterialDatasetService.TrainingSample] = []
                     var valueLoss = Double(0), detailLoss = Double(0), totalLoss = Double(0)
                     var dataPreparationSeconds = 0.0
+                    var gradientEvaluationSeconds = 0.0, gradientAccumulationSeconds = 0.0
                     let rate = options.effectiveLearningRate(update: completed + 1, totalUpdates: requestedUpdates)
                     for microbatch in 0..<options.gradientAccumulationSteps {
                         let accumulatedIndex: Int
@@ -639,8 +644,10 @@ enum NativeMaterialTrainer {
                             let preparedSample = accumulatedSample
                             guard let data = try availablePair(preparedSample, phase: "training") else { return nil }
                             dataPreparationSeconds += ProcessInfo.processInfo.systemUptime - loadingStarted
+                            let gradientStarted = ProcessInfo.processInfo.systemUptime
+                            defer { gradientEvaluationSeconds += ProcessInfo.processInfo.systemUptime - gradientStarted }
                             do { return try program.execute(rgb: data.0, weights: model.trainableWeights, reference: data.1,
-                            gradientsOnly: true,
+                            gradientsOnly: true, includePrediction: false,
                             featureKey: preparedSample.inputSHA256 + ":" + preparedSample.inputEncoding, checkCancellation: { try control.check() }, onStage: { done, total in
                                 if done == 1 || done % 10 == 0 || done == total {
                                     try? emit(["event": "feature_progress", "phase": "training", "sample_id": preparedSample.id, "completed": done, "total": total,
@@ -664,6 +671,8 @@ enum NativeMaterialTrainer {
                                 if control.shouldStopAndSave || timeLimitReached() { break }
                                 continue
                             }
+                            let accumulationStarted = ProcessInfo.processInfo.systemUptime
+                            defer { gradientAccumulationSeconds += ProcessInfo.processInfo.systemUptime - accumulationStarted }
                             var candidate = accumulated
                             do { try candidate.add(derivative.gradients) }
                             catch let error as NativeMaterialSampleError { try quarantine(accumulatedSample, phase: "training", error: error)
@@ -700,7 +709,9 @@ enum NativeMaterialTrainer {
                     }
                     let optimizerSeconds = ProcessInfo.processInfo.systemUptime - optimizerStarted
                     try control.check()
+                    let commitStarted = ProcessInfo.processInfo.systemUptime
                     try model.updateWeights(update.weights); optimizer = update.state
+                    let commitSeconds = ProcessInfo.processInfo.systemUptime - commitStarted
                     try emit(["event": "operation_progress", "phase": "training", "operation": "Applying optimizer update", "completed": 1, "total": 1])
                     completed += 1
                     activeUpdate = false
@@ -710,6 +721,9 @@ enum NativeMaterialTrainer {
                         "learning_rate": rate, "accumulated_samples": accumulated.count, "gradient_norm": update.gradientNorm,
                         "native_dimensions": [options.size, options.size],
                         "data_preparation_seconds": dataPreparationSeconds, "optimizer_seconds": optimizerSeconds,
+                        "gradient_evaluation_seconds": gradientEvaluationSeconds,
+                        "gradient_accumulation_seconds": gradientAccumulationSeconds,
+                        "parameter_commit_seconds": commitSeconds,
                         "cumulative_engine_statistics": try JSONSerialization.jsonObject(with: JSONEncoder().encode(program.executionStatistics)),
                         "update_duration_seconds": seconds(updateStarted.duration(to: now()))])
                     if control.shouldStopAndSave || timeLimitReached() { epochFinished = position == order.count - 1; break }

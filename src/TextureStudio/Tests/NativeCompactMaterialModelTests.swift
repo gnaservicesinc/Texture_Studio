@@ -4,6 +4,108 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeCompactMaterialModelTests: XCTestCase {
+    func testTrainingSkipsPredictionReadbackAndReusesOnlyExactParameterFeeds() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        try await Task.detached {
+            let model = try NativeCompactMaterialModel(target: "height", width: 16, seed: 31)
+            let program = try model.program(width: 64, height: 64, target: "height")
+            let input = Self.rgb(width: 64, height: 64)
+            let reference = (0..<64 * 64).map { Float(($0 * 11) % 251) / 251 }
+            XCTAssertThrowsError(try program.execute(rgb: input, weights: [:], reference: reference,
+                gradientsOnly: true, includePrediction: false))
+            XCTAssertEqual(program.executionStatistics.parameterFeedUploads, 0)
+            XCTAssertEqual(program.executionStatistics.parameterFeedCacheHits, 0)
+            XCTAssertEqual(program.executionStatistics.compilations, 0)
+            let withPrediction = try program.execute(rgb: input, weights: model.weights, reference: reference, gradientsOnly: true)
+            let training = try program.execute(rgb: input, weights: model.weights, reference: reference,
+                gradientsOnly: true, includePrediction: false)
+            XCTAssertEqual(withPrediction.output.count, 64 * 64)
+            XCTAssertTrue(training.output.isEmpty)
+            XCTAssertEqual(try XCTUnwrap(training.loss), try XCTUnwrap(withPrediction.loss), accuracy: 1e-6)
+            XCTAssertEqual(try XCTUnwrap(training.valueLoss), try XCTUnwrap(withPrediction.valueLoss), accuracy: 1e-6)
+            XCTAssertEqual(try XCTUnwrap(training.gradientLoss), try XCTUnwrap(withPrediction.gradientLoss), accuracy: 1e-6)
+            for name in model.weights.keys {
+                for (expected, actual) in zip(try withPrediction.gradients[name]!.floatValues(), try training.gradients[name]!.floatValues()) {
+                    XCTAssertEqual(actual, expected, accuracy: 1e-5, name)
+                }
+            }
+            XCTAssertEqual(program.executionStatistics.parameterFeedUploads, 1)
+            XCTAssertEqual(program.executionStatistics.parameterFeedCacheHits, 1)
+            var changed = model.weights
+            let originalBias = try model.weights["output.bias"]!.floatValues()[0]
+            changed["output.bias"] = .floats([originalBias + 0.25], shape: model.weights["output.bias"]!.shape)
+            let next = try program.execute(rgb: input, weights: changed, reference: reference,
+                gradientsOnly: true, includePrediction: false)
+            XCTAssertNotEqual(next.loss, training.loss, "An optimizer update must replace the cached parameter feeds.")
+            XCTAssertEqual(program.executionStatistics.parameterFeedUploads, 2)
+            var malformed = changed
+            malformed["output.bias"] = NativeTensor(dtype: "F32", shape: [1], bytes: changed["output.bias"]!.bytes)
+            XCTAssertThrowsError(try program.execute(rgb: input, weights: malformed, reference: reference,
+                gradientsOnly: true, includePrediction: false))
+            _ = try program.execute(rgb: input, weights: changed, reference: reference,
+                gradientsOnly: true, includePrediction: false)
+            XCTAssertEqual(program.executionStatistics.parameterFeedUploads, 2, "Rejected weights must not replace a valid feed cache.")
+            XCTAssertEqual(program.executionStatistics.parameterFeedCacheHits, 2)
+            XCTAssertEqual(program.executionStatistics.compilations, 2, "Repeated frozen microbatches retain the training executable.")
+        }.value
+    }
+
+    /// A bounded, opt-in engine comparison. It uses procedural native samples
+    /// and cannot mutate a user dataset or claim learned material quality.
+    func testCompactTrainingThroughput() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(environment["TEXTURE_STUDIO_COMPACT_THROUGHPUT_BENCHMARK"] == "1")
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        let reportPath = try XCTUnwrap(environment["TEXTURE_STUDIO_COMPACT_THROUGHPUT_REPORT"])
+        let size = Int(environment["TEXTURE_STUDIO_COMPACT_THROUGHPUT_SIZE"] ?? "512") ?? 512
+        let width = Int(environment["TEXTURE_STUDIO_COMPACT_THROUGHPUT_WIDTH"] ?? "32") ?? 32
+        guard size >= 64, size <= 2048, size % 64 == 0 else { XCTFail("Choose a bounded native benchmark grid divisible by 64."); return }
+        try await Task.detached {
+            let input = Self.rgb(width: size, height: size)
+            let reference = (0..<size * size).map { Float(($0 * 11) % 251) / 251 }
+            var runs: [[String: Any]] = []
+            for includePrediction in [true, false] {
+                for accumulation in [1, 2] {
+                    let model = try NativeCompactMaterialModel(target: "height", width: width, seed: 31)
+                    let program = try model.program(width: size, height: size, target: "height")
+                    var state: [String: NativeTensor] = [:], durations: [Double] = [], optimizerSeconds: [Double] = []
+                    for step in 1...7 {
+                        let started = ProcessInfo.processInfo.systemUptime
+                        var gradients = NativeMaterialGradientAccumulator()
+                        for _ in 0..<accumulation {
+                            let execution = try program.execute(rgb: input, weights: model.weights, reference: reference,
+                                gradientsOnly: true, includePrediction: includePrediction)
+                            try gradients.add(execution.gradients)
+                        }
+                        let optimizerStarted = ProcessInfo.processInfo.systemUptime
+                        let update = try NativeMaterialOptimizer.apply(gradients: gradients.averaged(), weights: model.weights,
+                            state: state, learningRate: 1e-3, step: step, configuration: .init())
+                        optimizerSeconds.append(ProcessInfo.processInfo.systemUptime - optimizerStarted)
+                        try model.updateWeights(update.weights); state = update.state
+                        durations.append(ProcessInfo.processInfo.systemUptime - started)
+                    }
+                    let warm = Array(durations.dropFirst()).sorted()
+                    let warmMedian = (warm[2] + warm[3]) / 2
+                    let statistics = try JSONSerialization.jsonObject(with: JSONEncoder().encode(program.executionStatistics))
+                    runs.append(["prediction_readback": includePrediction, "accumulation_steps": accumulation,
+                        "cold_update_seconds": durations[0], "warm_update_median_seconds": warmMedian,
+                        "warm_sample_median_seconds": warmMedian / Double(accumulation),
+                        "update_seconds": durations, "optimizer_seconds": optimizerSeconds, "statistics": statistics])
+                    XCTAssertEqual(program.executionStatistics.compilations, 1)
+                    XCTAssertEqual(program.executionStatistics.parameterFeedUploads, 7)
+                    XCTAssertEqual(program.executionStatistics.parameterFeedCacheHits, accumulation == 2 ? 7 : 0)
+                }
+            }
+            let report: [String: Any] = ["fixture": "deterministic native RGB/Float32 scalar arrays; seven optimizer updates",
+                "size": size, "network_width": width, "quality_qualification": false,
+                "comparison": "prediction readback only; all runs include exact parameter feed reuse and bulk Float32 decoding",
+                "runs": runs]
+            let url = URL(fileURLWithPath: reportPath)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: url)
+        }.value
+    }
+
     func testLinearDiffuseContractPersistsAndLegacyCheckpointsRetainSRGB() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

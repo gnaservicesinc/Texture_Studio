@@ -81,7 +81,8 @@ final class NativeMaterialDatasetTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: sources.appendingPathComponent("stone_diff_8k.png").path))
 
         // A new on-disk tier cannot bypass removal during ordinary discovery.
-        // Fresh untombstoned families remain visible without a manual import.
+        // Fresh untombstoned families remain registered without a manual
+        // import; only originals large enough for the selected grid are shown.
         for (family, width, height, label) in [("stone", 8192, 256, "8k"), ("fresh", 256, 256, "1k")] {
             for (suffix, bits, channels) in [("diff", 8, 3), ("disp", 16, 1)] {
                 let path = sources.appendingPathComponent("\(family)_\(suffix)_\(label).png")
@@ -91,7 +92,11 @@ final class NativeMaterialDatasetTests: XCTestCase {
         }
         let discovered = try await output(["dataset", "--dataset", dataset.path], sourceRecovery: automatic)
         let materials = try XCTUnwrap(discovered["materials"] as? [[String: Any]])
-        XCTAssertEqual(Set(materials.compactMap { $0["material_id"] as? String }), ["fresh_1k"])
+        XCTAssertEqual(discovered["source_set_count"] as? Int, 1, "The fresh family is registered while removed source families stay absent")
+        XCTAssertTrue(materials.isEmpty, "A 256-pixel original cannot appear as a 2048 training crop")
+        let smallerGrid = try NativeMaterialDatasetService.readOnlyDatasetInfo(datasetURL: dataset, size: 256)
+        let smallerMaterials = try XCTUnwrap(smallerGrid["materials"] as? [[String: Any]])
+        XCTAssertEqual(Set(smallerMaterials.compactMap { $0["material_id"] as? String }), ["fresh_1k"], "The fresh family remains available at its exact native grid")
         let requestedAfterDiscovery = await probe.urls()
         XCTAssertEqual(requestedAfterDiscovery, [], "Retained removed fields do not authorize automatic tier recovery")
 

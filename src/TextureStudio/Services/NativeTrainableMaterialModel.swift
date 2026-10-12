@@ -136,7 +136,7 @@ final class NativeTrainableMaterialModel {
             }
         }
         func execute(rgb: [Float], weights: [String: NativeTensor], reference: [Float]? = nil,
-                     gradientsOnly: Bool = false, featureKey: String? = nil,
+                     gradientsOnly: Bool = false, includePrediction: Bool = true, featureKey: String? = nil,
                      checkCancellation: () throws -> Void = { try Task.checkCancellation() },
                      onStage: (Int, Int) -> Void = { _, _ in },
                      onOperation: (String, Int, Int) -> Void = { _, _, _ in }) throws -> NativeMaterialModel.Program.Execution {
@@ -146,7 +146,7 @@ final class NativeTrainableMaterialModel {
                     featureKey: featureKey, checkCancellation: checkCancellation, onStage: onStage, onOperation: onOperation)
             case .compact(let program):
                 return try program.execute(rgb: rgb, weights: weights, reference: reference, gradientsOnly: gradientsOnly,
-                    featureKey: featureKey, checkCancellation: checkCancellation, onStage: onStage, onOperation: onOperation)
+                    includePrediction: includePrediction, featureKey: featureKey, checkCancellation: checkCancellation, onStage: onStage, onOperation: onOperation)
             }
         }
     }

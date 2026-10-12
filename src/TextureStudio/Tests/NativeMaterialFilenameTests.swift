@@ -47,6 +47,24 @@ final class NativeMaterialFilenameTests: XCTestCase {
         XCTAssertNil(NativeMaterialDatasetService.diffuseSourceFilename(URL(fileURLWithPath: "/Sources/Surface/Cardboard_01_height_1K.png")))
     }
 
+    func testAmbientOcclusionAndPackedPBRMapsNeverBecomeDiffuseInput() throws {
+        for name in ["ambientOcclusion.png", "Ambient_Occlusion.png", "AO.png", "ORM.png", "ARM.png",
+                     "CarpetSubstance001_COMPILED_ambientOcclusion_8k.png",
+                     "CarpetSubstance001_COMPILED_ambient_occlusion_2k.png",
+                     "CarpetSubstance001_COMPILED_4K_AO.png", "carpet_Ambient-Occlusion-2048px.png",
+                     "carpet_ao_2k.png", "carpet_rough_ao_2k.png", "carpet_ORM_2k.png",
+                     "Paper003_2K-PNG_AmbientOcclusion.png"] {
+            XCTAssertTrue(NativeMaterialDatasetService.isAncillarySourceFilename(name), name)
+            XCTAssertNil(NativeMaterialDatasetService.diffuseSourceFilename(URL(fileURLWithPath: "/Sources/Carpet/" + name)), name)
+        }
+        for name in ["CarpetSubstance001_COMPILED_baseColor_8k.png", "BaseColor.png", "height.png",
+                     "carpet_roughness_2k.png", "IMG_6678.png"] {
+            XCTAssertFalse(NativeMaterialDatasetService.isAncillarySourceFilename(name), name)
+        }
+        XCTAssertEqual(NativeMaterialDatasetService.diffuseSourceFilename(URL(fileURLWithPath: "/Sources/Carpet/CarpetSubstance001_COMPILED_baseColor_8k.png"))?.0,
+                       "carpetsubstance001_compiled")
+    }
+
     func testAuthoredAndAmbientImportsKeepEveryTargetExactOriginalIdentityAndPairedCrops() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let sources = root.appendingPathComponent("Originals"), dataset = root.appendingPathComponent("Dataset")

@@ -1,0 +1,177 @@
+{
+  "comparison" : "prediction readback only; all runs include exact parameter feed reuse and bulk Float32 decoding",
+  "fixture" : "deterministic native RGB\/Float32 scalar arrays; seven optimizer updates",
+  "network_width" : 32,
+  "quality_qualification" : false,
+  "runs" : [
+    {
+      "accumulation_steps" : 1,
+      "cold_update_seconds" : 0.48691266666537558,
+      "optimizer_seconds" : [
+        0.012066166667864309,
+        0.014340291667394922,
+        0.01295616666720889,
+        0.012635000000955188,
+        0.012477666667109588,
+        0.012166291666289908,
+        0.012431416666004225
+      ],
+      "prediction_readback" : true,
+      "statistics" : {
+        "commandBuffers" : 0,
+        "compilations" : 1,
+        "compilationSeconds" : 0,
+        "diskPackageCacheHits" : 0,
+        "executionSeconds" : 1.2142512083373731,
+        "finalCommandBufferGPUSeconds" : 0,
+        "maximumInFlightStages" : 0,
+        "packageLoadSeconds" : 0,
+        "parameterFeedCacheHits" : 0,
+        "parameterFeedUploads" : 7,
+        "peakCheckpointBytes" : 0,
+        "readbackSeconds" : 0.11445216666288616,
+        "recomputedStages" : 0,
+        "stages" : 7,
+        "waitSeconds" : 0
+      },
+      "update_seconds" : [
+        0.48691266666537558,
+        0.16879966666601831,
+        0.16392279166757362,
+        0.16200029166611785,
+        0.16286850000142294,
+        0.16383654166747874,
+        0.163073625000834
+      ],
+      "warm_sample_median_seconds" : 0.16345508333415637,
+      "warm_update_median_seconds" : 0.16345508333415637
+    },
+    {
+      "accumulation_steps" : 2,
+      "cold_update_seconds" : 0.58802349999859871,
+      "optimizer_seconds" : [
+        0.011541791665877099,
+        0.012873041667262441,
+        0.012467000000469852,
+        0.012170750000223052,
+        0.012556041667266982,
+        0.01233683333339286,
+        0.012495500001023174
+      ],
+      "prediction_readback" : true,
+      "statistics" : {
+        "commandBuffers" : 0,
+        "compilations" : 1,
+        "compilationSeconds" : 0,
+        "diskPackageCacheHits" : 0,
+        "executionSeconds" : 2.0083226250008011,
+        "finalCommandBufferGPUSeconds" : 0,
+        "maximumInFlightStages" : 0,
+        "packageLoadSeconds" : 0,
+        "parameterFeedCacheHits" : 7,
+        "parameterFeedUploads" : 7,
+        "peakCheckpointBytes" : 0,
+        "readbackSeconds" : 0.2173748750010418,
+        "recomputedStages" : 0,
+        "stages" : 14,
+        "waitSeconds" : 0
+      },
+      "update_seconds" : [
+        0.58802349999859871,
+        0.29804624999997031,
+        0.29680349999944156,
+        0.29715587499958929,
+        0.29763816666672938,
+        0.29649220833198342,
+        0.29672629166634579
+      ],
+      "warm_sample_median_seconds" : 0.14848984374975771,
+      "warm_update_median_seconds" : 0.29697968749951542
+    },
+    {
+      "accumulation_steps" : 1,
+      "cold_update_seconds" : 0.42149366666671995,
+      "optimizer_seconds" : [
+        0.011204833333977149,
+        0.012821374999475665,
+        0.012387708333335468,
+        0.012515083333710209,
+        0.012344541666607256,
+        0.012502083334766212,
+        0.012601166667081998
+      ],
+      "prediction_readback" : false,
+      "statistics" : {
+        "commandBuffers" : 0,
+        "compilations" : 1,
+        "compilationSeconds" : 0,
+        "diskPackageCacheHits" : 0,
+        "executionSeconds" : 1.1633680833347171,
+        "finalCommandBufferGPUSeconds" : 0,
+        "maximumInFlightStages" : 0,
+        "packageLoadSeconds" : 0,
+        "parameterFeedCacheHits" : 0,
+        "parameterFeedUploads" : 7,
+        "peakCheckpointBytes" : 0,
+        "readbackSeconds" : 0.10699637500147219,
+        "recomputedStages" : 0,
+        "stages" : 7,
+        "waitSeconds" : 0
+      },
+      "update_seconds" : [
+        0.42149366666671995,
+        0.16478466666740132,
+        0.16346625000005588,
+        0.16231912500006729,
+        0.16279558333189925,
+        0.16246816666716768,
+        0.16246570833209262
+      ],
+      "warm_sample_median_seconds" : 0.16263187499953347,
+      "warm_update_median_seconds" : 0.16263187499953347
+    },
+    {
+      "accumulation_steps" : 2,
+      "cold_update_seconds" : 0.55389208333326678,
+      "optimizer_seconds" : [
+        0.011143791667564074,
+        0.012397458332998212,
+        0.01250149999941641,
+        0.012319291667154175,
+        0.012302958333748393,
+        0.01218762499956938,
+        0.012421499999618391
+      ],
+      "prediction_readback" : false,
+      "statistics" : {
+        "commandBuffers" : 0,
+        "compilations" : 1,
+        "compilationSeconds" : 0,
+        "diskPackageCacheHits" : 0,
+        "executionSeconds" : 1.9778755833322066,
+        "finalCommandBufferGPUSeconds" : 0,
+        "maximumInFlightStages" : 0,
+        "packageLoadSeconds" : 0,
+        "parameterFeedCacheHits" : 7,
+        "parameterFeedUploads" : 7,
+        "peakCheckpointBytes" : 0,
+        "readbackSeconds" : 0.21360279166583496,
+        "recomputedStages" : 0,
+        "stages" : 14,
+        "waitSeconds" : 0
+      },
+      "update_seconds" : [
+        0.55389208333326678,
+        0.29709466666645312,
+        0.29675679166575719,
+        0.29692479166624253,
+        0.2949647500008723,
+        0.29668175000006158,
+        0.29700945833428705
+      ],
+      "warm_sample_median_seconds" : 0.14842039583299993,
+      "warm_update_median_seconds" : 0.29684079166599986
+    }
+  ],
+  "size" : 512
+}

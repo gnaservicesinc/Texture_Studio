@@ -424,7 +424,7 @@ struct ImportDatasetFolderSheet: View {
                         }
                         if let summary = preview.sourceRecovery?.summary { Text(summary).font(.callout).monospacedDigit() }
                         if let scannedSize = store.folderImportScannedSize, scannedSize != store.folderImportSize {
-                            Text("The current preview was set up at \(scannedSize) × \(scannedSize). Import will refresh the paired tiers at \(store.folderImportSize) × \(store.folderImportSize) before registering them.")
+                            Text("The current preview uses \(scannedSize) × \(scannedSize). Import will refresh the crop preview at \(store.folderImportSize) × \(store.folderImportSize).")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         if let plans = preview.plans[String(store.folderImportScannedSize ?? store.folderImportSize)] { DatasetPlanSummary(plans: plans) }

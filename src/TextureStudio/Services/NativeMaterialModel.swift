@@ -1790,6 +1790,9 @@ enum NativeGraphExecution {
         var compilationSeconds = 0.0
         var packageLoadSeconds = 0.0
         var executionSeconds = 0.0
+        var readbackSeconds = 0.0
+        var parameterFeedUploads = 0
+        var parameterFeedCacheHits = 0
         // MPS may commit intermediate buffers internally. This measures only
         // their final roots and must not be interpreted as GPU utilization.
         var finalCommandBufferGPUSeconds = 0.0
@@ -2218,7 +2221,11 @@ extension NativeTensor {
     }
     func floatValues() throws -> [Float] {
         guard dtype == "F32", bytes.count % 4 == 0 else { throw StudioError("Material computation requires exact Float32 samples.") }
-        return bytes.withUnsafeBytes { raw in (0..<bytes.count / 4).map { raw.loadUnaligned(fromByteOffset: $0 * 4, as: Float.self) } }
+        // Checkpoint slices may be unaligned. Copy into aligned Float storage
+        // in one operation rather than loading every parameter independently.
+        var values = [Float](repeating: 0, count: bytes.count / 4)
+        _ = values.withUnsafeMutableBytes { destination in bytes.copyBytes(to: destination) }
+        return values
     }
 }
 private extension Array where Element == Int { var ns: [NSNumber] { map { NSNumber(value: $0) } } }

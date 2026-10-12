@@ -1,0 +1,15 @@
+{
+  "dataset_path" : "\/Users\/andrewsmith\/Documents\/Texture Studio Datasets\/BadMonkey",
+  "duplicate_source_sets" : [
+    456,
+    456,
+    456
+  ],
+  "folder" : "\/opt\/ipde\/sources_mats",
+  "seconds" : [
+    0.77755008333406295,
+    0.77748870833420369,
+    0.78848058333278459
+  ],
+  "training_size" : 2048
+}

@@ -303,6 +303,9 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
         private var predictionCache: [String: MPSGraphExecutable] = [:]
         private var lossCache: [String: MPSGraphExecutable] = [:]
         private var derivativeCache: [String: MPSGraphExecutable] = [:]
+        private var derivativePredictionCache: [String: MPSGraphExecutable] = [:]
+        private var parameterSnapshot: [String: NativeTensor] = [:]
+        private var parameterFeeds: [MPSGraphTensor: MPSGraphTensorData] = [:]
         private(set) var executionStatistics = NativeGraphExecution.Statistics()
 
         init(model: NativeCompactMaterialModel, width: Int, height: Int) throws {
@@ -417,7 +420,7 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
         }
 
         func execute(rgb: [Float], weights: [String: NativeTensor], reference: [Float]? = nil,
-                     gradientsOnly: Bool = false, featureKey: String? = nil,
+                     gradientsOnly: Bool = false, includePrediction: Bool = true, featureKey: String? = nil,
                      checkCancellation: () throws -> Void = { try Task.checkCancellation() },
                      onStage: (Int, Int) -> Void = { _, _ in },
                      onOperation: (String, Int, Int) -> Void = { _, _, _ in }) throws -> NativeMaterialModel.Program.Execution {
@@ -427,7 +430,22 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
                     ? "DepthPro refinement needs one finite normalized depth channel between zero and one."
                     : "Compact material evaluation needs finite native RGB codes between zero and one.")
             }
-            try NativeCompactMaterialModel.validateWeights(weights, shapes: shapes)
+            // Every microbatch in an accumulation group uses the same frozen
+            // weights. Reuse their validated Metal feeds until the bytes or
+            // tensor contract change; never infer identity from a step number.
+            let sameParameters = !parameterSnapshot.isEmpty && weights.count == parameterSnapshot.count && weights.allSatisfy { name, tensor in
+                guard let previous = parameterSnapshot[name] else { return false }
+                return tensor.dtype == previous.dtype && tensor.shape == previous.shape && tensor.bytes == previous.bytes
+            }
+            if sameParameters { executionStatistics.parameterFeedCacheHits += 1 }
+            else {
+                try NativeCompactMaterialModel.validateWeights(weights, shapes: shapes)
+                let nextFeeds = try Dictionary(uniqueKeysWithValues: parameters.map { name, tensor in
+                    (tensor, try NativeGraphExecution.tensorData(weights[name]!))
+                })
+                parameterSnapshot = weights; parameterFeeds = nextFeeds
+                executionStatistics.parameterFeedUploads += 1
+            }
             if let reference {
                 guard reference.count == width * height * outputChannels, reference.allSatisfy(\.isFinite) else {
                     throw StudioError("Compact material target grid or values are invalid.")
@@ -435,11 +453,12 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
                 prepareLoss()
             } else if gradientsOnly { throw StudioError("Compact material gradients need a target map.") }
             if gradientsOnly { try prepareDerivatives() }
-            var feeds = try Dictionary(uniqueKeysWithValues: parameters.map { name, tensor in
-                (tensor, try NativeGraphExecution.tensorData(weights[name]!))
-            })
+            var feeds = parameterFeeds
             feeds[input] = try NativeGraphExecution.tensorData(.floats(rgb, shape: [1, inputChannels, height, width]))
-            var targets = [output!]
+            // Training consumes loss and derivatives only. Avoid exporting and
+            // reading an otherwise unused full native-resolution prediction.
+            let returnsPrediction = !gradientsOnly || includePrediction
+            var targets = returnsPrediction ? [output!] : []
             if let reference {
                 feeds[targetInput!] = try NativeGraphExecution.tensorData(.floats(reference, shape: [1, outputChannels, height, width]))
                 targets += [loss!, valueLoss!, detailLoss!]
@@ -448,25 +467,30 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
             targets += names.map { derivatives[$0]! }
             let label = gradientsOnly ? "Computing compact model gradients" : "Computing compact prediction"
             onOperation(label, 0, 1); onStage(0, 1)
-            var cache = gradientsOnly ? derivativeCache : reference == nil ? predictionCache : lossCache
+            var cache = gradientsOnly ? (returnsPrediction ? derivativePredictionCache : derivativeCache)
+                : reference == nil ? predictionCache : lossCache
             let cold = cache.isEmpty, started = ProcessInfo.processInfo.systemUptime
             let data = try NativeGraphExecution.runData(graph, feeds: feeds, targets: targets, cache: &cache, checkCancellation: checkCancellation)
-            if gradientsOnly { derivativeCache = cache } else if reference == nil { predictionCache = cache } else { lossCache = cache }
+            if gradientsOnly {
+                if returnsPrediction { derivativePredictionCache = cache } else { derivativeCache = cache }
+            } else if reference == nil { predictionCache = cache } else { lossCache = cache }
             executionStatistics.compilations += cold ? 1 : 0
             executionStatistics.stages += 1
             executionStatistics.executionSeconds += ProcessInfo.processInfo.systemUptime - started
             try Task.checkCancellation(); try checkCancellation()
+            let readbackStarted = ProcessInfo.processInfo.systemUptime
             let tensors = try data.map { try NativeGraphExecution.tensor($0) }
-            let prediction = try tensors[0].floatValues()
-            let total = reference == nil ? nil : try tensors[1].floatValues()[0]
-            let value = reference == nil ? nil : try tensors[2].floatValues()[0]
-            let detail = reference == nil ? nil : try tensors[3].floatValues()[0]
+            let prediction = returnsPrediction ? try tensors[0].floatValues() : []
+            let lossOffset = returnsPrediction ? 1 : 0
+            let total = reference == nil ? nil : try tensors[lossOffset].floatValues()[0]
+            let value = reference == nil ? nil : try tensors[lossOffset + 1].floatValues()[0]
+            let detail = reference == nil ? nil : try tensors[lossOffset + 2].floatValues()[0]
             guard prediction.allSatisfy(\.isFinite), [total, value, detail].allSatisfy({ $0?.isFinite ?? true }) else {
                 throw NativeMaterialSampleError(message: "Compact material model produced nonfinite sample output or loss; weights remain untouched.")
             }
             var gradients: [String: NativeTensor] = [:]
             for (index, name) in names.enumerated() {
-                let gradient = tensors[index + 4]
+                let gradient = tensors[index + lossOffset + 3]
                 guard gradient.dtype == "F32", gradient.shape == shapes[name] else {
                     throw StudioError("Compact material gradient shape differs from its weight: \(name).")
                 }
@@ -475,6 +499,7 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
                 }
                 gradients[name] = gradient
             }
+            executionStatistics.readbackSeconds += ProcessInfo.processInfo.systemUptime - readbackStarted
             onOperation(label, 1, 1); onStage(1, 1)
             return .init(output: prediction, loss: total, valueLoss: value, gradientLoss: detail,
                 updated: [:], optimizerState: [:], gradients: gradients)

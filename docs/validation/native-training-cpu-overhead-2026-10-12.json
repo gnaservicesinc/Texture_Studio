@@ -1,0 +1,110 @@
+{
+  "date": "2026-10-12",
+  "device": "Apple M2 Max",
+  "purpose": "Measure CPU accumulation and AdamW overhead only; GPU training throughput and learned quality are not assessed.",
+  "fixture": "999937 deterministic Float32 parameter values in a single tensor; 15 updates per repeat, 3 repeats per accumulation setting.",
+  "isolation": "The production NativeMaterialOptimizer.swift source is identical. Before uses HEAD per-value unaligned Float32 loads; after uses the working-tree bulk copy. Both compiled using swiftc -O.",
+  "summaries": [
+    {
+      "accumulation_steps": 1,
+      "before_warm_median_seconds": 0.0228576041663473,
+      "after_warm_median_seconds": 0.01323341666648048,
+      "duration_reduction_percent": 42.10497053770963,
+      "exact_final_weight_and_moment_bytes_equal": true
+    },
+    {
+      "accumulation_steps": 2,
+      "before_warm_median_seconds": 0.026716333333752118,
+      "after_warm_median_seconds": 0.014258333332691109,
+      "duration_reduction_percent": 46.6306504168451,
+      "exact_final_weight_and_moment_bytes_equal": true
+    }
+  ],
+  "before": {
+    "parameter_count": 999937,
+    "runs": [
+      {
+        "accumulation": 1,
+        "repeat": 0,
+        "warm_median_seconds": 0.02627239583307528,
+        "weights_and_moments_sha256": "01850adcd5254a641b41185d262d49fbeffdb1b7a1739db2166f5a325ae92e45"
+      },
+      {
+        "accumulation": 1,
+        "repeat": 1,
+        "warm_median_seconds": 0.0228576041663473,
+        "weights_and_moments_sha256": "01850adcd5254a641b41185d262d49fbeffdb1b7a1739db2166f5a325ae92e45"
+      },
+      {
+        "accumulation": 1,
+        "repeat": 2,
+        "warm_median_seconds": 0.022580645833841118,
+        "weights_and_moments_sha256": "01850adcd5254a641b41185d262d49fbeffdb1b7a1739db2166f5a325ae92e45"
+      },
+      {
+        "accumulation": 2,
+        "repeat": 0,
+        "warm_median_seconds": 0.027167437499883818,
+        "weights_and_moments_sha256": "01850adcd5254a641b41185d262d49fbeffdb1b7a1739db2166f5a325ae92e45"
+      },
+      {
+        "accumulation": 2,
+        "repeat": 1,
+        "warm_median_seconds": 0.025875895832541573,
+        "weights_and_moments_sha256": "01850adcd5254a641b41185d262d49fbeffdb1b7a1739db2166f5a325ae92e45"
+      },
+      {
+        "accumulation": 2,
+        "repeat": 2,
+        "warm_median_seconds": 0.026716333333752118,
+        "weights_and_moments_sha256": "01850adcd5254a641b41185d262d49fbeffdb1b7a1739db2166f5a325ae92e45"
+      }
+    ],
+    "scope": "CPU gradient accumulation and AdamW only; Float32 decoding implementation isolated",
+    "updates_per_repeat": 15
+  },
+  "after": {
+    "parameter_count": 999937,
+    "runs": [
+      {
+        "accumulation": 1,
+        "repeat": 0,
+        "warm_median_seconds": 0.01701127083379106,
+        "weights_and_moments_sha256": "01850adcd5254a641b41185d262d49fbeffdb1b7a1739db2166f5a325ae92e45"
+      },
+      {
+        "accumulation": 1,
+        "repeat": 1,
+        "warm_median_seconds": 0.01323341666648048,
+        "weights_and_moments_sha256": "01850adcd5254a641b41185d262d49fbeffdb1b7a1739db2166f5a325ae92e45"
+      },
+      {
+        "accumulation": 1,
+        "repeat": 2,
+        "warm_median_seconds": 0.01284554166613816,
+        "weights_and_moments_sha256": "01850adcd5254a641b41185d262d49fbeffdb1b7a1739db2166f5a325ae92e45"
+      },
+      {
+        "accumulation": 2,
+        "repeat": 0,
+        "warm_median_seconds": 0.014382916666363599,
+        "weights_and_moments_sha256": "01850adcd5254a641b41185d262d49fbeffdb1b7a1739db2166f5a325ae92e45"
+      },
+      {
+        "accumulation": 2,
+        "repeat": 1,
+        "warm_median_seconds": 0.014242395832297916,
+        "weights_and_moments_sha256": "01850adcd5254a641b41185d262d49fbeffdb1b7a1739db2166f5a325ae92e45"
+      },
+      {
+        "accumulation": 2,
+        "repeat": 2,
+        "warm_median_seconds": 0.014258333332691109,
+        "weights_and_moments_sha256": "01850adcd5254a641b41185d262d49fbeffdb1b7a1739db2166f5a325ae92e45"
+      }
+    ],
+    "scope": "CPU gradient accumulation and AdamW only; Float32 decoding implementation isolated",
+    "updates_per_repeat": 15
+  },
+  "local_harness_directory": "/Users/andrewsmith/Library/Application Support/Texture Studio/Validation/training-throughput-2026-10-12"
+}

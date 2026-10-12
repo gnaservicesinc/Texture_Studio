@@ -112,6 +112,13 @@ enum NativeMaterialDatasetService {
             guard ([output] + variants).allSatisfy({ trainingMapIsExact($0, prepared: preparation != nil) }) else {
                 throw StudioError("Refresh training crops from the original dataset. Training maps must use exact crops without scaling or interpolation.")
             }
+            guard ([output] + variants).allSatisfy({ map in
+                guard map["storage"] as? String == "source_reference" else { return true }
+                let source = map["source"] as? Object ?? [:]
+                return source["width"] as? Int == size && source["height"] as? Int == size
+            }) else {
+                throw StudioError("Prepare exact training crops before training. Original map dimensions differ from the selected grid.")
+            }
             let outputURL = try resolve(targetName, output)
             let transforms = output["transforms"] as? [Object] ?? []
             let convention = transforms.contains { $0["type"] as? String == "directx_to_opengl" && $0["applied_in_memory"] as? Bool == true } ? "directx" : "opengl"
@@ -129,6 +136,13 @@ enum NativeMaterialDatasetService {
                     materialName: sample["name"] as? String)
             }
         }
+    }
+
+    /// Inspect the registered projection without inventory maintenance,
+    /// downloads or metadata writes, including for audits of live datasets.
+    static func readOnlyDatasetInfo(datasetURL: URL, size: Int, target: String = "height") throws -> [String: Any] {
+        let root = canonical(datasetURL), index = try object(root.appendingPathComponent("dataset.json"))
+        return try info(root, index: index, records: readRecords(root, index: index), options: ["--review-size": String(size), "--target": target])
     }
 
     /// A saved resized cache may have the expected dimensions and checksum.
@@ -223,8 +237,12 @@ enum NativeMaterialDatasetService {
             // Recovery may legitimately change source file statistics.
             if command != "dataset", command != "create-dataset" { try checkIndex(root, expected: options["--expected-index-sha256"]) }
             var index = try object(root.appendingPathComponent("dataset.json"))
-            try compactStoredRecords(root, index: index)
-            if try sourceInventoryNeedsRefresh(root, index: index) { index = try refreshSourceIndex(root, index: index) }
+            let quickPreview = command == "scan-folder" && options["--quick-preview"] == "true"
+            let plannedImport = command == "import-folder" && options["--plan"] != nil
+            if !quickPreview && !plannedImport {
+                try compactStoredRecords(root, index: index)
+                if try sourceInventoryNeedsRefresh(root, index: index) { index = try refreshSourceIndex(root, index: index) }
+            }
             let records = try readRecords(root, index: index)
             if ["curate", "remove-missing"].contains(command), let lineage = index["native_size_preparation"] as? Object {
                 guard lineage["schema"] as? String == preparationSchema, let source = lineage["source_dataset_path"] as? String else { throw StudioError("Prepared dataset source lineage is invalid.") }
@@ -375,7 +393,7 @@ enum NativeMaterialDatasetService {
     /// capturing an import preview. The preview then binds the repaired files.
     private static func recoveryContext(_ arguments: [String]) throws -> RecoveryContext {
         let options = try parsedOptions(arguments), command = arguments[0]
-        if options["--skip-source-recovery"] == "true" { return RecoveryContext() }
+        if options["--skip-source-recovery"] == "true" || (command == "scan-folder" && options["--quick-preview"] == "true") { return RecoveryContext() }
         let setup = ["dataset", "scan-folder", "import-folder", "prepare-size"].contains(command)
             || (command == "edit-dataset" && options["--training-size"] != nil)
         guard setup, !(command == "import-folder" && options["--plan"] != nil),
@@ -752,7 +770,8 @@ enum NativeMaterialDatasetService {
         let originalRoot = (preparation?["source_dataset_path"] as? String).map { URL(fileURLWithPath: $0) } ?? root
         let metadata = preparation != nil && FileManager.default.fileExists(atPath: originalRoot.appendingPathComponent("dataset.json").path) ? try object(originalRoot.appendingPathComponent("dataset.json")) : index
         let sourceTierCount = try checkedSourceTierCount((metadata["source_tier_count"] as? Int).map(String.init) ?? "1")
-        let size = options["--review-size"].flatMap(Int.init) ?? metadata["training_size"] as? Int ?? options["--default-review-size"].flatMap(Int.init)
+        let datasetGrid = preparation == nil ? metadata["training_size"] as? Int : index["crop_size"] as? Int
+        let size = options["--review-size"].flatMap(Int.init) ?? datasetGrid ?? options["--default-review-size"].flatMap(Int.init)
         let reviews = try optionalObject(root.appendingPathComponent(".material-size-reviews.json"))
         let settings = try validation(metadata["validation"] as? Object)
         var resolutions: Object = [:], plans: Object = [:]
@@ -768,7 +787,9 @@ enum NativeMaterialDatasetService {
         }
         let selected = plans[options["--target"] ?? "height"] as? Object ?? [:]
         let assignments = selected["assignments"] as? [String: Object] ?? [:]
-        var records = preparation == nil && size != nil ? reviewRecords(original, size: size!) : original
+        var records = preparation == nil && size != nil ? reviewRecords(original, size: size!) : original.filter {
+            size == nil || $0.sample["sample_pixel_dimensions"] as? [Int] == [size!, size!]
+        }
         for (id, assignment) in assignments.sorted(by: { $0.key < $1.key }) where assignment["split"] as? String == "validation" {
             if var record = original.first(where: { $0.sample["material_id"] as? String == assignment["material_id"] as? String }) {
                 record.sample["sample_id"] = id; record.sample["source_region_id"] = "validation"
@@ -808,10 +829,10 @@ enum NativeMaterialDatasetService {
             group["samples"] = samples; grouped[material] = group
         }
         let eligible = sizes.filter { candidate in original.contains { record in
-            !["excluded", "rejected"].contains(record.sample["status"] as? String ?? "") && sources(record.sample).allSatisfy { min($0["width"] as? Int ?? 0, $0["height"] as? Int ?? 0) >= candidate } && !sources(record.sample).isEmpty
+            !["excluded", "rejected"].contains(record.sample["status"] as? String ?? "") && suppliesCrop(record.sample, size: candidate)
         } }
         func withoutAssignments(_ values: Object) -> Object { values.mapValues { value in var plan = value as? Object ?? [:]; plan.removeValue(forKey: "assignments"); return plan } }
-        return ["dataset_path": root.path, "index_sha256": try digest(root.appendingPathComponent("dataset.json")), "name": metadata["name"] ?? originalRoot.lastPathComponent, "description": metadata["description"] ?? "", "review_sha256": try optionalDigest(originalRoot.appendingPathComponent(".material-size-reviews.json")) ?? hash(Data()), "training_size": metadata["training_size"] ?? NSNull(), "source_tier_count": sourceTierCount, "review_size": size as Any? ?? NSNull(), "validation": settings, "subjects": selected["subjects"] ?? [], "material_count": grouped.count, "sample_count": records.count, "source_set_count": original.count, "training_plans": withoutAssignments(plans), "resolution_plans": resolutions.mapValues { withoutAssignments($0 as? Object ?? [:]) }, "supported_training_sizes": eligible, "validation_scope": selected.isEmpty ? index["validation_scope"] ?? NSNull() : "known_subject_diagnostic", "cross_size_validation_notice": preparation?["cross_size_validation_notice"] ?? NSNull(), "automatic_validation": index["automatic_validation"] ?? NSNull(), "preparation": NSNull(), "materials": grouped.keys.sorted().compactMap { grouped[$0] }]
+        return ["dataset_path": root.path, "index_sha256": try digest(root.appendingPathComponent("dataset.json")), "name": metadata["name"] ?? originalRoot.lastPathComponent, "description": metadata["description"] ?? "", "review_sha256": try optionalDigest(originalRoot.appendingPathComponent(".material-size-reviews.json")) ?? hash(Data()), "training_size": datasetGrid as Any? ?? NSNull(), "source_tier_count": sourceTierCount, "review_size": size as Any? ?? NSNull(), "validation": settings, "subjects": selected["subjects"] ?? [], "material_count": grouped.count, "sample_count": records.count, "source_set_count": original.count, "training_plans": withoutAssignments(plans), "resolution_plans": resolutions.mapValues { withoutAssignments($0 as? Object ?? [:]) }, "supported_training_sizes": eligible, "validation_scope": selected.isEmpty ? index["validation_scope"] ?? NSNull() : "known_subject_diagnostic", "cross_size_validation_notice": preparation?["cross_size_validation_notice"] ?? NSNull(), "automatic_validation": index["automatic_validation"] ?? NSNull(), "preparation": NSNull(), "materials": grouped.keys.sorted().compactMap { grouped[$0] }]
     }
     private static func mapInfo(_ filename: String, details: Object, sample: Object, folder: URL, originalRoot: URL, role: String) throws -> Object {
         let source = details["source"] as? Object ?? [:]
@@ -977,7 +998,7 @@ enum NativeMaterialDatasetService {
                 guard let source = sources(sample).first(where: { min($0["width"] as? Int ?? 0, $0["height"] as? Int ?? 0) < size }) else { return nil }
                 issue["source_path"] = source["path"] ?? issue["source_path"]
                 issue["target"] = NSNull(); issue["code"] = "undersized"
-                issue["reason"] = "Original map is \(source["width"] as? Int ?? 0) × \(source["height"] as? Int ?? 0) pixels. This set is imported for inspection and skipped for \(size) × \(size) training; other sets continue. To train this set, choose a smaller resolution."
+                issue["reason"] = "Original map is \(source["width"] as? Int ?? 0) × \(source["height"] as? Int ?? 0) pixels. Its originals are retained; this set is omitted from \(size) × \(size) crops while other sets continue. To train this set, choose a smaller resolution."
                 return issue
             }
             guard crops.contains(where: { $0["target_available"] as? Bool == false }) else { return nil }
@@ -1000,6 +1021,8 @@ enum NativeMaterialDatasetService {
         }
     }
     private static func suppliesCrop(_ sample: Object, size: Int) -> Bool {
+        guard let dimensions = sample["source_pixel_dimensions"] as? [Int], dimensions.count == 2,
+              size > 0, dimensions.allSatisfy({ $0 >= size }) else { return false }
         let originals = sources(sample)
         return !originals.isEmpty && originals.allSatisfy { min($0["width"] as? Int ?? 0, $0["height"] as? Int ?? 0) >= size }
     }
@@ -1077,8 +1100,8 @@ enum NativeMaterialDatasetService {
     }
     private static func reviewRecords(_ originals: [Record], size: Int) -> [Record] {
         originals.flatMap { original -> [Record] in
+            guard suppliesCrop(original.sample, size: size) else { return [] }
             let layout = cropLayout(original.sample["source_pixel_dimensions"] as? [Int] ?? [], size: size, subject: subjectID(original.sample), sourceSet: original.sample["source_set_id"] as? String ?? original.sample["material_id"] as? String ?? "")
-            if layout.isEmpty { return [original] }
             return layout.map { region, rectangle in
                 var record = original
                 record.sample["sample_id"] = (original.sample["material_id"] as? String ?? "") + "_" + region
@@ -1335,7 +1358,7 @@ enum NativeMaterialDatasetService {
         return try queue.completed()
     }
     private static func sourceSummaries(_ paths: [URL], cached: [String: Object],
-                                        manifests: [String: [URL]] = [:]) throws -> [String: Result<Object, Error>] {
+                                        manifests: [String: [URL]] = [:], headersOnly: Bool = false) throws -> [String: Result<Object, Error>] {
         let unique = Array(Set(paths.map { $0.resolvingSymlinksInPath().standardizedFileURL })).sorted { $0.path < $1.path }
         var compactCache: [String: Data] = [:]
         for path in unique { if let prior = cached[path.path] { compactCache[path.path] = try jsonData(prior) } }
@@ -1344,7 +1367,8 @@ enum NativeMaterialDatasetService {
         let results = try scanSourceFiles(unique, maximumWorkers: sourceScanWorkerCount(fileCount: unique.count,
                 largestFileBytes: largest, resources: .current)) { path in
             let prior: Object? = try savedCache[path.path].flatMap { try JSONSerialization.jsonObject(with: $0) as? Object }
-            var summary = try sourceSummary(path, cached: prior)
+            var summary = try headersOnly ? previewSourceSummary(path, cached: prior) : sourceSummary(path, cached: prior)
+            if headersOnly { return try jsonData(summary) }
             let expected = publishedMD5Candidates(path, source: summary, manifests: manifests[path.deletingLastPathComponent().path] ?? [])
             if !expected.isEmpty {
                 // Cached license evidence was verified against these same
@@ -1388,6 +1412,19 @@ enum NativeMaterialDatasetService {
         }
         return result
     }
+    /// A folder preview needs the grid and map roles, not compressed pixel
+    /// checksums. Verify all chunks and provenance before registering sources.
+    private static func previewSourceSummary(_ path: URL, cached: Object?) throws -> Object {
+        try Task.checkCancellation()
+        let before = try fileState(path)
+        if let cached, let state = cached["source_stat"] as? Object,
+           NSDictionary(dictionary: state).isEqual(to: before) { return compactMetadata(cached) as! Object }
+        let header = try NativePNG.inspect(path)
+        guard NSDictionary(dictionary: before).isEqual(to: try fileState(path)) else { throw StudioError("Original map changed while inspecting: \(path.path)") }
+        return ["width": header.width, "height": header.height, "sample_bits": header.bits,
+                "channels": header.channels, "png_color_type": Int(header.color), "interlace": Int(header.interlace),
+                "filename": path.lastPathComponent, "file_bytes": before["size"]!, "source_stat": before]
+    }
     private static func publishedMD5(_ url: URL) throws -> String {
         // Provider download audits sometimes require MD5. Compute it only for
         // that audit, without persisting a second checksum on every map.
@@ -1430,25 +1467,34 @@ enum NativeMaterialDatasetService {
         return cleaned.isEmpty ? "material_" + hash(Data(value.utf8)).prefix(16) : cleaned
     }
     private static func encoding(_ role: String, source: Object) -> String { role != "input" ? "linear_data" : source["png_gamma"] as? Double == 1 && source["srgb_rendering_intent"] == nil ? "linear" : "source_srgb_assumed" }
+    /// Authored paired maps may differ by a few edge pixels. Their shared
+    /// top-left intersection is cropable without resampling either original.
+    static func commonNativeDimensions(_ originals: [[String: Any]]) throws -> [Int] {
+        guard !originals.isEmpty else { throw StudioError("Choose original material maps.") }
+        let widths = originals.compactMap { $0["width"] as? Int }, heights = originals.compactMap { $0["height"] as? Int }
+        guard widths.count == originals.count, heights.count == originals.count,
+              let width = widths.min(), let height = heights.min(), width > 0, height > 0,
+              widths.max()! - width <= 8, heights.max()! - height <= 8 else {
+            throw StudioError("Paired maps must have matching native dimensions or differ by at most eight edge pixels; only their common pixels can be cropped.")
+        }
+        return [width, height]
+    }
     private static func sourceMaterial(_ name: String, paths: [String: URL], convention: String = "opengl",
                                        summaries: [String: Result<Object, Error>]? = nil) throws -> Object {
         let name = try checkedName(name)
         guard paths["input"] != nil, ["height", "roughness", "normal"].contains(where: { paths[$0] != nil }) else { throw StudioError("Choose an input map and at least one height, normal or roughness map.") }
         let family = identifier(name)
-        var maps: [String: Object] = [:], dimensions: [Int]?, warnings: [String] = []
+        var maps: [String: Object] = [:], warnings: [String] = []
         for role in paths.keys.sorted() {
             let path = paths[role]!.resolvingSymlinksInPath().standardizedFileURL
             var source = try summaries.map { try scannedSummary(path, summaries: $0) } ?? sourceSummary(path)
             if let notice = sourceFormatNotice(path) { warnings.append(notice) }
             guard role != "input" || [1, 2, 3, 4].contains(source["channels"] as? Int ?? 0),
                   role != "normal" || [3, 4].contains(source["channels"] as? Int ?? 0) else { throw StudioError("Diffuse maps need native gray, gray-alpha, RGB or RGBA channels; normal maps need RGB or RGBA channels.") }
-            let actual = [source["width"] as? Int ?? 0, source["height"] as? Int ?? 0]
-            if let dimensions, dimensions != actual { throw StudioError("All maps must have exactly matching native dimensions; no resizing is applied.") }
-            dimensions = actual
             source["path"] = path.path; source["suffix"] = ["input": "diff", "height": "disp", "roughness": "rough", "normal": convention.lowercased() == "directx" ? "nor_dx" : "nor_gl"][role]
             source["source_family_id"] = family; source["asset_family_id"] = family; maps[role] = source
         }
-        let size = dimensions!, width = size[0], height = size[1], resolution = width == height && width >= 1024 && width % 1024 == 0 ? "\(width / 1024)k" : "\(width)x\(height)"
+        let size = try commonNativeDimensions(Array(maps.values)), width = size[0], height = size[1], resolution = width == height && width >= 1024 && width % 1024 == 0 ? "\(width / 1024)k" : "\(width)x\(height)"
         for role in maps.keys { maps[role]?["resolution_label"] = resolution }
         maps["input"]?["variant_id"] = "color_default"
         return ["name": name, "material_id": family + "_" + resolution, "source_family_id": family, "source_set_id": "\(family)_\(width)x\(height)", "source_directory": paths["input"]!.resolvingSymlinksInPath().deletingLastPathComponent().path, "common_pixel_dimensions": size, "resolution_label": resolution, "maps": maps, "input_variants": [maps["input"]!], "source_files": Array(maps.values), "warnings": warnings, "ignored_files": [String](), "problems": [String]()]
@@ -1457,9 +1503,7 @@ enum NativeMaterialDatasetService {
         guard let materialID = material["material_id"] as? String, identifier(materialID) == materialID,
               let maps = material["maps"] as? [String: Object], let dimensions = material["common_pixel_dimensions"] as? [Int], dimensions.count == 2, maps["input"] != nil else { throw StudioError("Invalid native material source set.") }
         let variants = material["input_variants"] as? [Object] ?? []
-        for source in Array(maps.values) + variants {
-            guard [source["width"] as? Int ?? 0, source["height"] as? Int ?? 0] == dimensions else { throw StudioError("All maps and colors need matching native dimensions.") }
-        }
+        guard try commonNativeDimensions(Array(maps.values) + variants) == dimensions else { throw StudioError("The shared native crop must match the paired maps' common pixels.") }
         guard variants.allSatisfy({ [1, 2, 3, 4].contains($0["channels"] as? Int ?? 0) }), maps["normal"] == nil || [3, 4].contains(maps["normal"]?["channels"] as? Int ?? 0) else { throw StudioError("Diffuse maps need native gray, gray-alpha, RGB or RGBA channels; normal maps need RGB or RGBA channels.") }
         var filenames: [String: String] = [:], metadata: [String: Object] = [:]
         for (role, source) in maps {
@@ -1563,6 +1607,9 @@ enum NativeMaterialDatasetService {
         let explicit = mapAliases.keys.sorted { $0.count == $1.count ? $0 < $1 : $0.count > $1.count }
             .map { NSRegularExpression.escapedPattern(for: $0).replacingOccurrences(of: "_", with: "[_ -]") }.joined(separator: "|")
         let roles = #"(?:diffuse|diff|color|col|albedo)(?:_?\d+)?|coll\d+|"# + explicit
+        return authoredFilenameExpressions(roles: roles)
+    }()
+    private static func authoredFilenameExpressions(roles: String) -> [NSRegularExpression] {
         // A size label is descriptive only. Actual PNG dimensions decide which
         // maps pair, including non-power-of-two authored sets such as 515 px.
         // Require at least three digits for bare sizes so diff_2 stays a color
@@ -1572,7 +1619,34 @@ enum NativeMaterialDatasetService {
                         "^(.+?)[_ -](" + size + #")(?:-PNG)?[_ -]("# + roles + #")(?: \(\d+\))?$"#,
                         "^(.+?)[_ -](" + roles + #")(?: \(\d+\))?$"#]
         return patterns.map { try! NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
+    }
+    // Supplemental PBR maps are recognizable source files, but none supplies
+    // diffuse input or one of this trainer's targets. Keep this list separate
+    // from mapAliases so AO and packed maps cannot become color variants.
+    private static let ancillaryMapAliases: Set<String> = [
+        "ao", "ambientocclusion", "ambient_occlusion", "ambientocclusionmap", "ambient_occlusion_map", "occlusion",
+        "rough_ao", "orm", "arm", "rma", "occlusionroughnessmetallic", "occlusion_roughness_metallic",
+        "metal", "metallic", "metalness", "bump", "gloss", "glossiness", "smoothness",
+        "spec", "specular", "spec_ior", "anisotropy_rotation", "anisotropy_strength",
+        "emission", "emissive", "opacity", "translucent"
+    ]
+    private static let ancillaryFilenameExpressions: [NSRegularExpression] = {
+        let roles = ancillaryMapAliases.sorted { $0.count == $1.count ? $0 < $1 : $0.count > $1.count }
+            .map { NSRegularExpression.escapedPattern(for: $0).replacingOccurrences(of: "_", with: "[_ -]") }.joined(separator: "|")
+        return authoredFilenameExpressions(roles: roles)
     }()
+    static func isAncillarySourceFilename(_ filename: String) -> Bool {
+        let name = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
+        if ancillaryMapAliases.contains(normalizedMapAlias(name)) { return true }
+        if let (_, suffix, _) = parsedProvider(filename), providerRole(suffix) == nil { return true }
+        return ancillaryFilenameExpressions.contains { $0.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)) != nil }
+    }
+    private static func sameSourceContents(_ left: Object, _ right: Object) -> Bool {
+        if let leftPath = left["path"] as? String, let rightPath = right["path"] as? String, leftPath == rightPath { return true }
+        guard let hash = left["file_sha256"] as? String, hash.count == 64,
+              let other = right["file_sha256"] as? String, other.count == 64 else { return false }
+        return hash == other
+    }
     /// Explicit material roles only. This recognizes local authored maps as
     /// well as provider names, without assigning arbitrary photos a role or
     /// claiming that a generic filename proves provider provenance.
@@ -1636,7 +1710,7 @@ enum NativeMaterialDatasetService {
         return "\(path.path): PNG image with \(extensionDescription); detected and read as PNG."
     }
 
-    private static func discover(_ folder: URL, dataset: URL, records: [Record] = [], inventoriedFiles: [URL]? = nil) throws -> ([Object], [String]) {
+    private static func discover(_ folder: URL, dataset: URL, records: [Record] = [], inventoriedFiles: [URL]? = nil, headersOnly: Bool = false) throws -> ([Object], [String]) {
         var cache: [String: Object] = [:]
         for record in records { for source in sources(record.sample) { if let path = source["path"] as? String { cache[path] = source } } }
         if FileManager.default.fileExists(atPath: folder.appendingPathComponent("dataset.json").path) {
@@ -1644,13 +1718,13 @@ enum NativeMaterialDatasetService {
             return try locked(folder) {
                 let index = try object(folder.appendingPathComponent("dataset.json")), imported = try readRecords(folder, index: index)
                 let paths = imported.flatMap { sources($0.sample).compactMap { ($0["path"] as? String).map { URL(fileURLWithPath: $0) } } }
-                let summaries = try sourceSummaries(paths, cached: cache)
+                let summaries = try sourceSummaries(paths, cached: cache, headersOnly: headersOnly)
                 let materials: [Object] = try imported.map { record in
                     var maps: [String: Object] = [:]
                     for (role, details) in record.sample["map_metadata"] as? [String: Object] ?? [:] {
                         guard ["input", "height", "roughness", "normal"].contains(role), var source = details["source"] as? Object, let path = source["path"] as? String else { continue }
                         let actual = try scannedSummary(URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL, summaries: summaries)
-                        guard actual["file_sha256"] as? String == source["file_sha256"] as? String else { throw StudioError("Imported original source changed since registration.") }
+                        guard headersOnly || actual["file_sha256"] as? String == source["file_sha256"] as? String else { throw StudioError("Imported original source changed since registration.") }
                         source.merge(actual) { _, new in new }; maps[role] = source
                     }
                     guard let input = maps["input"] else { throw StudioError("Imported material has no diffuse source.") }
@@ -1658,11 +1732,11 @@ enum NativeMaterialDatasetService {
                     for detail in record.sample["input_variants"] as? [Object] ?? [] {
                         guard var source = detail["source"] as? Object, let path = source["path"] as? String else { continue }
                         let actual = try scannedSummary(URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL, summaries: summaries)
-                        guard actual["file_sha256"] as? String == source["file_sha256"] as? String else { throw StudioError("Imported original color changed since registration.") }
+                        guard headersOnly || actual["file_sha256"] as? String == source["file_sha256"] as? String else { throw StudioError("Imported original color changed since registration.") }
                         source.merge(actual) { _, new in new }; source["variant_id"] = detail["variant_id"] ?? "color_default"; variants.append(source)
                     }
                     if variants.isEmpty { var color = input; color["variant_id"] = "color_default"; variants = [color] }
-                    return ["name": record.sample["name"] ?? record.sample["material_id"] ?? "Material", "material_id": record.sample["material_id"] ?? "", "source_family_id": record.sample["source_family_id"] ?? record.sample["material_id"] ?? "", "source_set_id": record.sample["source_set_id"] ?? record.sample["material_id"] ?? "", "source_directory": URL(fileURLWithPath: input["path"] as? String ?? "").deletingLastPathComponent().path, "common_pixel_dimensions": [input["width"] as? Int ?? 0, input["height"] as? Int ?? 0], "resolution_label": record.sample["source_resolution_label"] ?? "native", "maps": maps, "input_variants": variants]
+                    return ["name": record.sample["name"] ?? record.sample["material_id"] ?? "Material", "material_id": record.sample["material_id"] ?? "", "source_family_id": record.sample["source_family_id"] ?? record.sample["material_id"] ?? "", "source_set_id": record.sample["source_set_id"] ?? record.sample["material_id"] ?? "", "source_directory": URL(fileURLWithPath: input["path"] as? String ?? "").deletingLastPathComponent().path, "common_pixel_dimensions": try commonNativeDimensions(Array(maps.values) + variants), "resolution_label": record.sample["source_resolution_label"] ?? "native", "maps": maps, "input_variants": variants]
                 }
                 return (materials, [])
             }
@@ -1673,33 +1747,34 @@ enum NativeMaterialDatasetService {
         let directories = byDirectory.keys.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
         let recognized = directories.flatMap { directory -> [URL] in
             let local = byDirectory[directory]!
-            if local.contains(where: { sourceMapFilename($0.lastPathComponent) != nil }) {
+            if local.contains(where: { sourceMapFilename($0.lastPathComponent).flatMap { providerRole($0.1) } != nil }) {
                 return local.filter { sourceMapFilename($0.lastPathComponent).flatMap { providerRole($0.1) } != nil }
             }
             return local.filter { mapAlias($0.deletingPathExtension().lastPathComponent) != nil }
         }
         var manifestFiles: [String: [URL]] = [:]
-        for directory in directories where byDirectory[directory]!.contains(where: { sourceMapFilename($0.lastPathComponent) != nil }) {
+        for directory in directories where byDirectory[directory]!.contains(where: { sourceMapFilename($0.lastPathComponent).flatMap { providerRole($0.1) } != nil }) {
             let paths = ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey, .isSymbolicLinkKey])) ?? [])
                 .filter { $0.lastPathComponent.hasPrefix("material-source") && $0.pathExtension.lowercased() == "json" }
             manifestFiles[directory.resolvingSymlinksInPath().standardizedFileURL.path] = paths
         }
-        let summaries = try sourceSummaries(recognized, cached: cache, manifests: manifestFiles)
+        let summaries = try sourceSummaries(recognized, cached: cache, manifests: manifestFiles, headersOnly: headersOnly)
         for directory in directories {
             try Task.checkCancellation()
             let local = byDirectory[directory]!.sorted { $0.lastPathComponent.lowercased() < $1.lastPathComponent.lowercased() }
-            let provider = local.contains { sourceMapFilename($0.lastPathComponent) != nil }
+            let provider = local.contains { sourceMapFilename($0.lastPathComponent).flatMap { providerRole($0.1) } != nil }
             if !provider {
                 var paths: [String: URL] = [:], ambiguous = false, convention = "opengl"
+                let sourceNotice = " Sources: " + local.filter { mapAlias($0.deletingPathExtension().lastPathComponent) != nil }.map(\.path).joined(separator: ", ")
                 for path in local { if let role = mapAlias(path.deletingPathExtension().lastPathComponent) {
-                    if paths[role] != nil { warnings.append("Skipped \(directory.lastPathComponent): multiple \(role) maps need explicit selection."); ambiguous = true }
+                    if paths[role] != nil { warnings.append("Skipped \(directory.lastPathComponent): multiple \(role) maps need explicit selection." + sourceNotice); ambiguous = true }
                     paths[role] = path
                     if role == "normal", canonicalMapSuffix(path.deletingPathExtension().lastPathComponent) == "nor_dx" { convention = "directx" }
                 } }
                 if !ambiguous, paths["input"] != nil, ["height", "normal", "roughness"].contains(where: { paths[$0] != nil }) {
                     do { let material = try sourceMaterial(directory.lastPathComponent, paths: paths, convention: convention, summaries: summaries); groups["manual:" + directory.path] = material }
                     catch is CancellationError { throw CancellationError() }
-                    catch { warnings.append("Skipped \(directory.lastPathComponent): \(error.localizedDescription)") }
+                    catch { warnings.append("Skipped \(directory.lastPathComponent): \(error.localizedDescription)" + sourceNotice) }
                 }
                 continue
             }
@@ -1732,8 +1807,26 @@ enum NativeMaterialDatasetService {
                     }
                 }
                 let dimensions = [source["width"] as? Int ?? 0, source["height"] as? Int ?? 0]
-                let key = "\(directory.path)|\(family)|\(dimensions[0])x\(dimensions[1])"
+                let exactKey = "\(directory.path)|\(family)|\(dimensions[0])x\(dimensions[1])"
+                // Authored maps can differ by a few edge pixels. A shared
+                // explicit tier permits a crop-only intersection; never join
+                // different resolution tiers or infer a match from an image
+                // with no size label. Compare every source to prevent a chain
+                // of small differences from admitting a large mismatch.
+                let nearKeys = label == "native" || groups[exactKey] != nil ? [] : groups.keys.filter { candidate in
+                    guard candidate.hasPrefix(directory.path + "|" + family + "|"),
+                          let prior = groups[candidate],
+                          (prior["resolution_labels"] as? [String] ?? []) == [label] else { return false }
+                    return (prior["source_files"] as? [Object] ?? []).allSatisfy { existing in
+                        abs((existing["width"] as? Int ?? 0) - dimensions[0]) <= 8 &&
+                        abs((existing["height"] as? Int ?? 0) - dimensions[1]) <= 8
+                    }
+                }.sorted()
+                let key = groups[exactKey] != nil ? exactKey : nearKeys.count == 1 ? nearKeys[0] : exactKey
                 var group = groups[key] ?? ["source_family_id": family, "source_set_id": "\(family)_\(dimensions[0])x\(dimensions[1])", "source_directory": directory.resolvingSymlinksInPath().path, "common_pixel_dimensions": dimensions, "maps": [String: Object](), "input_variants": [Object](), "source_files": [Object](), "warnings": [String](), "ignored_files": [String](), "problems": [String](), "resolution_labels": [String]()]
+                if let prior = group["common_pixel_dimensions"] as? [Int], prior.count == 2 {
+                    group["common_pixel_dimensions"] = [min(prior[0], dimensions[0]), min(prior[1], dimensions[1])]
+                }
                 var labels = group["resolution_labels"] as? [String] ?? []; if !labels.contains(label) { labels.append(label) }; group["resolution_labels"] = labels
                 var allSources = group["source_files"] as? [Object] ?? []; allSources.append(source); group["source_files"] = allSources
                 var maps = group["maps"] as? [String: Object] ?? [:], variants = group["input_variants"] as? [Object] ?? [], problems = group["problems"] as? [String] ?? [], ignored = group["ignored_files"] as? [String] ?? [], issues = group["warnings"] as? [String] ?? []
@@ -1742,12 +1835,12 @@ enum NativeMaterialDatasetService {
                     let digits = suffix.filter(\.isNumber)
                     source["variant_id"] = digits.isEmpty ? "color_default" : "color_\(Int(digits) ?? 0)"
                     if let prior = variants.first(where: { $0["variant_id"] as? String == source["variant_id"] as? String }) {
-                        if prior["file_sha256"] as? String == source["file_sha256"] as? String { ignored.append(path.lastPathComponent) } else { problems.append("Different maps claim the same color variant; choose one explicitly.") }
+                        if sameSourceContents(prior, source) { ignored.append(path.lastPathComponent) } else { problems.append("Different maps claim the same color variant; choose one explicitly.") }
                     } else { variants.append(source) }
                 } else if let prior = maps[role] {
                     if role == "normal", prior["suffix"] as? String == "nor_dx", suffix == "nor_gl" { ignored.append(prior["filename"] as? String ?? ""); maps[role] = source }
                     else if role == "normal", prior["suffix"] as? String == "nor_gl", suffix == "nor_dx" { ignored.append(path.lastPathComponent) }
-                    else if prior["file_sha256"] as? String == source["file_sha256"] as? String { ignored.append(path.lastPathComponent) }
+                    else if sameSourceContents(prior, source) { ignored.append(path.lastPathComponent) }
                     else { problems.append("Multiple source maps for \(role).") }
                 } else { maps[role] = source }
                 group["maps"] = maps; group["input_variants"] = variants; group["problems"] = problems; group["ignored_files"] = ignored; group["warnings"] = issues; groups[key] = group
@@ -1769,23 +1862,28 @@ enum NativeMaterialDatasetService {
             }
             let maps = group["maps"] as? [String: Object] ?? [:]
             let id = group["material_id"] as! String
+            // A recognized group can be rejected for identity, ambiguity or
+            // native-map validation. Bind that specific diagnostic to all of
+            // its files so the final inventory pass does not call them
+            // unrecognized or suggest that their diffuse pairing is absent.
+            let paths = (group["source_files"] as? [Object] ?? Array(maps.values))
+                .compactMap { $0["path"] as? String }.sorted()
+            let sourceNotice = " Sources: " + paths.joined(separator: ", ")
             let targetRoles = ["height", "normal", "roughness"].filter { maps[$0] != nil }
             if maps["input"] == nil || targetRoles.isEmpty {
                 let dimensions = group["common_pixel_dimensions"] as? [Int] ?? []
                 let size = dimensions.count == 2 ? " (\(dimensions[0]) × \(dimensions[1]))" : ""
-                let paths = (group["source_files"] as? [Object] ?? Array(maps.values))
-                    .compactMap { $0["path"] as? String }.sorted()
                 let reason = maps["input"] == nil
                     ? "The \(targetRoles.joined(separator: ", ")) maps were recognized, but a matching diffuse map at these pixel dimensions is missing."
                     : "The diffuse map was recognized, but matching height, normal or roughness maps at these pixel dimensions are missing."
-                warnings.append("Not imported: \(id)\(size). \(reason) Sources: " + paths.joined(separator: ", "))
+                warnings.append("Not imported: \(id)\(size). \(reason)" + sourceNotice)
                 continue
             }
-            if !seen.insert(id).inserted { warnings.append("Skipped \(id): duplicate normalized material identity."); continue }
+            if !seen.insert(id).inserted { warnings.append("Skipped \(id): duplicate normalized material identity." + sourceNotice); continue }
             let problems = group["problems"] as? [String] ?? []
-            if !problems.isEmpty { warnings.append("Skipped \(id): " + problems.joined(separator: "; ")); continue }
+            if !problems.isEmpty { warnings.append("Skipped \(id): " + problems.joined(separator: "; ") + sourceNotice); continue }
             do { _ = try sourceRecord(group); materials.append(group); warnings += (group["warnings"] as? [String] ?? []).map { id + ": " + $0 } }
-            catch { warnings.append("Skipped \(id): \(error.localizedDescription)") }
+            catch { warnings.append("Skipped \(id): \(error.localizedDescription)" + sourceNotice) }
         }
         return (materials.sorted { ($0["material_id"] as? String ?? "") < ($1["material_id"] as? String ?? "") }, warnings)
     }
@@ -1817,11 +1915,12 @@ enum NativeMaterialDatasetService {
         guard let requested = options["--folder"], let planPath = options["--plan"] else { throw StudioError("Choose a folder and preview path.") }
         let folder = URL(fileURLWithPath: requested).resolvingSymlinksInPath().standardizedFileURL, before = try inventory(folder, dataset: root)
         let files = before.compactMap { ($0[0] as? String).map { URL(fileURLWithPath: $0) } }
-        let (materials, discoveredWarnings) = try discover(folder, dataset: root, records: records, inventoriedFiles: files)
+        let quickPreview = options["--quick-preview"] == "true"
+        let (materials, discoveredWarnings) = try discover(folder, dataset: root, records: records, inventoriedFiles: files, headersOnly: quickPreview)
         guard NSArray(array: before).isEqual(to: try inventory(folder, dataset: root)) else { throw StudioError("Original folder changed while scanning. Scan it again.") }
-        var identities = Set(records.map { sourceIdentity($0.sample) }), names = Set(records.compactMap { $0.sample["material_id"] as? String }), accepted: [Object] = [], warnings = discoveredWarnings, duplicates = 0
+        var identities = Set(records.map { quickPreview ? previewSourceIdentity($0.sample) : sourceIdentity($0.sample) }), names = Set(records.compactMap { $0.sample["material_id"] as? String }), accepted: [Object] = [], warnings = discoveredWarnings, duplicates = 0
         for material in materials {
-            let sample = try sourceRecord(material), identity = sourceIdentity(sample), id = sample["material_id"] as! String
+            let sample = try sourceRecord(material), identity = quickPreview ? previewSourceIdentity(sample) : sourceIdentity(sample), id = sample["material_id"] as! String
             if identities.contains(identity) { duplicates += 1; continue }
             if names.contains(id) { warnings.append("Skipped \(id): another map set already uses this name. Add it manually with another name."); continue }
             identities.insert(identity); names.insert(id); accepted.append(material)
@@ -1834,7 +1933,7 @@ enum NativeMaterialDatasetService {
             let resolvedPath = file[1] as? String ?? path
             // Providers include ancillary PBR maps that this trainer does not
             // consume. Their presence is expected, not a broken source pair.
-            if let (_, suffix, _) = parsedProvider(URL(fileURLWithPath: path).lastPathComponent), providerRole(suffix) == nil { continue }
+            if isAncillarySourceFilename(URL(fileURLWithPath: path).lastPathComponent) { continue }
             if !warnings.contains(where: { $0.contains(path) || $0.contains(resolvedPath) }) {
                 warnings.append("Not imported: \(path). No recognized paired diffuse and surface map set includes this file. Assign its maps with Add Materials.")
             }
@@ -1843,14 +1942,16 @@ enum NativeMaterialDatasetService {
         let reviews = try optionalObject(root.appendingPathComponent(".material-size-reviews.json")), settings = try validation(index["validation"] as? Object)
         let combined = try records + accepted.map { Record(entry: [:], path: root.appendingPathComponent("dataset.json"), sample: try sourceRecord($0)) }
         var plans: Object = [:]
-        for size in sizes {
+        let previewSizes = quickPreview ? [try checkedSize(options["--size"] ?? options["--training-size"] ?? String(index["training_size"] as? Int ?? 1024))] : sizes
+        for size in previewSizes {
             let shared = try regionPlan(combined, size: size, reviews: reviews, target: "height", settings: settings)
             var targets: Object = [:]
             for target in ["height", "roughness", "normal"] { var plan = target == "height" ? shared : planForTarget(shared, records: combined, target: target); plan.removeValue(forKey: "assignments"); targets[target] = plan }
             plans[String(size)] = targets
         }
         let indexHash = try digest(root.appendingPathComponent("dataset.json")), reviewHash = try optionalDigest(root.appendingPathComponent(".material-size-reviews.json")) ?? hash(Data())
-        let plan: Object = ["schema": "texture-studio-folder-import-v1", "dataset_path": root.path, "folder_path": folder.path, "index_sha256": indexHash, "review_sha256": reviewHash, "inventory": before, "materials": accepted]
+        var plan: Object = ["schema": "texture-studio-folder-import-v1", "dataset_path": root.path, "folder_path": folder.path, "index_sha256": indexHash, "review_sha256": reviewHash, "inventory": before, "materials": accepted]
+        if quickPreview { plan["source_verification"] = "headers-only-v1" }
         let output = URL(fileURLWithPath: planPath); try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true); try atomic(output, data: jsonData(plan))
         return ["folder_path": folder.path, "plan_path": output.path, "plan_sha256": try digest(output), "index_sha256": indexHash, "source_set_count": materials.count, "added_material_count": accepted.count, "duplicate_material_count": duplicates, "ignored_file_count": ignored, "warnings": warnings, "plans": plans]
     }
@@ -1867,9 +1968,34 @@ enum NativeMaterialDatasetService {
             for material in pending { for source in Array((material["maps"] as? [String: Object] ?? [:]).values) + (material["input_variants"] as? [Object] ?? []) {
                 guard let path = source["path"] as? String, let expected = source["source_stat"] as? Object, NSDictionary(dictionary: expected).isEqual(to: try fileState(URL(fileURLWithPath: path))) else { throw StudioError("Original map changed since preview. Scan the folder again.") }
             } }
-            materials = pending
+            if plan["source_verification"] as? String == "headers-only-v1" {
+                // The quick preview is never durable evidence. Recheck complete
+                // PNG chunks/checksums and published provenance at import.
+                let files = currentInventory.compactMap { ($0[0] as? String).map { URL(fileURLWithPath: $0) } }
+                let verified = try discover(folder, dataset: root, records: records, inventoriedFiles: files).0
+                let wanted = Set(try pending.map { previewSourceIdentity(try sourceRecord($0)) })
+                materials = try verified.filter { wanted.contains(previewSourceIdentity(try sourceRecord($0))) }
+                guard materials.count == pending.count,
+                      NSArray(array: currentInventory).isEqual(to: try inventory(folder, dataset: root)) else {
+                    throw StudioError("Original maps failed verification or changed since preview. Scan the folder again.")
+                }
+            } else { materials = pending }
         } else { materials = try discover(folder, dataset: root, records: records).0 }
         return try register(root, index: index, records: records, materials: materials, options: options)
+    }
+    private static func previewSourceIdentity(_ sample: Object) -> String {
+        let maps = sample["map_metadata"] as? [String: Object] ?? [:]
+        func identity(_ details: Object) -> Object {
+            let source = details["source"] as? Object ?? [:]
+            return ["path": source["path"] ?? "", "stat": source["source_stat"] ?? [:],
+                    "width": source["width"] ?? 0, "height": source["height"] ?? 0,
+                    "suffix": source["suffix"] ?? "", "variant_id": details["variant_id"] ?? source["variant_id"] ?? ""]
+        }
+        let value: Object = ["material_id": sample["material_id"] ?? "", "name": sample["name"] ?? "",
+                             "source_family_id": sample["source_family_id"] ?? "", "source_set_id": sample["source_set_id"] ?? "",
+                             "dimensions": sample["source_pixel_dimensions"] ?? [],
+                             "maps": maps.mapValues(identity), "colors": (sample["input_variants"] as? [Object] ?? []).map(identity)]
+        return hash((try? jsonData(value)) ?? Data())
     }
     private static func refreshSourceIndex(_ root: URL, index: Object) throws -> Object {
         guard index["storage_policy"] as? String == "original-source-references-v1" else { throw StudioError("This dataset uses a retired material schema. Create a native dataset and import its original source maps.") }
@@ -1988,7 +2114,6 @@ enum NativeMaterialDatasetService {
                 try Task.checkCancellation()
                 let dimensions = record.sample["source_pixel_dimensions"] as? [Int] ?? []
                 guard dimensions.count == 2 else { throw StudioError("Invalid native source dimensions.") }
-                let regionCount = assignments.values.filter { $0["material_id"] as? String == record.sample["material_id"] as? String && $0["crop_rectangle"] as? [Int] != [0, 0] + dimensions }.count
                 for source in sources(record.sample, target: target) {
                     try Task.checkCancellation()
                     guard let path = source["path"] as? String, let expected = source["file_sha256"] as? String else { throw StudioError("Original source is not checksum bound.") }
@@ -2003,6 +2128,10 @@ enum NativeMaterialDatasetService {
                         guard header.width == source["width"] as? Int, header.height == source["height"] as? Int, header.bits == source["sample_bits"] as? Int, header.channels == source["channels"] as? Int else { throw StudioError("Original source dimensions or precision disagree with its evidence.") }
                         var bound = source; bound["path"] = currentPath.path; bound["source_stat"] = state; verified[path] = bound
                     }
+                    let sourceDimensions = [source["width"] as? Int ?? 0, source["height"] as? Int ?? 0]
+                    let regionCount = assignments.values.filter {
+                        $0["material_id"] as? String == record.sample["material_id"] as? String && $0["crop_rectangle"] as? [Int] != [0, 0] + sourceDimensions
+                    }.count
                     bytesRequired += Int64(size * size * (source["channels"] as? Int ?? 1) * (source["sample_bits"] as? Int ?? 8) / 8 * regionCount)
                 }
             }
@@ -2151,7 +2280,7 @@ enum NativeMaterialDatasetService {
         }
         let originalSample = try read(job.sample), assignments = try read(job.assignments) as? [String: Object] ?? [:]
         let reviews = try read(job.reviews), verified = try read(job.verified) as? [String: Object] ?? [:]
-        let size = job.size, dimensions = originalSample["source_pixel_dimensions"] as! [Int]
+        let size = job.size
         let originalMaps = originalSample["map_metadata"] as? [String: Object] ?? [:]
         var variants = originalSample["input_variants"] as? [Object] ?? []
         if variants.isEmpty, var input = originalMaps["input"] { input["variant_id"] = "color_default"; variants = [input] }
@@ -2187,7 +2316,11 @@ enum NativeMaterialDatasetService {
             sample["split"] = assignment["split"]; sample["split_assignment"] = "automatic"; sample["source_region_role"] = assignment["split"]; sample["source_region_id"] = region
             sample["source_review_snapshot"] = review; sample["source_binding_sha256"] = binding
             sample["split_strategy"] = "subject-extra-crops-v2"; sample["validation_scope"] = "known_subject_diagnostic"; sample["source_precision_verified"] = true; sample["crop_values_verified"] = true
-            let changed = rectangle != [0, 0] + dimensions; cropped = cropped || changed
+            let changed = maps.contains { _, details, _ in
+                let source = details["source"] as? Object ?? [:]
+                return rectangle != [0, 0, source["width"] as? Int ?? 0, source["height"] as? Int ?? 0]
+            }
+            cropped = cropped || changed
             sample["native_size_preparation"] = ["schema": preparationSchema, "source_dataset_path": job.original.path, "target_resized": false, "target_cropped": changed, "crop_selection_policy": sample["crop_selection_policy"]!, "crop_selection_seed": sample["crop_selection_seed"]!]
             let folder = try contained(job.stage, "samples/" + id); try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             active.append((sample, folder, rectangle))
@@ -2199,14 +2332,15 @@ enum NativeMaterialDatasetService {
             let before = try fileState(sourceURL)
             guard let verifiedState = verifiedSource["source_stat"] as? Object, NSDictionary(dictionary: verifiedState).isEqual(to: before) else { throw StudioError("Original source changed during preparation.") }
             let flip = role == "normal" && ["nor_dx", "normal_dx"].contains(source["suffix"] as? String ?? "")
-            let cropOffsets = active.indices.filter { active[$0].2 != [0, 0] + dimensions }
+            let sourceDimensions = [source["width"] as? Int ?? 0, source["height"] as? Int ?? 0]
+            let cropOffsets = active.indices.filter { active[$0].2 != [0, 0] + sourceDimensions }
             let crops = cropOffsets.isEmpty ? [] : try NativePNG.crops(sourceURL, rectangles: cropOffsets.map { active[$0].2 }, flipGreen: flip)
             let selectedCrops = Dictionary(uniqueKeysWithValues: zip(cropOffsets, crops))
             guard NSDictionary(dictionary: before).isEqual(to: try fileState(sourceURL)) else { throw StudioError("Original source changed during preparation.") }
             for offset in active.indices {
                 try Task.checkCancellation()
                 let rectangle = active[offset].2, output = active[offset].1.appendingPathComponent(filename)
-                let isCrop = rectangle != [0, 0] + dimensions
+                let isCrop = rectangle != [0, 0] + sourceDimensions
                 var details = originalDetails, transforms: [Object] = [], path = resolved
                 if isCrop {
                     guard let selected = selectedCrops[offset] else { throw StudioError("Native crop decode is absent.") }

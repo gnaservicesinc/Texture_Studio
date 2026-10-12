@@ -101,6 +101,7 @@ struct WorkbenchDataset: Decodable, Sendable {
     var sourceRecoveryResults: [WorkbenchSourceRecoveryResult]? = nil
     var samples: [WorkbenchSample] { materials.flatMap(\.samples) }
     func readyForTraining(size: Int, material: String?, target: String? = nil) -> Bool {
+        if let preparation, preparation.cropSize != size || trainingSize.map({ $0 != size }) == true { return false }
         guard hasNativeSize(size), let policy = automaticValidation,
               policy.policy == "subject-extra-crops-v2",
               target == nil || policy.target == nil || policy.target == target,
@@ -119,7 +120,8 @@ struct WorkbenchDataset: Decodable, Sendable {
     func hasNativeSize(_ size: Int) -> Bool {
         !samples.isEmpty && samples.allSatisfy { sample in
             sample.width == size && sample.height == size && !sample.maps.isEmpty &&
-                sample.maps.values.allSatisfy { $0.width == size && $0.height == size }
+                sample.maps.values.allSatisfy { $0.width == size && $0.height == size } &&
+                (sample.inputVariants ?? []).allSatisfy { $0.width == size && $0.height == size }
         }
     }
 }
