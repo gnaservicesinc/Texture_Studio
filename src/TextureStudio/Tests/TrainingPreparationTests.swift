@@ -42,6 +42,7 @@ final class TrainingPreparationTests: XCTestCase {
             try await store.loadTrainingCapabilities()
             try await store.loadDataset(fixture.original)
             store.training.size = 1024
+            store.training.compactWidth = 22
             XCTAssertNil(store.trainingConfigurationIssue)
             store.startTraining()
             try await settled(store)
@@ -51,6 +52,7 @@ final class TrainingPreparationTests: XCTestCase {
             XCTAssertEqual(value("--scope", in: train), "full-model")
             XCTAssertEqual(value("--target", in: train), fixture.mapTarget)
             XCTAssertEqual(value("--learning-rate", in: train), "0.001")
+            XCTAssertEqual(value("--compact-width", in: train), "22")
             XCTAssertNil(value("--model-directory", in: train))
             XCTAssertNil(value("--lora-rank", in: train))
             XCTAssertNil(value("--lora-alpha", in: train))

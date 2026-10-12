@@ -1,0 +1,17 @@
+{
+  "completed_updates" : 0,
+  "device" : "Apple M2 Max",
+  "finite_output" : true,
+  "forward_seconds" : 2.9354153750000478,
+  "metal_allocated_bytes_at_forward_completion" : 20336672768,
+  "native_dimensions" : [
+    2048,
+    2048
+  ],
+  "network_width" : 46,
+  "parameter_count" : 2050497,
+  "precision" : "Float32",
+  "process_cumulative_peak_resident_bytes" : 502693888,
+  "purpose" : "Native 2048 inference only; no optimizer or backward graph and no quality assessment",
+  "total_seconds" : 4.5983342499994251
+}

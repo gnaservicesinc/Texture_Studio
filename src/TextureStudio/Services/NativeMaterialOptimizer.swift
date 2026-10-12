@@ -12,14 +12,17 @@ struct NativeMaterialOptimizerConfiguration: Sendable, Equatable {
     var maxGradientNorm: Float = 1
 
     var isValid: Bool {
-        ["adam", "adamw"].contains(algorithm) && beta1.isFinite && beta2.isFinite &&
+        ["adam", "adamw", "lion"].contains(algorithm) && beta1.isFinite && beta2.isFinite &&
         (0..<1).contains(beta1) && (0..<1).contains(beta2) && epsilon.isFinite && epsilon > 0 &&
         weightDecay.isFinite && weightDecay >= 0 && maxGradientNorm.isFinite && maxGradientNorm >= 0
     }
     var metadata: [String: Any] {
         ["optimizer": algorithm, "optimizer_beta1": beta1, "optimizer_beta2": beta2,
          "optimizer_epsilon": epsilon, "weight_decay": weightDecay, "max_gradient_norm": maxGradientNorm,
-         "weight_decay_mode": algorithm == "adamw" ? "decoupled" : "coupled_l2"]
+         "weight_decay_mode": algorithm == "adam" ? "coupled_l2" : "decoupled",
+         "optimizer_state_values_per_parameter": algorithm == "lion" ? 1 : 2,
+         "optimizer_epsilon_used": algorithm != "lion",
+         "optimizer_update_contract": algorithm == "lion" ? "lion-sign-momentum-v1" : "adam-bias-corrected-v1"]
     }
 }
 
@@ -67,7 +70,8 @@ enum NativeMaterialOptimizer {
                       configuration: NativeMaterialOptimizerConfiguration) throws -> Update {
         guard configuration.isValid, learningRate.isFinite, learningRate > 0, step > 0,
               !weights.isEmpty, Set(gradients.keys) == Set(weights.keys) else { throw StudioError("Native optimizer configuration or adapter gradients are invalid.") }
-        let stateNames = Set(weights.keys.flatMap { [$0 + ".m", $0 + ".v"] })
+        let lion = configuration.algorithm == "lion"
+        let stateNames = Set(weights.keys.flatMap { lion ? [$0 + ".m"] : [$0 + ".m", $0 + ".v"] })
         guard state.isEmpty || Set(state.keys) == stateNames else { throw StudioError("Native optimizer moment state is incomplete.") }
         var gradientValues: [String: [Float]] = [:]
         var normSquared = Double(0)
@@ -95,14 +99,24 @@ enum NativeMaterialOptimizer {
                 guard values.allSatisfy(\.isFinite), suffix != ".v" || values.allSatisfy({ $0 >= 0 }) else { throw StudioError("Native optimizer moment state is invalid.") }
                 return values
             }
-            var m = try moment(".m"), v = try moment(".v"), values = parameters
+            var m = try moment(".m"), v = lion ? [] : try moment(".v"), values = parameters
             for index in values.indices {
                 let parameter = Double(parameters[index])
                 let gradient = Double(derivative[index]) * clip + (configuration.algorithm == "adam" ? decay * parameter : 0)
-                m[index] = Float(beta1 * Double(m[index]) + (1 - beta1) * gradient)
-                v[index] = Float(beta2 * Double(v[index]) + (1 - beta2) * gradient * gradient)
-                let direction = (Double(m[index]) / correction1) / (sqrt(Double(v[index]) / correction2) + epsilon)
-                let decayed = configuration.algorithm == "adamw" ? parameter * (1 - rate * decay) : parameter
+                let direction: Double
+                if lion {
+                    // Chen et al., arXiv:2302.06675: beta1 blends the old momentum
+                    // for the sign update; beta2 then updates stored momentum.
+                    // No squared moment, epsilon or bias correction is used.
+                    let blended = beta1 * Double(m[index]) + (1 - beta1) * gradient
+                    direction = blended > 0 ? 1 : blended < 0 ? -1 : 0
+                    m[index] = Float(beta2 * Double(m[index]) + (1 - beta2) * gradient)
+                } else {
+                    m[index] = Float(beta1 * Double(m[index]) + (1 - beta1) * gradient)
+                    v[index] = Float(beta2 * Double(v[index]) + (1 - beta2) * gradient * gradient)
+                    direction = (Double(m[index]) / correction1) / (sqrt(Double(v[index]) / correction2) + epsilon)
+                }
+                let decayed = configuration.algorithm != "adam" ? parameter * (1 - rate * decay) : parameter
                 values[index] = Float(decayed - rate * direction)
             }
             guard values.allSatisfy(\.isFinite), m.allSatisfy(\.isFinite), v.allSatisfy(\.isFinite) else {
@@ -110,7 +124,7 @@ enum NativeMaterialOptimizer {
             }
             updated[name] = .floats(values, shape: tensor.shape)
             nextState[name + ".m"] = .floats(m, shape: tensor.shape)
-            nextState[name + ".v"] = .floats(v, shape: tensor.shape)
+            if !lion { nextState[name + ".v"] = .floats(v, shape: tensor.shape) }
         }
         return Update(weights: updated, state: nextState, gradientNorm: norm)
     }

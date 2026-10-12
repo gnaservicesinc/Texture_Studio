@@ -21,10 +21,10 @@ final class HuggingFaceUploadTests: XCTestCase {
         try await settled(store)
         XCTAssertNil(store.error)
         XCTAssertEqual(store.uploadAccount, "artist")
-        XCTAssertEqual(store.effectiveUploadRepo, "artist/texture-height-native-2k-height-abcdef01")
+        XCTAssertEqual(store.effectiveUploadRepo, "artist/matterloom-height-native-2k-height-abcdef01")
         XCTAssertTrue(store.canUploadSelectedCheckpoint)
         store.selectedCheckpointId = second.id
-        XCTAssertEqual(store.effectiveUploadRepo, "artist/texture-height-refined-height-98765432")
+        XCTAssertEqual(store.effectiveUploadRepo, "artist/matterloom-height-refined-height-98765432")
         XCTAssertFalse(store.uploadPublic)
     }
 
@@ -147,6 +147,19 @@ final class HuggingFaceUploadTests: XCTestCase {
             XCTAssertFalse(HuggingFaceUpload.validRepository(invalid), invalid)
         }
         XCTAssertTrue(HuggingFaceUpload.validRepository("artist/material_height.v2"))
+    }
+
+    func testRepositoryUsesModelNameAndHandlesPunctuationAccentsAndLongNames() throws {
+        let fixture = try UploadFixture(); defer { fixture.remove() }
+        var selected = try fixture.checkpoint(hash: "abcdef0123456789", directory: "run-20261012-1834")
+        selected.modelName = "Píne Bark / Surface Height"
+        XCTAssertEqual(HuggingFaceUpload.repository(account: "artist", checkpoint: selected),
+                       "artist/matterloom-height-pine-bark-surface-height-abcdef01")
+        selected.modelName = String(repeating: "Bark ", count: 100)
+        XCTAssertTrue(HuggingFaceUpload.validRepository(HuggingFaceUpload.repository(account: "artist", checkpoint: selected)))
+        selected.modelName = "樹皮"
+        XCTAssertEqual(HuggingFaceUpload.repository(account: "artist", checkpoint: selected),
+                       "artist/matterloom-height-material-abcdef01")
     }
 
     private func settled(_ store: WorkbenchStore) async throws {

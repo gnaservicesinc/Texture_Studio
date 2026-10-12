@@ -7,6 +7,24 @@ import XCTest
 
 @MainActor
 final class DatasetManagementTests: XCTestCase {
+    func testSourceTierCountIsSavedFromDatasetSettingsAndPreservedByResolutionEdits() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let store = fixture.store()
+        store.createDataset(name: "Bounded dataset", description: "", parentURL: fixture.root, size: 2048, sourceTierCount: 2)
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(fixture.value("--source-tier-count", in: fixture.calls.last!), "2")
+        XCTAssertEqual(store.datasetSourceTierCount, 2)
+        store.updateDatasetInfo(name: store.datasetName, description: "", sourceTierCount: 1)
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.datasetSourceTierCount, 1)
+        store.updateDatasetInfo(name: store.datasetName, description: "", size: 1024)
+        try await settled(store)
+        XCTAssertEqual(fixture.value("--source-tier-count", in: fixture.calls.last!), "1")
+        XCTAssertEqual(store.datasetSourceTierCount, 1)
+    }
+
     func testOpenFolderAndRestoreDoNotRequireModelCapabilities() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
@@ -555,6 +573,7 @@ final class DatasetManagementTests: XCTestCase {
         var description = "Native original maps"
         var failEdit = false
         var trainingSize = 1024
+        var sourceTierCount = 1
         var hash: String {
             SHA256.hash(data: try! Data(contentsOf: dataset.appendingPathComponent("dataset.json")))
                 .map { String(format: "%02x", $0) }.joined()
@@ -576,7 +595,7 @@ final class DatasetManagementTests: XCTestCase {
         }
         func document(prepared: Bool = false, indexHash: String = "source-hash") throws -> String {
             var object: [String: Any] = ["dataset_path": prepared ? root.appendingPathComponent("prepared").path : dataset.path,
-                "index_sha256": indexHash, "name": name, "description": description, "training_size": trainingSize, "materials": []]
+                "index_sha256": indexHash, "name": name, "description": description, "training_size": trainingSize, "source_tier_count": sourceTierCount, "materials": []]
             if prepared { object["preparation"] = ["source_dataset_path": dataset.path, "source_index_sha256": hash,
                 "prepared_dataset_path": root.appendingPathComponent("prepared").path, "crop_size": 1024,
                 "reused": false, "target_resized": false, "original_dataset_modified": false] }
@@ -587,6 +606,8 @@ final class DatasetManagementTests: XCTestCase {
                 self.calls.append(args)
                 if ["edit-dataset", "create-dataset"].contains(args[0]), !self.failEdit,
                    let size = self.value("--training-size", in: args).flatMap(Int.init) { self.trainingSize = size }
+                if ["edit-dataset", "create-dataset"].contains(args[0]), !self.failEdit,
+                   let count = self.value("--source-tier-count", in: args).flatMap(Int.init) { self.sourceTierCount = count }
                 if args.first == "capabilities" { throw StudioError("Model runtime is not installed") }
                 XCTAssertEqual(script, args.first)
                 if args.first == "edit-dataset" {

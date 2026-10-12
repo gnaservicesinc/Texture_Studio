@@ -1,0 +1,106 @@
+{
+  "folders" : [
+    {
+      "folder" : "\/opt\/ipde\/sources_mats\/FabricSubstance003",
+      "original_sha256_checked_count" : 16,
+      "sets" : [
+        {
+          "dimensions" : [
+            1024,
+            1024
+          ],
+          "material_id" : "fabricsubstance003_compiled_1k"
+        },
+        {
+          "dimensions" : [
+            2048,
+            2048
+          ],
+          "material_id" : "fabricsubstance003_compiled_2k"
+        },
+        {
+          "dimensions" : [
+            4096,
+            4096
+          ],
+          "material_id" : "fabricsubstance003_compiled_4k"
+        },
+        {
+          "dimensions" : [
+            512,
+            512
+          ],
+          "material_id" : "fabricsubstance003_compiled_515"
+        }
+      ],
+      "source_set_count" : 4,
+      "warnings" : [
+
+      ]
+    },
+    {
+      "folder" : "\/opt\/ipde\/sources_mats\/Pine Bark",
+      "original_sha256_checked_count" : 12,
+      "sets" : [
+        {
+          "dimensions" : [
+            1024,
+            1024
+          ],
+          "material_id" : "pine_bark_1k"
+        },
+        {
+          "dimensions" : [
+            2048,
+            2048
+          ],
+          "material_id" : "pine_bark_2k"
+        },
+        {
+          "dimensions" : [
+            4096,
+            4096
+          ],
+          "material_id" : "pine_bark_4k"
+        }
+      ],
+      "source_set_count" : 3,
+      "warnings" : [
+
+      ]
+    },
+    {
+      "folder" : "\/opt\/ipde\/sources_mats\/pine_bark",
+      "original_sha256_checked_count" : 12,
+      "sets" : [
+        {
+          "dimensions" : [
+            1024,
+            1024
+          ],
+          "material_id" : "pine_bark_1k"
+        },
+        {
+          "dimensions" : [
+            2048,
+            2048
+          ],
+          "material_id" : "pine_bark_2k"
+        },
+        {
+          "dimensions" : [
+            4096,
+            4096
+          ],
+          "material_id" : "pine_bark_4k"
+        }
+      ],
+      "source_set_count" : 3,
+      "warnings" : [
+
+      ]
+    }
+  ],
+  "offline_preview" : true,
+  "source_bytes_unchanged" : true
+}

@@ -12,6 +12,7 @@ extension WorkbenchStore {
     }
     var datasetDescription: String { dataset?.description ?? "" }
     var datasetResolution: Int { dataset?.trainingSize ?? training.size }
+    var datasetSourceTierCount: Int { dataset?.sourceTierCount ?? 1 }
 
     func rememberDataset(_ result: WorkbenchDataset) {
         let source = URL(fileURLWithPath: result.preparation?.sourceDatasetPath ?? result.datasetPath)
@@ -54,7 +55,7 @@ extension WorkbenchStore {
             if response == .OK, let url = panel.url { completion(url) }
         }
     }
-    func createDataset(name: String, description: String, parentURL: URL, size: Int? = nil, validation: WorkbenchValidationSettings = .init()) {
+    func createDataset(name: String, description: String, parentURL: URL, size: Int? = nil, sourceTierCount: Int = 1, validation: WorkbenchValidationSettings = .init()) {
         guard !isBusy else { return }
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { error = "Give your dataset a name."; return }
@@ -64,7 +65,7 @@ extension WorkbenchStore {
         operation("Creating \(title)…") {
             let result = try WorkbenchResult.decode(WorkbenchDataset.self, output: await self.worker([
                 "create-dataset", "--dataset", destination.path, "--name", title, "--description", description,
-                "--training-size", String(size ?? self.training.size)] + validation.arguments))
+                "--training-size", String(size ?? self.training.size), "--source-tier-count", String(sourceTierCount)] + validation.arguments))
             self.selectedSampleId = nil
             self.adoptDataset(result)
             self.saveDatasetLocation(result)
@@ -103,7 +104,7 @@ extension WorkbenchStore {
         datasetPreparationSummary = ""
         return result
     }
-    func updateDatasetInfo(name: String, description: String, size: Int? = nil, validation: WorkbenchValidationSettings? = nil) {
+    func updateDatasetInfo(name: String, description: String, size: Int? = nil, sourceTierCount: Int? = nil, validation: WorkbenchValidationSettings? = nil) {
         guard !isBusy else { return }
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { error = "Give your dataset a name."; return }
@@ -111,7 +112,8 @@ extension WorkbenchStore {
             let current = try await self.sourceDatasetForManagement()
             try self.adoptManagedDataset(await self.worker(["edit-dataset", "--dataset", current.datasetPath,
                 "--name", title, "--description", description, "--expected-index-sha256", current.indexSha256,
-                "--training-size", String(size ?? self.datasetResolution), "--review-size", String(size ?? self.datasetResolution)] + (validation ?? self.dataset?.validation ?? .init()).arguments))
+                "--training-size", String(size ?? self.datasetResolution), "--review-size", String(size ?? self.datasetResolution),
+                "--source-tier-count", String(sourceTierCount ?? self.datasetSourceTierCount)] + (validation ?? self.dataset?.validation ?? .init()).arguments))
             self.showDatasetInfoSheet = false
             self.activity = "Saved \(self.datasetName)."
         }

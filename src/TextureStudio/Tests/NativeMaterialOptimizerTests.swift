@@ -38,7 +38,7 @@ final class NativeMaterialOptimizerTests: XCTestCase {
     }
 
     func testRejectsUnsupportedNonfiniteUnderflowAndRoundedBetaValues() throws {
-        for (flag, value) in [("--optimizer", "lion"), ("--learning-rate", "nan"), ("--learning-rate", "1e-100"),
+        for (flag, value) in [("--optimizer", "unknown"), ("--learning-rate", "nan"), ("--learning-rate", "1e-100"),
             ("--gradient-accumulation-steps", "0"), ("--optimizer-beta1", "1"), ("--optimizer-beta2", "0.999999999999"),
             ("--optimizer-beta1", "-1e-100"), ("--optimizer-epsilon", "1e-100"), ("--weight-decay", "-1"),
             ("--max-gradient-norm", "inf"), ("--max-gradient-norm", "1e-100"), ("--weight-decay", "1e-100"),
@@ -114,5 +114,41 @@ final class NativeMaterialOptimizerTests: XCTestCase {
             weights: first.weights, state: first.state, learningRate: 0.1, step: 2, configuration: configuration))
         XCTAssertThrowsError(try NativeMaterialOptimizer.apply(gradients: ["a": .floats([4], shape: [1])],
             weights: first.weights, state: ["a.m": first.state["a.m"]!], learningRate: 0.1, step: 2, configuration: configuration))
+    }
+
+    func testLionUsesPreviousMomentumForSignThenStoresBeta2MomentumAndDecoupledDecay() throws {
+        let configuration = NativeMaterialOptimizerConfiguration(algorithm: "lion", beta1: 0.5, beta2: 0.75,
+            weightDecay: 0.1, maxGradientNorm: 0)
+        let first = try NativeMaterialOptimizer.apply(gradients: ["a": .floats([2, -2, 0], shape: [3])],
+            weights: ["a": .floats([1, -1, 3], shape: [3])], state: [:], learningRate: 0.1, step: 1, configuration: configuration)
+        let firstValues = try first.weights["a"]!.floatValues()
+        XCTAssertEqual(firstValues[0], 0.89, accuracy: 1e-6)
+        XCTAssertEqual(firstValues[1], -0.89, accuracy: 1e-6)
+        XCTAssertEqual(firstValues[2], 2.97, accuracy: 1e-6)
+        XCTAssertEqual(try first.state["a.m"]!.floatValues(), [0.5, -0.5, 0])
+        XCTAssertEqual(Set(first.state.keys), ["a.m"], "Lion stores one momentum, without a squared moment")
+        let second = try NativeMaterialOptimizer.apply(gradients: ["a": .floats([-0.25, 0.5, 0], shape: [3])],
+            weights: first.weights, state: first.state, learningRate: 0.1, step: 2, configuration: configuration)
+        let secondValues = try second.weights["a"]!.floatValues()
+        XCTAssertEqual(secondValues[0], 0.89 * 0.99 - 0.1, accuracy: 1e-6,
+            "The existing positive momentum beats the new negative gradient for the sign update")
+        XCTAssertEqual(secondValues[1], -0.89 * 0.99, accuracy: 1e-6, "A zero blend gives a zero sign")
+        XCTAssertEqual(try second.state["a.m"]!.floatValues(), [0.3125, -0.25, 0])
+        var incompatible = first.state; incompatible["a.v"] = .floats([0, 0, 0], shape: [3])
+        XCTAssertThrowsError(try NativeMaterialOptimizer.apply(gradients: ["a": .floats([0, 0, 0], shape: [3])],
+            weights: first.weights, state: incompatible, learningRate: 0.1, step: 2, configuration: configuration))
+        XCTAssertEqual(configuration.metadata["weight_decay_mode"] as? String, "decoupled")
+        XCTAssertEqual(configuration.metadata["optimizer_epsilon_used"] as? Bool, false)
+    }
+
+    func testLionDefaultsAndPreferencesPreserveExplicitSettings() throws {
+        let options = try NativeMaterialTrainer.Options(arguments + ["--model-family", "compact-scalar", "--optimizer", "lion"])
+        XCTAssertEqual(options.optimizerConfiguration.beta2, 0.99)
+        XCTAssertEqual(options.learningRate, 0.0001)
+        let saved = try JSONDecoder().decode(MaterialTrainingOptions.self,
+            from: Data("{\"optimizer\":\"lion\",\"learningRate\":0.00003,\"optimizerBeta2\":0.97}".utf8))
+        XCTAssertEqual(saved.optimizerBeta2, 0.97); XCTAssertEqual(saved.learningRate, 0.00003)
+        XCTAssertNil(saved.configurationIssue)
+        XCTAssertEqual(saved, try JSONDecoder().decode(MaterialTrainingOptions.self, from: JSONEncoder().encode(saved)))
     }
 }

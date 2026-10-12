@@ -31,7 +31,14 @@ enum NativeMaterialCommands {
             return try NativeMaterialTransfer.json(["training_sizes": [256,512,1024,2048,4096], "inference_sizes": [256,512,1024,2048,4096,8192],
                 "targets": targets, "scope": family == "pbrnxt" ? scope : "full-model", "model_family": family, "model_families": families,
                 "base_required": family == "pbrnxt", "all_weights_trainable": family != "pbrnxt", "image_size_matches_training_size": true,
-                "hidden_encoder_resize": false, "memory_admission_enabled": true])
+                "hidden_encoder_resize": false, "memory_admission_enabled": true,
+                "optimizers": ["adamw", "adam", "lion"],
+                "compact_model_sizes": MaterialTrainingModelSize.allCases.map { preset in
+                    ["name": preset.label, "network_width": preset.rawValue,
+                     "scalar_parameter_count": preset.parameterCount(target: "height", family: .compactScalar)!,
+                     "normal_parameter_count": preset.parameterCount(target: "normal", family: .compactNormal)!,
+                     "depthpro_refiner_parameter_count": preset.parameterCount(target: "height", family: .depthProHeightRefiner)!] as [String: Any]
+                }])
         case "hub-account": return try await NativeHuggingFaceService().accountJSON()
         case "hub-models": return try await NativeHuggingFaceService().modelsJSON()
         case "train", "refine", "infer": return try await NativeMaterialTrainer.run(arguments: arguments, onEvent: onEvent, control: control)

@@ -423,6 +423,7 @@ final class WorkbenchComparisonTests: XCTestCase {
             store.selectedSampleId = "soil"
             store.training.modelFamily = .compactScalar
             store.training.seed = 123
+            store.training.compactWidth = 22
             if useRecordedCheckpoint {
                 let checkpoint = try WorkbenchResult.decode(WorkbenchCheckpoint.self, output: """
                 {"checkpoint_path":"/models/compact/model.safetensors","sha256":"compact-sha","schema":"texture-studio-compact-material-v1","architecture":"texture-studio-compact-scalar-native-v1","target":"height","step":42,"compatible":true}
@@ -445,10 +446,12 @@ final class WorkbenchComparisonTests: XCTestCase {
             if useRecordedCheckpoint {
                 XCTAssertTrue(call.contains("compact-sha"))
                 XCTAssertFalse(call.contains("--seed"), "A checkpoint baseline uses the recorded seed")
+                XCTAssertFalse(call.contains("--compact-width"), "A checkpoint baseline retains its recorded width")
             } else {
                 XCTAssertEqual(call[try XCTUnwrap(call.firstIndex(of: "--model-family")) + 1], "compact-scalar")
                 XCTAssertEqual(call[try XCTUnwrap(call.firstIndex(of: "--target")) + 1], "height")
                 XCTAssertEqual(call[try XCTUnwrap(call.firstIndex(of: "--seed")) + 1], "123")
+                XCTAssertEqual(call[try XCTUnwrap(call.firstIndex(of: "--compact-width")) + 1], "22")
             }
             XCTAssertEqual(store.comparisonCandidates.map(\.role), ["diffuse", "target", "base"])
             let baseline = try XCTUnwrap(store.comparisonCandidates.last)

@@ -13,11 +13,13 @@ enum HuggingFaceUpload {
     /// A blank custom destination follows the selected model and saved account.
     /// Including its SHA avoids silently replacing another checkpoint's repo.
     static func repository(account: String, checkpoint: WorkbenchCheckpoint) -> String {
-        let name = checkpoint.url.deletingLastPathComponent().lastPathComponent.lowercased()
+        let displayName = checkpoint.modelName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let name = (displayName.isEmpty ? checkpoint.url.deletingLastPathComponent().lastPathComponent : displayName)
+            .folding(options: [.diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX")).lowercased()
             .replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression)
             .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
         let stem = name.isEmpty ? "material" : String(name.prefix(50)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        return "\(account)/texture-\(checkpoint.target)-\(stem)-\(checkpoint.sha256.prefix(8))"
+        return "\(account)/matterloom-\(checkpoint.target)-\(stem)-\(checkpoint.sha256.prefix(8))"
     }
 }
 

@@ -315,14 +315,13 @@ enum NativeMaterialPackage {
             files["ModelLicenses/" + name] = try Data(contentsOf: source)
         }
         files["LICENSE"] = files["ModelLicenses/TextureStudio_LICENSE"]
-        let modelName = (configuration["model_name"] as? String).map { "Model name: \($0)\n\n" } ?? ""
         let familyDescription: String
         if configuration["model_family"] as? String == MaterialTrainingModelFamily.depthProHeightRefiner.rawValue {
             familyDescription = "This DepthPro Height Refiner trains every weight from scratch and includes the complete one-channel refiner weights. It consumes cached normalized inverse DepthPro depth and predicts original material height. Production first requires the matching DepthPro Core ML model identified by SHA-256 \(configuration["depthpro_model_sha256"] ?? ""); those upstream weights are not included. Input preparation uses \(configuration["depthpro_preparation_contract"] ?? "")."
         } else {
             familyDescription = compact ? "This compact model trains every weight from scratch and includes its complete standalone weights. No downloaded base or LoRA adapter is required." : "Original model notices are in ModelLicenses."
         }
-        files["README.md"] = Data("---\nlicense: gpl-3.0\ntags:\n- texture-studio-material\n- material-maps\n- safetensors\n---\n\n# Texture Studio native material model\n\n\(modelName)Target: \(configuration["target"] ?? ""). Every training map uses its declared native grid without padding or resizing. The app evaluates this numeric checkpoint with Apple MPSGraph in Float32. \(familyDescription) Source images and an interpreter are not included. Visual review is required before choosing a model.\n".utf8)
+        files["README.md"] = Data(MaterialModelCard.readme(configuration: configuration, familyDescription: familyDescription).utf8)
         let size = files.values.reduce(Int64(0)) { $0 + Int64($1.count) }
         try fm.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
         let capacity = try output.deletingLastPathComponent().resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage

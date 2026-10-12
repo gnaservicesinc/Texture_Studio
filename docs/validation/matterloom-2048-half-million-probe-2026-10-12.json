@@ -1,0 +1,30 @@
+{
+  "device" : "Apple M2 Max",
+  "optimizer" : "adamw",
+  "precision" : "Float32",
+  "purpose" : "Bounded native Float32 2048 execution only; learned quality is not assessed",
+  "reduced_precision_fast_math" : false,
+  "runs" : [
+    {
+      "backward_seconds" : 10.842898500000047,
+      "completed_updates" : 1,
+      "finite_gradients" : true,
+      "finite_output" : true,
+      "loss" : 6.7671480178833008,
+      "metal_allocated_bytes_at_forward_completion" : 47553134592,
+      "native_dimensions" : [
+        2048,
+        2048
+      ],
+      "network_width" : 22,
+      "optimizer_seconds" : 0.422239041667126,
+      "parameter_count" : 478017,
+      "post_update_forward_seconds" : 3.2397858750000523,
+      "process_cumulative_peak_resident_bytes" : 566001664,
+      "total_seconds" : 15.081346166666663,
+      "weights_changed" : true
+    }
+  ],
+  "total_wall_seconds" : 16.949936708333553,
+  "training_size" : 2048
+}

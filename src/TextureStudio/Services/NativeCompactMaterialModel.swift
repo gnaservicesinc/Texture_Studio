@@ -52,6 +52,7 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
         configuration = ["schema": Self.schema, "architecture": architectureID,
             "model_family": modelFamily.rawValue,
             "from_scratch": true, "target": target, "network_width": width,
+            "model_size_standard": MaterialTrainingModelSize(rawValue: width)!.label,
             "input_channels": inputChannels, "output_channels": outputChannels,
             "initialization_seed": seed, "initial_weights_sha256": baseSHA256,
             "training_scope": "all-weights", "scope": "full-model", "head_activation": "linear",
@@ -143,7 +144,7 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
 
     static func weightShapes(target: String, width: Int, family: MaterialTrainingModelFamily? = nil) throws -> [String: [Int]] {
         let modelFamily = try resolvedFamily(target: target, requested: family)
-        guard [16, 32].contains(width) else { throw StudioError("Compact material width must be 16 or 32.") }
+        guard MaterialTrainingModelSize(rawValue: width) != nil else { throw StudioError("Choose a supported compact model width: 16, 22, 32, 46 or 64.") }
         var shapes: [String: [Int]] = [:]
         func convolution(_ name: String, _ incoming: Int, _ outgoing: Int, kernel: Int = 1, groups: Int = 1) {
             shapes[name + ".weight"] = [outgoing, incoming / groups, kernel, kernel]

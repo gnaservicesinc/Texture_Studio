@@ -15,17 +15,32 @@ final class NativeMaterialFilenameTests: XCTestCase {
             ("Cardboard_01_1K_NormalGL.png", "cardboard_01", "nor_gl", "1k"),
             ("Cardboard_01_BaseColor.png", "cardboard_01", "basecolor", "native"),
             ("stone_col_2_4k.png", "stone", "col_2", "4k"),
-            ("wood_2k_Height.png", "wood", "height", "2k")
+            ("wood_2k_Height.png", "wood", "height", "2k"),
+            ("pine_bark_diff_2k.png", "pine_bark", "diff", "2k"),
+            ("pine_bark_disp_4k.png", "pine_bark", "disp", "4k"),
+            ("pine_bark_nor_gl_1k.png", "pine_bark", "nor_gl", "1k"),
+            ("FabricSubstance003_COMPILED_baseColor_515.png", "fabricsubstance003_compiled", "basecolor", "515"),
+            ("FabricSubstance003_COMPILED_normal_515.png", "fabricsubstance003_compiled", "normal", "515"),
+            ("My Surface-Base-Colour-2048px.png", "my surface", "base_colour", "2048px"),
+            ("My Surface_260x262_Normal_OpenGL.png", "my surface", "nor_gl", "260x262"),
+            ("leather_DiffuseColour_1024.png", "leather", "diffusecolour", "1024"),
+            ("leather_DisplacementMap_1024.png", "leather", "displacementmap", "1024"),
+            ("leather_NRM_DX_1024.png", "leather", "nor_dx", "1024"),
+            ("leather_RoughnessMap_1024.png", "leather", "roughnessmap", "1024"),
+            ("stone_diff_2.png", "stone", "diff_2", "native")
         ]
         for (name, family, suffix, resolution) in cases {
             let parsed = try XCTUnwrap(NativeMaterialDatasetService.sourceMapFilename(name), name)
             XCTAssertEqual(parsed.0, family, name); XCTAssertEqual(parsed.1, suffix, name); XCTAssertEqual(parsed.2, resolution, name)
         }
-        for name in ["IMG_6678.png", "my_room.png", "person_1k.png", "Paper003.png", "height_of_room_1k.png"] {
+        for name in ["IMG_6678.png", "my_room.png", "person_1k.png", "Paper003.png", "height_of_room_1k.png", "wood_gloss_2k.png", "wood_ORM_2k.png"] {
             XCTAssertNil(NativeMaterialDatasetService.sourceMapFilename(name), name)
             XCTAssertNil(NativeMaterialDatasetService.diffuseSourceFilename(URL(fileURLWithPath: "/Sources/Surface/" + name)), name)
         }
         XCTAssertEqual(NativeMaterialDatasetService.diffuseSourceFilename(URL(fileURLWithPath: "/Sources/Surface/Color.png"))?.0, "surface")
+        XCTAssertEqual(NativeMaterialDatasetService.diffuseSourceFilename(URL(fileURLWithPath: "/Sources/Surface/Base_Colour.png"))?.0, "surface")
+        XCTAssertNil(NativeMaterialDatasetService.sourceMapFilename("Diffuse_Color.png"), "A standalone alias belongs to its enclosing material folder")
+        XCTAssertNil(NativeMaterialDatasetService.diffuseSourceFilename(URL(fileURLWithPath: "/Sources/Surface/wood_bump_2k.png")))
         XCTAssertEqual(NativeMaterialDatasetService.diffuseSourceFilename(URL(fileURLWithPath: "/Sources/Surface/Cardboard_01_color_1K.png"))?.0, "cardboard_01")
         XCTAssertEqual(NativeMaterialDatasetService.diffuseSourceFilename(URL(fileURLWithPath: "/Sources/Surface/My Surface_col01_1K.png"))?.0, "my_surface")
         XCTAssertEqual(NativeMaterialDatasetService.diffuseSourceFilename(URL(fileURLWithPath: "/Sources/Surface/My Surface_col01_1K.png"))?.1, "color_1")
@@ -75,6 +90,7 @@ final class NativeMaterialFilenameTests: XCTestCase {
                 }
                 XCTAssertEqual(sample.inputSHA256, NativeMaterialTrainer.checksum(try Data(contentsOf: sample.inputURL)))
                 XCTAssertEqual(sample.targetSHA256, NativeMaterialTrainer.checksum(try Data(contentsOf: sample.targetURL)))
+                XCTAssertFalse(try XCTUnwrap(sample.materialName).isEmpty, "Training descriptors retain the registered material name for model cards")
             }
             _ = try await command(["cleanup-size", "--dataset", preparedURL.path])
         }

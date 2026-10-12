@@ -375,7 +375,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
         let packageConfig = try NativeMaterialTransfer.object(output.appendingPathComponent("export/config.json"))
         XCTAssertEqual(packageConfig["model_name"] as? String, "石 Stone / Displacement")
         XCTAssertTrue(try String(contentsOf: output.appendingPathComponent("export/README.md"), encoding: .utf8)
-            .contains("Model name: 石 Stone / Displacement"))
+            .contains("# 石 Stone / Displacement"))
         XCTAssertEqual(events.updates, 2)
         XCTAssertFalse(events.executedOnMain)
         let final = try XCTUnwrap(result["final_validation"] as? [String: Any])

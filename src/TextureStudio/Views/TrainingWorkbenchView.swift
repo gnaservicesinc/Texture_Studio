@@ -75,6 +75,25 @@ struct TrainingWorkbenchView: View {
                         }
                     }
                     Toggle("Start from selected checkpoint", isOn: $store.training.useWarmStart)
+                    if store.training.modelFamily.isCompact {
+                        if store.training.useWarmStart {
+                            if let width = store.selectedCheckpoint?.networkWidth,
+                               let preset = MaterialTrainingModelSize(rawValue: width) {
+                                Text("Recorded model size: \(preset.label(target: store.training.target, family: store.training.modelFamily))")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Text("A starting checkpoint retains its recorded model size.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Picker("Model size", selection: $store.training.compactWidth) {
+                                ForEach(MaterialTrainingModelSize.allCases) { preset in
+                                    Text(preset.label(target: store.training.target, family: store.training.modelFamily)).tag(preset.rawValue)
+                                }
+                            }
+                            Text("Larger models add capacity, training work and memory use. Compare learned quality on the same validation materials; size alone does not guarantee better maps.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                     Text(store.training.modelFamily.isCompact ? "Training scope: complete compact model" : "Training scope: \(store.training.scope == "map-decoder" ? "Map decoder and output branch" : "Map output branch")")
                         .font(.caption).foregroundStyle(.secondary)
                     Button("Choose Starting Checkpoint…") { store.chooseResumeCheckpoint() }
@@ -106,6 +125,21 @@ struct TrainingWorkbenchView: View {
                     Picker("Optimizer", selection: $store.training.optimizer) {
                         Text("AdamW").tag("adamw")
                         Text("Adam").tag("adam")
+                        Text("Lion · sign momentum").tag("lion")
+                    }
+                    .onChange(of: store.training.optimizer) { old, new in
+                        if new == "lion", store.training.optimizerBeta2 == 0.999 { store.training.optimizerBeta2 = 0.99 }
+                        if old == "lion", new != "lion", store.training.optimizerBeta2 == 0.99 { store.training.optimizerBeta2 = 0.999 }
+                    }
+                    if store.training.optimizer == "lion" {
+                        Text("Lion keeps one momentum tensor per parameter. Start with a learning rate 3–10× lower than AdamW; increase nonzero weight decay by the same factor to retain its strength. Compare validation quality for your material.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button("Apply Lion starting settings (10× lower learning rate)") {
+                            store.training.learningRate /= 10
+                            store.training.weightDecay *= 10
+                            store.training.optimizerBeta1 = 0.9
+                            store.training.optimizerBeta2 = 0.99
+                        }
                     }
                     NumericField("Gradient accumulation steps", value: $store.training.gradientAccumulationSteps, atLeast: 1, unit: "maps / update")
                     Text("One complete map is processed at a time. Gradients are averaged before each optimizer update. Increasing accumulation does more work per update.")
@@ -124,7 +158,9 @@ struct TrainingWorkbenchView: View {
                     DisclosureGroup("Advanced training settings") {
                         NumericField("Optimizer beta 1", value: $store.training.optimizerBeta1, in: 0...Double(Float(1).nextDown))
                         NumericField("Optimizer beta 2", value: $store.training.optimizerBeta2, in: 0...Double(Float(1).nextDown))
-                        NumericField("Optimizer epsilon", value: $store.training.optimizerEpsilon, greaterThan: 0)
+                        if store.training.optimizer != "lion" {
+                            NumericField("Optimizer epsilon", value: $store.training.optimizerEpsilon, greaterThan: 0)
+                        }
                         NumericField("Maximum gradient norm", value: $store.training.maxGradientNorm, atLeast: 0)
                         Text("0 disables gradient clipping. Warm starts restore weights and start fresh optimizer moments.")
                             .font(.caption).foregroundStyle(.secondary)

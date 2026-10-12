@@ -15,7 +15,7 @@ final class NativeMaterialTrainingControl: @unchecked Sendable {
 }
 
 /// Native whole-grid Float32 material training. MPSGraph differentiates the
-/// recorded LoRA factors or compact model weights; Swift owns averaging and Adam/AdamW updates, dataset
+/// recorded LoRA factors or compact model weights; Swift owns averaging and optimizer updates, dataset
 /// locks, iteration, validation and bit-preserving checkpoint publication.
 enum NativeMaterialTrainer {
     typealias Event = @Sendable (String) -> Void
@@ -124,13 +124,14 @@ enum NativeMaterialTrainer {
                 throw StudioError("Choose a compatible material map and training scope for this model family.")
             }
             compactWidth = Int(value("--compact-width") ?? String(recorded["network_width"] as? Int ?? 32)) ?? 0
-            guard family == .pbrnxt || [16, 32].contains(compactWidth) else { throw StudioError("Compact model width must be 16 or 32.") }
+            guard family == .pbrnxt || MaterialTrainingModelSize(rawValue: compactWidth) != nil else { throw StudioError("Choose a supported compact model width: 16, 22, 32, 46 or 64.") }
             let directory = url("--model-directory") ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("Texture Studio/Material Models/pbrnxt-base")
             base = url("--base-checkpoint") ?? NativeMaterialPackage.baseURL(directory, configuration: recorded)
             size = Int(value("--size") ?? (family == .pbrnxt ? "1024" : "512")) ?? 0
             rank = Int(value("--lora-rank") ?? "8") ?? 0
             alpha = Float(value("--lora-alpha") ?? "8") ?? .nan
-            learningRate = Float(value("--learning-rate") ?? (family == .pbrnxt ? "0.00001" : "0.001")) ?? .nan
+            let defaultRate = family == .pbrnxt ? 0.00001 : 0.001
+            learningRate = Float(value("--learning-rate") ?? String(value("--optimizer") == "lion" ? defaultRate / 10 : defaultRate)) ?? .nan
             gradientAccumulationSteps = Int(value("--gradient-accumulation-steps") ?? "1") ?? 0
             warmupUpdates = Int(value("--warmup-updates") ?? "0") ?? -1
             learningRateSchedule = value("--learning-rate-schedule") ?? "constant"
@@ -143,7 +144,7 @@ enum NativeMaterialTrainer {
             }
             optimizerConfiguration = .init(algorithm: value("--optimizer") ?? "adamw",
                 beta1: nonnegative("--optimizer-beta1", default: 0.9),
-                beta2: nonnegative("--optimizer-beta2", default: 0.999),
+                beta2: nonnegative("--optimizer-beta2", default: value("--optimizer") == "lion" ? 0.99 : 0.999),
                 epsilon: nonnegative("--optimizer-epsilon", default: 1e-8),
                 weightDecay: nonnegative("--weight-decay", default: 0),
                 maxGradientNorm: nonnegative("--max-gradient-norm", default: 1))
@@ -329,6 +330,12 @@ enum NativeMaterialTrainer {
             model.configuration["depthpro_preparation_contract"] = NativeDepthProContract.identifier
         }
         if let name = options.modelName { model.configuration["model_name"] = name }
+        model.configuration["texture_pipeline"] = MaterialModelCard.pipelineName
+        let sourceManifest = try directories.last.map { try NativeMaterialTransfer.object($0.appendingPathComponent("dataset.json")) } ?? [:]
+        model.configuration["training_dataset_name"] = sourceManifest["name"] as? String ?? dataset.lastPathComponent
+        let subjects = descriptors.filter { $0.split == "train" }.compactMap(\.materialName)
+        let previousSubjects = model.configuration["training_subjects"] as? [String] ?? []
+        model.configuration["training_subjects"] = Array(Set(previousSubjects + subjects)).sorted()
         var effectiveConfiguration = options.trainingConfiguration
         effectiveConfiguration["training_size"] = options.size
         effectiveConfiguration["updates_per_map"] = options.updatesPerMap
@@ -338,6 +345,7 @@ enum NativeMaterialTrainer {
         effectiveConfiguration["target"] = options.target
         effectiveConfiguration["scope"] = options.scope
         effectiveConfiguration["dataset_manifest_sha256"] = sourceHash
+        effectiveConfiguration["source_tier_count"] = sourceManifest["source_tier_count"] ?? 1
         effectiveConfiguration["crop_cache_path"] = options.cropCacheURL.path
         effectiveConfiguration["training_cache_root"] = options.trainingCacheRootURL?.path
         effectiveConfiguration["crop_selection"] = (manifest?["native_size_preparation"] as? [String: Any])?["crop_selection"]

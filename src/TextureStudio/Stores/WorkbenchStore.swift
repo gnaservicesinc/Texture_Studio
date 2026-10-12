@@ -694,6 +694,7 @@ final class WorkbenchStore {
         let target = selected.first?.target ?? baselineCheckpoint?.target ??
             (baselineFamily.supports(target: training.target) ? training.target : baselineFamily == .compactNormal ? "normal" : "height")
         let baselineSeed = training.seed
+        let baselineWidth = training.compactWidth
         let baselineDependencies = baselineCheckpoint.map { dependencyArguments(for: $0) } ??
             (baselineFamily == .depthProHeightRefiner ? ["--depthpro-model", depthProModelPath] : baselineFamily.isCompact ? [] : dependencyArguments)
         let sampleLabel = sourceImageURL == nil ? selectedSampleId ?? image.lastPathComponent : image.lastPathComponent
@@ -766,6 +767,7 @@ final class WorkbenchStore {
                     arguments += ["--checkpoint", reference.checkpointPath, "--expected-sha256", reference.sha256]
                 } else {
                     arguments += ["--model-family", baselineFamily.rawValue, "--target", target, "--seed", String(baselineSeed)]
+                    if compact { arguments += ["--compact-width", String(baselineWidth)] }
                 }
                 let result: MaterialInferenceResponse = try WorkbenchResult.decode(MaterialInferenceResponse.self, output: await self.worker(arguments))
                 if let path = result.preparedInputPath {
@@ -973,6 +975,7 @@ final class WorkbenchStore {
             args += depthProArguments
             args += options.cropArguments
             args += ["--crop-selection-prepared"]
+            if options.modelFamily.isCompact && checkpoint == nil { args += ["--compact-width", String(options.compactWidth)] }
             if !options.modelFamily.isCompact { args += ["--lora-rank", String(options.loraRank), "--lora-alpha", String(options.loraAlpha)] }
             if developer { args += ["--developer-mode"] }
             // Preparation already restricted the selected folder across all zoom

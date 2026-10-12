@@ -7,6 +7,7 @@ struct NewMaterialDatasetSheet: View {
     @State private var description = ""
     @State private var parentURL: URL?
     @State private var size = 1024
+    @State private var sourceTierCount = 1
     @State private var validation = WorkbenchValidationSettings()
     @FocusState private var nameFocused: Bool
 
@@ -21,6 +22,7 @@ struct NewMaterialDatasetSheet: View {
                 TextField("Name", text: $name).focused($nameFocused)
                 TextField("Description", text: $description, axis: .vertical).lineLimit(3...5)
                 DatasetResolutionPicker(size: $size)
+                DatasetSourceTierControls(count: $sourceTierCount, size: size)
                 DatasetValidationControls(settings: $validation)
                 if let folder = store.pendingSourceFolder {
                     LabeledContent("Source folder", value: folder.path)
@@ -43,7 +45,7 @@ struct NewMaterialDatasetSheet: View {
                 Button("Cancel") { store.pendingSourceFolder = nil; dismiss() }.keyboardShortcut(.cancelAction).disabled(store.isBusy)
                 Button("Create Dataset") {
                     guard let parentURL else { return }
-                    store.createDataset(name: cleanName, description: description, parentURL: parentURL, size: size, validation: validation)
+                    store.createDataset(name: cleanName, description: description, parentURL: parentURL, size: size, sourceTierCount: sourceTierCount, validation: validation)
                 }
                 .buttonStyle(.glassProminent).keyboardShortcut(.defaultAction)
                 .disabled(cleanName.isEmpty || parentURL == nil || store.isBusy)
@@ -71,6 +73,7 @@ struct MaterialDatasetInfoSheet: View {
     @State private var name: String
     @State private var description: String
     @State private var size: Int
+    @State private var sourceTierCount: Int
     @State private var validation: WorkbenchValidationSettings
     @FocusState private var nameFocused: Bool
 
@@ -79,11 +82,12 @@ struct MaterialDatasetInfoSheet: View {
         _name = State(initialValue: store.datasetName)
         _description = State(initialValue: store.datasetDescription)
         _size = State(initialValue: store.datasetResolution)
+        _sourceTierCount = State(initialValue: store.datasetSourceTierCount)
         _validation = State(initialValue: store.dataset?.validation ?? .init())
     }
 
     private var cleanName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var hasChanges: Bool { cleanName != store.datasetName || description != store.datasetDescription || size != store.dataset?.trainingSize || validation != (store.dataset?.validation ?? .init()) }
+    private var hasChanges: Bool { cleanName != store.datasetName || description != store.datasetDescription || size != store.dataset?.trainingSize || sourceTierCount != store.datasetSourceTierCount || validation != (store.dataset?.validation ?? .init()) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -93,6 +97,7 @@ struct MaterialDatasetInfoSheet: View {
                 TextField("Name", text: $name).focused($nameFocused)
                 TextField("Description", text: $description, axis: .vertical).lineLimit(3...5)
                 DatasetResolutionPicker(size: $size)
+                DatasetSourceTierControls(count: $sourceTierCount, size: size)
                 DatasetValidationControls(settings: $validation)
                 if let plans = store.dataset?.resolutionPlans?[String(size)] {
                     DatasetPlanSummary(plans: plans, validation: validation)
@@ -115,7 +120,7 @@ struct MaterialDatasetInfoSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).disabled(store.isBusy)
                 Button("Save Changes") {
-                    store.updateDatasetInfo(name: cleanName, description: description, size: size, validation: validation)
+                    store.updateDatasetInfo(name: cleanName, description: description, size: size, sourceTierCount: sourceTierCount, validation: validation)
                 }
                 .buttonStyle(.glassProminent).keyboardShortcut(.defaultAction)
                 .disabled(cleanName.isEmpty || !hasChanges || store.isBusy)
@@ -238,6 +243,23 @@ struct DatasetSheetOperationNotice: View {
                 WorkbenchStopButtons(store: store)
             }
         }
+    }
+}
+
+struct DatasetSourceTierControls: View {
+    @Binding var count: Int
+    let size: Int
+
+    private var fetchedSizes: [Int] {
+        Array(Set((0..<count).map { max(1024, size) * (1 << $0) }.filter { [1024, 2048, 4096, 8192, 16384].contains($0) })).sorted()
+    }
+
+    var body: some View {
+        NumericField("Source tiers to fetch", value: $count, in: 1...3, unit: "tiers")
+        Text(fetchedSizes.isEmpty
+             ? "No published provider tier matches this grid. Existing original maps remain available."
+             : "Fetch published \(fetchedSizes.map { "\($0 / 1024)K" }.joined(separator: ", ")) maps as needed. Higher tiers use more disk space. Existing original maps remain available; prepared crops use \(size) × \(size) pixels.")
+            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -426,7 +448,7 @@ struct ImportDatasetFolderSheet: View {
                                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         }
                     } else if store.isBusy {
-                        Text("Setting up the 1×, 2× and 4× paired source tiers when published, then scanning exact crop counts. Source sets without a published map continue with their available targets. Resolution changes are applied by a fresh setup before import.")
+                        Text("Setting up up to \(store.datasetSourceTierCount) paired source \(store.datasetSourceTierCount == 1 ? "tier" : "tiers") when published, then scanning exact crop counts. Change the fetch limit in Dataset Info. Existing local source resolutions remain available.")
                             .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     if store.isBusy, !store.sourceRecoverySummary.isEmpty { Text(store.sourceRecoverySummary).font(.caption).monospacedDigit() }

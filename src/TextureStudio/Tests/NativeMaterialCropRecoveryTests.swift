@@ -4,12 +4,40 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeMaterialCropRecoveryTests: XCTestCase {
+    func testSmallTrainingGridsRecoverTheirMissingTargetAtOneKWithDefaultTierLimit() throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let input = try fixture.write(role: "input", pixels: 1024)
+        for size in [256, 512] {
+            let requests = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input], size: size, target: "height")
+            XCTAssertEqual(Self.identities(requests), ["1k|height"])
+            XCTAssertEqual(requests.first?.width, 1024)
+            XCTAssertEqual(requests.first?.height, 1024)
+        }
+    }
+
+    func testTwoKTrainingFetchLimitDefaultsToOnlyTwoKAndExplicitlyExpands() throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let input = try fixture.write(role: "input", pixels: 1024)
+        let original = try Data(contentsOf: input)
+        for (count, expected) in [(1, Set(["2k"])), (2, Set(["2k", "4k"])), (3, Set(["2k", "4k", "8k"]))] {
+            let requests = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input], size: 2048, target: "height", tierCount: count)
+            XCTAssertEqual(Set(requests.map(\.resolution)), expected)
+            XCTAssertEqual(requests.count, expected.count * 2)
+        }
+        let defaults = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input], size: 2048, target: "height")
+        XCTAssertEqual(Set(defaults.map(\.resolution)), ["2k"])
+        for count in [0, 4, -1] {
+            XCTAssertTrue(NativeMaterialDatasetService.croppingRecoveryRequests(files: [input], size: 2048, target: "height", tierCount: count).isEmpty)
+        }
+        XCTAssertEqual(try Data(contentsOf: input), original)
+    }
+
     func testCroppingRequestsMissingOneTwoAndFourKTiersForRelevantTargetOnly() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let input = try fixture.write(role: "input", pixels: 1024)
         let height = try fixture.write(role: "height", pixels: 1024)
-        let requests = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input, height], size: 1024, target: "roughness")
+        let requests = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input, height], size: 1024, target: "roughness", tierCount: 3)
         XCTAssertEqual(Self.identities(requests), ["1k|roughness", "2k|input", "2k|roughness", "4k|input", "4k|roughness"])
         XCTAssertFalse(requests.contains { $0.target == "height" || $0.target == "normal" })
         for request in requests {
@@ -26,21 +54,20 @@ final class NativeMaterialCropRecoveryTests: XCTestCase {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let height = try fixture.write(role: "height", pixels: 8192)
-        let requests = NativeMaterialDatasetService.croppingRecoveryRequests(files: [height], size: 1024, target: "height")
+        let requests = NativeMaterialDatasetService.croppingRecoveryRequests(files: [height], size: 1024, target: "height", tierCount: 3)
         XCTAssertEqual(Self.identities(requests), ["1k|height", "1k|input", "2k|height", "2k|input", "4k|height", "4k|input"])
         XCTAssertFalse(requests.contains { $0.resolution == "8k" },
                        "A high-resolution target alone must not cause a new high-resolution diffuse download")
     }
 
-    func testExistingEightKDiffuseRequestsItsMissingTargetWithoutRefetchingInput() throws {
+    func testExistingEightKDiffuseDoesNotExceedTheSelectedDownloadTierLimit() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let input = try fixture.write(role: "input", pixels: 8192)
-        let requests = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input], size: 1024, target: "height")
-        XCTAssertEqual(Self.identities(requests), ["1k|height", "1k|input", "2k|height", "2k|input", "4k|height", "4k|input", "8k|height"])
-        let highTier = try XCTUnwrap(requests.first { $0.resolution == "8k" })
-        XCTAssertEqual(highTier.width, 8192); XCTAssertEqual(highTier.height, 8192)
-        XCTAssertFalse(requests.contains { $0.resolution == "8k" && $0.target == "input" })
+        let requests = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input], size: 1024, target: "height", tierCount: 3)
+        XCTAssertEqual(Self.identities(requests), ["1k|height", "1k|input", "2k|height", "2k|input", "4k|height", "4k|input"])
+        XCTAssertFalse(requests.contains { $0.resolution == "8k" })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: input.path))
     }
 
     func testCompleteTierPairsAreNotRefetchedAndSmallProviderLabelsDoNotTriggerRecovery() throws {
@@ -84,7 +111,7 @@ final class NativeMaterialCropRecoveryTests: XCTestCase {
         let input2K = try fixture.write(role: "input", pixels: 2048, height: 4096)
         let input4K = try fixture.write(role: "input", pixels: 4096, height: 8192)
         let height4K = try fixture.write(role: "height", pixels: 4096, height: 8192)
-        let repairs = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input2K, input4K, height4K], size: 1024, target: "height")
+        let repairs = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input2K, input4K, height4K], size: 1024, target: "height", tierCount: 3)
         XCTAssertEqual(Self.identities(repairs), ["2k|height"])
         XCTAssertEqual(repairs.first?.width, 2048); XCTAssertEqual(repairs.first?.height, 4096)
         let square4K = try fixture.write(role: "height", pixels: 4096)
@@ -101,7 +128,7 @@ final class NativeMaterialCropRecoveryTests: XCTestCase {
         defer { fixture.remove() }
         let input = try fixture.write(role: "input", pixels: 1024)
         let originalBytes = try Data(contentsOf: input)
-        let requests = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input], size: 1024, target: "height")
+        let requests = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input], size: 1024, target: "height", tierCount: 3)
         XCTAssertEqual(requests.count, 5)
         var catalog: [String: [String: [String: [String: Any]]]] = [:]
         var payloads: [URL: Data] = [:]

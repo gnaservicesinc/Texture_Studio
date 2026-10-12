@@ -133,9 +133,9 @@ struct ModelTrainingHubView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Label("Material models and source maps", systemImage: "graduationcap")
+                    Label("MatterLoom texture pipeline", systemImage: "graduationcap")
                         .font(.largeTitle.bold())
-                    Text("Refine small material models with your paired diffuse and surface maps, then inspect the exact inputs and outputs.")
+                    Text("Build one material pipeline with specialist models for surface height, roughness and normals. Train with paired diffuse and surface maps, then inspect the exact inputs and outputs.")
                         .font(.title3).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 startCard("Train category specialists", symbol: "arrow.triangle.branch", description: "Use the diffuse classifier to organize paired materials, then train and review one category or subtype at a time.", button: "Open Specialist Workflow") {

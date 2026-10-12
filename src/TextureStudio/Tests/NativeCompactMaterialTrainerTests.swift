@@ -118,6 +118,56 @@ final class NativeCompactMaterialTrainerTests: XCTestCase {
         XCTAssertTrue(recorder.events.contains { $0["event"] as? String == "sample_skipped" && $0["phase"] as? String == "validation" })
     }
 
+    func testPreparedTrainingExportKeepsOriginalDatasetNameSelectedSubjectAnd16BitTarget() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let original = root.appendingPathComponent("opaque-source-folder")
+        _ = try await NativeMaterialDatasetService.run(arguments: ["create-dataset", "--dataset", original.path,
+            "--name", "Artist Bark Collection", "--training-size", "256", "--validation-enabled", "no"], onEvent: { _ in })
+        var selectedMaterial: String?, sourceBytes: [URL: Data] = [:]
+        for (variant, name) in ["Pine Bark", "Fabric"].enumerated() {
+            let folder = root.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let diffuse = folder.appendingPathComponent("diffuse.png"), height = folder.appendingPathComponent("height.png")
+            let input = try NativePNG(header: .init(width: 256, height: 256, bits: 16, channels: 3, color: 2, interlace: 0),
+                pixels: Data((0..<256 * 256 * 6).map { UInt8(($0 * 7 + variant * 31) % 251) }), colorChunks: []).encoded()
+            let target = try NativePNG(header: .init(width: 256, height: 256, bits: 16, channels: 1, color: 0, interlace: 0),
+                pixels: Data((0..<256 * 256 * 2).map { UInt8(($0 * 3 + variant * 13) % 251) }), colorChunks: []).encoded()
+            try input.write(to: diffuse); try target.write(to: height)
+            sourceBytes[diffuse] = input; sourceBytes[height] = target
+            let responseText = try await NativeMaterialDatasetService.run(arguments: ["add-material",
+                "--dataset", original.path, "--name", name, "--input", diffuse.path, "--height", height.path], onEvent: { _ in })
+            let response = try XCTUnwrap(responseText)
+            if selectedMaterial == nil {
+                selectedMaterial = try XCTUnwrap(WorkbenchResult.decode(WorkbenchDataset.self, output: response).materials.first?.materialId)
+            }
+        }
+        let prepared = try NativeMaterialDatasetService.prepareTrainingDataset(datasetURL: original, size: 256,
+            target: "height", material: XCTUnwrap(selectedMaterial), automaticValidation: false)
+        let preparedIndex = try NativeMaterialTransfer.object(Data(contentsOf: prepared.appendingPathComponent("dataset.json")))
+        XCTAssertNil(preparedIndex["name"], "This regression covers a prepared manifest with no copied display name")
+        let descriptors = try NativeMaterialDatasetService.trainingSamples(datasetURL: prepared, size: 256, target: "height")
+        XCTAssertEqual(descriptors.filter { $0.split == "train" }.count, 1)
+        XCTAssertEqual(Set(descriptors.compactMap(\.materialName)), ["Pine Bark"])
+        XCTAssertEqual(try NativePNG.inspect(XCTUnwrap(descriptors.first?.targetURL)).bits, 16)
+        let result = try NativeMaterialTransfer.object(Data(try await NativeMaterialTrainer.run(arguments: ["train",
+            "--dataset", prepared.path, "--output", root.appendingPathComponent("trained").path,
+            "--model-family", "compact-scalar", "--target", "height", "--size", "256", "--compact-width", "16",
+            "--model-name", "Pine Bark Surface Height", "--updates-per-map", "1", "--max-minutes", "1",
+            "--randomize-crops", "never", "--crop-selection-prepared"]).utf8))
+        XCTAssertEqual(result["completed_updates"] as? Int, 1)
+        let checkpoint = URL(fileURLWithPath: try XCTUnwrap(result["checkpoint_path"] as? String))
+        let (configuration, _) = try NativeMaterialPackage.verify(checkpoint.deletingLastPathComponent())
+        XCTAssertEqual(configuration["texture_pipeline"] as? String, "MatterLoom")
+        XCTAssertEqual(configuration["training_dataset_name"] as? String, "Artist Bark Collection")
+        XCTAssertEqual(configuration["training_subjects"] as? [String], ["Pine Bark"])
+        XCTAssertEqual(configuration["model_name"] as? String, "Pine Bark Surface Height")
+        let readme = try String(contentsOf: checkpoint.deletingLastPathComponent().appendingPathComponent("README.md"), encoding: .utf8)
+        XCTAssertTrue(readme.contains("MatterLoom texture pipeline"))
+        XCTAssertTrue(readme.contains("surface height / displacement specialist for Pine Bark"))
+        for (url, bytes) in sourceBytes { XCTAssertEqual(try Data(contentsOf: url), bytes) }
+    }
+
     /// Opt-in short throughput probe. It deliberately does not assess trained quality.
     func testCompact512TrainingBenchmark() async throws {
         try await benchmark(size: 512)

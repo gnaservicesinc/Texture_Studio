@@ -3,6 +3,100 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeMaterialImportDiagnosticsTests: XCTestCase {
+    func testFabricSubstanceAndPineBarkNamingStylesImportEveryResolutionWithoutChangingSources() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Sources")
+        _ = try await create(dataset)
+        var originals: [URL: Data] = [:]
+        for (family, labels, roles) in [
+            ("FabricSubstance003_COMPILED", ["515", "1k", "2k", "4k"], ["baseColor", "height", "normal", "roughness"]),
+            ("pine_bark", ["1k", "2k", "4k"], ["diff", "disp", "nor_gl", "rough"])
+        ] {
+            let folder = sources.appendingPathComponent(family)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            for (offset, label) in labels.enumerated() {
+                // Different actual dimensions separate sets; a misleading 515
+                // filename must still pair maps by their actual 512 pixels.
+                let dimension = label == "515" ? 512 : 256 + offset * 2
+                for (role, bits, channels) in [(roles[0], 8, 3), (roles[1], 16, 1), (roles[2], 8, 3), (roles[3], 8, 1)] {
+                    let path = try writeMap(family + "_" + role + "_" + label + ".png", folder: folder,
+                                            width: dimension, height: dimension, bits: bits, channels: channels)
+                    originals[path] = try Data(contentsOf: path)
+                }
+            }
+        }
+        let preview = try await scan(dataset, sources: sources, root: root)
+        XCTAssertEqual(preview["source_set_count"] as? Int, 7)
+        XCTAssertEqual(preview["ignored_file_count"] as? Int, 0)
+        XCTAssertEqual(preview["warnings"] as? [String], [])
+        let plan = try object(root.appendingPathComponent("preview.json")), materials = try XCTUnwrap(plan["materials"] as? [[String: Any]])
+        XCTAssertEqual(materials.count, 7)
+        let unusual = try XCTUnwrap(materials.first { $0["material_id"] as? String == "fabricsubstance003_compiled_515" })
+        XCTAssertEqual(unusual["common_pixel_dimensions"] as? [Int], [512, 512])
+        for material in materials {
+            let maps = try XCTUnwrap(material["maps"] as? [String: [String: Any]])
+            XCTAssertEqual(Set(maps.keys), ["input", "height", "normal", "roughness"])
+            for source in maps.values {
+                let path = URL(fileURLWithPath: try XCTUnwrap(source["path"] as? String))
+                XCTAssertEqual(source["file_sha256"] as? String, NativeMaterialTrainer.checksum(try XCTUnwrap(originals[path])))
+                XCTAssertNil(source["provider"], "A name alone must not claim verified provider provenance")
+            }
+        }
+        let imported = try await command(["import-folder", "--dataset", dataset.path, "--folder", sources.path,
+                                           "--plan", root.appendingPathComponent("preview.json").path,
+                                           "--expected-plan-sha256", try XCTUnwrap(preview["plan_sha256"] as? String),
+                                           "--expected-index-sha256", try XCTUnwrap(preview["index_sha256"] as? String), "--skip-source-recovery"])
+        XCTAssertEqual(imported["added_material_count"] as? Int, 7)
+        for (path, bytes) in originals { XCTAssertEqual(try Data(contentsOf: path), bytes) }
+    }
+
+    func testCommonStandaloneAliasesKeepDirectXConventionAndRejectConflictingTargetAliases() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Sources")
+        _ = try await create(dataset)
+        let complete = sources.appendingPathComponent("Author supplied maps"), ambiguous = sources.appendingPathComponent("Conflicting maps")
+        for folder in [complete, ambiguous] { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
+        for (name, bits, channels) in [("dif", 8, 3), ("displ", 16, 1), ("normal_directx", 8, 3), ("roughness_map", 8, 1)] {
+            _ = try writeMap(name + ".png", folder: complete, width: 260, height: 262, bits: bits, channels: channels)
+        }
+        _ = try writeMap("base_colour.png", folder: ambiguous, width: 260, height: 262, bits: 8, channels: 3)
+        _ = try writeMap("displacement_map.png", folder: ambiguous, width: 260, height: 262, bits: 16, channels: 1)
+        _ = try writeMap("height.png", folder: ambiguous, width: 260, height: 262, bits: 16, channels: 1)
+        let preview = try await scan(dataset, sources: sources, root: root)
+        XCTAssertEqual(preview["source_set_count"] as? Int, 1)
+        let warnings = try XCTUnwrap(preview["warnings"] as? [String])
+        XCTAssertTrue(warnings.contains { $0.contains("Conflicting maps") && $0.contains("multiple height maps need explicit selection") })
+        let plan = try object(root.appendingPathComponent("preview.json")), material = try XCTUnwrap((plan["materials"] as? [[String: Any]])?.first)
+        let maps = try XCTUnwrap(material["maps"] as? [String: [String: Any]])
+        XCTAssertEqual(Set(maps.keys), ["input", "height", "normal", "roughness"])
+        XCTAssertEqual(maps["normal"]?["suffix"] as? String, "nor_dx")
+    }
+
+    func testDeveloperReportedFabricAndBarkFoldersPreviewOfflineWithOriginalHashesPreserved() async throws {
+        guard ProcessInfo.processInfo.environment["TEXTURE_STUDIO_IMPORT_SYNONYMS_PROOF"] == "1" else {
+            throw XCTSkip("Set TEXTURE_STUDIO_IMPORT_SYNONYMS_PROOF=1 to inspect the user's reported original folders without changing them.")
+        }
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        var reports: [[String: Any]] = []
+        for (offset, name, expected) in [(0, "FabricSubstance003", 4), (1, "Pine Bark", 3), (2, "pine_bark", 3)] {
+            let source = URL(fileURLWithPath: "/opt/ipde/sources_mats/" + name), dataset = root.appendingPathComponent("Dataset-\(offset)")
+            let paths = try FileManager.default.contentsOfDirectory(at: source, includingPropertiesForKeys: nil).filter { $0.pathExtension.lowercased() == "png" }
+            let hashes = try Dictionary(uniqueKeysWithValues: paths.map { ($0, NativeMaterialTrainer.checksum(try Data(contentsOf: $0))) })
+            _ = try await create(dataset)
+            let preview = try await scan(dataset, sources: source, root: root)
+            XCTAssertEqual(preview["source_set_count"] as? Int, expected, source.path)
+            XCTAssertEqual(preview["warnings"] as? [String], [], source.path)
+            XCTAssertEqual(preview["ignored_file_count"] as? Int, 0, source.path)
+            let plan = try object(root.appendingPathComponent("preview.json")), materials = try XCTUnwrap(plan["materials"] as? [[String: Any]])
+            for material in materials { XCTAssertEqual(Set((material["maps"] as? [String: [String: Any]] ?? [:]).keys), ["input", "height", "normal", "roughness"]) }
+            for (path, hash) in hashes { XCTAssertEqual(NativeMaterialTrainer.checksum(try Data(contentsOf: path)), hash, path.path) }
+            reports.append(["folder": source.path, "source_set_count": expected, "original_sha256_checked_count": hashes.count,
+                            "warnings": preview["warnings"] ?? [], "sets": materials.map { ["material_id": $0["material_id"] ?? "", "dimensions": $0["common_pixel_dimensions"] ?? []] }])
+        }
+        try JSONSerialization.data(withJSONObject: ["offline_preview": true, "source_bytes_unchanged": true, "folders": reports], options: [.prettyPrinted, .sortedKeys])
+            .write(to: URL(fileURLWithPath: "/tmp/texture-import-synonyms-proof.json"))
+    }
+
     func testRecognizedSurfaceMapsProduceOneGroupedMissingDiffuseDiagnostic() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Sources")
