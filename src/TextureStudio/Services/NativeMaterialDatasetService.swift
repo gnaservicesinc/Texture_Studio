@@ -1592,7 +1592,7 @@ enum NativeMaterialDatasetService {
         var seen = Set<String>()
         return candidates.filter { seen.insert(($0["path"] as? String ?? "") + "|" + ($0["file_sha256"] as? String ?? "")).inserted }
     }
-    private static func sourceBinding(_ sample: Object) -> String {
+    static func sourceBinding(_ sample: [String: Any]) -> String {
         if sample["native_size_preparation"] != nil, let binding = sample["source_binding_sha256"] as? String { return binding }
         func identity(_ source: Object) -> Any {
             if let hash = source["file_sha256"] as? String, hash.count == 64 { return hash }
@@ -3563,7 +3563,9 @@ enum NativeMaterialDatasetService {
         }
     }
     private static func readRecords(_ root: URL, index: Object) throws -> [Record] {
-        guard index["schema_version"] as? Int == 2, let entries = index["samples"] as? [Object] else { throw StudioError("Expected a schema-2 material dataset.") }
+        guard index["schema_version"] as? Int == 2, let entries = index["samples"] as? [Object] else {
+            throw StudioError("Expected a schema-2 material dataset at \(root.path); found schema \(index["schema_version"] ?? "missing") with \(index["samples"] is [Object] ? "valid" : "missing or invalid") sample entries.")
+        }
         var seen = Set<String>()
         return try entries.map { entry in
             guard let directory = entry["path"] as? String else { throw StudioError("Dataset sample path is missing.") }

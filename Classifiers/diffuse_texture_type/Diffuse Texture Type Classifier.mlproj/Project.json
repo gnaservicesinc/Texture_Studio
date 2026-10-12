@@ -1,0 +1,29 @@
+{
+  "activityEntities" : [
+    "projectCreated",
+    [
+      {
+        "createdDate" : "2026-10-11T22:28:34Z",
+        "event" : "projectCreated",
+        "id" : "117E2338-524F-4E52-B658-8B65416B267D",
+        "subtitle" : "Diffuse Texture Type Classifier",
+        "title" : "Project Created"
+      }
+    ]
+  ],
+  "authorName" : "Andrew Smith",
+  "createdDate" : "2026-10-11T22:28:33Z",
+  "description" : "Used to classify the surface surface type for model routing.",
+  "id" : "14EFC371-D6D3-439F-9FD9-59BB5C47ED49",
+  "license" : "GPLv3",
+  "location" : "",
+  "modifiedDate" : "2026-10-11T22:28:33Z",
+  "projectName" : "Diffuse Texture Type Classifier",
+  "settingsEntity" : {
+    "snapshotOnExtendTraining" : true,
+    "snapshotOnResumeTraining" : false
+  },
+  "taskType" : "imageClassifier",
+  "title" : "Image Classification",
+  "version" : "1.1"
+}

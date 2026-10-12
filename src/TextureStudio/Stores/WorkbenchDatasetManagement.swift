@@ -79,6 +79,7 @@ extension WorkbenchStore {
                 self.classifierUseSourceFolder = false
                 self.specialistTrainingContext = nil
                 self.useOpenSourcesInModelWorkshop()
+                try await self.alignModelWorkshopWorkspace(with: self.modelWorkshopSourcePath)
             }
             self.saveDatasetLocation(result)
             self.datasetPreparationSummary = ""

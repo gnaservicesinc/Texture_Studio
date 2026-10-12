@@ -212,6 +212,88 @@ import XCTest
         XCTAssertEqual(store.classifierSourceMinimumSize, 4096)
     }
 
+    func testOpeningUnrelatedSourceAutomaticallySelectsAndReusesItsOwnWorkspace() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let first = fixture.root.appendingPathComponent("First sources"), second = fixture.root.appendingPathComponent("Second sources")
+        for source in [first, second] { try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true) }
+        let originalWorkspace = fixture.root.appendingPathComponent("Original model workspace")
+        try writeModelWorkspace(originalWorkspace, source: first)
+        let originalRegistry = try Data(contentsOf: originalWorkspace.appendingPathComponent("specialists.json"))
+        var calls: [[String]] = []
+        let store = fixture.store { args, _ in
+            calls.append(args)
+            if args.first == "refresh-specialists" {
+                let workspace = URL(fileURLWithPath: try XCTUnwrap(self.value("--workspace", in: args)))
+                let source = URL(fileURLWithPath: try XCTUnwrap(self.value("--dataset", in: args)))
+                XCTAssertTrue(try NativeMaterialSpecialistService.canUseWorkspace(workspaceURL: workspace, datasetURL: source))
+                return try self.modelWorkspaceDocument(workspace, source: source)
+            }
+            return Self.originalFolder(path: try XCTUnwrap(self.value("--dataset", in: args)))
+        }
+        store.specialistWorkspacePath = originalWorkspace.path
+        store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: Self.originalFolder(path: first.path))
+        await store.loadSpecialistRegistry()
+        XCTAssertEqual(store.selectedSpecialist?.name, "Wood")
+        store.openDataset(second)
+        try await wait(store)
+        XCTAssertNil(store.error)
+        let secondWorkspace = store.specialistWorkspacePath
+        XCTAssertNotEqual(secondWorkspace, originalWorkspace.path)
+        XCTAssertNil(store.specialistRegistry, "Categories from another source must disappear immediately after opening")
+        XCTAssertNil(store.selectedSpecialistID)
+        XCTAssertEqual(calls.map { $0[0] }, ["dataset"], "Opening selects metadata without classification or model inspection")
+        store.refreshSpecialists()
+        try await wait(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(value("--workspace", in: try XCTUnwrap(calls.last)), secondWorkspace)
+        XCTAssertEqual(value("--dataset", in: try XCTUnwrap(calls.last)), second.path)
+        try writeModelWorkspace(URL(fileURLWithPath: secondWorkspace), source: second)
+        store.openDataset(first)
+        try await wait(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.specialistWorkspacePath, originalWorkspace.path)
+        XCTAssertEqual(store.selectedSpecialist?.name, "Wood")
+        store.openDataset(second)
+        try await wait(store)
+        XCTAssertEqual(store.specialistWorkspacePath, secondWorkspace)
+        XCTAssertEqual(try Data(contentsOf: originalWorkspace.appendingPathComponent("specialists.json")), originalRegistry,
+                       "Switching source roots must preserve the other workspace")
+    }
+
+    func testOpeningBareFolderKeepsLegacyWorkspaceForTheSameOriginalCorpus() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let originals = fixture.root.appendingPathComponent("Original images"), legacy = fixture.root.appendingPathComponent("Legacy dataset")
+        try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+        let image = originals.appendingPathComponent("wood_input.png")
+        try Data("Original pixel bytes are never read by workspace selection".utf8).write(to: image)
+        let sample = legacy.appendingPathComponent("samples/wood")
+        try FileManager.default.createDirectory(at: sample, withIntermediateDirectories: true)
+        let sha = String(repeating: "a", count: 64)
+        let source: [String: Any] = ["path": image.path, "width": 256, "height": 256, "file_sha256": sha]
+        let details: [String: Any] = ["storage": "source_reference", "source": source, "sample_sha256": sha]
+        let record: [String: Any] = ["material_id": "wood", "sample_pixel_dimensions": [256, 256],
+            "maps": ["input": image.path], "map_metadata": ["input": details]]
+        try JSONSerialization.data(withJSONObject: record).write(to: sample.appendingPathComponent("sample.json"))
+        try JSONSerialization.data(withJSONObject: ["schema_version": 2, "storage_policy": "original-source-references-v1",
+            "samples": [["path": "samples/wood"]]]).write(to: legacy.appendingPathComponent("dataset.json"))
+        let workspace = fixture.root.appendingPathComponent("Existing models")
+        try writeModelWorkspace(workspace, source: legacy)
+        let before = try Data(contentsOf: workspace.appendingPathComponent("specialists.json"))
+        var calls: [[String]] = []
+        let store = fixture.store { args, _ in calls.append(args); return Self.originalFolder(path: originals.path) }
+        store.specialistWorkspacePath = workspace.path
+        store.openDataset(originals)
+        try await wait(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.specialistWorkspacePath, workspace.path)
+        XCTAssertEqual(store.specialistRegistry?.specialists.map(\.name), ["Wood", "Bark"])
+        XCTAssertEqual(store.modelWorkshopSourcePath, originals.path)
+        XCTAssertEqual(calls.map { $0[0] }, ["dataset"])
+        XCTAssertEqual(try Data(contentsOf: workspace.appendingPathComponent("specialists.json")), before,
+                       "Opening only selects the compatible workspace; explicit refresh performs migration")
+        XCTAssertEqual(try Data(contentsOf: image), Data("Original pixel bytes are never read by workspace selection".utf8))
+    }
+
     func testModelWorkshopShowsImageTagsOnceAcrossSubtypeCategories() throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(Self.registry.utf8)) as? [String: Any])
@@ -276,6 +358,56 @@ import XCTest
         XCTAssertEqual(store.specialistTrainingContext?.membershipSHA256, "normal-members")
     }
 
+    func testCategoryTrainerUsesOriginal2048GridInsteadOfLegacy1024Default() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        var calls: [[String]] = []
+        let store = fixture.store { args, _ in
+            calls.append(args)
+            if args.first == "capabilities" { return "{\"training_sizes\":[256,512,1024,2048]}" }
+            if self.value("--dataset", in: args) == "/original/main" { return Self.originalFolder(path: "/original/main") }
+            return """
+                {"dataset_path":"/specialist/wood","index_sha256":"category-sha","training_size":1024,
+                 "review_size":2048,"supported_training_sizes":[1024,2048],
+                 "materials":[{"material_id":"wood_2k","samples":[{"sample_id":"wood_2k_full","status":"unreviewed",
+                   "split":"train","width":2048,"height":2048,"available_targets":["height"],
+                   "maps":{"input":{"path":"/sources/wood_diff_2k.png","width":2048,"height":2048},
+                           "height":{"path":"/sources/wood_disp_2k.png","width":2048,"height":2048,"source_bits":16}}}]}],
+                 "original_materials":[{"material_id":"wood_1k","samples":[{"sample_id":"wood_1k_full","status":"unreviewed",
+                   "split":"original","width":1024,"height":1024,"maps":{}}]}]}
+                """
+        }
+        store.specialistRegistry = try WorkbenchResult.decode(WorkbenchSpecialistRegistry.self, output: Self.registry)
+        store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: Self.originalFolder(path: "/original/main"))
+        store.specialistTarget = "height"
+        store.openSpecialistTrainer()
+        try await wait(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(calls.map { $0[0] }, ["capabilities", "dataset"])
+        XCTAssertEqual(value("--review-size", in: try XCTUnwrap(calls.last)), "2048")
+        XCTAssertEqual(store.training.size, 2048)
+        XCTAssertEqual(store.datasetResolution, 2048)
+        XCTAssertEqual(store.dataset?.reviewSize, 2048)
+        XCTAssertFalse(store.samples.isEmpty)
+        XCTAssertTrue(store.samples.allSatisfy { $0.width == 2048 && $0.height == 2048 })
+        XCTAssertFalse(store.samples.contains { $0.width == 1024 || $0.height == 1024 })
+        XCTAssertEqual(store.dataset?.originalSamples.first?.width, 1024, "Originals remain visible separately from the selected training projection")
+        XCTAssertNil(store.trainingConfigurationIssue)
+
+        calls = []
+        store.specialistTrainingContext = nil
+        store.dataset?.trainingSize = 1024
+        store.training.size = 1024
+        store.openSpecialistTrainer()
+        try await wait(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(calls.map { $0[0] }, ["dataset", "capabilities", "dataset"],
+                       "A category comparison restores the original source grid before another training handoff")
+        XCTAssertEqual(value("--dataset", in: try XCTUnwrap(calls.first)), "/original/main")
+        XCTAssertEqual(value("--review-size", in: try XCTUnwrap(calls.last)), "2048")
+        XCTAssertEqual(store.training.size, 2048)
+        XCTAssertTrue(store.samples.allSatisfy { $0.width == 2048 && $0.height == 2048 })
+    }
+
     func testMissingPairedMapStopsSetupAndNextSpecialistSkipsFinishedModels() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
@@ -320,6 +452,38 @@ import XCTest
 
     private func value(_ flag: String, in args: [String]) -> String? {
         args.firstIndex(of: flag).flatMap { args.indices.contains($0 + 1) ? args[$0 + 1] : nil }
+    }
+    private func modelWorkspaceDocument(_ workspace: URL, source: URL) throws -> String {
+        var document = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(Self.registry.utf8)) as? [String: Any])
+        document["schema"] = NativeMaterialSpecialistService.schema
+        document["workspace_path"] = workspace.path
+        document["source_dataset_path"] = source.path
+        document["classifier_only_assets"] = []
+        var specialists = try XCTUnwrap(document["specialists"] as? [[String: Any]])
+        for index in specialists.indices {
+            specialists[index]["dataset_path"] = workspace.appendingPathComponent("datasets/" + (specialists[index]["id"] as! String)).path
+            specialists[index]["models"] = []
+            specialists[index]["assignments"] = []
+            specialists[index]["automatically_managed_material_ids"] = []
+            specialists[index]["automatically_removed_material_ids"] = []
+        }
+        document["specialists"] = specialists
+        return String(decoding: try JSONSerialization.data(withJSONObject: document), as: UTF8.self)
+    }
+    private func writeModelWorkspace(_ workspace: URL, source: URL) throws {
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        let document = try modelWorkspaceDocument(workspace, source: source)
+        try Data(document.utf8).write(to: workspace.appendingPathComponent("specialists.json"))
+        try JSONSerialization.data(withJSONObject: ["schema": NativeMaterialSpecialistService.schema,
+            "workspace_path": workspace.path, "source_dataset_path": source.path]).write(to: workspace.appendingPathComponent(".specialist-workspace.json"))
+        let registry = try WorkbenchResult.decode(WorkbenchSpecialistRegistry.self, output: document)
+        for category in registry.specialists {
+            let dataset = URL(fileURLWithPath: category.datasetPath)
+            try FileManager.default.createDirectory(at: dataset, withIntermediateDirectories: true)
+            try Data("{}".utf8).write(to: dataset.appendingPathComponent("dataset.json"))
+            try JSONSerialization.data(withJSONObject: ["schema": NativeMaterialSpecialistService.schema,
+                "workspace_path": workspace.path, "specialist_id": category.id]).write(to: dataset.appendingPathComponent(".specialist-binding.json"))
+        }
     }
     private func wait(_ store: WorkbenchStore) async throws {
         for _ in 0..<500 where store.isBusy { try await Task.sleep(for: .milliseconds(10)) }

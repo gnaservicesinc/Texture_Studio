@@ -33,7 +33,7 @@ enum NativeMaterialSpecialistService {
     struct Registry: Codable, Sendable {
         let schema: String
         let workspacePath: String
-        let sourceDatasetPath: String
+        var sourceDatasetPath: String
         var classifierDatasetPath: String?
         var sourceFolderPath: String? = nil
         var classifierPath: String
@@ -221,10 +221,11 @@ enum NativeMaterialSpecialistService {
         }
         try claimWorkspace(workspace, source: dataset)
         let lock = try workspaceLock(workspace); defer { flock(lock, LOCK_UN); close(lock) }
+        try migrateWorkspaceSourceIfNeeded(workspace, source: dataset)
         var registry: Registry
         if FileManager.default.fileExists(atPath: workspace.appendingPathComponent(registryFilename).path) {
             registry = try load(workspaceURL: workspace)
-            guard datasetRoot(URL(fileURLWithPath: registry.sourceDatasetPath)) == dataset else {
+            guard datasetRoot(URL(fileURLWithPath: registry.sourceDatasetPath)).path == dataset.path else {
                 throw StudioError("This specialist workspace belongs to another original dataset. Choose a separate workspace.")
             }
         } else {
@@ -239,7 +240,7 @@ enum NativeMaterialSpecialistService {
         var materials = try readMaterials(dataset)
         var warnings: [String] = []
         let sourceFolder = sourceFolderURL.map(canonical) ?? registry.sourceFolderPath.map { canonical(URL(fileURLWithPath: $0)) }
-        if let folder = sourceFolder, folder != dataset {
+        if let folder = sourceFolder, folder.path != dataset.path {
             let inventory = workspace.appendingPathComponent(".source-inventory-" + UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: inventory) }
             do {
@@ -536,6 +537,9 @@ enum NativeMaterialSpecialistService {
         var current = try readMaterials(root, includeExcluded: true)
         var automaticRemovals = Set(specialist.automaticallyRemovedMaterialIds)
         let desiredIDs = Set(desired.map(\.id)), priorIDs = Set(specialist.automaticallyManagedMaterialIds)
+        let manualIDs = Set(current.map(\.id)).subtracting(priorIDs)
+        try refreshManagedSourceReferences(root, current: current, desired: desired, managedIDs: priorIDs, warnings: &warnings)
+        current = try readMaterials(root, includeExcluded: true)
         for material in current where priorIDs.contains(material.id) && !desiredIDs.contains(material.id) {
             let status = material.sample["status"] as? String ?? "unreviewed"
             if status == "unreviewed", (material.sample["curation_note"] as? String ?? "").isEmpty {
@@ -573,8 +577,93 @@ enum NativeMaterialSpecialistService {
         let final = try readMaterials(root, includeExcluded: true)
         specialist.materialIds = final.map(\.id).sorted(); specialist.familyIds = Array(Set(final.map(\.family))).sorted()
         specialist.targets = targetStatuses(final, models: specialist.models)
-        specialist.automaticallyManagedMaterialIds = Array(priorIDs.union(desiredIDs)).sorted()
+        specialist.automaticallyManagedMaterialIds = Array(priorIDs.union(desiredIDs.subtracting(manualIDs))).sorted()
         specialist.automaticallyRemovedMaterialIds = automaticRemovals.sorted()
+    }
+
+    /// A folder rename changes authoritative paths while retaining a material
+    /// ID. Refresh only app-managed references; reviews and manual additions
+    /// remain owned by the user, and pending new proofs stay pending.
+    private static func refreshManagedSourceReferences(_ root: URL, current: [Material], desired: [Material],
+                                                        managedIDs: Set<String>, warnings: inout [String]) throws {
+        func locations(_ sample: Object) -> [String] {
+            let maps = sample["map_metadata"] as? [String: Object] ?? [:]
+            var paths = maps.keys.sorted().map { role in
+                role + "|" + (((maps[role]?["source"] as? Object)?["path"] as? String).map { canonical(URL(fileURLWithPath: $0)).path } ?? "")
+            }
+            paths += (sample["input_variants"] as? [Object] ?? []).compactMap { ($0["source"] as? Object)?["path"] as? String }
+                .map { "color|" + canonical(URL(fileURLWithPath: $0)).path }.sorted()
+            return paths
+        }
+        let wanted = Dictionary(desired.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let reviewURL = root.appendingPathComponent(".material-size-reviews.json")
+        var reviews = FileManager.default.fileExists(atPath: reviewURL.path) ? try object(reviewURL) : [:]
+        var index = try object(root.appendingPathComponent("dataset.json")), updates: [(URL, Object)] = []
+        var changedReviews = false, changedIndex = false
+        for material in current where managedIDs.contains(material.id) {
+            guard let replacement = wanted[material.id], locations(material.sample) != locations(replacement.sample),
+                  let relative = material.entry["path"] as? String else { continue }
+            try Task.checkCancellation()
+            var sample = material.sample
+            for key in ["maps", "map_metadata", "input_variants", "source_directory", "source_pixel_dimensions", "sample_pixel_dimensions",
+                        "crop_rectangle_top_left_xywh", "source_resolution_label", "source_discovery_warnings", "ignored_source_files",
+                        "available_targets", "source_verification", "source_precision_verified", "crop_values_verified", "source_verification_issues"] {
+                sample[key] = replacement.sample[key]
+            }
+            sample.removeValue(forKey: "source_files"); sample.removeValue(forKey: "source_binding_sha256")
+            if sample["source_verification"] as? String == "header_inspected" {
+                index["managed_source_folders"] = true; changedIndex = true
+            }
+            let oldBinding = NativeMaterialDatasetService.sourceBinding(material.sample)
+            let newBinding = NativeMaterialDatasetService.sourceBinding(sample)
+            for key in reviews.keys {
+                let parts = key.split(separator: ":", maxSplits: 1)
+                guard parts.count == 2, parts[1].hasPrefix(material.id + "_"),
+                      var review = reviews[key] as? Object, review["source_binding_sha256"] as? String == oldBinding else { continue }
+                review["source_binding_sha256"] = newBinding; reviews[key] = review; changedReviews = true
+            }
+            if let old = material.sample["source_directory"] as? String, let new = sample["source_directory"] as? String,
+               canonical(URL(fileURLWithPath: old)).path != canonical(URL(fileURLWithPath: new)).path,
+               var settings = index["validation"] as? Object, var flags = settings["folders"] as? [String: Bool],
+               let flag = flags.removeValue(forKey: canonical(URL(fileURLWithPath: old)).path) {
+                let newPath = canonical(URL(fileURLWithPath: new)).path
+                if flags[newPath] == nil { flags[newPath] = flag }
+                settings["folders"] = flags; index["validation"] = settings; changedIndex = true
+            }
+            if var catalog = index["source_inventory"] as? [Object] {
+                let oldSources = material.sample["map_metadata"] as? [String: Object] ?? [:]
+                let newSources = sample["map_metadata"] as? [String: Object] ?? [:]
+                for offset in catalog.indices where catalog[offset]["material_id"] as? String == material.id {
+                    for role in oldSources.keys {
+                        let oldPath = (oldSources[role]?["source"] as? Object)?["path"] as? String
+                        guard catalog[offset]["path"] as? String == oldPath,
+                              let source = newSources[role]?["source"] as? Object, let path = source["path"] as? String else { continue }
+                        catalog[offset]["path"] = path; catalog[offset]["id"] = hash(Data(path.utf8))
+                        catalog[offset]["filename"] = URL(fileURLWithPath: path).lastPathComponent
+                        catalog[offset]["directory"] = URL(fileURLWithPath: path).deletingLastPathComponent().path
+                        catalog[offset]["source_verification"] = source["source_verification"] ?? "header_inspected"
+                        catalog[offset]["state"] = "paired"; catalog[offset].removeValue(forKey: "issue")
+                    }
+                }
+                index["source_inventory"] = catalog; changedIndex = true
+            }
+            let folder = canonical(root.appendingPathComponent(relative))
+            guard folder.path.hasPrefix(root.path + "/") else { throw StudioError("Original sample metadata escapes its specialist dataset.") }
+            updates.append((folder.appendingPathComponent("sample.json"), sample))
+        }
+        guard !updates.isEmpty else { return }
+        if changedReviews { updates.append((reviewURL, reviews)) }
+        if changedIndex { updates.append((root.appendingPathComponent("dataset.json"), index)) }
+        let previous = try updates.map { (url, _) in (url, FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : nil) }
+        do {
+            for (url, value) in updates { try Task.checkCancellation(); try write(value, to: url) }
+        } catch {
+            for (url, data) in previous {
+                if let data { try? data.write(to: url, options: .atomic) }
+                else { try? FileManager.default.removeItem(at: url) }
+            }
+            throw error
+        }
     }
 
     /// The exact input variants and target hashes bind completion and routing to
@@ -753,6 +842,93 @@ enum NativeMaterialSpecialistService {
         let value = normalized(text).replacingOccurrences(of: " ", with: "_")
         return value.isEmpty ? "specialist" : value
     }
+    /// Metadata-only eligibility lets the browser retain an existing workspace
+    /// when the same originals move from a legacy reference dataset to a folder.
+    /// It never creates folders, writes markers or reads compressed image bytes.
+    static func canUseWorkspace(workspaceURL: URL, datasetURL: URL) throws -> Bool {
+        let root = canonical(workspaceURL), source = datasetRoot(datasetURL)
+        var directory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &directory) else { return true }
+        guard directory.boolValue, (try root.resourceValues(forKeys: [.isSymbolicLinkKey])).isSymbolicLink != true else { return false }
+        let marker = root.appendingPathComponent(".specialist-workspace.json")
+        guard FileManager.default.fileExists(atPath: marker.path) else {
+            return try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).isEmpty
+        }
+        let value = try object(marker)
+        guard value["schema"] as? String == schema,
+              let workspacePath = value["workspace_path"] as? String, canonical(URL(fileURLWithPath: workspacePath)).path == root.path,
+              let oldPath = value["source_dataset_path"] as? String, oldPath.hasPrefix("/") else { return false }
+        let oldSource = datasetRoot(URL(fileURLWithPath: oldPath))
+        let registryURL = root.appendingPathComponent(registryFilename)
+        let registry = FileManager.default.fileExists(atPath: registryURL.path) ? try load(workspaceURL: root) : nil
+        if let registry, datasetRoot(URL(fileURLWithPath: registry.sourceDatasetPath)).path != oldSource.path { return false }
+        if oldSource.path == source.path { return true }
+        guard let registry else { return false }
+        try validateMigrationBindings(registry, workspace: root)
+        return try legacyDatasetUsesFolder(oldSource, folder: source)
+    }
+    private static func legacyDatasetUsesFolder(_ legacy: URL, folder: URL) throws -> Bool {
+        var directory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: legacy.appendingPathComponent("dataset.json").path),
+              !FileManager.default.fileExists(atPath: folder.appendingPathComponent("dataset.json").path),
+              FileManager.default.fileExists(atPath: folder.path, isDirectory: &directory), directory.boolValue else { return false }
+        let records = try readMaterials(legacy, includeExcluded: true)
+        guard !records.isEmpty else { return false }
+        let prefix = folder.path + "/"
+        for record in records {
+            let details = Array((record.sample["map_metadata"] as? [String: Object] ?? [:]).values)
+                + (record.sample["input_variants"] as? [Object] ?? [])
+            guard !details.isEmpty else { return false }
+            for map in details {
+                guard map["storage"] as? String == "source_reference",
+                      let path = (map["source"] as? Object)?["path"] as? String, path.hasPrefix("/") else { return false }
+                let file = canonical(URL(fileURLWithPath: path))
+                guard file.path.hasPrefix(prefix), FileManager.default.fileExists(atPath: file.path),
+                      try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else { return false }
+            }
+        }
+        return true
+    }
+    private static func validateMigrationBindings(_ registry: Registry, workspace: URL) throws {
+        for specialist in registry.specialists {
+            let dataset = canonical(URL(fileURLWithPath: specialist.datasetPath))
+            let bindingURL = dataset.appendingPathComponent(".specialist-binding.json")
+            guard FileManager.default.fileExists(atPath: dataset.appendingPathComponent("dataset.json").path),
+                  FileManager.default.fileExists(atPath: bindingURL.path) else {
+                throw StudioError("A specialist dataset is missing its workspace binding; it was preserved.")
+            }
+            let binding = try object(bindingURL)
+            guard binding["schema"] as? String == schema, binding["specialist_id"] as? String == specialist.id,
+                  let path = binding["workspace_path"] as? String, canonical(URL(fileURLWithPath: path)).path == workspace.path else {
+                throw StudioError("An unrelated dataset occupies the specialist folder; it was preserved.")
+            }
+        }
+    }
+    private static func migrateWorkspaceSourceIfNeeded(_ root: URL, source: URL) throws {
+        let markerURL = root.appendingPathComponent(".specialist-workspace.json")
+        let marker = try object(markerURL)
+        guard let path = marker["source_dataset_path"] as? String else { throw StudioError("The specialist workspace has no source dataset binding.") }
+        guard datasetRoot(URL(fileURLWithPath: path)).path != source.path else { return }
+        guard try canUseWorkspace(workspaceURL: root, datasetURL: source) else {
+            throw StudioError("The specialist workspace belongs to another source dataset. Choose a separate workspace.")
+        }
+        let registryURL = root.appendingPathComponent(registryFilename)
+        let priorRegistry = try Data(contentsOf: registryURL), priorMarker = try Data(contentsOf: markerURL)
+        var registry = try load(workspaceURL: root), revisedMarker = marker
+        registry.sourceDatasetPath = source.path; revisedMarker["source_dataset_path"] = source.path
+        // Rebind only ownership metadata. Existing category datasets, reviews,
+        // classifier curation paths and completed model histories stay intact.
+        do {
+            try Task.checkCancellation()
+            try save(registry, workspace: root)
+            try Task.checkCancellation()
+            try write(revisedMarker, to: markerURL)
+        } catch {
+            try? priorRegistry.write(to: registryURL, options: .atomic)
+            try? priorMarker.write(to: markerURL, options: .atomic)
+            throw error
+        }
+    }
     private static func claimWorkspace(_ root: URL, source: URL) throws {
         let marker = root.appendingPathComponent(".specialist-workspace.json")
         if FileManager.default.fileExists(atPath: root.path) {
@@ -765,9 +941,7 @@ enum NativeMaterialSpecialistService {
             }
         } else { try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true) }
         if FileManager.default.fileExists(atPath: marker.path) {
-            let value = try object(marker)
-            guard value["schema"] as? String == schema, value["workspace_path"] as? String == root.path,
-                  value["source_dataset_path"] as? String == source.path else {
+            guard try canUseWorkspace(workspaceURL: root, datasetURL: source) else {
                 throw StudioError("The specialist workspace belongs to another source dataset.")
             }
         } else {

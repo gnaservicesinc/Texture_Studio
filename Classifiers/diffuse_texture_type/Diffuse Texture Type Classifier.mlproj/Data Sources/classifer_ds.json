@@ -1,0 +1,885 @@
+{
+  "activityEntities" : [
+    "dataSourceCreated",
+    [
+      {
+        "createdDate" : "2026-10-12T01:18:49Z",
+        "event" : "dataSourceCreated",
+        "id" : "3BE3FCD5-EB41-498F-A46C-7749579E077C",
+        "subtitle" : "classifer_ds",
+        "title" : "Data Source Created"
+      }
+    ],
+    "dataSourceTrainingStarted",
+    [
+      {
+        "createdDate" : "2026-10-12T01:19:25Z",
+        "event" : "dataSourceTrainingStarted",
+        "id" : "F333B987-6A4B-4946-8283-86E2C35C0395",
+        "subtitle" : "Diffuse Texture Type Classifier 1",
+        "title" : "Used By"
+      },
+      {
+        "createdDate" : "2026-10-12T01:27:16Z",
+        "event" : "dataSourceTrainingStarted",
+        "id" : "92279E6C-8E7A-4663-AE62-F40D51D76540",
+        "subtitle" : "Diffuse Texture Type Classifier 2",
+        "title" : "Used By"
+      },
+      {
+        "createdDate" : "2026-10-12T01:30:23Z",
+        "event" : "dataSourceTrainingStarted",
+        "id" : "5D4F65D3-F6BB-45C0-8CDA-6513ADEB770B",
+        "subtitle" : "Diffuse Texture Type Classifier  IFPv1",
+        "title" : "Used By"
+      },
+      {
+        "createdDate" : "2026-10-12T01:31:47Z",
+        "event" : "dataSourceTrainingStarted",
+        "id" : "5B3AA661-C5DD-41B8-A46A-905C2E2731DB",
+        "subtitle" : "Diffuse Texture Type Classifier IFPv2",
+        "title" : "Used By"
+      },
+      {
+        "createdDate" : "2026-10-12T11:16:32Z",
+        "event" : "dataSourceTrainingStarted",
+        "id" : "81E46F73-1A26-4499-9248-41382D436CC9",
+        "subtitle" : "DTTC2",
+        "title" : "Used By"
+      },
+      {
+        "createdDate" : "2026-10-12T11:18:17Z",
+        "event" : "dataSourceTrainingStarted",
+        "id" : "4B137E96-7EE2-416D-A84C-03D208EB190C",
+        "subtitle" : "DTTC2",
+        "title" : "Used By"
+      },
+      {
+        "createdDate" : "2026-10-12T11:20:58Z",
+        "event" : "dataSourceTrainingStarted",
+        "id" : "D752C550-5392-44BA-B4C5-ED08D82F0F3D",
+        "subtitle" : "Diffuse Texture Type Classifier 1",
+        "title" : "Used By"
+      },
+      {
+        "createdDate" : "2026-10-12T11:24:07Z",
+        "event" : "dataSourceTrainingStarted",
+        "id" : "13B39F47-0D41-4A29-ABAB-DDEC5D85CEFA",
+        "subtitle" : "DTTC2",
+        "title" : "Used By"
+      },
+      {
+        "createdDate" : "2026-10-12T11:25:28Z",
+        "event" : "dataSourceTrainingStarted",
+        "id" : "9CBD5CC7-6D94-4D6F-BE28-9B6D2441BAD9",
+        "subtitle" : "DTTC3",
+        "title" : "Used By"
+      },
+      {
+        "createdDate" : "2026-10-12T11:46:19Z",
+        "event" : "dataSourceTrainingStarted",
+        "id" : "3F6F4897-A568-4622-BE90-BCC04586EC1C",
+        "subtitle" : "Diffuse Texture Type Classifier 1",
+        "title" : "Used By"
+      }
+    ],
+    "dataSourceMetrics",
+    [
+      {
+        "createdDate" : "2026-10-12T01:19:25Z",
+        "event" : "dataSourceMetrics",
+        "id" : "4CBD8B9D-3CCF-4209-A33B-26BB84343D22",
+        "subtitle" : "16 Classes, 143 Items",
+        "title" : "Data Summary"
+      },
+      {
+        "createdDate" : "2026-10-12T01:27:16Z",
+        "event" : "dataSourceMetrics",
+        "id" : "129E592D-C9FC-4B82-9318-CDE1F438B227",
+        "subtitle" : "15 Classes, 147 Items",
+        "title" : "Data Summary"
+      },
+      {
+        "createdDate" : "2026-10-12T01:30:23Z",
+        "event" : "dataSourceMetrics",
+        "id" : "014345BA-B5F9-4B58-B8CE-0BCFE2A3D993",
+        "subtitle" : "15 Classes, 147 Items",
+        "title" : "Data Summary"
+      },
+      {
+        "createdDate" : "2026-10-12T01:31:47Z",
+        "event" : "dataSourceMetrics",
+        "id" : "8B1F4F3B-7804-40FB-ABCA-5F07D9E327F2",
+        "subtitle" : "15 Classes, 147 Items",
+        "title" : "Data Summary"
+      },
+      {
+        "createdDate" : "2026-10-12T11:16:32Z",
+        "event" : "dataSourceMetrics",
+        "id" : "600399C1-1D89-40B5-A58C-66455D133118",
+        "subtitle" : "15 Classes, 163 Items",
+        "title" : "Data Summary"
+      },
+      {
+        "createdDate" : "2026-10-12T11:18:17Z",
+        "event" : "dataSourceMetrics",
+        "id" : "8FD4C36C-3509-4A2F-9121-A16F82DA0FDE",
+        "subtitle" : "15 Classes, 163 Items",
+        "title" : "Data Summary"
+      },
+      {
+        "createdDate" : "2026-10-12T11:20:58Z",
+        "event" : "dataSourceMetrics",
+        "id" : "0F3F2C7A-DD47-417F-8BB2-0F39D85032F3",
+        "subtitle" : "15 Classes, 163 Items",
+        "title" : "Data Summary"
+      },
+      {
+        "createdDate" : "2026-10-12T11:24:07Z",
+        "event" : "dataSourceMetrics",
+        "id" : "B2312272-2D25-415A-A7A4-7AE980E2444A",
+        "subtitle" : "15 Classes, 163 Items",
+        "title" : "Data Summary"
+      },
+      {
+        "createdDate" : "2026-10-12T11:25:28Z",
+        "event" : "dataSourceMetrics",
+        "id" : "3AF0E26D-9B0F-4360-A53A-043ED3A2EBFE",
+        "subtitle" : "15 Classes, 163 Items",
+        "title" : "Data Summary"
+      },
+      {
+        "createdDate" : "2026-10-12T11:46:19Z",
+        "event" : "dataSourceMetrics",
+        "id" : "25E3070E-0A0E-46D5-B28D-CFDCA723FAA0",
+        "subtitle" : "15 Classes, 163 Items",
+        "title" : "Data Summary"
+      }
+    ]
+  ],
+  "createdDate" : "2026-10-12T01:18:49Z",
+  "dataPathRelativeToProjectURL" : "../../../../classifer_ds/",
+  "dataResult" : {
+    "classesCount" : 15,
+    "createdDate" : "2026-10-12T01:18:49Z",
+    "dataAnalysis" : {
+      "classifierAnalysis" : {
+        "details" : [
+          "file:///opt/ipde/classifer_ds/Drywall/white_stucco--color_1--458ba23a1807.png",
+          [
+            "Drywall"
+          ],
+          "file:///opt/ipde/classifer_ds/Rock%20Cliff%20Marble/rock_face_04--color_1--9089ebe9d6d3.png",
+          [
+            "Rock Cliff Marble"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/bamboo_wall_02--color_1--c36b8388a322.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Cement%20Concrete%20Pavement/concrete_slab_wall--color_1--c6a1fb019c55.png",
+          [
+            "Cement Concrete Pavement"
+          ],
+          "file:///opt/ipde/classifer_ds/Medium%20Particles/rocks_ground_01--color_1--bd160decec1e.png",
+          [
+            "Medium Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Bricks/brick_wall_006--color_1--066f508d2e86.png",
+          [
+            "Bricks"
+          ],
+          "file:///opt/ipde/classifer_ds/Other%20Diffuse%20Textures/FoodCrossSectionSet005_2.png",
+          [
+            "Other Diffuse Textures"
+          ],
+          "file:///opt/ipde/classifer_ds/Medium%20Particles/gravel--color_1--7abfcd65aaf1.png",
+          [
+            "Medium Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Medium%20Particles/dry_river_pebbles--color_1--5205fc3bbcd7.png",
+          [
+            "Medium Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Bricks/seaworn_sandstone_brick--color_1--3c0ae44a8cbc.png",
+          [
+            "Bricks"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/raw_plank_wall--color_1--da5ccf89c2a1.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/stained_pine--color_1--1df3c6e7830c.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Small%20Particles/snow_014--color_1--1b05fd830580.png",
+          [
+            "Small Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Bricks/whitewashed_brick--color_1--375365c0a3d9.png",
+          [
+            "Bricks"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/long_white_tiles--color_1--ac5582b47cc9.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Cement%20Concrete%20Pavement/concrete_layers--color_1--9b23d1ebbcc2.png",
+          [
+            "Cement Concrete Pavement"
+          ],
+          "file:///opt/ipde/classifer_ds/Bricks/red_brick_03--color_1--225a4170682a.png",
+          [
+            "Bricks"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/pine_bark--color_1--04c55ed7cab2.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Paper/Paper005_1K-PNG_Color.png",
+          [
+            "Paper"
+          ],
+          "file:///opt/ipde/classifer_ds/Rock%20Cliff%20Marble/wood_inlaid_stone_wall--color_1--b10544c092f9.png",
+          [
+            "Rock Cliff Marble"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/japanese_sycamore--color_1--410620d232e8.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/weathered_peeling_timber--color_1--2bcfe37c37d9.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/bamboo_wall--color_1--c4c1aaef9dd6.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/weathered_plank_siding--color_1--be4e4e43fc9e.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/marble_tiles--color_1--117ff1faab94.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Bricks/broken_brick_wall--color_1--2916a12932fd.png",
+          [
+            "Bricks"
+          ],
+          "file:///opt/ipde/classifer_ds/Leather/leather_red_03--color_2--f144c9663b6f.png",
+          [
+            "Leather"
+          ],
+          "file:///opt/ipde/classifer_ds/Metal/rusty_metal_shutter--color_1--d2c19980c24f.png",
+          [
+            "Metal"
+          ],
+          "file:///opt/ipde/classifer_ds/Ground/winter_leaves--color_1--faaf835a0e85.png",
+          [
+            "Ground"
+          ],
+          "file:///opt/ipde/classifer_ds/Fabric/wool_boucle--color_1--c3e1ab68ed3c.png",
+          [
+            "Fabric"
+          ],
+          "file:///opt/ipde/classifer_ds/Bricks/stacked_brick_wall--color_1--26c4592739ea.png",
+          [
+            "Bricks"
+          ],
+          "file:///opt/ipde/classifer_ds/Rock%20Cliff%20Marble/tiger_rock--color_1--f1cd675d3de2.png",
+          [
+            "Rock Cliff Marble"
+          ],
+          "file:///opt/ipde/classifer_ds/Small%20Particles/baseball_playground--color_1--b0ba15afb1fa.png",
+          [
+            "Small Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/palm_tree_bark--color_1--1ce017b70c47.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Paper/Paper003_1K-PNG_Color.png",
+          [
+            "Paper"
+          ],
+          "file:///opt/ipde/classifer_ds/Paper/Drawing_2.png",
+          [
+            "Paper"
+          ],
+          "file:///opt/ipde/classifer_ds/Bricks/brick_wall_10--color_1--fba0542b6017.png",
+          [
+            "Bricks"
+          ],
+          "file:///opt/ipde/classifer_ds/Small%20Particles/snow_01--color_1--45495f0a9260.png",
+          [
+            "Small Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Ground/dry_decay_leaves--color_1--0b9c1655d4d9.png",
+          [
+            "Ground"
+          ],
+          "file:///opt/ipde/classifer_ds/Drywall/white_rough_plaster--color_1--b1dc23398ab1.png",
+          [
+            "Drywall"
+          ],
+          "file:///opt/ipde/classifer_ds/Paper/Cardboard_01_color_1K.png",
+          [
+            "Paper"
+          ],
+          "file:///opt/ipde/classifer_ds/Other%20Diffuse%20Textures/Pizza003_3.png",
+          [
+            "Other Diffuse Textures"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/japanese_camphor_bark--color_1--cb5736f6305e.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/old_wooden_floor_02--color_1--9b82112a7914.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Metal/metal_plate--color_1--42fb1a7ed34d.png",
+          [
+            "Metal"
+          ],
+          "file:///opt/ipde/classifer_ds/Medium%20Particles/wood_chip_path--color_1--f5974560d2f3.png",
+          [
+            "Medium Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/wood_table--color_1--f68b5d6f46e5.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Other%20Diffuse%20Textures/food_cookie_chocolate-chip_2.png",
+          [
+            "Other Diffuse Textures"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/oriented_strand_board--color_1--c34c73deb4c5.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/trident_maple_bark--color_1--1285ff3d150e.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/coated_pine_02--color_1--1339f4eeec6c.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Cement%20Concrete%20Pavement/asphalt_07--color_1--1e2be7522f61.png",
+          [
+            "Cement Concrete Pavement"
+          ],
+          "file:///opt/ipde/classifer_ds/Other%20Diffuse%20Textures/FoodCrossSectionSet005_4.png",
+          [
+            "Other Diffuse Textures"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/chinese_hackberry_bark--color_1--02c735c409e4.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Ground/forest_ground_05--color_1--22d9429cdce5.png",
+          [
+            "Ground"
+          ],
+          "file:///opt/ipde/classifer_ds/Metal/rusty_metal_grid--color_1--30c7cc7850a2.png",
+          [
+            "Metal"
+          ],
+          "file:///opt/ipde/classifer_ds/Ground/sparse_grass--color_1--cf6dbdfbe8b8.png",
+          [
+            "Ground"
+          ],
+          "file:///opt/ipde/classifer_ds/Other%20Diffuse%20Textures/ShellSet001_2.png",
+          [
+            "Other Diffuse Textures"
+          ],
+          "file:///opt/ipde/classifer_ds/Drywall/white_stucco_02--color_1--10f31a72b7cf.png",
+          [
+            "Drywall"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/grey_tiles--color_1--f0d29ca85461.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Fabric/crepe_satin--color_1--577b6270b29e.png",
+          [
+            "Fabric"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/knotted_pine_bark--color_1--bb74845744e1.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Medium%20Particles/multicolored_pebble_floor--color_1--d73af284149d.png",
+          [
+            "Medium Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/wicker_013--color_1--437359167c78.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Drywall/IMG_1934.HEIC",
+          [
+            "Drywall"
+          ],
+          "file:///opt/ipde/classifer_ds/Bricks/painted_worn_brick--color_1--45b02de05e55.png",
+          [
+            "Bricks"
+          ],
+          "file:///opt/ipde/classifer_ds/Fabric/fabric_085--color_1--9114aea69614.png",
+          [
+            "Fabric"
+          ],
+          "file:///opt/ipde/classifer_ds/Drywall/IMG_1947.HEIC",
+          [
+            "Drywall"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/bamboo_wall_03--color_1--125b6cea7721.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Ground/red_mud_stones--color_1--b3cbe437433b.png",
+          [
+            "Ground"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/stone_tile_wall--color_1--caff2986b774.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/sakura_bark--color_1--b70d904094b7.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Other%20Diffuse%20Textures/food_cookie_chocolate-chip_1.png",
+          [
+            "Other Diffuse Textures"
+          ],
+          "file:///opt/ipde/classifer_ds/Leather/leather_red_02--color_2--d61c8eef1571.png",
+          [
+            "Leather"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/floor_tiles_06--color_1--563eb42ae68a.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/bark_brown_02--color_1--5fbbfb5b2b03.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Metal/rusty_metal_03--color_1--e7f97a08ba0c.png",
+          [
+            "Metal"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/patterned_terracotta_tiling--color_1--a86c1e8ddb83.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Bricks/brick_wall_005--color_1--b1bc125cca6c.png",
+          [
+            "Bricks"
+          ],
+          "file:///opt/ipde/classifer_ds/Paper/Painting001_1.png",
+          [
+            "Paper"
+          ],
+          "file:///opt/ipde/classifer_ds/Drywall/plastered_wall_05--color_1--6c9195ec2e46.png",
+          [
+            "Drywall"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/japanese_cedar_planks--color_1--9733be0af1c3.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Rock%20Cliff%20Marble/dry_riverbed_rock--color_1--860745f06469.png",
+          [
+            "Rock Cliff Marble"
+          ],
+          "file:///opt/ipde/classifer_ds/Cement%20Concrete%20Pavement/asphalt_snow--color_1--739bc787c72f.png",
+          [
+            "Cement Concrete Pavement"
+          ],
+          "file:///opt/ipde/classifer_ds/Leather/leather_red_02--color_1--3df18fba224b.png",
+          [
+            "Leather"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/bark_brown_01--color_1--10c7a233f7f2.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/jolcham_oak_bark_01--color_1--d0481e34dc17.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Small%20Particles/snow_floor--color_1--5c824b2bf568.png",
+          [
+            "Small Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Other%20Diffuse%20Textures/Pizza003_1.png",
+          [
+            "Other Diffuse Textures"
+          ],
+          "file:///opt/ipde/classifer_ds/Drywall/plastered_wall--color_1--1dd6ef75ea4b.png",
+          [
+            "Drywall"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/coated_pine--color_1--75cd3f21d2c7.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Small%20Particles/excavated_soil_wall--color_1--bd68bba14f44.png",
+          [
+            "Small Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/interior_tiles--color_1--eea4cda841fb.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/wood_shutter--color_1--113c41acf4ab.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Small%20Particles/farm_soil--color_1--770d6c34a4c6.png",
+          [
+            "Small Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Drywall/painted_drywall.png",
+          [
+            "Drywall"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/wood_planks--color_1--79b89b7ca36a.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Ground/forest_leaves_03--color_1--4d23de4e2030.png",
+          [
+            "Ground"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/fever_tree_bark--color_1--ccac25d771b4.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Paper/Drawing_1.png",
+          [
+            "Paper"
+          ],
+          "file:///opt/ipde/classifer_ds/Cement%20Concrete%20Pavement/damaged_concrete_floor--color_1--1b94ec9ca520.png",
+          [
+            "Cement Concrete Pavement"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/rough_pine_door--color_1--d68db8112ae3.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/square_tiles_03--color_1--32b0fe2d1b28.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Rock%20Cliff%20Marble/stacked_stone_wall--color_1--792819238454.png",
+          [
+            "Rock Cliff Marble"
+          ],
+          "file:///opt/ipde/classifer_ds/Leather/leather_red_03--color_1--7b5576be7578.png",
+          [
+            "Leather"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/eucalyptus_bark--color_1--e2a1c1a03841.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Small%20Particles/snow_02--color_1--96bcd1c71038.png",
+          [
+            "Small Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Ground/mud_forest--color_1--c48ac8c83e06.png",
+          [
+            "Ground"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/seaworn_stone_tiles--color_1--12053c12cae7.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/dark_paneled_wood--color_1--922eec32f379.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/chinese_cedar_bark--color_1--bb913a77e953.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Rock%20Cliff%20Marble/marble_cliff_03--color_1--a4b59e14f632.png",
+          [
+            "Rock Cliff Marble"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/wooden_floor_02--color_1--a59ad36c414b.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/bark_willow--color_1--657f043963d4.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Ground/forest_ground_06--color_1--85ad36988755.png",
+          [
+            "Ground"
+          ],
+          "file:///opt/ipde/classifer_ds/Paper/Drawing_3.png",
+          [
+            "Paper"
+          ],
+          "file:///opt/ipde/classifer_ds/Other%20Diffuse%20Textures/Grate002_1.png",
+          [
+            "Other Diffuse Textures"
+          ],
+          "file:///opt/ipde/classifer_ds/Metal/green_metal_rust--color_1--85f290976c7a.png",
+          [
+            "Metal"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/bark_willow_02--color_1--ddbe080d3040.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Small%20Particles/flour--color_1--1cff8d4c990b.png",
+          [
+            "Small Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Metal/rusty_metal--color_1--38a046878fa9.png",
+          [
+            "Metal"
+          ],
+          "file:///opt/ipde/classifer_ds/Other%20Diffuse%20Textures/FoodCrossSectionSet005_1.png",
+          [
+            "Other Diffuse Textures"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/brown_floor_tiles--color_1--86a5bf20e524.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Other%20Diffuse%20Textures/Grate002_2.png",
+          [
+            "Other Diffuse Textures"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/square_pavers--color_1--2da4c28b60a0.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Paper/cardboard_002--color_1--0692933744d6.png",
+          [
+            "Paper"
+          ],
+          "file:///opt/ipde/classifer_ds/Cement%20Concrete%20Pavement/concrete_pavement_02--color_1--2283411b3864.png",
+          [
+            "Cement Concrete Pavement"
+          ],
+          "file:///opt/ipde/classifer_ds/Other%20Diffuse%20Textures/ShellSet001_1.png",
+          [
+            "Other Diffuse Textures"
+          ],
+          "file:///opt/ipde/classifer_ds/Small%20Particles/macro_flour--color_1--310d30e4485c.png",
+          [
+            "Small Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/patterned_paving_02--color_1--714c7267f9af.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Bricks/brick_wall_11--color_1--34708e5f04ab.png",
+          [
+            "Bricks"
+          ],
+          "file:///opt/ipde/classifer_ds/Medium%20Particles/gravel_embedded_concrete_02--color_1--cada6e8dd66d.png",
+          [
+            "Medium Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/granite_tile_04--color_1--21b231cf41c1.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Small%20Particles/playground_sand--color_1--da75f90ad38e.png",
+          [
+            "Small Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Rock%20Cliff%20Marble/marble_rock_01--color_1--91120da3e468.png",
+          [
+            "Rock Cliff Marble"
+          ],
+          "file:///opt/ipde/classifer_ds/Small%20Particles/dirt--color_1--db3f0b2fad69.png",
+          [
+            "Small Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Other%20Diffuse%20Textures/food_cookie_chocolate-chip_3.png",
+          [
+            "Other Diffuse Textures"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/tree_bark_03--color_1--d58284da7a87.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Metal/blue_metal_plate--color_1--7015f5e1367e.png",
+          [
+            "Metal"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/anti_skid_tiles--color_1--c9d7f8b7811a.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Drywall/IMG_1933.HEIC",
+          [
+            "Drywall"
+          ],
+          "file:///opt/ipde/classifer_ds/Other%20Diffuse%20Textures/FoodCrossSectionSet005_3.png",
+          [
+            "Other Diffuse Textures"
+          ],
+          "file:///opt/ipde/classifer_ds/Ground/leaves_forest_ground--color_1--9caad1c4f7bb.png",
+          [
+            "Ground"
+          ],
+          "file:///opt/ipde/classifer_ds/Other%20Diffuse%20Textures/Pizza003_2.png",
+          [
+            "Other Diffuse Textures"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/terracotta_floor_tiles--color_1--784b47404dee.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Fabric/cotton_jersey--color_1--ac3880060e30.png",
+          [
+            "Fabric"
+          ],
+          "file:///opt/ipde/classifer_ds/Drywall/clay_plaster--color_1--f52c97a88014.png",
+          [
+            "Drywall"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/hinoki_planks--color_1--379cffbb30e5.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Bricks/red_brick--color_1--3f6d0fdd452e.png",
+          [
+            "Bricks"
+          ],
+          "file:///opt/ipde/classifer_ds/Medium%20Particles/gravel_floor_03--color_1--032f4e732258.png",
+          [
+            "Medium Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Ground/forest_floor--color_1--8f0a2285e2f1.png",
+          [
+            "Ground"
+          ],
+          "file:///opt/ipde/classifer_ds/Small%20Particles/farm_furrows--color_1--c26d678278e1.png",
+          [
+            "Small Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Tiles%20and%20Pavers/old_linoleum_flooring_01--color_1--530e4908c80e.png",
+          [
+            "Tiles and Pavers"
+          ],
+          "file:///opt/ipde/classifer_ds/Ground/leaf_scattered_gravel--color_1--c5ca89dbd03a.png",
+          [
+            "Ground"
+          ],
+          "file:///opt/ipde/classifer_ds/Small%20Particles/snow_015--color_1--b1e9e9c83709.png",
+          [
+            "Small Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Small%20Particles/snow_013--color_1--8a5f9ec2419d.png",
+          [
+            "Small Particles"
+          ],
+          "file:///opt/ipde/classifer_ds/Metal/box_profile_metal_sheet--color_1--bcb452250c87.png",
+          [
+            "Metal"
+          ],
+          "file:///opt/ipde/classifer_ds/Bark/metasequoia_bark--color_1--5e1ab048979c.png",
+          [
+            "Bark"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/wooden_barrel--color_1--02069456448f.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Wood/wooden_floor_01--color_1--2823fc7cdaf0.png",
+          [
+            "Wood"
+          ],
+          "file:///opt/ipde/classifer_ds/Drywall/IMG_1948.HEIC",
+          [
+            "Drywall"
+          ],
+          "file:///opt/ipde/classifer_ds/Drywall/diffuse.png",
+          [
+            "Drywall"
+          ],
+          "file:///opt/ipde/classifer_ds/Fabric/denmin_fabric_02--color_1--3b5114933c68.png",
+          [
+            "Fabric"
+          ]
+        ],
+        "labelStats" : {
+          "Bark" : 18,
+          "Bricks" : 11,
+          "Cement Concrete Pavement" : 6,
+          "Drywall" : 12,
+          "Fabric" : 5,
+          "Ground" : 11,
+          "Leather" : 4,
+          "Medium Particles" : 7,
+          "Metal" : 8,
+          "Other Diffuse Textures" : 14,
+          "Paper" : 8,
+          "Rock Cliff Marble" : 7,
+          "Small Particles" : 14,
+          "Tiles and Pavers" : 16,
+          "Wood" : 22
+        }
+      },
+      "issues" : [
+        {
+          "description" : "15 classes found, including Wood, Bark, Tiles and Pavers",
+          "severity" : "debug"
+        },
+        {
+          "description" : "163 images found, automatically creating validation set",
+          "severity" : "good"
+        },
+        {
+          "description" : "Smallest class is \"Leather\" with 4 images",
+          "severity" : "debug"
+        },
+        {
+          "description" : "Largest class is \"Wood\" with 22 images",
+          "severity" : "debug"
+        }
+      ],
+      "objectDetectorAnalysis" : {
+        "details" : {
+
+        }
+      },
+      "summary" : {
+        "canUseValidation" : 1,
+        "classCount" : 15,
+        "sampleCount" : 163
+      }
+    },
+    "dataSourceID" : "6C3CE2DA-9EEA-47E3-A016-A818AC9743FD",
+    "dataURL" : "file:///opt/ipde/classifer_ds/",
+    "itemsCount" : 163
+  },
+  "dataURL" : "file:///opt/ipde/classifer_ds/",
+  "experimentIDs" : [
+    "A6C4F1CC-088E-44AF-A00A-6F1693702031",
+    "8AB22902-4C23-424B-96B5-CC0E46245DFE",
+    "1BFC103F-7356-4AD3-91D3-031A1B2B2203",
+    "B50F7FAC-AD1C-4CA2-BC01-C66EF4D05226"
+  ],
+  "id" : "6C3CE2DA-9EEA-47E3-A016-A818AC9743FD",
+  "modifiedDate" : "2026-10-12T11:46:19Z",
+  "pathType" : 0,
+  "preferredFilename" : "classifer_ds",
+  "title" : "classifer_ds",
+  "version" : "1.0"
+}

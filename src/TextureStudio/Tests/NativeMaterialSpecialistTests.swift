@@ -317,6 +317,179 @@ final class NativeMaterialSpecialistTests: XCTestCase {
         } catch { XCTAssertEqual(try Data(contentsOf: userFile), bytes) }
     }
 
+    func testLegacyWorkspaceMigratesToItsActualSourceFolderAndPreservesModelHistoryAndCuration() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let legacy = try await dataset(root), sources = root.appendingPathComponent("Actual Sources")
+        let folder = sources.appendingPathComponent("Wood")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let input = folder.appendingPathComponent("wood_diff_2k.png"), height = folder.appendingPathComponent("wood_disp_2k.png")
+        try png(size: 2048, value: 62).write(to: input)
+        try png(size: 2048, value: 91, bits: 16, channels: 1).write(to: height)
+        _ = try await NativeMaterialDatasetService.run(arguments: ["add-material", "--dataset", legacy.path,
+            "--name", "wood", "--input", input.path, "--height", height.path])
+        let workspace = root.appendingPathComponent("Loom Room"), curation = root.appendingPathComponent("Classifier Curation")
+        try FileManager.default.createDirectory(at: curation.appendingPathComponent("Paper"), withIntermediateDirectories: true)
+        let classifier = fake(labels: ["Wood", "Paper"], choose: { _ in "Wood" })
+        let initial = try await NativeMaterialSpecialistService.refresh(datasetURL: legacy, classifierDatasetURL: curation,
+            workspaceURL: workspace, classifier: classifier)
+        let wood = try specialist("Wood", initial), native = URL(fileURLWithPath: wood.datasetPath)
+        let checkpoint = try savedCheckpoint(root.appendingPathComponent("Models"), dataset: native, step: 2)
+        let recorded = try NativeMaterialSpecialistService.recordCompletedModel(workspaceURL: workspace,
+            specialistID: wood.id, target: "height", checkpointURL: checkpoint, trainingSize: 64, completedUpdates: 2)
+        let model = try XCTUnwrap(specialist("Wood", recorded).models.first)
+        let approved = try NativeMaterialSpecialistService.approveModel(workspaceURL: workspace, specialistID: wood.id, modelID: model.id)
+        let approvedModel = try XCTUnwrap(specialist("Wood", approved).models.first)
+        let custom = try await NativeMaterialSpecialistService.addSpecialist(workspaceURL: workspace,
+            name: "My Wood", classLabel: "Wood", subtype: "wood")
+        let customID = try XCTUnwrap(custom.specialists.first { $0.isCustom }?.id)
+        let materialID = try XCTUnwrap(wood.materialIds.first)
+        _ = try await NativeMaterialDatasetService.run(arguments: ["curate", "--dataset", native.path,
+            "--sample", materialID + "_full", "--status", "excluded", "--note", "Keep my review"])
+        let sampleURL = native.appendingPathComponent("samples/" + materialID + "_full/sample.json")
+        let priorSample = try Data(contentsOf: sampleURL), checkpointBytes = try Data(contentsOf: checkpoint)
+        XCTAssertTrue(try NativeMaterialSpecialistService.canUseWorkspace(workspaceURL: workspace, datasetURL: sources))
+        let migrated = try await NativeMaterialSpecialistService.refresh(datasetURL: sources,
+            workspaceURL: workspace, classifier: classifier)
+        XCTAssertEqual(migrated.sourceDatasetPath, sources.path)
+        XCTAssertEqual(migrated.classifierDatasetPath, curation.path)
+        XCTAssertEqual(try specialist("Wood", migrated).id, wood.id)
+        XCTAssertTrue(migrated.specialists.contains { $0.id == customID && $0.isCustom })
+        let preserved = try XCTUnwrap(specialist("Wood", migrated).models.first)
+        XCTAssertEqual(preserved.id, approvedModel.id)
+        XCTAssertEqual(preserved.checkpointPath, approvedModel.checkpointPath)
+        XCTAssertEqual(preserved.checkpointSha256, approvedModel.checkpointSha256)
+        XCTAssertEqual(preserved.membershipSha256, approvedModel.membershipSha256)
+        XCTAssertEqual(preserved.approved, true); XCTAssertEqual(preserved.approvedAt, approvedModel.approvedAt)
+        XCTAssertEqual(try Data(contentsOf: checkpoint), checkpointBytes)
+        XCTAssertEqual(try Data(contentsOf: sampleURL), priorSample, "Migration must preserve specialist curation in place")
+        XCTAssertEqual(try object(workspace.appendingPathComponent(".specialist-workspace.json"))["source_dataset_path"] as? String, sources.path)
+        XCTAssertEqual(try NativeMaterialSpecialistService.load(workspaceURL: workspace).sourceDatasetPath, sources.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sources.appendingPathComponent("dataset.json").path))
+    }
+
+    func testWorkspaceMigrationRejectsPartialContainmentAndConflictingRegistryWithoutChangingOwnership() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let legacy = try await dataset(root)
+        _ = try await add("wood", size: 32, value: 48, to: legacy, under: root)
+        _ = try await add("paper", size: 32, value: 62, to: legacy, under: root)
+        let workspace = root.appendingPathComponent("Loom Room"), classifier = fake(labels: ["Wood"], choose: { _ in "Wood" })
+        let initial = try await NativeMaterialSpecialistService.refresh(datasetURL: legacy, workspaceURL: workspace, classifier: classifier)
+        let markerURL = workspace.appendingPathComponent(".specialist-workspace.json")
+        let registryURL = workspace.appendingPathComponent(NativeMaterialSpecialistService.registryFilename)
+        let markerBytes = try Data(contentsOf: markerURL), registryBytes = try Data(contentsOf: registryURL)
+        let onlyOneFamily = root.appendingPathComponent("originals/wood")
+        XCTAssertFalse(try NativeMaterialSpecialistService.canUseWorkspace(workspaceURL: workspace, datasetURL: onlyOneFamily))
+        do {
+            _ = try await NativeMaterialSpecialistService.refresh(datasetURL: onlyOneFamily, workspaceURL: workspace, classifier: classifier)
+            XCTFail("One overlapping family cannot claim a workspace for another corpus")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("another source")) }
+        XCTAssertEqual(try Data(contentsOf: markerURL), markerBytes); XCTAssertEqual(try Data(contentsOf: registryURL), registryBytes)
+        let allOriginals = root.appendingPathComponent("originals")
+        XCTAssertTrue(try NativeMaterialSpecialistService.canUseWorkspace(workspaceURL: workspace, datasetURL: allOriginals))
+        let owned = try specialist("Wood", initial)
+        let bindingURL = URL(fileURLWithPath: owned.datasetPath).appendingPathComponent(".specialist-binding.json")
+        let bindingBytes = try Data(contentsOf: bindingURL)
+        var colliding = try object(bindingURL); colliding["workspace_path"] = root.appendingPathComponent("Unrelated Workspace").path
+        try JSONSerialization.data(withJSONObject: colliding).write(to: bindingURL, options: .atomic)
+        XCTAssertThrowsError(try NativeMaterialSpecialistService.canUseWorkspace(workspaceURL: workspace, datasetURL: allOriginals))
+        do {
+            _ = try await NativeMaterialSpecialistService.refresh(datasetURL: allOriginals, workspaceURL: workspace, classifier: classifier)
+            XCTFail("A colliding category folder must retain its existing binding")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("unrelated dataset")) }
+        XCTAssertEqual(try Data(contentsOf: markerURL), markerBytes); XCTAssertEqual(try Data(contentsOf: registryURL), registryBytes)
+        try bindingBytes.write(to: bindingURL, options: .atomic)
+        var mismatched = try object(registryURL)
+        mismatched["source_dataset_path"] = root.appendingPathComponent("Another Legacy Dataset").path
+        try JSONSerialization.data(withJSONObject: mismatched, options: [.sortedKeys]).write(to: registryURL, options: .atomic)
+        let conflictingBytes = try Data(contentsOf: registryURL)
+        XCTAssertFalse(try NativeMaterialSpecialistService.canUseWorkspace(workspaceURL: workspace, datasetURL: allOriginals))
+        do {
+            _ = try await NativeMaterialSpecialistService.refresh(datasetURL: allOriginals, workspaceURL: workspace, classifier: classifier)
+            XCTFail("Conflicting ownership cannot be repaired by claiming it")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("another source")) }
+        XCTAssertEqual(try Data(contentsOf: markerURL), markerBytes)
+        XCTAssertEqual(try Data(contentsOf: registryURL), conflictingBytes)
+        let partial = root.appendingPathComponent("Partial Workspace")
+        try FileManager.default.createDirectory(at: partial, withIntermediateDirectories: true)
+        var partialMarker = try object(markerURL); partialMarker["workspace_path"] = partial.path
+        try JSONSerialization.data(withJSONObject: partialMarker).write(to: partial.appendingPathComponent(".specialist-workspace.json"))
+        XCTAssertFalse(try NativeMaterialSpecialistService.canUseWorkspace(workspaceURL: partial, datasetURL: allOriginals))
+        let absent = root.appendingPathComponent("New Workspace")
+        XCTAssertTrue(try NativeMaterialSpecialistService.canUseWorkspace(workspaceURL: absent, datasetURL: allOriginals))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: absent.path), "Eligibility must remain read-only")
+    }
+
+    func testMigrationRefreshesRenamedManagedSourcePathsWhileKeepingOriginalAndCropReviews() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let legacy = try await dataset(root), sources = root.appendingPathComponent("Actual Sources")
+        let oldFolder = sources.appendingPathComponent("TypoWood"), newFolder = sources.appendingPathComponent("Wood")
+        try FileManager.default.createDirectory(at: oldFolder, withIntermediateDirectories: true)
+        let input = oldFolder.appendingPathComponent("wood_diff_2k.png"), height = oldFolder.appendingPathComponent("wood_disp_2k.png")
+        let inputBytes = try png(size: 2048, value: 62), heightBytes = try png(size: 2048, value: 93, bits: 16, channels: 1)
+        try inputBytes.write(to: input); try heightBytes.write(to: height)
+        _ = try await NativeMaterialDatasetService.run(arguments: ["add-material", "--dataset", legacy.path,
+            "--name", "wood", "--input", input.path, "--height", height.path])
+        let workspace = root.appendingPathComponent("Loom Room"), probe = PredictionProbe()
+        let classifier = fake(labels: ["Wood"], probe: probe, choose: { _ in "Wood" })
+        let initial = try await NativeMaterialSpecialistService.refresh(datasetURL: legacy,
+            workspaceURL: workspace, classifier: classifier)
+        let wood = try specialist("Wood", initial), native = URL(fileURLWithPath: wood.datasetPath)
+        let materialID = try XCTUnwrap(wood.materialIds.first), originalID = materialID + "_full"
+        _ = try await NativeMaterialDatasetService.run(arguments: ["curate", "--dataset", native.path,
+            "--sample", originalID, "--original-source", "true", "--status", "approved", "--note", "Keep original review"])
+        let browserText = try await NativeMaterialDatasetService.run(arguments: ["dataset", "--dataset", native.path, "--review-size", "256"])
+        let browser = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(try XCTUnwrap(browserText).utf8)) as? [String: Any])
+        let crop = try XCTUnwrap((browser["materials"] as? [[String: Any]])?.first?["samples"] as? [[String: Any]]).first
+        let cropID = try XCTUnwrap(crop?["sample_id"] as? String)
+        _ = try await NativeMaterialDatasetService.run(arguments: ["curate", "--dataset", native.path, "--sample", cropID,
+            "--review-size", "256", "--status", "approved", "--split", "train", "--note", "Keep crop review"])
+        var nativeIndex = try object(native.appendingPathComponent("dataset.json"))
+        var validation = try XCTUnwrap(nativeIndex["validation"] as? [String: Any]); validation["folders"] = [oldFolder.path: false]
+        nativeIndex["validation"] = validation
+        try JSONSerialization.data(withJSONObject: nativeIndex).write(to: native.appendingPathComponent("dataset.json"), options: .atomic)
+        let managedSample = native.appendingPathComponent("samples/" + originalID + "/sample.json")
+        let sampleBefore = try object(managedSample)
+        try FileManager.default.moveItem(at: oldFolder, to: newFolder)
+        func rebase(_ value: Any) -> Any {
+            if let value = value as? String, value == oldFolder.path || value.hasPrefix(oldFolder.path + "/") { return newFolder.path + value.dropFirst(oldFolder.path.count) }
+            if let values = value as? [Any] { return values.map(rebase) }
+            if let object = value as? [String: Any] { return object.mapValues(rebase) }
+            return value
+        }
+        let legacySample = legacy.appendingPathComponent("samples/" + originalID + "/sample.json")
+        try JSONSerialization.data(withJSONObject: rebase(try object(legacySample))).write(to: legacySample, options: .atomic)
+        let refreshed = try await NativeMaterialSpecialistService.refresh(datasetURL: sources,
+            workspaceURL: workspace, classifier: classifier)
+        XCTAssertEqual(probe.paths.count, 1, "Renaming a folder must reuse the valid classifier file tag")
+        XCTAssertEqual(try specialist("Wood", refreshed).assignments.first?.inputPath, newFolder.appendingPathComponent(input.lastPathComponent).path)
+        let sample = try object(managedSample)
+        for key in ["status", "review_status", "curation_note", "split", "sample_id", "material_id"] {
+            XCTAssertEqual(sample[key] as? String, sampleBefore[key] as? String)
+        }
+        XCTAssertEqual(sample["source_directory"] as? String, newFolder.path)
+        let target = try XCTUnwrap((sample["map_metadata"] as? [String: [String: Any]])?["height"]?["source"] as? [String: Any])
+        XCTAssertEqual(target["path"] as? String, newFolder.appendingPathComponent(height.lastPathComponent).path)
+        XCTAssertNil(target["file_sha256"], "An unverified new target path must not inherit the previous stored checksum")
+        XCTAssertEqual(target["source_verification"] as? String, "header_inspected")
+        let updatedSettings = try XCTUnwrap(try object(native.appendingPathComponent("dataset.json"))["validation"] as? [String: Any])
+        XCTAssertEqual((updatedSettings["folders"] as? [String: Bool])?[newFolder.path], false)
+        XCTAssertNil((updatedSettings["folders"] as? [String: Bool])?[oldFolder.path])
+        let reviews = try object(native.appendingPathComponent(".material-size-reviews.json"))
+        let review = try XCTUnwrap(reviews["256:" + cropID] as? [String: Any])
+        XCTAssertEqual(review["status"] as? String, "approved"); XCTAssertEqual(review["curation_note"] as? String, "Keep crop review")
+        XCTAssertEqual(review["split"] as? String, "train"); XCTAssertEqual(review["split_assignment"] as? String, "manual")
+        XCTAssertEqual(review["source_binding_sha256"] as? String, NativeMaterialDatasetService.sourceBinding(sample))
+        let outputText = try await NativeMaterialDatasetService.run(arguments: ["prepare-size", "--dataset", native.path, "--size", "256", "--target", "height", "--skip-source-recovery"])
+        let output = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(try XCTUnwrap(outputText).utf8)) as? [String: Any])
+        let prepared = URL(fileURLWithPath: try XCTUnwrap(output["dataset_path"] as? String))
+        let training = try NativeMaterialDatasetService.trainingSamples(datasetURL: prepared, size: 256, target: "height")
+        XCTAssertFalse(training.isEmpty)
+        XCTAssertTrue(training.allSatisfy { $0.augmentationSourceInputURL?.path.hasPrefix(newFolder.path + "/") == true && $0.augmentationSourceTargetURL?.path.hasPrefix(newFolder.path + "/") == true })
+        _ = try NativeMaterialDatasetService.cleanup(prepared)
+        XCTAssertEqual(try Data(contentsOf: newFolder.appendingPathComponent(input.lastPathComponent)), inputBytes)
+        XCTAssertEqual(try Data(contentsOf: newFolder.appendingPathComponent(height.lastPathComponent)), heightBytes)
+    }
+
     func testCurrentDirectoriesReplaceStaleManifestTaxonomyAndRetireOnlyEmptyAutomaticRecords() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let dataset = try await dataset(root)

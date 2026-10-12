@@ -1,0 +1,15 @@
+{
+  "MLModelVersionStringKey" : "--",
+  "MLModelDescriptionKey" : "Used to classify the surface surface type for model routing.",
+  "MLModelCreatorDefinedKey" : {
+    "com.apple.coreml.model.preview.type" : "imageClassifier",
+    "com.apple.createml.training.started" : "2026-10-12T01:31:47Z",
+    "com.apple.createml.version" : "27.2.0",
+    "com.apple.createml.training.finished" : "2026-10-12T01:31:54Z",
+    "com.apple.createml.app.tag" : "188.1",
+    "com.apple.createml.model.created" : "2026-10-12T01:31:54Z",
+    "com.apple.createml.app.version" : "6.2"
+  },
+  "MLModelAuthorKey" : "Andrew Smith",
+  "MLModelLicenseKey" : "GPLv3"
+}

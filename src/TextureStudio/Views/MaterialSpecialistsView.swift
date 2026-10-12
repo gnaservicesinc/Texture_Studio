@@ -157,7 +157,7 @@ struct MaterialSpecialistsView: View {
                 }
             }.padding(24).frame(maxWidth: 1200).frame(maxWidth: .infinity)
         }
-        .task { store.loadSpecialistRegistry() }
+        .task { await store.loadSpecialistRegistry() }
         .sheet(isPresented: $showAdd) { addSheet }
         .sheet(isPresented: $store.showClassifierDatasetSettings) { ClassifierDatasetSettingsSheet(store: store) }
     }

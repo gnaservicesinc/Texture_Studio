@@ -365,6 +365,11 @@ final class WorkbenchStore {
             if let datasetPath, FileManager.default.fileExists(atPath: datasetPath) {
                 let url = URL(fileURLWithPath: datasetPath)
                 try await self.loadDataset(url)
+                if self.dataset?.isSourceFolder == true {
+                    self.specialistTrainingContext = nil
+                    self.useOpenSourcesInModelWorkshop()
+                    try await self.alignModelWorkshopWorkspace(with: self.modelWorkshopSourcePath)
+                }
             }
             let browsing = sourceBrowsing ?? (MaterialTool.launchRole == nil && freshLaunch == nil)
             if MaterialTool.launchRole == .dataset || browsing && self.dataset?.isSourceFolder == true {
@@ -529,6 +534,7 @@ final class WorkbenchStore {
             self.specialistTrainingContext = nil
             self.useOpenSourcesInModelWorkshop()
             if self.dataset?.isSourceFolder == true { self.classifierUseSourceFolder = false }
+            try await self.alignModelWorkshopWorkspace(with: self.modelWorkshopSourcePath)
             self.activity = "Opened \(self.datasetName)."
         }
     }
@@ -575,10 +581,16 @@ final class WorkbenchStore {
         }
     }
 
-    func loadDataset(_ url: URL, recoverSources: Bool = false) async throws {
-        let result: WorkbenchDataset = try WorkbenchResult.decode(WorkbenchDataset.self,
+    func loadDataset(_ url: URL, recoverSources: Bool = false, reviewSize: Int? = nil) async throws {
+        var result: WorkbenchDataset = try WorkbenchResult.decode(WorkbenchDataset.self,
             output: await worker(["dataset", "--dataset", url.path, "--target", training.target,
-                                  "--default-review-size", String(training.size)] + (recoverSources ? [] : ["--skip-source-recovery"])))
+                                  "--default-review-size", String(training.size)]
+                + (reviewSize.map { ["--review-size", String($0)] } ?? [])
+                + (recoverSources ? [] : ["--skip-source-recovery"])))
+        if let reviewSize {
+            result.trainingSize = reviewSize
+            result.reviewSize = reviewSize
+        }
         adoptDataset(result)
         datasetPreparationSummary = ""
         sourceRecoverySummary = result.sourceRecovery?.summary ?? ""

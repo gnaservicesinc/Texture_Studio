@@ -92,6 +92,7 @@ extension WorkbenchStore {
         specialistTrainingContext = nil
         specialistSourceDatasetPath = source
         datasetBrowserMode = .originals
+        try await alignModelWorkshopWorkspace(with: source)
     }
 
     func returnToModelWorkshop() {
@@ -159,12 +160,11 @@ extension WorkbenchStore {
             ?? specialistRegistry?.specialists.first
     }
 
-    func loadSpecialistRegistry() {
-        let url = URL(fileURLWithPath: specialistWorkspacePath).appendingPathComponent("specialists.json")
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
+    func loadSpecialistRegistry() async {
         do {
-            specialistRegistry = try WorkbenchResult.decode(WorkbenchSpecialistRegistry.self,
-                output: String(contentsOf: url, encoding: .utf8))
+            let source = modelWorkshopSourcePath
+            if !source.isEmpty { try await alignModelWorkshopWorkspace(with: source) }
+            else { specialistRegistry = nil }
         } catch { self.error = "Could not open the model workspace: \(error.localizedDescription)" }
     }
 
@@ -173,13 +173,14 @@ extension WorkbenchStore {
         let source = modelWorkshopSourcePath
         guard !source.isEmpty else { error = "Open your original source folder in Loom Room first."; return }
         specialistSourceDatasetPath = source
-        var args = ["refresh-specialists", "--dataset", source, "--workspace", specialistWorkspacePath,
-                    "--classifier-dataset", classifierDatasetPath]
-        let classifier = specialistClassifierPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !classifier.isEmpty { args += ["--classifier", classifier] }
-        let originals = classifierSourceFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        if classifierUseSourceFolder, !originals.isEmpty { args += ["--source-folder", originals] }
         operation("Organizing image tags and map training datasets…") {
+            try await self.alignModelWorkshopWorkspace(with: source)
+            var args = ["refresh-specialists", "--dataset", source, "--workspace", self.specialistWorkspacePath,
+                        "--classifier-dataset", self.classifierDatasetPath]
+            let classifier = self.specialistClassifierPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !classifier.isEmpty { args += ["--classifier", classifier] }
+            let originals = self.classifierSourceFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            if self.classifierUseSourceFolder, !originals.isEmpty { args += ["--source-folder", originals] }
             self.specialistRegistry = try WorkbenchResult.decode(WorkbenchSpecialistRegistry.self,
                 output: await self.worker(args))
             if self.selectedSpecialistID == nil { self.selectedSpecialistID = self.specialistRegistry?.specialists.first?.id }
@@ -197,6 +198,8 @@ extension WorkbenchStore {
         specialistSourceDatasetPath = modelWorkshopSourcePath
         let target = specialistTarget, workspace = specialistWorkspacePath
         operation("Opening \(specialist.name) training dataset…") {
+            if self.modelWorkshopNeedsOriginalSources { try await self.restoreModelWorkshopSourcesIfNeeded() }
+            let sourceGrid = self.datasetResolution
             let family: MaterialTrainingModelFamily = target == "normal" ? .compactNormal : .compactScalar
             if self.training.modelFamily != family { self.training.learningRate = 0.0003 }
             self.training.modelFamily = family
@@ -206,7 +209,8 @@ extension WorkbenchStore {
             self.training.useWarmStart = false
             self.training.modelName = "\(specialist.name) \(Self.specialistMapTitle(target))"
             try await self.loadTrainingCapabilities()
-            try await self.loadDataset(URL(fileURLWithPath: specialist.datasetPath))
+            try await self.loadDataset(URL(fileURLWithPath: specialist.datasetPath), reviewSize: sourceGrid)
+            self.training.size = sourceGrid
             self.selectedRole = target
             if continuing, let saved = specialist.latestModel(for: target) {
                 try await self.loadCheckpoint(URL(fileURLWithPath: saved.checkpointPath))
@@ -292,7 +296,7 @@ extension WorkbenchStore {
         switch kind {
         case "classifier": specialistClassifierPath = url.path
         case "source": specialistSourceDatasetPath = url.path
-        default: specialistWorkspacePath = url.path; loadSpecialistRegistry()
+        default: specialistWorkspacePath = url.path; Task { await loadSpecialistRegistry() }
         }
     }
 
