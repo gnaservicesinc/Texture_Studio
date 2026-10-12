@@ -98,6 +98,45 @@ final class NativeMaterialCropAugmentationTests: XCTestCase {
         XCTAssertThrowsError(try NativeMaterialCropAugmentation.spunCenter(source: source, expectedSHA256: sha, size: 8, degrees: 45), "No introduced border pixels or padding")
     }
 
+    func testRectangularStripCenterSpinUsesItsRecordedPixelsForBothMapsAcrossEpochs() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let originalInput = root.appendingPathComponent("original-diffuse.png"), originalTarget = root.appendingPathComponent("original-height.png")
+        let codes = (0..<32).map { $0 * 1700 }
+        let diffuse = png(width: 4, height: 8, channels: 3, codes: codes.flatMap { [$0, $0, $0] })
+        let height = png(width: 4, height: 8, channels: 1, codes: codes)
+        let originalRGB = try diffuse.encoded(), originalHeight = try height.encoded()
+        try originalRGB.write(to: originalInput); try originalHeight.write(to: originalTarget)
+        let rectangle = [1, 5, 2, 2]
+        let input = root.appendingPathComponent("crop-diffuse.png"), target = root.appendingPathComponent("crop-height.png")
+        let inputBytes = try diffuse.crop(rectangle).encoded(), targetBytes = try height.crop(rectangle).encoded()
+        try inputBytes.write(to: input); try targetBytes.write(to: target)
+        let sample = Sample(id: "bottom-strip-center", split: "train", width: 2, height: 2,
+            inputURL: input, targetURL: target, inputSHA256: NativeMaterialTrainer.checksum(inputBytes),
+            targetSHA256: NativeMaterialTrainer.checksum(targetBytes), inputEncoding: "srgb", targetConvention: "opengl",
+            augmentationSourceInputURL: originalInput, augmentationSourceInputSHA256: NativeMaterialTrainer.checksum(originalRGB),
+            augmentationSourceTargetURL: originalTarget, augmentationSourceTargetSHA256: NativeMaterialTrainer.checksum(originalHeight),
+            cropRectangle: rectangle, cropKind: "center")
+        let augmentation = NativeMaterialCropAugmentation(directory: root.appendingPathComponent("crop-cache"), target: "height", seed: 17)
+        var current = [sample]
+        for epoch in 1...4 {
+            current = try augmentation.refresh(current, epoch: epoch, flip: true, spin: true, depthProCache: nil, check: {})
+            let receipt = try XCTUnwrap(augmentation.history.last), angle = try XCTUnwrap(receipt["source_center_spin_degrees"] as? Int)
+            let spun = try NativeMaterialCropAugmentation.quarterTurn(height.crop(rectangle), degrees: angle)
+            let expected = try NativeMaterialCropAugmentation.flipped(spun, horizontal: receipt["horizontal_flip"] as? Bool ?? false,
+                vertical: receipt["vertical_flip"] as? Bool ?? false)
+            let actualHeight = try NativePNG.decode(Data(contentsOf: current[0].targetURL))
+            let actualRGB = try NativePNG.decode(Data(contentsOf: current[0].inputURL))
+            XCTAssertEqual(actualHeight.pixels, expected.pixels, "Spinning must not replace the chosen strip with the whole source's center")
+            XCTAssertEqual(stride(from: 0, to: 12, by: 3).map { self.codes(actualRGB)[$0] }, self.codes(actualHeight))
+            XCTAssertEqual(current[0].cropRectangle, rectangle)
+        }
+        XCTAssertThrowsError(try NativeMaterialCropAugmentation.spunCenter(source: originalTarget,
+            expectedSHA256: NativeMaterialTrainer.checksum(originalHeight), size: 2, degrees: 90, rectangle: [1, 5, 3, 2]))
+        XCTAssertThrowsError(try NativeMaterialCropAugmentation.spunCenter(source: originalTarget,
+            expectedSHA256: NativeMaterialTrainer.checksum(originalHeight), size: 2, degrees: 90, rectangle: [3, 7, 2, 2]))
+        XCTAssertEqual(try Data(contentsOf: originalInput), originalRGB); XCTAssertEqual(try Data(contentsOf: originalTarget), originalHeight)
+    }
+
     func testQuarterTurnsKeepExactPairedCodesAtBothPrecisionsAndOddSourceDimensions() throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         for bits in [8, 16] {

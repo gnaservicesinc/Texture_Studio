@@ -310,16 +310,21 @@ final class WorkbenchStore {
             lastPackagePath: lastPackageURL?.path, lastPackageCheckpointId: lastPackageCheckpointId).save(to: preferences)
     }
 
-    func restore() {
+    func restore(arguments: [String] = CommandLine.arguments) {
         guard !isBusy, !hasRestored else { return }
+        let freshLaunch: FreshMaterialTrainingLaunch?
+        do { freshLaunch = try FreshMaterialTrainingLaunch.parse(arguments: arguments) }
+        catch { self.error = error.localizedDescription; return }
+        if let freshLaunch { configureFreshTraining(freshLaunch) }
+        let freshTrainingSize = freshLaunch.map { _ in training.size }
         hasRestored = true
-        let args = CommandLine.arguments
         var datasetPath = preferences.string(forKey: "dataset")
         if datasetPath == nil {
             let localDataset = workspaceURL.deletingLastPathComponent().appendingPathComponent("material-dataset/dataset.json")
             if FileManager.default.fileExists(atPath: localDataset.path) { datasetPath = localDataset.path }
         }
-        if let i = args.firstIndex(of: "--dataset"), args.indices.contains(i + 1) { datasetPath = args[i + 1] }
+        if let i = arguments.firstIndex(of: "--dataset"), arguments.indices.contains(i + 1) { datasetPath = arguments[i + 1] }
+        if let freshLaunch { datasetPath = freshLaunch.datasetURL.path }
         let paths = preferences.stringArray(forKey: "checkpoints") ?? []
         let saved = WorkbenchPreferences.load(from: preferences)
         operation("Opening workspace…") {
@@ -346,7 +351,84 @@ final class WorkbenchStore {
             }
             let available = Set(self.checkpoints.map(\.id))
             self.comparisonCheckpointIds = saved.comparisonCheckpointIds.map { $0.intersection(available) } ?? available
+            if let freshTrainingSize {
+                // Dataset inspection can select a row or recover its recorded
+                // review size. Fresh launch keeps the explicit training request
+                // and starts with no old source or comparison selection.
+                self.training.size = freshTrainingSize
+                self.selectedSampleId = nil
+                self.selectedInputVariantId = nil
+                self.restoreFreshSpecialistTrainingContext()
+                self.activity = "Ready to train a fresh RGB height model on all material folders."
+            }
         }
+    }
+
+    private func configureFreshTraining(_ launch: FreshMaterialTrainingLaunch) {
+        isRestoringPreferences = true
+        var options = training.restored(for: resources)
+        options.modelFamily = .compactScalar
+        options.target = "height"
+        options.scope = "full-model"
+        options.useWarmStart = false
+        options.useSelectedMaterialOnly = false
+        if let size = launch.trainingSize { options.size = size }
+        if let rate = launch.learningRate { options.learningRate = rate }
+        if let updates = launch.updatesPerMap { options.updatesPerCrop = updates }
+        training = options
+        dataset = nil
+        selectedSampleId = nil
+        selectedInputVariantId = nil
+        selectedRole = "height"
+        checkpoints = []
+        selectedCheckpointId = nil
+        comparisonCheckpointIds = []
+        comparisonIncludesBase = false
+        comparisonCandidates = []
+        sourceImageURL = nil
+        lastOutputURL = nil
+        lastLogURL = nil
+        lastPackageURL = nil
+        lastPackageCheckpointId = nil
+        lastUploadURL = nil
+        specialistTrainingContext = nil
+        adapterMix = []
+        datasetPreparationSummary = ""
+        sourceRecoverySummary = ""
+        sourceRecoveryResults = []
+        trainingPreferenceNotice = nil
+        preferences.set([String](), forKey: "checkpoints")
+        preferences.set(launch.datasetURL.path, forKey: "dataset")
+        isRestoringPreferences = false
+        saveUserSettings()
+    }
+
+    private func restoreFreshSpecialistTrainingContext() {
+        guard let folder = datasetFolderURL, let specialistID = selectedSpecialistID else { return }
+        let bindingURL = folder.appendingPathComponent(".specialist-binding.json")
+        guard let data = try? Data(contentsOf: bindingURL),
+              let binding = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              binding["schema"] as? String == NativeMaterialSpecialistService.schema,
+              binding["specialist_id"] as? String == specialistID,
+              let boundWorkspace = binding["workspace_path"] as? String else { return }
+        func canonical(_ path: String) -> URL {
+            URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+        }
+        guard canonical(boundWorkspace) == canonical(specialistWorkspacePath) else { return }
+        let registryURL = canonical(specialistWorkspacePath).appendingPathComponent("specialists.json")
+        guard let registryText = try? String(contentsOf: registryURL, encoding: .utf8),
+              let registry = try? WorkbenchResult.decode(WorkbenchSpecialistRegistry.self, output: registryText),
+              canonical(registry.workspacePath) == canonical(specialistWorkspacePath),
+              let specialist = registry.specialists.first(where: {
+                  $0.id == specialistID && canonical($0.datasetPath) == folder.standardizedFileURL.resolvingSymlinksInPath()
+              }),
+              let height = specialist.targetInfo("height"), height.materialCount > 0,
+              !height.membershipSha256.isEmpty, let datasetPath = dataset?.datasetPath else { return }
+        specialistRegistry = registry
+        specialistTarget = "height"
+        specialistTrainingContext = .init(workspacePath: registry.workspacePath, specialistID: specialist.id,
+            name: specialist.name, target: "height", datasetPath: datasetPath, membershipSHA256: height.membershipSha256)
+        training.modelName = "\(specialist.name) Displacement"
     }
 
     func saveConfiguration(refreshSelectedRuntime: Bool = true) {

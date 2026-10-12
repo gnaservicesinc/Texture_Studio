@@ -61,6 +61,41 @@ final class NativeMaterialCropRecoveryTests: XCTestCase {
             size: 1024, target: "unsupported").isEmpty)
     }
 
+    func testCompleteRectangularBarkPairsStartAtTheirAvailableNativeTierWithoutAcquiringOneK() throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        var nativeFiles: [URL] = []
+        for pixels in [2048, 4096] {
+            nativeFiles.append(try fixture.write(role: "input", pixels: pixels, height: pixels * 2))
+            nativeFiles.append(try fixture.write(role: "height", pixels: pixels, height: pixels * 2))
+        }
+        for asset in ["japanese_sycamore", "chinese_hackberry_bark", "palm_tree_bark"] {
+            var files: [URL] = []
+            for original in nativeFiles {
+                let file = fixture.root.appendingPathComponent(original.lastPathComponent.replacingOccurrences(of: Fixture.asset, with: asset))
+                try FileManager.default.copyItem(at: original, to: file); files.append(file)
+            }
+            XCTAssertTrue(NativeMaterialDatasetService.croppingRecoveryRequests(files: files, size: 1024, target: "height").isEmpty,
+                "A paired native rectangle supplies this grid without fabricating or downloading an absent 1K tier")
+        }
+    }
+
+    func testRectangularTierRecoveryStillRepairsMissingRegisteredTargetsAndRequiresMatchingAdequatePixels() throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let input2K = try fixture.write(role: "input", pixels: 2048, height: 4096)
+        let input4K = try fixture.write(role: "input", pixels: 4096, height: 8192)
+        let height4K = try fixture.write(role: "height", pixels: 4096, height: 8192)
+        let repairs = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input2K, input4K, height4K], size: 1024, target: "height")
+        XCTAssertEqual(Self.identities(repairs), ["2k|height"])
+        XCTAssertEqual(repairs.first?.width, 2048); XCTAssertEqual(repairs.first?.height, 4096)
+        let square4K = try fixture.write(role: "height", pixels: 4096)
+        let mismatched = NativeMaterialDatasetService.croppingRecoveryRequests(files: [input2K, input4K, square4K], size: 1024, target: "height")
+        XCTAssertTrue(mismatched.contains { $0.resolution == "1k" }, "Mismatched maps do not prove an adequate rectangular pair")
+        let thinInput = try fixture.write(role: "input", pixels: 2048, height: 512)
+        let thinHeight = try fixture.write(role: "height", pixels: 2048, height: 512)
+        let undersized = NativeMaterialDatasetService.croppingRecoveryRequests(files: [thinInput, thinHeight], size: 1024, target: "height")
+        XCTAssertTrue(undersized.contains { $0.resolution == "1k" }, "A matching nominal edge cannot authorize an undersized short edge")
+    }
+
     func testBalancedTierRequestsRecoverThroughInjectedTransportWithExactPublishedBytes() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
@@ -113,17 +148,18 @@ final class NativeMaterialCropRecoveryTests: XCTestCase {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         }
         func remove() { try? FileManager.default.removeItem(at: root) }
-        func write(role: String, pixels: Int) throws -> URL {
+        func write(role: String, pixels: Int, height: Int? = nil) throws -> URL {
             let suffix = role == "input" ? "diff" : "disp"
             let url = root.appendingPathComponent("\(Self.asset)_\(suffix)_\(pixels / 1024)k.png")
-            try Self.png(role: role, pixels: pixels).write(to: url)
+            try Self.png(role: role, pixels: pixels, height: height).write(to: url)
             return url
         }
-        static func png(role: String, pixels: Int) throws -> Data {
+        static func png(role: String, pixels: Int, height: Int? = nil) throws -> Data {
             let bits = role == "height" ? 16 : 8, channels = role == "input" ? 3 : 1
-            return try NativePNG(header: .init(width: pixels, height: pixels, bits: bits, channels: channels,
+            let rows = height ?? pixels
+            return try NativePNG(header: .init(width: pixels, height: rows, bits: bits, channels: channels,
                 color: channels == 3 ? 2 : 0, interlace: 0),
-                pixels: Data(repeating: 97, count: pixels * pixels * channels * (bits / 8)), colorChunks: []).encoded()
+                pixels: Data(repeating: 97, count: pixels * rows * channels * (bits / 8)), colorChunks: []).encoded()
         }
     }
 }

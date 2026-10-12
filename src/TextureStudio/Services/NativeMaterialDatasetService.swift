@@ -475,7 +475,12 @@ enum NativeMaterialDatasetService {
             guard parsedProvider(file.lastPathComponent) == nil, let name = sourceMapFilename(file.lastPathComponent) else { return nil }
             return canonical(file.deletingLastPathComponent()).path + "|" + identifier(name.0)
         })
-        struct Field { var roles: Set<String>; let width: Int; let height: Int }
+        struct Field {
+            var roles: Set<String>
+            let width: Int
+            let height: Int
+            var dimensionsByRole: [String: Set<[Int]>] = [:]
+        }
         var fields: [String: [Int: Field]] = [:], locations: [String: (ProviderSourceName, URL)] = [:]
         var inputRoles: [String: Set<String>] = [:]
         for file in Set(files) {
@@ -488,7 +493,9 @@ enum NativeMaterialDatasetService {
             let key = folder.path + "|" + providerAssetKey(name)
             locations[key] = (name, folder)
             var field = fields[key]?[nominal] ?? Field(roles: [], width: header.width, height: header.height)
-            field.roles.insert(role); fields[key, default: [:]][nominal] = field
+            field.roles.insert(role)
+            field.dimensionsByRole[role, default: []].insert([header.width, header.height])
+            fields[key, default: [:]][nominal] = field
             if role == "input", name.provider == .polyHaven { inputRoles[key, default: []].insert(name.suffix) }
         }
         var requests: [NativeMaterialSourceRecovery.Request] = []
@@ -503,8 +510,20 @@ enum NativeMaterialDatasetService {
             }.first
             let requested = Set([size, size * 2, size * 4].filter { [1024, 2048, 4096, 8192, 16384].contains($0) })
             let tiers = requested.union(current.keys.filter { $0 > size * 4 && current[$0]!.roles.contains("input") })
+            // Rectangular providers may begin above the requested square grid.
+            // A complete native pair already covers that grid; do not acquire
+            // absent smaller tiers merely to imitate square-source filenames.
+            let firstCompleteRectangle = current.keys.filter { pixels in
+                let field = current[pixels]!
+                let paired = (field.dimensionsByRole["input"] ?? []).intersection(field.dimensionsByRole[target] ?? [])
+                return paired.contains { dimensions in
+                    let edge = min(dimensions[0], dimensions[1])
+                    return edge >= size && max(dimensions[0], dimensions[1]) / edge >= 2
+                }
+            }.min()
             for pixels in tiers.sorted() {
                 let field = current[pixels], roles = field?.roles ?? []
+                if field == nil, let firstCompleteRectangle, pixels < firstCompleteRectangle { continue }
                 for role in ["input", target] where !roles.contains(role) {
                     if role == "input", pixels > size * 4 { continue }
                     let label = "\(pixels / 1024)k"
@@ -826,9 +845,9 @@ enum NativeMaterialDatasetService {
         for assignment in reserved.values {
             guard let material = assignment["material_id"] as? String, let record = materials[material],
                   let dimensions = record.sample["source_pixel_dimensions"] as? [Int], dimensions.count == 2,
-                  min(dimensions[0], dimensions[1]) > size * 2, min(dimensions[0], dimensions[1]) <= size * 4,
+                  min(dimensions[0], dimensions[1]) <= size * 4,
                   let rectangle = assignment["crop_rectangle"] as? [Int] else { continue }
-            let positions = anchorRectangles(dimensions, size: size)
+            let positions = selectionRectangles(dimensions, size: size)
             if let anchor = positions.firstIndex(of: rectangle) { excludedAnchors[subjectID(record.sample), default: []].insert(anchor) }
         }
         var assignments: [String: Object] = [:], subjects: [String: Set<String>] = [:], occupied: [String: [[Double]]] = [:]
@@ -840,21 +859,25 @@ enum NativeMaterialDatasetService {
         for material in materials.keys.sorted() {
             let sample = materials[material]!.sample
             let dimensions = sample["source_pixel_dimensions"] as? [Int] ?? [0, 0]
-            guard dimensions.count == 2 else { throw StudioError("Invalid original material dimensions.") }
+            guard dimensions.count == 2, min(dimensions[0], dimensions[1]) >= size else { throw StudioError("Invalid original material dimensions.") }
             let subject = subjectID(sample), family = familyID(sample)
             for (region, selectedRectangle) in cropLayout(dimensions, size: size, subject: subject, sourceSet: sample["source_set_id"] as? String ?? material, seed: cropSeed, excludedAnchors: excludedAnchors[subject] ?? []) {
                 var rectangle = selectedRectangle
+                guard let field = squareFields(dimensions).first(where: { rectangle[0] >= $0[0] && rectangle[1] >= $0[1] && rectangle[0] + size <= $0[0] + $0[2] && rectangle[1] + size <= $0[1] + $0[3] }) else {
+                    throw StudioError("The selected native crop is outside its original source field.")
+                }
                 if region == "random", reserved.values.contains(where: { $0["material_id"] as? String == material && $0["crop_rectangle"] as? [Int] == rectangle }) {
-                    rectangle[0] = (rectangle[0] + 1) % (dimensions[0] - size + 1)
+                    if field[2] > size { rectangle[0] = field[0] + (rectangle[0] - field[0] + 1) % (field[2] - size + 1) }
+                    else { rectangle[1] = field[1] + (rectangle[1] - field[1] + 1) % (field[3] - size + 1) }
                 }
                 let identity = material + "_" + region
                 let review = currentReview(reviews, key: "\(size):\(identity)", sample: sample)
                 let status = review["status"] as? String ?? sample["status"] as? String ?? "unreviewed"
                 let included = !["excluded", "rejected"].contains(status)
-                let center = [(dimensions[0] - size) / 2, (dimensions[1] - size) / 2, size, size]
-                let isCenter = rectangle == center && (dimensions[0] > size || dimensions[1] > size)
+                let center = [field[0] + (field[2] - size) / 2, field[1] + (field[3] - size) / 2, size, size]
+                let isCenter = rectangle == center && (field[2] > size || field[3] > size)
                 let kind = isCenter ? "center" : region == "selected" ? "anchor" : region
-                assignments[identity] = ["material_id": material, "region": region, "crop_kind": kind, "crop_selection_policy": cropSelectionPolicy, "crop_selection_seed": String(cropSeed), "subject_id": subject, "split": "train", "split_assignment": "automatic", "validation_scope": "known_subject_diagnostic", "eligible": included && eligible(sample), "target_available": eligible(sample), "status": status, "crop_rectangle": rectangle]
+                assignments[identity] = ["material_id": material, "region": region, "crop_kind": kind, "source_square_rectangle_top_left_xywh": field, "crop_selection_policy": cropSelectionPolicy, "crop_selection_seed": String(cropSeed), "subject_id": subject, "split": "train", "split_assignment": "automatic", "validation_scope": "known_subject_diagnostic", "eligible": included && eligible(sample), "target_available": eligible(sample), "status": status, "crop_rectangle": rectangle]
                 if included {
                     subjects[subject, default: []].insert(material)
                     // Diagnostic source membership remains stable when a new
@@ -987,28 +1010,58 @@ enum NativeMaterialDatasetService {
             return sample["material_id"] as? String
         })
     }
-    static let cropSelectionPolicy = "balanced-native-resolution-crops-v1"
+    static let cropSelectionPolicy = "balanced-native-resolution-crops-v2"
     /// One spatial sample per source resolution. Every paired map and diffuse
-    /// variant uses this rectangle; five-position choices share a folder seed.
+    /// variant uses this rectangle; choices share a folder seed. Long native
+    /// fields first choose a short-edge square, without resizing or padding.
     static func cropLayout(_ dimensions: [Int], size: Int, subject: String = "", sourceSet: String = "", seed: UInt64 = 0, excludedAnchors: Set<Int> = []) -> [(String, [Int])] {
         guard size > 0, size <= Int.max / 4, dimensions.count == 2, min(dimensions[0], dimensions[1]) >= size else { return [] }
         let width = dimensions[0], height = dimensions[1]
         if width == size && height == size { return [("full", [0, 0, size, size])] }
-        let center = [(width - size) / 2, (height - size) / 2, size, size]
-        if min(width, height) <= size * 2 { return [("center", center)] }
         func random(_ axis: String) -> UInt64 {
             let identity = "\(cropSelectionPolicy)|\(size)|\(subject)|\(seed)|\(axis)"
             return SHA256.hash(data: Data(identity.utf8)).prefix(8).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
         }
+        let fields = squareFields(dimensions)
         if min(width, height) <= size * 4 {
-            let positions = anchorRectangles(dimensions, size: size)
-            let allowed = positions.indices.filter { !excludedAnchors.contains($0) }
-            guard !allowed.isEmpty else { return [] }
-            return [("selected", positions[allowed[Int(random("anchor") % UInt64(allowed.count))]])]
+            let positions = selectionRectangles(dimensions, size: size)
+            let perField = positions.count / fields.count
+            let allowedFields = fields.indices.filter { field in
+                (0..<perField).contains { !excludedAnchors.contains(field * perField + $0) }
+            }
+            guard !allowedFields.isEmpty else { return [] }
+            let field = allowedFields[Int(random("field") % UInt64(allowedFields.count))]
+            let allowed = (0..<perField).map { field * perField + $0 }.filter { !excludedAnchors.contains($0) }
+            let position = positions[allowed[Int(random("anchor") % UInt64(allowed.count))]]
+            let region = perField == 1 && (fields[field][2] > size || fields[field][3] > size) ? "center" : "selected"
+            return [(region, position)]
         }
-        let x = Int(random("\(sourceSet)|x") % UInt64(width - size + 1))
-        let y = Int(random("\(sourceSet)|y") % UInt64(height - size + 1))
+        let field = fields[Int(random("field") % UInt64(fields.count))]
+        let x = field[0] + Int(random("\(sourceSet)|x") % UInt64(field[2] - size + 1))
+        let y = field[1] + Int(random("\(sourceSet)|y") % UInt64(field[3] - size + 1))
         return [("random", [x, y, size, size])]
+    }
+    /// Preserve both ends of a non-square field. Evenly separated native
+    /// squares also cover a trailing partial strip without padding it.
+    private static func squareFields(_ dimensions: [Int]) -> [[Int]] {
+        let width = dimensions[0], height = dimensions[1], edge = min(width, height), length = max(width, height)
+        let count = length / edge
+        guard count >= 2 else { return [[0, 0, width, height]] }
+        return (0..<count).map { index in
+            let product = UInt64(length - edge).multipliedFullWidth(by: UInt64(index))
+            let offset = Int(UInt64(count - 1).dividingFullWidth(product).quotient)
+            return width < height ? [0, offset, edge, edge] : [offset, 0, edge, edge]
+        }
+    }
+    private static func selectionRectangles(_ dimensions: [Int], size: Int) -> [[Int]] {
+        let fields = squareFields(dimensions)
+        return fields.flatMap { field in
+            let local: [[Int]]
+            if field[2] == size && field[3] == size { local = [[0, 0, size, size]] }
+            else if min(field[2], field[3]) <= size * 2 { local = [[(field[2] - size) / 2, (field[3] - size) / 2, size, size]] }
+            else { local = anchorRectangles([field[2], field[3]], size: size) }
+            return local.map { [field[0] + $0[0], field[1] + $0[1], size, size] }
+        }
     }
     private static func anchorRectangles(_ dimensions: [Int], size: Int) -> [[Int]] {
         let width = dimensions[0], height = dimensions[1]
@@ -2092,6 +2145,7 @@ enum NativeMaterialDatasetService {
             sample.merge(review) { _, new in new }
             sample["sample_id"] = id; sample["sample_pixel_dimensions"] = [size, size]; sample["crop_rectangle_top_left_xywh"] = rectangle
             sample["crop_kind"] = assignment["crop_kind"] ?? region
+            sample["source_square_rectangle_top_left_xywh"] = assignment["source_square_rectangle_top_left_xywh"]
             sample["crop_selection_policy"] = assignment["crop_selection_policy"] ?? cropSelectionPolicy
             sample["crop_selection_seed"] = assignment["crop_selection_seed"] ?? "0"
             sample["maps"] = [String: String](); sample["map_metadata"] = [String: Object](); sample["input_variants"] = [Object]()

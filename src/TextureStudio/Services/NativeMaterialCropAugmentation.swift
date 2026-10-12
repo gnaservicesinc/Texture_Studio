@@ -71,7 +71,8 @@ final class NativeMaterialCropAugmentation {
             if degrees > 0, let source = sample.augmentationSourceInputURL,
                let sha = sample.augmentationSourceInputSHA256 {
                 try onOperation("Spinning center crop", sample.id)
-                input = try Self.spunCenter(source: source, expectedSHA256: sha, size: sample.width, degrees: degrees)
+                input = try Self.spunCenter(source: source, expectedSHA256: sha, size: sample.width, degrees: degrees,
+                    rectangle: sample.cropRectangle)
             } else {
                 // An unchanged crop keeps its exact compressed bytes and cache
                 // identity. Decode only when a pixel permutation is requested.
@@ -110,7 +111,8 @@ final class NativeMaterialCropAugmentation {
                 if degrees > 0, let source = sample.augmentationSourceTargetURL,
                    let sha = sample.augmentationSourceTargetSHA256 {
                     output = try Self.spunCenter(source: source, expectedSHA256: sha, size: sample.width,
-                        degrees: degrees, normal: target == "normal", normalConvention: sample.augmentationSourceTargetConvention ?? sample.targetConvention)
+                        degrees: degrees, normal: target == "normal", normalConvention: sample.augmentationSourceTargetConvention ?? sample.targetConvention,
+                        rectangle: sample.cropRectangle)
                     if target == "normal" { convention = "opengl" }
                 } else { originalBytes = try readBytes(sample.targetURL, expected: sample.targetSHA256) }
                 let bytes: Data
@@ -201,11 +203,12 @@ final class NativeMaterialCropAugmentation {
         return NativePNG(header: h, pixels: pixels, colorChunks: image.colorChunks)
     }
 
-    /// Take an exact integer-aligned center crop, then permute its pixels.
+    /// Take the recorded integer-aligned crop, then permute its pixels. Older
+    /// samples without a rectangle retain their original center behavior.
     /// Restrict rotation to quarter turns so diffuse and scalar targets retain
     /// every original code; normal X/Y are only swapped and/or complemented.
     static func spunCenter(source: URL, expectedSHA256: String, size: Int, degrees: Int,
-                           normal: Bool = false, normalConvention: String = "opengl") throws -> NativePNG {
+                           normal: Bool = false, normalConvention: String = "opengl", rectangle: [Int]? = nil) throws -> NativePNG {
         let bytes = try Data(contentsOf: source, options: .mappedIfSafe)
         guard NativeMaterialTrainer.checksum(bytes) == expectedSHA256, size > 0,
               [90, 180, 270].contains(degrees) else {
@@ -215,8 +218,12 @@ final class NativeMaterialCropAugmentation {
         guard size <= header.width, size <= header.height else {
             throw StudioError("The original source cannot cover this center crop without resizing or padding.")
         }
+        let selectedRectangle = rectangle ?? [(header.width - size) / 2, (header.height - size) / 2, size, size]
+        guard selectedRectangle.count == 4, selectedRectangle[2] == size, selectedRectangle[3] == size else {
+            throw StudioError("The recorded center crop must match the selected native training grid.")
+        }
         let selected = try NativePNG.crop(bytes,
-            rectangle: [(header.width - size) / 2, (header.height - size) / 2, size, size],
+            rectangle: selectedRectangle,
             flipGreen: normal && normalConvention == "directx")
         let rotated = try quarterTurn(selected, degrees: degrees, normal: normal)
         guard NativeMaterialTrainer.checksum(try Data(contentsOf: source, options: .mappedIfSafe)) == expectedSHA256 else {

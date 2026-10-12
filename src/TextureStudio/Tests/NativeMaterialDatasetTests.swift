@@ -359,6 +359,101 @@ final class NativeMaterialDatasetTests: XCTestCase {
         XCTAssertTrue(NativeMaterialDatasetService.cropLayout([1024, 1024], size: 0).isEmpty)
     }
 
+    func testRectangularNativeFieldsChooseOneSeededSquareWithoutChangingMaterialWeight() throws {
+        for dimensions in [[2048, 4096], [4096, 2048]] {
+            let portrait = dimensions[0] < dimensions[1]
+            let possible = portrait ? [[0, 0, 2048, 2048], [0, 2048, 2048, 2048]] : [[0, 0, 2048, 2048], [2048, 0, 2048, 2048]]
+            var chosen = Set<[Int]>()
+            for seed in UInt64(0)..<64 {
+                let layout = NativeMaterialDatasetService.cropLayout(dimensions, size: 2048, subject: "bark", sourceSet: "bark-native", seed: seed)
+                XCTAssertEqual(layout.count, 1, "A rectangular tier contributes one spatial sample, just like a square tier")
+                let rectangle = try XCTUnwrap(layout.first?.1)
+                XCTAssertTrue(possible.contains(rectangle)); chosen.insert(rectangle)
+                XCTAssertEqual(layout.first?.0, "selected")
+                XCTAssertEqual(rectangle, NativeMaterialDatasetService.cropLayout(dimensions, size: 2048, subject: "bark", sourceSet: "other-color", seed: seed).first?.1)
+                XCTAssertEqual(rectangle, NativeMaterialDatasetService.cropLayout(dimensions, size: 2048, subject: "bark", sourceSet: "bark-native", seed: seed).first?.1)
+            }
+            XCTAssertEqual(chosen, Set(possible), "Both long-axis regions must be reachable")
+            XCTAssertEqual(NativeMaterialDatasetService.cropLayout(dimensions, size: 2048, subject: "bark", seed: 1, excludedAnchors: [0]).first?.1, possible[1])
+            XCTAssertTrue(NativeMaterialDatasetService.cropLayout(dimensions, size: 2048, subject: "bark", excludedAnchors: [0, 1]).isEmpty)
+        }
+        let centers = Set([[512, 512, 1024, 1024], [512, 2560, 1024, 1024]])
+        let selected = Set((UInt64(0)..<64).compactMap { NativeMaterialDatasetService.cropLayout([2048, 4096], size: 1024, subject: "bark", seed: $0).first?.1 })
+        XCTAssertEqual(selected, centers, "Center crops come from a selected native square rather than the middle seam")
+        let ends = Set((UInt64(0)..<64).compactMap { NativeMaterialDatasetService.cropLayout([2048, 5120], size: 2048, subject: "bark", seed: $0).first?.1 })
+        XCTAssertEqual(ends, Set([[0, 0, 2048, 2048], [0, 3072, 2048, 2048]]), "A partial trailing strip is covered by another exact native square")
+        XCTAssertTrue(NativeMaterialDatasetService.cropLayout([1024, 2048], size: 2048).isEmpty, "The long edge or filename cannot make an undersized short edge eligible")
+        for seed in UInt64(0)..<32 {
+            let crop = try XCTUnwrap(NativeMaterialDatasetService.cropLayout([8192, 16384], size: 1024, subject: "bark", seed: seed).first)
+            XCTAssertEqual(crop.0, "random")
+            XCTAssertTrue((0...7168).contains(crop.1[0]))
+            XCTAssertTrue((0...7168).contains(crop.1[1]) || (8192...15360).contains(crop.1[1]))
+        }
+    }
+
+    func testRectangularPreparationPreservesEveryPairedTargetAndColorAndSkipsActualUndersizedTier() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), folder = root.appendingPathComponent("bark")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Rectangular bark", "--training-size", "256"])
+        var originals: [URL: Data] = [:]
+        for (edge, label) in [(128, "1k"), (512, "2k"), (1024, "4k")] {
+            for (suffix, bits, channels) in [("diff", 16, 3), ("diff2", 16, 3), ("disp", 16, 1), ("rough", 16, 1), ("nor_dx", 16, 3)] {
+                let url = folder.appendingPathComponent("bark_\(suffix)_\(label).png")
+                let bytes = try fixturePNG(width: edge, height: edge * 2, bits: bits, channels: channels)
+                try bytes.write(to: url); originals[url] = bytes
+            }
+        }
+        _ = try await output(["import-folder", "--dataset", dataset.path, "--folder", folder.path, "--training-size", "256"])
+        let indexBytes = try Data(contentsOf: dataset.appendingPathComponent("dataset.json"))
+        var geometry: [String: [Int]] = [:]
+        for target in ["height", "roughness", "normal"] {
+            let prepared = try NativeMaterialDatasetService.prepareTrainingDataset(datasetURL: dataset, size: 256, target: target, cropSeed: 17, automaticValidation: false)
+            let samples = try NativeMaterialDatasetService.trainingSamples(datasetURL: prepared, size: 256, target: target)
+            XCTAssertEqual(samples.count, 4, "Each of two adequate native tiers retains both original colors")
+            for sample in samples {
+                let input = try XCTUnwrap(sample.augmentationSourceInputURL), output = try XCTUnwrap(sample.augmentationSourceTargetURL)
+                XCTAssertFalse(input.lastPathComponent.contains("_1k"), "Actual dimensions override nominal tier labels")
+                let rectangle = try XCTUnwrap(sample.cropRectangle), identity = String(sample.id.split(separator: "|")[0])
+                if let prior = geometry[identity] { XCTAssertEqual(rectangle, prior) } else { geometry[identity] = rectangle }
+                let inputBytes = try XCTUnwrap(originals[input]), outputBytes = try XCTUnwrap(originals[output])
+                XCTAssertEqual(sample.augmentationSourceInputSHA256, NativeMaterialTrainer.checksum(inputBytes))
+                XCTAssertEqual(sample.augmentationSourceTargetSHA256, NativeMaterialTrainer.checksum(outputBytes))
+                XCTAssertEqual(try NativePNG.decode(Data(contentsOf: sample.inputURL)).pixels, try NativePNG.decode(inputBytes).crop(rectangle).pixels)
+                XCTAssertEqual(try NativePNG.decode(Data(contentsOf: sample.targetURL)).pixels, try NativePNG.decode(outputBytes).crop(rectangle, flipGreen: target == "normal").pixels)
+                let metadata = try object(sample.inputURL.deletingLastPathComponent().appendingPathComponent("sample.json"))
+                let square = try XCTUnwrap(metadata["source_square_rectangle_top_left_xywh"] as? [Int])
+                let edge = try NativePNG.inspect(input).width
+                XCTAssertEqual(square, [0, rectangle[1] < edge ? 0 : edge, edge, edge])
+                let isCenter = rectangle == [square[0] + (edge - 256) / 2, square[1] + (edge - 256) / 2, 256, 256]
+                XCTAssertEqual(sample.cropKind, isCenter ? "center" : "anchor")
+            }
+        }
+        XCTAssertEqual(geometry.count, 2)
+        XCTAssertEqual(try Data(contentsOf: dataset.appendingPathComponent("dataset.json")), indexBytes)
+        for (url, bytes) in originals { XCTAssertEqual(try Data(contentsOf: url), bytes) }
+    }
+
+    func testRectangularFullSquareChoiceKeepsDiagnosticPixelsFixedAcrossTrainingSeeds() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent("Dataset"), folder = root.appendingPathComponent("bark")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        _ = try await output(["create-dataset", "--dataset", dataset.path, "--name", "Two native squares", "--training-size", "256", "--validation-percent", "100"])
+        for (suffix, bits, channels) in [("diff", 16, 3), ("disp", 16, 1)] {
+            try fixturePNG(width: 256, height: 512, bits: bits, channels: channels).write(to: folder.appendingPathComponent("bark_\(suffix)_2k.png"))
+        }
+        _ = try await output(["import-folder", "--dataset", dataset.path, "--folder", folder.path, "--training-size", "256"])
+        var diagnosticID: String?, diagnosticRectangle: [Int]?
+        for seed in [UInt64(0), 1, 17, 64] {
+            let prepared = try NativeMaterialDatasetService.prepareTrainingDataset(datasetURL: dataset, size: 256, target: "height", cropSeed: seed)
+            let samples = try NativeMaterialDatasetService.trainingSamples(datasetURL: prepared, size: 256, target: "height")
+            let train = try XCTUnwrap(samples.first { $0.split == "train" }), check = try XCTUnwrap(samples.first { $0.split == "validation" })
+            XCTAssertNotEqual(train.cropRectangle, check.cropRectangle, "Refreshing a native-square choice must not reuse its reserved diagnostic pixels")
+            if let diagnosticID { XCTAssertEqual(check.id, diagnosticID); XCTAssertEqual(check.cropRectangle, diagnosticRectangle) }
+            else { diagnosticID = check.id; diagnosticRectangle = check.cropRectangle }
+        }
+    }
+
     func testSeededPreparationKeepsVariantAndTargetGeometryPairedAndReusesOnlyMatchingSelection() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let dataset = root.appendingPathComponent("Dataset"), folder = root.appendingPathComponent("stone")
