@@ -75,6 +75,10 @@ final class WorkbenchStore {
     @ObservationIgnored private var trainingEventBuffer = ""
     private(set) var isPreparingDataset = false
     var datasetPreparationSummary = ""
+    var showClassifierDatasetSettings = false
+    var classifierSourceFolderPath: String { didSet { preferences.set(classifierSourceFolderPath, forKey: "classifierSourceFolder") } }
+    var classifierDatasetPath: String { didSet { preferences.set(classifierDatasetPath, forKey: "classifierDatasetPath") } }
+    var classifierDatasetResult: WorkbenchClassifierDatasetResult?
     var sourceRecoverySummary = ""
     var sourceRecoveryResults: [WorkbenchSourceRecoveryResult] = []
     private(set) var trainingPreferenceNotice: String?
@@ -238,6 +242,10 @@ final class WorkbenchStore {
         self.workerOverride = workerOverride
         self.managedWorkspaceURL = (managedWorkspaceURL ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Texture Studio/Material Workspace")).standardizedFileURL
+        let developmentCorpus = "/opt/ipde/sources_mats"
+        let hasDevelopmentCorpus = FileManager.default.fileExists(atPath: developmentCorpus)
+        classifierSourceFolderPath = defaults.string(forKey: "classifierSourceFolder") ?? (hasDevelopmentCorpus ? developmentCorpus : "")
+        classifierDatasetPath = defaults.string(forKey: "classifierDatasetPath") ?? (hasDevelopmentCorpus ? "/opt/ipde/classifer_ds" : self.managedWorkspaceURL.appendingPathComponent("Diffuse Classifier Dataset").path)
         let workspace = Self.userWorkspaceURL(configured: defaults.string(forKey: "workspace"), managed: self.managedWorkspaceURL).path
         workspacePath = workspace
         defaults.set(workspace, forKey: "workspace")
@@ -1287,6 +1295,7 @@ final class WorkbenchStore {
         try Task.checkCancellation()
         guard !WorkbenchLifecycle.shared.isTerminating else { throw CancellationError() }
         let trainingWorker = ["train", "refine"].contains(args.first ?? "")
+        let classifierWorker = args.first == "refresh-classifier-dataset"
         let progressWorker = trainingWorker || ["dataset", "prepare-size", "scan-folder", "import-folder", "edit-dataset"].contains(args.first ?? "")
         if progressWorker { trainingEventBuffer = "" }
         if trainingWorker { hasTrainingStarted = false }
@@ -1316,6 +1325,7 @@ final class WorkbenchStore {
                 let pending = events.drainPending()
                 self.logText = events.text
                 if progressWorker, !pending.isEmpty { self.recordTrainingProgress(pending) }
+                if classifierWorker, !pending.isEmpty { self.recordClassifierDatasetProgress(pending) }
             }
         }
         let operation = Task { try await NativeMaterialCommands.run(arguments: args, onEvent: event, control: control) }
@@ -1325,6 +1335,7 @@ final class WorkbenchStore {
             // UI delivery then fails its worker identity check and cannot replay them.
             let pending = events.drainPending()
             if progressWorker, !pending.isEmpty { recordTrainingProgress(pending) }
+            if classifierWorker, !pending.isEmpty { recordClassifierDatasetProgress(pending) }
             runner = nil; activeWorkerId = nil
             logText = events.text
             WorkbenchLifecycle.shared.remove(control)

@@ -217,7 +217,8 @@ enum NativeMaterialTrainer {
             model.configuration["depthpro_model_sha256"] = cache.modelSHA256
         }
         let rgb = try cache?.input(imageURL: imageURL, expectedSHA256: checksum(snapshot), width: photo.header.width,
-            height: photo.header.height, checkCancellation: { try control.check() }) ?? photo.modelFloatSamples(role: "input", encoding: options.inputEncoding)
+            height: photo.header.height, checkCancellation: { try control.check() }) ?? photo.modelFloatSamples(role: "input", encoding: options.inputEncoding,
+                inputTransfer: model.diffuseInputTransfer)
         let prediction = try model.predict(rgb: rgb, width: photo.header.width, height: photo.header.height, target: options.target)
         try control.check()
         guard try checksum(Data(contentsOf: imageURL)) == checksum(snapshot) else { throw StudioError("The prepared diffuse changed during inference.") }
@@ -242,6 +243,11 @@ enum NativeMaterialTrainer {
             "generation": ["tiled": false, "model_input_dimensions": [prediction.width, prediction.height],
                 "source_pixels_resized": false, "source_pixels_discarded": false, "runtime": "Apple MPSGraph Float32"],
             "outputs": [options.target: ["path": final.path, "sha256": digest, "encoding": "linear_data", "storage": "FLOAT32", "blender_color_space": "Non-Color"]]]
+        if cache == nil {
+            result["source_input_encoding"] = options.inputEncoding
+            result["input_tensor_transfer"] = try model.diffuseInputTransfer.rawValue
+            result["input_transfer"] = try model.diffuseInputTransfer.description
+        }
         if let cache {
             let inputName = "depthpro-input.float32.exr"
             try NativeMaterialNumericExporter.writeEXR(.init(width: photo.header.width, height: photo.header.height, channels: 1, values: rgb), to: stage.appendingPathComponent(inputName))
@@ -452,7 +458,8 @@ enum NativeMaterialTrainer {
                 refreshDepthProCacheCounts()
                 try emit(["event": "depthpro_preparation", "phase": preparationPhase, "operation": "Cached DepthPro input",
                     "completed": 1, "total": 1, "sample_id": descriptor.id, "sample_position": 1, "sample_total": 1])
-            } else { rgb = try input.modelFloatSamples(role: "input", encoding: descriptor.inputEncoding) }
+            } else { rgb = try input.modelFloatSamples(role: "input", encoding: descriptor.inputEncoding,
+                inputTransfer: model.diffuseInputTransfer) }
             let reference = try target.modelFloatSamples(role: options.target, normalConvention: descriptor.targetConvention)
             return (rgb, reference)
         }

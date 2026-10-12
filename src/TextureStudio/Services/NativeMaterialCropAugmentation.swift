@@ -4,7 +4,7 @@ import Foundation
 /// immutable; an epoch flip reads the preceding cached crop, never its source.
 final class NativeMaterialCropAugmentation {
     typealias Sample = NativeMaterialDatasetService.TrainingSample
-    static let centerSpinSampling = "bilinear-pixel-center-v1"
+    static let centerSpinSampling = "exact-quarter-turn-pixel-permutation-v1"
     let directory: URL
     let target: String
     private var random: NativeMaterialRandom
@@ -36,7 +36,7 @@ final class NativeMaterialCropAugmentation {
             // All color variants share target geometry and orientation.
             let geometry = String(sample.id.split(separator: "|", maxSplits: 1)[0])
             if decisions[geometry] == nil {
-                var degrees = spin && sample.cropKind == "center" ? Int(random.next() % 179) + 1 : 0
+                var degrees = spin && sample.cropKind == "center" ? (Int(random.next() % 3) + 1) * 90 : 0
                 var insufficientSupport = false
                 if degrees > 0 {
                     guard let inputSource = sample.augmentationSourceInputURL, sample.augmentationSourceInputSHA256 != nil,
@@ -44,10 +44,9 @@ final class NativeMaterialCropAugmentation {
                         throw StudioError("Center spinning needs both original diffuse and target source bindings.")
                     }
                     let inputHeader = try NativePNG.inspect(inputSource), targetHeader = try NativePNG.inspect(targetSource)
-                    let bound = Self.spinBound(size: sample.width, degrees: degrees)
-                    if [inputHeader.width, inputHeader.height, targetHeader.width, targetHeader.height].contains(where: { $0 < bound }) {
-                        // Near-native fields can be center-cut by one row but
-                        // cannot supply a rotated crop without new border data.
+                    if [inputHeader.width, inputHeader.height, targetHeader.width, targetHeader.height].contains(where: { $0 < sample.width }) {
+                        // Quarter turns need only the exact center crop, with
+                        // no additional support, border pixels or interpolation.
                         degrees = 0; insufficientSupport = true
                     }
                 }
@@ -137,6 +136,7 @@ final class NativeMaterialCropAugmentation {
                 "horizontal_flip": horizontal, "vertical_flip": vertical,
                 "input_sha256": inputSHA, "target_sha256": paired.1,
                 "center_spin_skipped_insufficient_support": insufficientSupport,
+                "source_pixels_resized": false, "source_pixels_interpolated": false,
                 "progressive_cached_flip": degrees == 0, "original_sources_modified": false]
             try appendHistory(receipt)
             history.append(receipt)
@@ -201,96 +201,68 @@ final class NativeMaterialCropAugmentation {
         return NativePNG(header: h, pixels: pixels, colorChunks: image.colorChunks)
     }
 
-    /// Sample the rotated full source's center without decoding its entire grid.
-    /// Bilinear pixel-center sampling retains the source's 8/16-bit precision
-    /// while avoiding nearest-neighbor stair steps in continuous height targets.
+    /// Take an exact integer-aligned center crop, then permute its pixels.
+    /// Restrict rotation to quarter turns so diffuse and scalar targets retain
+    /// every original code; normal X/Y are only swapped and/or complemented.
     static func spunCenter(source: URL, expectedSHA256: String, size: Int, degrees: Int,
                            normal: Bool = false, normalConvention: String = "opengl") throws -> NativePNG {
         let bytes = try Data(contentsOf: source, options: .mappedIfSafe)
-        guard NativeMaterialTrainer.checksum(bytes) == expectedSHA256, (1...179).contains(degrees) else {
-            throw StudioError("The center-spin source or angle is invalid.")
+        guard NativeMaterialTrainer.checksum(bytes) == expectedSHA256, size > 0,
+              [90, 180, 270].contains(degrees) else {
+            throw StudioError("Center crops rotate only by 90, 180 or 270 degrees to preserve exact source pixels.")
         }
         let header = try NativePNG.inspect(source)
-        let angle = Double(degrees) * .pi / 180
-        // Exact quarter turns keep integer-aligned scalar/color pixels exact.
-        let c = degrees == 90 ? 0 : cos(angle), s = degrees == 90 ? 1 : sin(angle)
-        let bound = spinBound(size: size, degrees: degrees)
-        guard bound <= header.width, bound <= header.height else { throw StudioError("The original source cannot cover this center spin without padding.") }
-        let left = (header.width - bound) / 2, top = (header.height - bound) / 2
-        let selected = try NativePNG.crop(bytes, rectangle: [left, top, bound, bound],
+        guard size <= header.width, size <= header.height else {
+            throw StudioError("The original source cannot cover this center crop without resizing or padding.")
+        }
+        let selected = try NativePNG.crop(bytes,
+            rectangle: [(header.width - size) / 2, (header.height - size) / 2, size, size],
             flipGreen: normal && normalConvention == "directx")
-        let h = selected.header, bpp = h.bytesPerPixel, component = h.bits / 8
+        let rotated = try quarterTurn(selected, degrees: degrees, normal: normal)
+        guard NativeMaterialTrainer.checksum(try Data(contentsOf: source, options: .mappedIfSafe)) == expectedSHA256 else {
+            throw StudioError("Original source changed during center rotation.")
+        }
+        return rotated
+    }
+
+    static func quarterTurn(_ image: NativePNG, degrees: Int, normal: Bool = false) throws -> NativePNG {
+        let h = image.header, bpp = h.bytesPerPixel, component = h.bits / 8
+        guard h.width == h.height, [90, 180, 270].contains(degrees) else {
+            throw StudioError("Exact crop rotations need a square grid and a quarter turn.")
+        }
         guard !normal || h.channels >= 3 else { throw StudioError("Normal augmentation needs RGB channels.") }
-        let maximum = h.bits == 16 ? 65535 : 255
-        var pixels = Data(count: size * size * bpp)
-        try selected.pixels.withUnsafeBytes { original in
+        var pixels = Data(count: image.pixels.count)
+        try image.pixels.withUnsafeBytes { original in
             try pixels.withUnsafeMutableBytes { transformed in
-                let input = original.bindMemory(to: UInt8.self).baseAddress!, output = transformed.bindMemory(to: UInt8.self).baseAddress!
-                func code(_ p: UnsafePointer<UInt8>, _ channel: Int) -> Int {
-                    let offset = channel * component
-                    return component == 1 ? Int(p[offset]) : Int(p[offset]) * 256 + Int(p[offset + 1])
-                }
-                func putCode(_ offset: Int, _ value: Double) {
-                    let integer = min(maximum, max(0, Int(value.rounded())))
-                    if component == 1 { output[offset] = UInt8(integer) }
-                    else { output[offset] = UInt8(integer >> 8); output[offset + 1] = UInt8(integer & 255) }
-                }
-                for y in 0..<size {
+                let source = original.bindMemory(to: UInt8.self).baseAddress!, output = transformed.bindMemory(to: UInt8.self).baseAddress!
+                for y in 0..<h.height {
                     try Task.checkCancellation()
-                    for x in 0..<size {
-                        let dx = Double(x) + 0.5 - Double(size) / 2, dy = Double(y) + 0.5 - Double(size) / 2
-                        let sx = c * dx + s * dy + Double(header.width) / 2 - 0.5 - Double(left)
-                        let sy = -s * dx + c * dy + Double(header.height) / 2 - 0.5 - Double(top)
-                        guard sx >= 0, sy >= 0, sx <= Double(bound - 1), sy <= Double(bound - 1) else {
-                            throw StudioError("Center spin escaped its original pixel support.")
+                    for x in 0..<h.width {
+                        let sx: Int, sy: Int
+                        switch degrees {
+                        case 90: sx = y; sy = h.width - x - 1
+                        case 180: sx = h.width - x - 1; sy = h.height - y - 1
+                        default: sx = h.height - y - 1; sy = x
                         }
-                        let x0 = Int(floor(sx)), y0 = Int(floor(sy))
-                        let x1 = min(x0 + 1, bound - 1), y1 = min(y0 + 1, bound - 1)
-                        let fx = sx - Double(x0), fy = sy - Double(y0)
-                        let p00 = input + (y0 * bound + x0) * bpp, p10 = input + (y0 * bound + x1) * bpp
-                        let p01 = input + (y1 * bound + x0) * bpp, p11 = input + (y1 * bound + x1) * bpp
-                        let to = (y * size + x) * bpp
-                        func interpolated(_ channel: Int) -> Double {
-                            let upper = Double(code(p00, channel)) * (1 - fx) + Double(code(p10, channel)) * fx
-                            let lower = Double(code(p01, channel)) * (1 - fx) + Double(code(p11, channel)) * fx
-                            return upper * (1 - fy) + lower * fy
-                        }
-                        if fx == 0 && fy == 0 && !normal {
-                            (output + to).update(from: p00, count: bpp)
-                        } else {
-                            // Normal RGB is encoded only after normalization;
-                            // interpolate any remaining alpha channel normally.
-                            for channel in (normal ? 3 : 0)..<h.channels {
-                                putCode(to + channel * component, interpolated(channel))
-                            }
-                        }
+                        let from = (sy * h.width + sx) * bpp, to = (y * h.width + x) * bpp
+                        (output + to).update(from: source + from, count: bpp)
                         if normal {
-                            let nx = interpolated(0) / Double(maximum) * 2 - 1
-                            let ny = interpolated(1) / Double(maximum) * 2 - 1
-                            let nz = interpolated(2) / Double(maximum) * 2 - 1
-                            let rx = c * nx + s * ny, ry = -s * nx + c * ny
-                            let length = sqrt(rx * rx + ry * ry + nz * nz)
-                            // Opposing vectors can cancel; the neutral tangent
-                            // normal is deterministic and finite in that case.
-                            let vector = length > 1e-12 ? (rx / length, ry / length, nz / length) : (0.0, 0.0, 1.0)
-                            putCode(to, (vector.0 + 1) * 0.5 * Double(maximum))
-                            putCode(to + component, (vector.1 + 1) * 0.5 * Double(maximum))
-                            putCode(to + component * 2, (vector.2 + 1) * 0.5 * Double(maximum))
+                            for byte in 0..<component {
+                                let nx = source[from + byte], ny = source[from + component + byte]
+                                switch degrees {
+                                case 90:
+                                    output[to + byte] = ny; output[to + component + byte] = 255 - nx
+                                case 180:
+                                    output[to + byte] = 255 - nx; output[to + component + byte] = 255 - ny
+                                default:
+                                    output[to + byte] = 255 - ny; output[to + component + byte] = nx
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        guard NativeMaterialTrainer.checksum(try Data(contentsOf: source, options: .mappedIfSafe)) == expectedSHA256 else {
-            throw StudioError("Original source changed during center spin.")
-        }
-        return NativePNG(header: .init(width: size, height: size, bits: h.bits, channels: h.channels, color: h.color, interlace: 0),
-            pixels: pixels, colorChunks: selected.colorChunks)
-    }
-
-    private static func spinBound(size: Int, degrees: Int) -> Int {
-        if degrees == 90 { return size + 2 }
-        let angle = Double(degrees) * .pi / 180
-        return Int(ceil(Double(size) * (abs(cos(angle)) + abs(sin(angle))))) + 2
+        return NativePNG(header: h, pixels: pixels, colorChunks: image.colorChunks)
     }
 }

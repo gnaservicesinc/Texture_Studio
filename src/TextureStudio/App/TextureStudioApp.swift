@@ -79,6 +79,22 @@ final class StudioAppDelegate: NSObject, NSApplicationDelegate {
             }
             return
         }
+        if let index = CommandLine.arguments.firstIndex(of: "--refresh-classifier-dataset") {
+            NSApp.setActivationPolicy(.prohibited)
+            Task {
+                do {
+                    let result = try await NativeMaterialCommands.run(
+                        arguments: ["refresh-classifier-dataset"] + Array(CommandLine.arguments.dropFirst(index + 1)),
+                        onEvent: { FileHandle.standardError.write(Data($0.utf8)) }, control: .init())
+                    FileHandle.standardOutput.write(Data((result + "\n").utf8))
+                    exit(0)
+                } catch {
+                    fputs("Classifier dataset refresh failed: \(error)\n", stderr)
+                    exit(1)
+                }
+            }
+            return
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--export-auxiliary") {
             Task {
                 do {

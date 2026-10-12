@@ -89,6 +89,10 @@ enum NativeMaterialDatasetService {
 
     static func trainingSamples(datasetURL: URL, size: Int, target: String, materials: [String] = []) throws -> [TrainingSample] {
         let root = canonical(datasetURL), index = try object(root.appendingPathComponent("dataset.json"))
+        let preparation = index["native_size_preparation"] as? Object
+        if let preparation, preparation["target_resized"] as? Bool != false {
+            throw StudioError("Refresh training crops from the original dataset. Scaled training maps are not supported.")
+        }
         let records = try readRecords(root, index: index)
         return try records.flatMap { record -> [TrainingSample] in
             let sample = record.sample, status = sample["status"] as? String ?? "unreviewed", material = sample["material_id"] as? String ?? ""
@@ -103,6 +107,9 @@ enum NativeMaterialDatasetService {
             }
             let colors = sample["input_variants"] as? [Object] ?? []
             let variants = colors.isEmpty ? [input] : colors
+            guard ([output] + variants).allSatisfy({ trainingMapIsExact($0, prepared: preparation != nil) }) else {
+                throw StudioError("Refresh training crops from the original dataset. Training maps must use exact crops without scaling or interpolation.")
+            }
             let outputURL = try resolve(targetName, output)
             let transforms = output["transforms"] as? [Object] ?? []
             let convention = transforms.contains { $0["type"] as? String == "directx_to_opengl" && $0["applied_in_memory"] as? Bool == true } ? "directx" : "opengl"
@@ -118,6 +125,34 @@ enum NativeMaterialDatasetService {
                     cropRectangle: sample["crop_rectangle_top_left_xywh"] as? [Int], subjectID: subjectID(sample),
                     cropKind: sample["crop_kind"] as? String ?? sample["source_region_id"] as? String)
             }
+        }
+    }
+
+    /// A saved resized cache may have the expected dimensions and checksum.
+    /// Its declared pixel transformation must also satisfy the crop contract.
+    private static func trainingMapIsExact(_ map: Object, prepared: Bool) -> Bool {
+        guard map["exact_source_crop"] as? Bool != false,
+              !["resized", "scaled", "resampled", "image_resizing"].contains(where: { map[$0] as? Bool == true }) else { return false }
+        let transforms = map["transforms"] as? [Object] ?? []
+        if map["transforms"] != nil, !(map["transforms"] is [Object]) { return false }
+        for transform in transforms {
+            switch transform["type"] as? String {
+            case "native_crop":
+                guard transform["algorithm"] as? String == "exact_native_integer_codes",
+                      transform["range_normalization"] as? Bool == false,
+                      transform["gamma_applied"] as? Bool == false else { return false }
+            case "directx_to_opengl":
+                guard transform["component"] as? String == "G" else { return false }
+            default: return false
+            }
+        }
+        guard prepared else { return true }
+        switch map["storage"] as? String {
+        case "source_reference":
+            return !transforms.contains { $0["type"] as? String == "native_crop" }
+        case "prepared_crop":
+            return map["exact_source_crop"] as? Bool == true && transforms.contains { $0["type"] as? String == "native_crop" }
+        default: return false
         }
     }
     private typealias Object = [String: Any]
@@ -2059,7 +2094,9 @@ enum NativeMaterialDatasetService {
     }
     static func validatePrepared(_ root: URL, size: Int, proof: [String: Any], checksumFile: ((URL) throws -> String)? = nil) throws -> Bool {
         let index = try object(root.appendingPathComponent("dataset.json"))
-        guard index["crop_size"] as? Int == size, let binding = index["native_size_preparation"] as? Object, binding["schema"] as? String == preparationSchema, let snapshot = binding["source_snapshot"] as? Object, NSDictionary(dictionary: snapshot).isEqual(to: proof) else { return false }
+        guard index["crop_size"] as? Int == size, let binding = index["native_size_preparation"] as? Object, binding["schema"] as? String == preparationSchema,
+              binding["target_resized"] as? Bool == false,
+              let snapshot = binding["source_snapshot"] as? Object, NSDictionary(dictionary: snapshot).isEqual(to: proof) else { return false }
         let verifyFile = checksumFile ?? digest
         var verified: [String: (String, Object)] = [:]
         for record in try readRecords(root, index: index) {
@@ -2068,7 +2105,7 @@ enum NativeMaterialDatasetService {
             var changed = false
             func validateMap(_ map: inout Object) throws -> Bool {
                 try Task.checkCancellation()
-                guard let name = map["filename"] as? String, let expected = map["sample_sha256"] as? String else { return false }
+                guard trainingMapIsExact(map, prepared: true), let name = map["filename"] as? String, let expected = map["sample_sha256"] as? String else { return false }
                 let path = name.hasPrefix("/") ? URL(fileURLWithPath: name) : try contained(record.path.deletingLastPathComponent(), name)
                 let header = try NativePNG.inspect(path)
                 guard header.width == size, header.height == size else { return false }

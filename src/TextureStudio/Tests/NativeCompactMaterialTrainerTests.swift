@@ -54,6 +54,7 @@ final class NativeCompactMaterialTrainerTests: XCTestCase {
             XCTAssertEqual(checkpoint.lastPathComponent, "model.safetensors")
             let (configuration, inventory) = try NativeMaterialPackage.verify(checkpoint.deletingLastPathComponent())
             XCTAssertEqual(configuration["target"] as? String, target)
+            XCTAssertEqual(configuration["input_tensor_transfer"] as? String, NativeMaterialInputTransfer.linear.rawValue)
             XCTAssertNil(configuration["base"]); XCTAssertNil(inventory["adapter.safetensors"])
             let initial = try NativeCompactMaterialModel(target: target, width: 16, seed: 31)
             let trained = try NativeSafetensors(contentsOf: checkpoint).nativeTensors()
@@ -68,6 +69,7 @@ final class NativeCompactMaterialTrainerTests: XCTestCase {
             XCTAssertEqual(inferred["output_channels"] as? Int, target == "normal" ? 3 : 1)
             XCTAssertEqual(inferred["model_family"] as? String, family)
             XCTAssertEqual(inferred["checkpoint_sha256"] as? String, hash)
+            XCTAssertEqual(inferred["input_tensor_transfer"] as? String, NativeMaterialInputTransfer.linear.rawValue)
             if target == "height" {
                 let baseline = try NativeMaterialTransfer.object(Data(try await NativeMaterialTrainer.run(arguments: ["infer", "--baseline",
                     "--checkpoint", checkpoint.path, "--image", dataset.appendingPathComponent("samples/train-0/diffuse.png").path,

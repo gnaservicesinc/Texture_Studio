@@ -4,6 +4,45 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeCompactMaterialModelTests: XCTestCase {
+    func testLinearDiffuseContractPersistsAndLegacyCheckpointsRetainSRGB() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = try NativeCompactMaterialModel(target: "height", width: 16, seed: 29)
+        XCTAssertEqual(try NativeTrainableMaterialModel(model).diffuseInputTransfer, .linear)
+        let current = try model.checkpointConfiguration(size: 64, step: 4)
+        XCTAssertEqual(current["input_tensor_transfer"] as? String, NativeMaterialInputTransfer.linear.rawValue)
+        XCTAssertEqual(current["target_transfer"] as? String, "linear numeric source codes / code maximum")
+        for legacy in [false, true] {
+            var configuration = current
+            if legacy {
+                configuration.removeValue(forKey: "input_tensor_transfer")
+                configuration["input_transfer"] = NativeMaterialInputTransfer.srgb.description
+                configuration.removeValue(forKey: "convolution_padding")
+            }
+            let checkpoint = directory.appendingPathComponent(legacy ? "legacy.safetensors" : "linear.safetensors")
+            try NativeSafetensors.write(tensors: model.weights,
+                metadata: ["configuration": NativeMaterialTransfer.json(configuration)], to: checkpoint)
+            let original = try Data(contentsOf: checkpoint)
+            let loaded = try NativeCompactMaterialModel.load(checkpointURL: checkpoint, target: "height", width: 16)
+            let expected: NativeMaterialInputTransfer = legacy ? .srgb : .linear
+            XCTAssertEqual(try NativeTrainableMaterialModel(loaded).diffuseInputTransfer, expected)
+            XCTAssertEqual(try loaded.checkpointConfiguration(size: 64, step: 5)["input_tensor_transfer"] as? String, expected.rawValue)
+            let options = try NativeMaterialTrainer.Options(["infer", "--baseline", "--checkpoint", checkpoint.path,
+                "--image", "/unused.png", "--output", "/unused-output"])
+            let baseline = try NativeTrainableMaterialModel.load(options, training: false)
+            XCTAssertEqual(try baseline.diffuseInputTransfer, expected,
+                "The fresh baseline comparison must use the same input convention as the trained checkpoint")
+            XCTAssertEqual(baseline.configuration["convolution_padding"] as? String,
+                try NativeCompactMaterialModel.convolutionPadding(in: configuration),
+                "The fresh baseline must retain the checkpoint graph's original border behavior")
+            XCTAssertEqual(try Data(contentsOf: checkpoint), original)
+        }
+        var invalid = current; invalid["input_tensor_transfer"] = "unsupported"
+        let snapshot = try NativeSafetensors(bytes: NativeSafetensors.encoded(tensors: model.weights, metadata: [:]))
+        XCTAssertThrowsError(try NativeCompactMaterialModel.validateCheckpoint(snapshot, configuration: invalid))
+    }
+
     func testDepthProRefinerUsesDistinctSingleChannelArchitectureAndCheckpointContract() throws {
         let model = try NativeCompactMaterialModel(target: "height", width: 16, seed: 19, family: .depthProHeightRefiner)
         let repeated = try NativeCompactMaterialModel(target: "height", width: 16, seed: 19, family: .depthProHeightRefiner)

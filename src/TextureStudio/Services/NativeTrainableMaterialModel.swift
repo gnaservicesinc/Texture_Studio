@@ -31,8 +31,13 @@ final class NativeTrainableMaterialModel {
                 throw StudioError("The compact comparison must use its checkpoint's recorded family, target, width and initialization seed.")
             }
             let model = try NativeCompactMaterialModel(target: target, width: width, seed: seed, family: options.modelFamily)
+            model.configuration["convolution_padding"] = try NativeCompactMaterialModel.convolutionPadding(in: recorded)
             if options.modelFamily == .depthProHeightRefiner {
                 model.configuration["depthpro_model_sha256"] = recorded["depthpro_model_sha256"]
+            } else {
+                let transfer = try NativeMaterialInputTransfer.recorded(in: recorded)
+                model.configuration["input_tensor_transfer"] = transfer.rawValue
+                model.configuration["input_transfer"] = transfer.description
             }
             return .init(model)
         }
@@ -56,6 +61,9 @@ final class NativeTrainableMaterialModel {
         }
     }
     var isCompact: Bool { if case .compact = backend { return true }; return false }
+    var diffuseInputTransfer: NativeMaterialInputTransfer {
+        get throws { try NativeMaterialInputTransfer.recorded(in: configuration) }
+    }
     var trainableWeights: [String: NativeTensor] {
         switch backend {
         case .refinement(let model): return model.adapterWeights

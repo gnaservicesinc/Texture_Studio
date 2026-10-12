@@ -4,6 +4,41 @@ import zlib
 @testable import TextureStudio
 
 final class NativePNGTests: XCTestCase {
+    func testDiffuseTensorTransferDecodesSRGBOnceAndNeverTransformsNumericTargets() throws {
+        for bits in [8, 16] {
+            let maximum = bits == 16 ? 65535 : 255
+            let codes = [0, Int(Float(maximum) * 0.03), Int(Float(maximum) * 0.5), maximum]
+            var bytes = Data()
+            for code in codes { for _ in 0..<3 {
+                if bits == 16 { bytes.append(UInt8(code >> 8)) }
+                bytes.append(UInt8(truncatingIfNeeded: code))
+            } }
+            let source = NativePNG(header: .init(width: 4, height: 1, bits: bits, channels: 3, color: 2, interlace: 0),
+                pixels: bytes, colorChunks: [("gAMA", Data([0, 0, 177, 143]))])
+            let normalized = codes.map { Float($0) / Float(maximum) }
+            let decoded = try source.modelFloatSamples(role: "input", encoding: "srgb", inputTransfer: .linear)
+            for channel in 0..<3 { for pixel in codes.indices {
+                let value = normalized[pixel]
+                let expected = value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+                XCTAssertEqual(decoded[channel * 4 + pixel], expected, accuracy: 1e-7)
+            } }
+            XCTAssertEqual(try source.modelFloatSamples(role: "input", encoding: "linear_rgb", inputTransfer: .linear),
+                normalized + normalized + normalized, "Already linear source samples must not be decoded a second time")
+            XCTAssertEqual(try source.modelFloatSamples(role: "input", encoding: "srgb", inputTransfer: .srgb),
+                normalized + normalized + normalized, "Legacy checkpoints retain their trained input")
+            for role in ["roughness", "normal"] + (bits == 16 ? ["height"] : []) {
+                let expected = role == "normal" ? normalized + normalized + normalized : normalized
+                XCTAssertEqual(try source.modelFloatSamples(role: role, encoding: "srgb", inputTransfer: .linear), expected,
+                    "Numeric \(role) codes ignore display gamma and PNG color metadata")
+            }
+            XCTAssertEqual(source.pixels, bytes)
+            XCTAssertEqual(try NativePNG.decode(source.encoded()).pixels, bytes)
+        }
+        XCTAssertEqual(try NativeMaterialInputTransfer.recorded(in: [:]), .srgb)
+        XCTAssertThrowsError(try NativeMaterialInputTransfer.recorded(in: ["input_tensor_transfer": "unknown"]))
+        XCTAssertThrowsError(try NativeMaterialInputTransfer.recorded(in: ["input_tensor_transfer": 1]))
+    }
+
     func testEveryFilterAndAdam7PreserveEightAndSixteenBitIntegerChannels() throws {
         for bits in [8, 16] { for (color, channels) in [(UInt8(0), 1), (2, 3), (4, 2), (6, 4)] {
             for (width, height) in [(1, 1), (1, 7), (9, 7)] {

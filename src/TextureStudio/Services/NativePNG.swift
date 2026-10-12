@@ -1,6 +1,33 @@
 import Foundation
 import zlib
 
+/// Diffuse color is converted only when it enters a model tensor. Crops and
+/// numeric material maps retain their original codes. Checkpoints keep this
+/// separate from the source file's encoding so inference can repeat training.
+enum NativeMaterialInputTransfer: String, Sendable {
+    case srgb = "srgb-code-v1"
+    case linear = "linear-srgb-v1"
+
+    var description: String {
+        switch self {
+        case .srgb: return "sRGB diffuse codes / code maximum"
+        case .linear: return "linear-light sRGB diffuse; decode source sRGB once, preserve linear source"
+        }
+    }
+
+    static func recorded(in configuration: [String: Any]) throws -> Self {
+        if let recorded = configuration["input_tensor_transfer"] {
+            guard let value = recorded as? String, let transfer = Self(rawValue: value) else {
+                throw StudioError("Unsupported material diffuse tensor transfer contract.")
+            }
+            return transfer
+        }
+        // All checkpoints written before an explicit tensor contract consumed
+        // display-encoded diffuse. Keep continuation and inference compatible.
+        return .srgb
+    }
+}
+
 /// Integer PNG storage. This decoder never enters a color-managed image
 /// pipeline: filters, compression and Adam7 are reversed directly on bytes.
 struct NativePNG: Sendable {
@@ -352,7 +379,8 @@ struct NativePNG: Sendable {
     /// PNG color/data samples are unassociated with alpha. Training pairs are
     /// already planar: alpha and color-key transparency are display metadata,
     /// never a crop/coverage test, compositing operation, or reason to fill pixels.
-    func modelFloatSamples(role: String, encoding: String = "linear_data", normalConvention: String = "opengl") throws -> [Float] {
+    func modelFloatSamples(role: String, encoding: String = "linear_data", normalConvention: String = "opengl",
+                           inputTransfer: NativeMaterialInputTransfer = .srgb) throws -> [Float] {
         try validateStorage()
         guard ["input", "height", "roughness", "normal"].contains(role),
               role != "height" || header.bits == 16,
@@ -364,7 +392,7 @@ struct NativePNG: Sendable {
         let linear = ["linear", "linear_rgb", "linear_color", "linear_light"].contains(encoding)
         if role == "input", !linear, !["srgb", "sRGB", "source_srgb_assumed", "srgb_display", "srgb_color"].contains(encoding) { throw Self.invalid("Diffuse color transfer must be explicit.") }
         let scalarRGB = ["height", "roughness"].contains(role) && channels >= 3
-        let flipGreen = role == "normal" && normalConvention.lowercased() == "directx", linearInput = role == "input" && linear
+        let flipGreen = role == "normal" && normalConvention.lowercased() == "directx"
         try pixels.withUnsafeBytes { storage in
             let bytes = storage.bindMemory(to: UInt8.self).baseAddress!
             func code(_ offset: Int, _ channel: Int) -> Int {
@@ -380,7 +408,13 @@ struct NativePNG: Sendable {
                     for channel in 0..<outputChannels {
                         let integer = code(offset, channel)
                         var value = Float(flipGreen && channel == 1 ? maximum - integer : integer) / Float(maximum)
-                        if linearInput { value = value <= 0.0031308 ? 12.92 * value : 1.055 * pow(value, 1 / 2.4) - 0.055 }
+                        if role == "input" {
+                            if linear, inputTransfer == .srgb {
+                                value = value <= 0.0031308 ? 12.92 * value : 1.055 * pow(value, 1 / 2.4) - 0.055
+                            } else if !linear, inputTransfer == .linear {
+                                value = value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+                            }
+                        }
                         destination[channel * count + pixel] = value
                     }
                 }

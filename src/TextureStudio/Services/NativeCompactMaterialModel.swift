@@ -62,6 +62,9 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
         if modelFamily == .depthProHeightRefiner {
             configuration["input_kind"] = "depthpro"
             configuration["depthpro_preparation_contract"] = NativeDepthProContract.identifier
+        } else {
+            configuration["input_tensor_transfer"] = NativeMaterialInputTransfer.linear.rawValue
+            configuration["input_transfer"] = NativeMaterialInputTransfer.linear.description
         }
     }
 
@@ -124,6 +127,8 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
                   modelHash.count == 64, modelHash.allSatisfy({ "0123456789abcdef".contains($0) }) else {
                 throw NativeCheckpointError.invalid("DepthPro refiner input preparation or model identity is missing")
             }
+        } else {
+            _ = try NativeMaterialInputTransfer.recorded(in: configuration)
         }
         let shapes = try weightShapes(target: target, width: width, family: family)
         guard Set(snapshot.tensors.keys) == Set(shapes.keys), snapshot.tensors.allSatisfy({
@@ -264,11 +269,14 @@ final class NativeCompactMaterialModel: @unchecked Sendable {
         result["head_activation"] = "linear"; result["step"] = step; result["training_size"] = size
         result["convolution_padding"] = try Self.convolutionPadding(in: configuration)
         result["image_padding"] = false; result["image_resizing"] = false
-        result["input_transfer"] = modelFamily == .depthProHeightRefiner
-            ? "normalized inverse DepthPro meters / full-field min-max" : "sRGB diffuse codes / code maximum"
         if modelFamily == .depthProHeightRefiner {
+            result["input_transfer"] = "normalized inverse DepthPro meters / full-field min-max"
             result["input_kind"] = "depthpro"
             result["depthpro_preparation_contract"] = NativeDepthProContract.identifier
+        } else {
+            let transfer = try NativeMaterialInputTransfer.recorded(in: configuration)
+            result["input_tensor_transfer"] = transfer.rawValue
+            result["input_transfer"] = transfer.description
         }
         result["target_transfer"] = "linear numeric source codes / code maximum"
         result["native_runtime"] = "Apple MPSGraph Float32, reduced precision fast math disabled"

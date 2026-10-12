@@ -33,6 +33,7 @@ struct DatasetWorkbenchView: View {
     var body: some View {
         VStack(spacing: 0) {
             datasetHeader
+            classifierHeader
             Divider()
             HSplitView {
             VStack(spacing: 0) {
@@ -164,6 +165,9 @@ struct DatasetWorkbenchView: View {
             }
         }
         .searchable(text: $query, prompt: "Find a material")
+        .sheet(isPresented: $store.showClassifierDatasetSettings) {
+            ClassifierDatasetSettingsSheet(store: store)
+        }
         .dropDestination(for: URL.self) { urls, _ in
             guard !store.isBusy, let url = urls.first, urls.count == 1 else { return false }
             var directory: ObjCBool = false
@@ -247,6 +251,23 @@ struct DatasetWorkbenchView: View {
             }
         }
         .padding(14).disabled(store.isBusy)
+    }
+
+    private var classifierHeader: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Diffuse type classifier").font(.callout.bold())
+                Text(store.classifierDatasetResult?.summary ?? "Refresh separately when you add new material types; review labels before Create ML training.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button("Create / Refresh Classifier Dataset", systemImage: "arrow.clockwise") { store.refreshClassifierDataset() }
+            Button("Settings…", systemImage: "gearshape") { store.showClassifierDatasetSettings = true }
+            Button("Show Folder", systemImage: "folder") { store.revealClassifierDataset() }
+                .disabled(!FileManager.default.fileExists(atPath: store.classifierDatasetPath))
+        }
+        .padding(.horizontal, 14).padding(.bottom, 12).disabled(store.isBusy)
     }
 
     private var recentDatasets: some View {

@@ -33,6 +33,8 @@ Numeric map exports receive no photographic gamma or tone mapping. Float32 expor
 
 ## Refine a material model
 
+Dataset Studio can [create and refresh a separate diffuse type classifier dataset](docs/diffuse-classifier-dataset.md) for review in Create ML. New compact RGB models use [recorded linear-light input](docs/material-linear-data.md); numeric material targets and EXR exports preserve their data values.
+
 Training uses complete registered diffuse and target maps at one explicit grid. Every input, target and training review matches that grid; no smaller random crop is hidden inside the loader. Supported training sizes are filtered by the available source pixels; the selected grid is never silently reduced. A test photo passes through the same diffuse preparation as application generation before reaching the model.
 
 Exact-size originals are referenced directly. Exact crops create temporary training images when the originals exceed the selected grid; maps are not rescaled or padded. Changing size, finishing training or stopping a run removes those owned files while preserving original sources and small per-size review records. Dataset entries reference original material maps without duplicating their image files.

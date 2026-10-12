@@ -231,7 +231,7 @@ enum NativeMaterialCheckpoint {
                   let seed = object["initialization_seed"] as? UInt64, let initialDigest = object["initial_weights_sha256"] as? String else {
                 throw NativeCheckpointError.invalid("compact checkpoint identity or training metadata is missing")
             }
-            let information: [String: Any] = ["checkpoint_path": url.path, "sha256": snapshot.sha256,
+            var information: [String: Any] = ["checkpoint_path": url.path, "sha256": snapshot.sha256,
                 "schema": NativeCompactMaterialModel.schema, "architecture": architecture,
                 "model_family": family, "target": target, "step": step,
                 "compatible": true, "variant": "full", "supports_training_warm_start": true,
@@ -244,6 +244,13 @@ enum NativeMaterialCheckpoint {
                 "depthpro_preparation_contract": object["depthpro_preparation_contract"] ?? NSNull(),
                 "depthpro_model_sha256": object["depthpro_model_sha256"] ?? NSNull(),
                 "model_name": object["model_name"] ?? NSNull(), "scope": "full-model", "validation": object["validation"] ?? NSNull()]
+            if family != MaterialTrainingModelFamily.depthProHeightRefiner.rawValue {
+                let transfer = try NativeMaterialInputTransfer.recorded(in: object)
+                information["input_tensor_transfer"] = transfer.rawValue
+                information["input_transfer"] = transfer.description
+            }
+            information["target_transfer"] = object["target_transfer"] ?? "linear numeric source codes / code maximum"
+            information["convolution_padding"] = try NativeCompactMaterialModel.convolutionPadding(in: object)
             try Task.checkCancellation()
             return String(decoding: try JSONSerialization.data(withJSONObject: information, options: [.sortedKeys]), as: UTF8.self)
         }

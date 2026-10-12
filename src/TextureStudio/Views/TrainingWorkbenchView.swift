@@ -83,9 +83,15 @@ struct TrainingWorkbenchView: View {
                             Text("Starting model: \(checkpoint.title)").font(.caption).textSelection(.enabled)
                             Text(checkpoint.modelSummary)
                                 .font(.caption).foregroundStyle(.secondary)
+                            Text(checkpoint.inputColorSummary)
+                                .font(.caption).foregroundStyle(.secondary)
                         } else {
                             Text("Choose a starting checkpoint before training.").font(.caption).foregroundStyle(.secondary)
                         }
+                    }
+                    if !store.training.useWarmStart, store.training.modelFamily.isCompact, store.training.modelFamily != .depthProHeightRefiner {
+                        Text("Diffuse input: linear sRGB. Height, roughness and normal targets keep their numerical values.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     NumericField("Updates per map", value: $store.training.updatesPerCrop, atLeast: 1, unit: "updates")
                     NumericField("Time limit", value: $store.training.maxMinutes, greaterThan: 0, unit: "minutes")
@@ -259,10 +265,10 @@ struct TrainingCropSelectionFields: View {
             .disabled(!options.cropAugmentationEnabled)
             .accessibilityIdentifier("training.random-flip")
             .help("Choose equally among vertical flip, horizontal flip, both or unchanged. Every epoch applies the choice to the current cached crop.")
-        Toggle("Randomly Spin Centercut Crops", isOn: $options.randomSpinCentercut)
+        Toggle("Randomly Rotate Center Crops", isOn: $options.randomSpinCentercut)
             .disabled(!options.cropAugmentationEnabled)
             .accessibilityIdentifier("training.random-spin-centercut")
-            .help("Rotate the original source by a random whole degree from 1 to 179, then take its center crop. Each spin starts from the original source; an optional flip follows.")
+            .help("Take an exact center crop from the original source, then randomly rotate it by 90, 180 or 270 degrees. Pixel codes are preserved without scaling or interpolation; an optional flip follows.")
         Text("Never uses the deterministic crop selection and pauses both options. Each crop refreshes when its update needs it, once per run or epoch. DepthPro predictions are reused for unchanged inputs.")
             .font(.caption).foregroundStyle(.secondary)
     }

@@ -203,7 +203,9 @@ final class NativeMaterialModel: @unchecked Sendable {
         var record = configuration
         record["step"] = step; record["training_size"] = size
         record["image_padding"] = false; record["image_resizing"] = false
-        record["input_transfer"] = "sRGB diffuse codes / code maximum"
+        let transfer = try NativeMaterialInputTransfer.recorded(in: configuration)
+        record["input_tensor_transfer"] = transfer.rawValue
+        record["input_transfer"] = transfer.description
         record["target_transfer"] = "linear numeric source codes / code maximum"
         record["native_runtime"] = "Apple MPSGraph Float32, reduced precision fast math disabled"
         record["layers"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(layers))

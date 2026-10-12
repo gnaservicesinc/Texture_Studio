@@ -989,6 +989,57 @@ final class NativeMaterialDatasetTests: XCTestCase {
         }
     }
 
+    func testPreparedReuseAndTrainingRejectLegacyResampledMapsAndRebuildExactCrops() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = try await preparationFixture(root, materials: 1, dimension: 512)
+        let inputBytes = try Data(contentsOf: root.appendingPathComponent("input-0.png"))
+        let heightBytes = try Data(contentsOf: root.appendingPathComponent("height-0.png"))
+        let arguments = ["prepare-size", "--dataset", dataset.path, "--size", "256", "--target", "height"]
+        let prepared = try await output(arguments)
+        let preparedURL = URL(fileURLWithPath: try XCTUnwrap(prepared["dataset_path"] as? String))
+        let indexURL = preparedURL.appendingPathComponent("dataset.json"), index = try object(indexURL)
+        let binding = try XCTUnwrap(index["native_size_preparation"] as? [String: Any])
+        let proof = try XCTUnwrap(binding["source_snapshot"] as? [String: Any])
+        let entry = try XCTUnwrap((index["samples"] as? [[String: Any]])?.first)
+        let sampleURL = preparedURL.appendingPathComponent(try XCTUnwrap(entry["path"] as? String)).appendingPathComponent("sample.json")
+        let originalSample = try object(sampleURL)
+        for mutation in 0..<4 {
+            var sample = originalSample
+            var maps = try XCTUnwrap(sample["map_metadata"] as? [String: [String: Any]])
+            var height = try XCTUnwrap(maps["height"])
+            switch mutation {
+            case 0:
+                height["transforms"] = [["type": "native_resize", "algorithm": "bilinear"]]
+            case 1:
+                height["transforms"] = [["type": "native_crop", "algorithm": "exact_native_integer_codes",
+                                         "range_normalization": false, "gamma_applied": true]]
+            case 2:
+                height["exact_source_crop"] = false
+            default:
+                var variants = try XCTUnwrap(sample["input_variants"] as? [[String: Any]])
+                variants[0]["scaled"] = true; sample["input_variants"] = variants
+            }
+            maps["height"] = height; sample["map_metadata"] = maps
+            try JSONSerialization.data(withJSONObject: sample).write(to: sampleURL)
+            XCTAssertFalse(try NativeMaterialDatasetService.validatePrepared(preparedURL, size: 256, proof: proof),
+                           "Correct dimensions and checksums cannot authorize scaled or altered pixel values")
+            XCTAssertThrowsError(try NativeMaterialDatasetService.trainingSamples(datasetURL: preparedURL, size: 256, target: "height"))
+        }
+        try JSONSerialization.data(withJSONObject: originalSample).write(to: sampleURL)
+        var scaledIndex = index, scaledBinding = binding
+        scaledBinding["target_resized"] = true; scaledIndex["native_size_preparation"] = scaledBinding
+        try JSONSerialization.data(withJSONObject: scaledIndex).write(to: indexURL)
+        XCTAssertFalse(try NativeMaterialDatasetService.validatePrepared(preparedURL, size: 256, proof: proof))
+        XCTAssertThrowsError(try NativeMaterialDatasetService.trainingSamples(datasetURL: preparedURL, size: 256, target: "height"))
+        let refreshed = try await output(arguments)
+        let refreshedURL = URL(fileURLWithPath: try XCTUnwrap(refreshed["dataset_path"] as? String))
+        XCTAssertEqual((refreshed["preparation"] as? [String: Any])?["reused"] as? Bool, false)
+        XCTAssertTrue(try NativeMaterialDatasetService.validatePrepared(refreshedURL, size: 256, proof: proof))
+        XCTAssertFalse(try NativeMaterialDatasetService.trainingSamples(datasetURL: refreshedURL, size: 256, target: "height").isEmpty)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("input-0.png")), inputBytes)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("height-0.png")), heightBytes)
+    }
+
     func testStagedMetadataJournalRejectsCorruptionAndRecoversAlreadyPublishedReplacement() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let dataset = root.appendingPathComponent("Dataset")

@@ -291,8 +291,9 @@ struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
     var scope: String? = nil
     var base: Base? = nil
     var modelName: String? = nil
+    var inputTensorTransfer: String? = nil
     enum CodingKeys: String, CodingKey {
-        case checkpointPath, sha256, schema, target, step, compatible, variant, refinementPolicy, architecture, scope, base, modelName
+        case checkpointPath, sha256, schema, target, step, compatible, variant, refinementPolicy, architecture, scope, base, modelName, inputTensorTransfer
         case warmStartSupported = "supportsTrainingWarmStart"
     }
     var modelFamily: MaterialTrainingModelFamily? {
@@ -321,6 +322,12 @@ struct WorkbenchCheckpoint: Decodable, Identifiable, Sendable {
     }
     var trainingBaseLabel: String {
         modelFamily == .depthProHeightRefiner ? "DepthPro Height Refiner" : architecture ?? "PBRnxt material model"
+    }
+    var inputColorSummary: String {
+        if modelFamily == .depthProHeightRefiner { return "Input: numerical DepthPro depth" }
+        return inputTensorTransfer == NativeMaterialInputTransfer.linear.rawValue
+            ? "Diffuse input: linear sRGB"
+            : "Diffuse input: original sRGB convention. Start a new compact run to use linear input."
     }
     var modelSummary: String {
         let map = target == "height" ? "Surface height / displacement" : target.capitalized
