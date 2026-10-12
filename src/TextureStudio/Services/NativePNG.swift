@@ -384,7 +384,7 @@ struct NativePNG: Sendable {
         try validateStorage()
         guard ["input", "height", "roughness", "normal"].contains(role),
               role != "height" || header.bits == 16,
-              !["input", "normal"].contains(role) || [3, 4].contains(header.channels) else { throw Self.invalid("The native map channels or precision do not support this training target.") }
+              role != "normal" || [3, 4].contains(header.channels) else { throw Self.invalid("The native map channels or precision do not support this training target.") }
         let count = header.width * header.height, outputChannels = ["input", "normal"].contains(role) ? 3 : 1
         let maximum = header.bits == 16 ? 65535 : 255
         let bytesPerPixel = header.bytesPerPixel, componentBytes = header.bits / 8, channels = header.channels
@@ -392,6 +392,9 @@ struct NativePNG: Sendable {
         let linear = ["linear", "linear_rgb", "linear_color", "linear_light"].contains(encoding)
         if role == "input", !linear, !["srgb", "sRGB", "source_srgb_assumed", "srgb_display", "srgb_color"].contains(encoding) { throw Self.invalid("Diffuse color transfer must be explicit.") }
         let scalarRGB = ["height", "roughness"].contains(role) && channels >= 3
+        // Grayscale diffuse files are color inputs too. Replicate their color
+        // sample in the model tensor, retaining the original gray/alpha codes.
+        let grayDiffuse = role == "input" && channels <= 2
         let flipGreen = role == "normal" && normalConvention.lowercased() == "directx"
         try pixels.withUnsafeBytes { storage in
             let bytes = storage.bindMemory(to: UInt8.self).baseAddress!
@@ -406,7 +409,7 @@ struct NativePNG: Sendable {
                     let offset = pixel * bytesPerPixel
                     if scalarRGB, (code(offset, 0) != code(offset, 1) || code(offset, 0) != code(offset, 2)) { throw Self.invalid("Scalar material maps need identical RGB codes.") }
                     for channel in 0..<outputChannels {
-                        let integer = code(offset, channel)
+                        let integer = code(offset, grayDiffuse ? 0 : channel)
                         var value = Float(flipGreen && channel == 1 ? maximum - integer : integer) / Float(maximum)
                         if role == "input" {
                             if linear, inputTransfer == .srgb {

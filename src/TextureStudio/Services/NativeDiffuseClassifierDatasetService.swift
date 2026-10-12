@@ -26,6 +26,7 @@ enum NativeDiffuseClassifierDatasetService {
         .init(id: "rock", name: "Rock Cliff Marble", description: "Solid rock, cliff faces, marble and stone walls."),
         .init(id: "tiles", name: "Tiles and Pavers", description: "Tiles, pavers and regular laid stone flooring."),
         .init(id: "fabric", name: "Fabric", description: "Woven cloth, knit, leather and other flexible textiles."),
+        .init(id: "paper", name: "Paper", description: "Paper, cardboard and related fiber sheets."),
         .init(id: "wall_finish", name: "Paint Wallpaper Drywall Stucco", description: "Paint, wallpaper, plaster, drywall and stucco."),
         .init(id: "plastic", name: "Plastic Rubber Clay", description: "Plastic, rubber, linoleum and unlaid clay."),
         .init(id: "other_diffuse", name: "Other Diffuse Textures", description: "User-populated, evenly lit material textures that do not fit the other types."),
@@ -191,6 +192,7 @@ enum NativeDiffuseClassifierDatasetService {
             ("ground", ["leaves", "leaf", "grass", "forest floor", "forest ground", "forest leaves", "mud forest", "ground cover"]),
             ("small_particles", ["flour", "sugar", "sand", "snow", "soil", "dirt", "mud", "furrows", "baseball playground"]),
             ("fabric", ["fabric", "cloth", "textile", "denim", "cotton", "wool", "satin", "jersey", "leather", "corduroy", "boucle", "carpet"]),
+            ("paper", ["paper", "cardboard", "card board"]),
             ("wall_finish", ["plaster", "plastered", "stucco", "wallpaper", "drywall", "paint"]),
             ("plastic", ["plastic", "rubber", "linoleum", "clay"]),
             ("metal", ["metal", "steel", "iron", "aluminum", "aluminium", "copper", "brass"]),
@@ -276,12 +278,14 @@ enum NativeDiffuseClassifierDatasetService {
                     let url = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
                     guard FileManager.default.fileExists(atPath: url.path) else { continue }
                     let header = try NativePNG.inspect(url)
-                    guard [3, 4].contains(header.channels) else { continue }
+                    guard [1, 2, 3, 4].contains(header.channels) else { continue }
                     let parsed = parsedDiffuse(url)
                     let meta = ProviderMetadata(name: sample["name"] as? String ?? family,
                         tags: source["tags"] as? [String] ?? [], categories: source["categories"] as? [String] ?? [],
                         pageURL: source["published_url"] as? String)
-                    candidates.append(Source(family: family, variant: map["variant_id"] as? String ?? parsed?.1 ?? "color_1", url: url,
+                    let recordedVariant = map["variant_id"] as? String ?? parsed?.1 ?? "color_1"
+                    let variant = recordedVariant == "color_default" ? "color_1" : recordedVariant
+                    candidates.append(Source(family: family, variant: variant, url: url,
                         width: header.width, height: header.height, metadata: meta))
                 }
             }
@@ -296,7 +300,7 @@ enum NativeDiffuseClassifierDatasetService {
                 let state = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
                 guard state.isRegularFile == true, let parsed = parsedDiffuse(file) else { continue }
                 let url = file.resolvingSymlinksInPath().standardizedFileURL, header = try NativePNG.inspect(url)
-                guard [3, 4].contains(header.channels) else { continue }
+                guard [1, 2, 3, 4].contains(header.channels) else { continue }
                 candidates.append(Source(family: parsed.0, variant: parsed.1, url: url, width: header.width, height: header.height, metadata: nil))
             }
         }
@@ -327,18 +331,20 @@ enum NativeDiffuseClassifierDatasetService {
         guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { throw StudioError("The classifier dataset is already refreshing.") }
         defer { flock(descriptor, LOCK_UN) }
         let manifestURL = root.appendingPathComponent(".classifier-manifest.json")
-        var previous: [Entry] = []
-        if FileManager.default.fileExists(atPath: manifestURL.path) {
+        var previous: [Entry] = [], previousClasses: [TextureClass] = []
+        let hasManifest = FileManager.default.fileExists(atPath: manifestURL.path)
+        if hasManifest {
             let manifest = try JSONDecoder().decode(Manifest.self, from: Data(contentsOf: manifestURL))
             guard manifest.schema == schema, manifest.datasetPath == root.path,
                   Set(manifest.entries.map(\.id)).count == manifest.entries.count else { throw StudioError("Classifier dataset provenance does not match this folder.") }
-            previous = manifest.entries
+            previous = manifest.entries; previousClasses = manifest.classes
         }
-        for item in classes {
+        for item in hasManifest ? [] : classes {
             let folder = root.appendingPathComponent(item.name, isDirectory: true)
             guard (try? folder.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { throw StudioError("Classifier class folders cannot be symbolic links.") }
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         }
+        let catalog = try classCatalog(root: root, previous: previousClasses)
         let pending = root.deletingLastPathComponent().appendingPathComponent(root.lastPathComponent + "-pending-review", isDirectory: true)
         var existing = try imageFiles(in: root) + (FileManager.default.fileExists(atPath: pending.path) ? try imageFiles(in: pending) : [])
         var entries: [Entry] = [], added = 0, preserved = 0, reclassified = 0
@@ -352,12 +358,19 @@ enum NativeDiffuseClassifierDatasetService {
             guard header["width"] as? Int == source.width, header["height"] as? Int == source.height else { throw StudioError("Original diffuse dimensions changed during classifier refresh.") }
             let priorEntry = old[source.id]
             let metadata = providerMetadata[source.family.lowercased()] ?? priorEntry?.providerMetadata ?? source.metadata
-            let assignment = classify(family: source.family, filename: source.url.lastPathComponent, metadata: metadata)
+            let suggested = classify(family: source.family, filename: source.url.lastPathComponent, metadata: metadata)
+            let materialName = normalized(source.family + " " + source.url.lastPathComponent + " " + (metadata?.name ?? ""))
+            let custom = catalog.first { item in
+                item.id.hasPrefix("user_") && (" " + materialName + " ").contains(" " + normalized(item.name) + " ")
+            }
+            let assignedID = custom?.id ?? suggested.classID.flatMap { id in catalog.first { $0.id == id }?.id }
+            let assignment = Assignment(classID: assignedID, confidence: custom == nil ? suggested.confidence : "user_class_name",
+                evidence: suggested.evidence + (custom.map { ["Name matches user class '\($0.name)'."] } ?? []))
             var entry: Entry
             if var prior = priorEntry {
                 let current = try locate(prior, files: existing)
                 if let current {
-                    let currentClass = classID(for: current, root: root)
+                    let currentClass = classID(for: current, root: root, catalog: catalog)
                     let isEdited = try hash(Data(contentsOf: current, options: .mappedIfSafe)) != prior.sourceSHA256
                     let hasAutoStatus = ["suggested", "preserved", "taxonomy_refreshed", "taxonomy_conflict_review"].contains(prior.status)
                     let untouched = hasAutoStatus && !isEdited && sourceHash == prior.sourceSHA256 &&
@@ -370,7 +383,7 @@ enum NativeDiffuseClassifierDatasetService {
                         var canUpdate = true
                         if assignment.classID != prior.suggestedClass {
                             let targetFolder: URL
-                            if let id = assignment.classID, let textureClass = classes.first(where: { $0.id == id }) {
+                            if let id = assignment.classID, let textureClass = catalog.first(where: { $0.id == id }) {
                                 targetFolder = root.appendingPathComponent(textureClass.name)
                             } else {
                                 guard (try? pending.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else {
@@ -404,38 +417,53 @@ enum NativeDiffuseClassifierDatasetService {
                 }
                 entry = prior; preserved += 1
             } else {
-                let filename = safeName(source.family) + "--" + safeName(source.variant) + "--" + String(hash(Data(source.id.utf8)).prefix(12)) + ".png"
-                let targetFolder: URL
-                if let id = assignment.classID, let textureClass = classes.first(where: { $0.id == id }) { targetFolder = root.appendingPathComponent(textureClass.name) }
-                else {
-                    guard (try? pending.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { throw StudioError("Classifier pending-review folder cannot be a symbolic link.") }
-                    try FileManager.default.createDirectory(at: pending, withIntermediateDirectories: true)
-                    targetFolder = pending
+                let manualMatches = try existing.filter { file in
+                    guard file.lastPathComponent == source.url.lastPathComponent,
+                          classID(for: file, root: root, catalog: catalog) != nil else { return false }
+                    return hash(try Data(contentsOf: file, options: .mappedIfSafe)) == sourceHash
                 }
-                let output = targetFolder.appendingPathComponent(filename)
-                // A manually supplied image with this stable name stays intact.
-                if FileManager.default.fileExists(atPath: output.path) {
-                    guard try hash(Data(contentsOf: output, options: .mappedIfSafe)) == sourceHash else {
-                        throw StudioError("Classifier filename is already occupied by another image: \(output.path)")
+                if manualMatches.count == 1, let curated = manualMatches.first {
+                    entry = Entry(id: source.id, family: source.family, variant: source.variant, sourcePath: source.url.path,
+                        sourceSHA256: sourceHash, width: source.width, height: source.height, filename: curated.lastPathComponent,
+                        suggestedClass: assignment.classID, confidence: "user_curated_original", evidence: ["The existing user-classified image matches the original source bytes."],
+                        providerMetadata: metadata, subtype: subtype(family: source.family, filename: source.url.lastPathComponent, metadata: metadata, classID: assignment.classID),
+                        currentPath: curated.path, currentClass: classID(for: curated, root: root, catalog: catalog),
+                        status: "adopted_user_class", needsReview: false)
+                    preserved += 1
+                } else {
+                    let filename = safeName(source.family) + "--" + safeName(source.variant) + "--" + String(hash(Data(source.id.utf8)).prefix(12)) + ".png"
+                    let targetFolder: URL
+                    if let id = assignment.classID, let textureClass = catalog.first(where: { $0.id == id }) { targetFolder = root.appendingPathComponent(textureClass.name) }
+                    else {
+                        guard (try? pending.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { throw StudioError("Classifier pending-review folder cannot be a symbolic link.") }
+                        try FileManager.default.createDirectory(at: pending, withIntermediateDirectories: true)
+                        targetFolder = pending
                     }
-                } else { try copyOriginal(source.url, to: output, expectedSHA256: sourceHash); added += 1 }
-                entry = Entry(id: source.id, family: source.family, variant: source.variant, sourcePath: source.url.path,
-                    sourceSHA256: sourceHash, width: source.width, height: source.height, filename: filename,
-                    suggestedClass: assignment.classID, confidence: assignment.confidence, evidence: assignment.evidence,
-                    providerMetadata: metadata, subtype: subtype(family: source.family, filename: source.url.lastPathComponent, metadata: metadata, classID: assignment.classID),
-                    currentPath: output.path, currentClass: assignment.classID,
-                    status: "suggested", needsReview: true)
+                    let output = targetFolder.appendingPathComponent(filename)
+                    // A manually supplied image with this stable name stays intact.
+                    if FileManager.default.fileExists(atPath: output.path) {
+                        guard try hash(Data(contentsOf: output, options: .mappedIfSafe)) == sourceHash else {
+                            throw StudioError("Classifier filename is already occupied by another image: \(output.path)")
+                        }
+                    } else { try copyOriginal(source.url, to: output, expectedSHA256: sourceHash); added += 1 }
+                    entry = Entry(id: source.id, family: source.family, variant: source.variant, sourcePath: source.url.path,
+                        sourceSHA256: sourceHash, width: source.width, height: source.height, filename: filename,
+                        suggestedClass: assignment.classID, confidence: assignment.confidence, evidence: assignment.evidence,
+                        providerMetadata: metadata, subtype: subtype(family: source.family, filename: source.url.lastPathComponent, metadata: metadata, classID: assignment.classID),
+                        currentPath: output.path, currentClass: assignment.classID,
+                        status: "suggested", needsReview: true)
+                }
             }
             entries.append(entry)
             // Every successful copy is durable even if the user cancels later.
-            try saveManifest(entries + previous.filter { !liveIDs.contains($0.id) }, to: manifestURL, root: root)
+            try saveManifest(entries + previous.filter { !liveIDs.contains($0.id) }, to: manifestURL, root: root, catalog: catalog)
             onEvent(try event("Classifier diffuse: \(source.family)", completed: offset + 1, total: sources.count))
         }
         for var entry in previous where !liveIDs.contains(entry.id) {
             entry.status = "source_not_in_current_inventory"; entry.needsReview = true; entries.append(entry)
         }
-        try saveManifest(entries, to: manifestURL, root: root)
-        let counts = try classes.map { item -> Object in
+        try saveManifest(entries, to: manifestURL, root: root, catalog: catalog)
+        let counts = try catalog.map { item -> Object in
             ["id": item.id, "name": item.name, "count": try imageFiles(in: root.appendingPathComponent(item.name)).count]
         }
         // Curation is already saved. A derived-view problem is a follow-up
@@ -494,7 +522,8 @@ enum NativeDiffuseClassifierDatasetService {
         var removeStaging = true
         defer { if removeStaging { try? FileManager.default.removeItem(at: staging) } }
         var inventory: [TrainingViewFile] = [], labels: [String] = []
-        for textureClass in classes {
+        let curation = try JSONDecoder().decode(Manifest.self, from: Data(contentsOf: manifestURL))
+        for textureClass in curation.classes {
             try Task.checkCancellation()
             let classFolder = root.appendingPathComponent(textureClass.name), files = try imageFiles(in: classFolder)
             guard !files.isEmpty else { continue }
@@ -562,7 +591,7 @@ enum NativeDiffuseClassifierDatasetService {
         let manifest = try JSONDecoder().decode(TrainingViewManifest.self, from: Data(contentsOf: manifestURL))
         guard manifest.schema == trainingViewSchema, manifest.datasetPath == dataset.path, manifest.trainingPath == training.path,
               Set(manifest.classes).count == manifest.classes.count, Set(manifest.files.map(\.relativePath)).count == manifest.files.count,
-              manifest.classes.allSatisfy({ classes.map(\.name).contains($0) }) else { throw StudioError("The Create ML view ownership binding is invalid.") }
+              manifest.classes.allSatisfy(validClassFolderName) else { throw StudioError("The Create ML view ownership binding is invalid.") }
         let expectedFiles = Dictionary(uniqueKeysWithValues: manifest.files.map { ($0.relativePath, $0) })
         var found = Set<String>(), foundDirectories = Set<String>()
         guard let iterator = FileManager.default.enumerator(at: canonicalLocation, includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey]) else {
@@ -604,10 +633,31 @@ enum NativeDiffuseClassifierDatasetService {
         for file in files where try hash(Data(contentsOf: file, options: .mappedIfSafe)) == entry.sourceSHA256 { return file }
         return nil
     }
-    private static func classID(for file: URL, root: URL) -> String? {
+    private static func classID(for file: URL, root: URL, catalog: [TextureClass]) -> String? {
         guard file.path.hasPrefix(root.path + "/") else { return nil }
         let components = file.path.dropFirst(root.path.count + 1).split(separator: "/")
-        return classes.first { $0.name == components.first.map(String.init) }?.id
+        return catalog.first { $0.name == components.first.map(String.init) }?.id
+    }
+    private static func validClassFolderName(_ name: String) -> Bool {
+        !name.isEmpty && !name.hasPrefix(".") && !name.contains("/") && !name.contains("\\") && !name.contains("\0")
+    }
+    private static func classCatalog(root: URL, previous: [TextureClass]) throws -> [TextureClass] {
+        var result: [TextureClass] = []
+        let children = try FileManager.default.contentsOfDirectory(at: root,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles])
+        for folder in children.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            let state = try folder.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard state.isDirectory == true else { continue }
+            guard state.isSymbolicLink != true, validClassFolderName(folder.lastPathComponent) else {
+                throw StudioError("Classifier class folders must be ordinary child directories.")
+            }
+            let name = folder.lastPathComponent
+            if let known = (previous + classes).first(where: { $0.name == name }) { result.append(known) }
+            else { result.append(.init(id: "user_" + String(hash(Data(name.utf8)).prefix(12)), name: name,
+                                      description: "User-created material type.")) }
+        }
+        guard Set(result.map(\.id)).count == result.count else { throw StudioError("Classifier class identities must be unique.") }
+        return result
     }
     private static func imageFiles(in folder: URL) throws -> [URL] {
         guard let iterator = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) else { return [] }
@@ -622,27 +672,16 @@ enum NativeDiffuseClassifierDatasetService {
     }
     private static func parsedDiffuse(_ file: URL) -> (String, String)? {
         guard file.pathExtension.lowercased() == "png" else { return nil }
-        let name = file.deletingPathExtension().lastPathComponent
-        let patterns = [#"^(.+?)_((?:diffuse|diff|color|col|albedo)(?:_?\d+)?|coll\d+)_(\d+k)(?: \(\d+\))?$"#,
-                        #"^([A-Za-z][A-Za-z0-9]*)_([1248]K)-PNG_(Color)$"#]
-        for (offset, pattern) in patterns.enumerated() {
-            guard let expression = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-                  let match = expression.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)),
-                  let familyRange = Range(match.range(at: 1), in: name), let roleRange = Range(match.range(at: 2), in: name) else { continue }
-            let role = String(name[roleRange]).lowercased(), digits = role.filter(\.isNumber)
-            let variant = offset == 1 || digits.isEmpty ? "color_1" : "color_" + digits
-            return (String(name[familyRange]).lowercased(), variant)
-        }
-        return nil
+        return NativeMaterialDatasetService.diffuseSourceFilename(file)
     }
     private static func contained(_ root: URL, _ relative: String) throws -> URL {
         let url = root.appendingPathComponent(relative).resolvingSymlinksInPath().standardizedFileURL
         guard !relative.hasPrefix("/"), url.path.hasPrefix(root.path + "/") else { throw StudioError("Material sample path leaves its dataset.") }
         return url
     }
-    private static func saveManifest(_ entries: [Entry], to url: URL, root: URL) throws {
+    private static func saveManifest(_ entries: [Entry], to url: URL, root: URL, catalog: [TextureClass]) throws {
         let manifest = Manifest(schema: schema, updatedAt: ISO8601DateFormatter().string(from: Date()), datasetPath: root.path,
-            selectionPolicy: "one_smallest_original_per_family_and_color_variant_no_resizing", classes: classes,
+            selectionPolicy: "one_smallest_original_per_family_and_color_variant_no_resizing", classes: catalog,
             entries: entries.sorted { $0.id < $1.id })
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         try encoder.encode(manifest).write(to: url, options: .atomic)
@@ -652,7 +691,7 @@ enum NativeDiffuseClassifierDatasetService {
         let summary = counts.map { "<li><b>\(escape($0["name"] as? String ?? ""))</b>: \($0["count"] as? Int ?? 0)</li>" }.joined()
         let cards = entries.map { entry in
             let image = entry.currentPath.map { "<a href=\"\(escape(URL(fileURLWithPath: $0).absoluteString))\"><img loading=\"lazy\" src=\"\(escape(URL(fileURLWithPath: $0).absoluteString))\" alt=\"\(escape(entry.family))\"></a>" } ?? "<p>Removed image</p>"
-            let label = classes.first { $0.id == entry.currentClass }?.name ?? "Pending review"
+            let label = counts.first { $0["id"] as? String == entry.currentClass }?["name"] as? String ?? "Pending review"
             let subtype = entry.subtype.map { "<p>Subtype: <b>\(escape($0.replacingOccurrences(of: "_", with: " ")))</b></p>" } ?? ""
             return "<article>\(image)<h2>\(escape(entry.family))</h2><p><b>\(escape(label))</b> · \(escape(entry.variant)) · \(entry.width) × \(entry.height)</p>\(subtype)<p>\(escape(entry.status)) · \(escape(entry.confidence))</p><p>\(escape(entry.evidence.joined(separator: "; ")))</p><details><summary>Original provenance</summary><p>\(escape(entry.sourcePath))</p><code>\(entry.sourceSHA256)</code></details></article>"
         }.joined()
@@ -663,7 +702,7 @@ enum NativeDiffuseClassifierDatasetService {
         <p>Curate your images in <b>\(escape(root.path))</b>. Each class is a child folder. Review the initial suggestions by moving images between class folders in Finder; refresh preserves moves, renames, edits, removals and your added images. Refresh creates a separate byte-preserving Create ML view containing only populated classes. Keep your edits in the curation folder; changed images in an existing generated view are preserved and reported for review.</p>
         <p>Untouched generated suggestions follow updated class definitions. Bark has its own class. Subtype hints such as planks and boards come from explicit names or tags and remain available for future specialized models. Original family names and existing image filenames are preserved.</p>
         <p>One smallest native original per material/color variant is copied byte-for-byte. No resizing, crops, gamma changes, noise or blur are applied. Repeated resolutions are excluded to reduce validation leakage. Create ML’s feature extractor may resize internally; that does not change these files or material-model training crops.</p>
-        <p>Unclassified images remain outside the training folder at \(escape(pending.path)). Both Other folders are reserved for your examples and stay in the curation folder even while empty. Create ML rejects empty labels, so the generated import view includes them only after you add examples. Automatic validation is a preliminary check; use distinct material families for an independent test set.</p>
+        <p>Unclassified images remain outside the training folder at \(escape(pending.path)). Add or rename class folders in the curation folder to define your material types; refresh preserves your chosen classes. Empty classes stay out of the generated import view until you add examples. Automatic validation is a preliminary check; use distinct material families for an independent test set.</p>
         <ul>\(summary)</ul><main>\(cards)</main></html>
         """
     }

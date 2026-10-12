@@ -79,17 +79,17 @@ final class StudioAppDelegate: NSObject, NSApplicationDelegate {
             }
             return
         }
-        if let index = CommandLine.arguments.firstIndex(of: "--refresh-classifier-dataset") {
+        if let index = CommandLine.arguments.firstIndex(where: { ["--refresh-classifier-dataset", "--refresh-specialists", "--specialists"].contains($0) }) {
             NSApp.setActivationPolicy(.prohibited)
             Task {
                 do {
                     let result = try await NativeMaterialCommands.run(
-                        arguments: ["refresh-classifier-dataset"] + Array(CommandLine.arguments.dropFirst(index + 1)),
+                        arguments: [String(CommandLine.arguments[index].dropFirst(2))] + Array(CommandLine.arguments.dropFirst(index + 1)),
                         onEvent: { FileHandle.standardError.write(Data($0.utf8)) }, control: .init())
                     FileHandle.standardOutput.write(Data((result + "\n").utf8))
                     exit(0)
                 } catch {
-                    fputs("Classifier dataset refresh failed: \(error)\n", stderr)
+                    fputs("Classifier / specialist operation failed: \(error)\n", stderr)
                     exit(1)
                 }
             }

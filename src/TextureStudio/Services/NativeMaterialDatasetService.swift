@@ -469,6 +469,12 @@ enum NativeMaterialDatasetService {
     }
     static func croppingRecoveryRequests(files: [URL], size: Int, target: String) -> [NativeMaterialSourceRecovery.Request] {
         guard ["height", "roughness", "normal"].contains(target), size > 0, size <= Int.max / 4 else { return [] }
+        // Explicit generic map names do not prove a downloadable provider
+        // identity, even if their color filename resembles a provider name.
+        let genericFamilies = Set(files.compactMap { file -> String? in
+            guard parsedProvider(file.lastPathComponent) == nil, let name = sourceMapFilename(file.lastPathComponent) else { return nil }
+            return canonical(file.deletingLastPathComponent()).path + "|" + identifier(name.0)
+        })
         struct Field { var roles: Set<String>; let width: Int; let height: Int }
         var fields: [String: [Int: Field]] = [:], locations: [String: (ProviderSourceName, URL)] = [:]
         var inputRoles: [String: Set<String>] = [:]
@@ -478,6 +484,7 @@ enum NativeMaterialDatasetService {
             guard isProviderResolutionField(dimensions: [header.width, header.height], resolution: name.resolution) else { continue }
             let nominal = scale * 1024
             let folder = file.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
+            guard !genericFamilies.contains(folder.path + "|" + identifier(name.asset)) else { continue }
             let key = folder.path + "|" + providerAssetKey(name)
             locations[key] = (name, folder)
             var field = fields[key]?[nominal] ?? Field(roles: [], width: header.width, height: header.height)
@@ -1372,7 +1379,8 @@ enum NativeMaterialDatasetService {
             let path = paths[role]!.resolvingSymlinksInPath().standardizedFileURL
             var source = try summaries.map { try scannedSummary(path, summaries: $0) } ?? sourceSummary(path)
             if let notice = sourceFormatNotice(path) { warnings.append(notice) }
-            guard !["input", "normal"].contains(role) || [3, 4].contains(source["channels"] as? Int ?? 0) else { throw StudioError("Color and normal maps must contain native RGB or RGBA channels.") }
+            guard role != "input" || [1, 2, 3, 4].contains(source["channels"] as? Int ?? 0),
+                  role != "normal" || [3, 4].contains(source["channels"] as? Int ?? 0) else { throw StudioError("Diffuse maps need native gray, gray-alpha, RGB or RGBA channels; normal maps need RGB or RGBA channels.") }
             let actual = [source["width"] as? Int ?? 0, source["height"] as? Int ?? 0]
             if let dimensions, dimensions != actual { throw StudioError("All maps must have exactly matching native dimensions; no resizing is applied.") }
             dimensions = actual
@@ -1391,7 +1399,7 @@ enum NativeMaterialDatasetService {
         for source in Array(maps.values) + variants {
             guard [source["width"] as? Int ?? 0, source["height"] as? Int ?? 0] == dimensions else { throw StudioError("All maps and colors need matching native dimensions.") }
         }
-        guard variants.allSatisfy({ [3, 4].contains($0["channels"] as? Int ?? 0) }), maps["normal"] == nil || [3, 4].contains(maps["normal"]?["channels"] as? Int ?? 0) else { throw StudioError("Diffuse and normal maps must contain RGB or RGBA integer channels.") }
+        guard variants.allSatisfy({ [1, 2, 3, 4].contains($0["channels"] as? Int ?? 0) }), maps["normal"] == nil || [3, 4].contains(maps["normal"]?["channels"] as? Int ?? 0) else { throw StudioError("Diffuse maps need native gray, gray-alpha, RGB or RGBA channels; normal maps need RGB or RGBA channels.") }
         var filenames: [String: String] = [:], metadata: [String: Object] = [:]
         for (role, source) in maps {
             guard let path = source["path"] as? String else { throw StudioError("Missing original map path.") }
@@ -1488,7 +1496,45 @@ enum NativeMaterialDatasetService {
     }
     private static func providerRole(_ suffix: String) -> String? {
         if suffix.range(of: #"^(?:diffuse|diff|color|col|albedo)(?:_?\d+)?$"#, options: .regularExpression) != nil { return "input" }
-        return ["disp": "height", "disp_gl": "height", "displacement": "height", "nor_gl": "normal", "nor_dx": "normal", "rough": "roughness", "roughness": "roughness"][suffix]
+        return ["input": "input", "colour": "input", "basecolor": "input", "base_color": "input",
+                "disp": "height", "disp_gl": "height", "displacement": "height", "height": "height",
+                "nor_gl": "normal", "nor_dx": "normal", "normal": "normal",
+                "rough": "roughness", "roughness": "roughness"][suffix]
+    }
+    private static let authoredFilenameExpressions: [NSRegularExpression] = {
+        let roles = #"(?:diffuse|diff|color|colour|col|albedo)(?:_?\d+)?|coll\d+|base_?color|input|displacement|disp|height|roughness|rough|normal_?gl|normal_?dx|nor_gl|nor_dx|normal"#
+        let patterns = ["^(.+?)[_-](" + roles + #")[_-](\d+k)(?: \(\d+\))?$"#,
+                        #"^(.+?)[_-](\d+k)(?:-PNG)?[_-]("# + roles + #")(?: \(\d+\))?$"#,
+                        "^(.+?)[_-](" + roles + #")(?: \(\d+\))?$"#]
+        return patterns.map { try! NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
+    }()
+    /// Explicit material roles only. This recognizes local authored maps as
+    /// well as provider names, without assigning arbitrary photos a role or
+    /// claiming that a generic filename proves provider provenance.
+    static func sourceMapFilename(_ filename: String) -> (String, String, String)? {
+        if let provider = parsedProvider(filename) { return provider }
+        let name = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
+        for (offset, expression) in authoredFilenameExpressions.enumerated() {
+            guard let match = expression.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)),
+                  let familyRange = Range(match.range(at: 1), in: name),
+                  let roleRange = Range(match.range(at: offset == 1 ? 3 : 2), in: name) else { continue }
+            let raw = String(name[roleRange]).lowercased()
+            let suffix = ["normalgl": "nor_gl", "normal_gl": "nor_gl", "normaldx": "nor_dx", "normal_dx": "nor_dx"][raw]
+                ?? (raw.hasPrefix("coll") ? "col_" + raw.dropFirst(4) : raw)
+            let resolution = offset == 2 ? "native" : Range(match.range(at: offset == 1 ? 2 : 3), in: name).map { String(name[$0]).lowercased() } ?? "native"
+            return (String(name[familyRange]).lowercased(), suffix, resolution)
+        }
+        return nil
+    }
+    static func diffuseSourceFilename(_ file: URL) -> (String, String)? {
+        if let (family, suffix, _) = sourceMapFilename(file.lastPathComponent), providerRole(suffix) == "input" {
+            let digits = suffix.filter(\.isNumber)
+            return (identifier(family), digits.isEmpty ? "color_1" : "color_\(Int(digits) ?? 0)")
+        }
+        if mapAliases[file.deletingPathExtension().lastPathComponent.lowercased()] == "input" {
+            return (identifier(file.deletingLastPathComponent().lastPathComponent), "color_1")
+        }
+        return nil
     }
     private static let mapAliases: [String: String] = ["input": "input", "color": "input", "colour": "input", "albedo": "input", "basecolor": "input", "base_color": "input", "diffuse": "input", "height": "height", "displacement": "height", "disp": "height", "roughness": "roughness", "rough": "roughness", "normal": "normal", "normalgl": "normal", "normal_gl": "normal", "normaldx": "normal", "normal_dx": "normal"]
     /// Downloads can contain PNG bytes under a different extension. Map names
@@ -1496,7 +1542,7 @@ enum NativeMaterialDatasetService {
     /// and reports invalid files instead of silently skipping them.
     private static func isSourceImageCandidate(_ file: URL) -> Bool {
         if file.pathExtension.lowercased() == "png" { return true }
-        return parsedProvider(file.lastPathComponent) != nil || mapAliases[file.deletingPathExtension().lastPathComponent.lowercased()] != nil
+        return sourceMapFilename(file.lastPathComponent) != nil || mapAliases[file.deletingPathExtension().lastPathComponent.lowercased()] != nil
     }
     private static func sourceFormatNotice(_ path: URL) -> String? {
         guard path.pathExtension.lowercased() != "png" else { return nil }
@@ -1542,13 +1588,13 @@ enum NativeMaterialDatasetService {
         let directories = byDirectory.keys.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
         let recognized = directories.flatMap { directory -> [URL] in
             let local = byDirectory[directory]!
-            if local.contains(where: { parsedProvider($0.lastPathComponent) != nil }) {
-                return local.filter { parsedProvider($0.lastPathComponent).flatMap { providerRole($0.1) } != nil }
+            if local.contains(where: { sourceMapFilename($0.lastPathComponent) != nil }) {
+                return local.filter { sourceMapFilename($0.lastPathComponent).flatMap { providerRole($0.1) } != nil }
             }
             return local.filter { aliases[$0.deletingPathExtension().lastPathComponent.lowercased()] != nil }
         }
         var manifestFiles: [String: [URL]] = [:]
-        for directory in directories where byDirectory[directory]!.contains(where: { parsedProvider($0.lastPathComponent) != nil }) {
+        for directory in directories where byDirectory[directory]!.contains(where: { sourceMapFilename($0.lastPathComponent) != nil }) {
             let paths = ((try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.fileSizeKey, .isSymbolicLinkKey])) ?? [])
                 .filter { $0.lastPathComponent.hasPrefix("material-source") && $0.pathExtension.lowercased() == "json" }
             manifestFiles[directory.resolvingSymlinksInPath().standardizedFileURL.path] = paths
@@ -1557,7 +1603,7 @@ enum NativeMaterialDatasetService {
         for directory in directories {
             try Task.checkCancellation()
             let local = byDirectory[directory]!.sorted { $0.lastPathComponent.lowercased() < $1.lastPathComponent.lowercased() }
-            let provider = local.contains { parsedProvider($0.lastPathComponent) != nil }
+            let provider = local.contains { sourceMapFilename($0.lastPathComponent) != nil }
             if !provider {
                 var paths: [String: URL] = [:], ambiguous = false, convention = "opengl"
                 for path in local { if let role = aliases[path.deletingPathExtension().lastPathComponent.lowercased()] {
@@ -1576,7 +1622,7 @@ enum NativeMaterialDatasetService {
                 guard let value = sourceManifest(path) else { return nil }; return (path, value)
             }
             for path in local {
-                guard let (asset, suffix, label) = parsedProvider(path.lastPathComponent), let role = providerRole(suffix) else { continue }
+                guard let (asset, suffix, label) = sourceMapFilename(path.lastPathComponent), let role = providerRole(suffix) else { continue }
                 var family = identifier(asset)
                 if family.hasSuffix("_" + label) { family = String(family.dropLast(label.count + 1)) }
                 let resolved = path.resolvingSymlinksInPath().standardizedFileURL
@@ -1608,7 +1654,7 @@ enum NativeMaterialDatasetService {
                 var maps = group["maps"] as? [String: Object] ?? [:], variants = group["input_variants"] as? [Object] ?? [], problems = group["problems"] as? [String] ?? [], ignored = group["ignored_files"] as? [String] ?? [], issues = group["warnings"] as? [String] ?? []
                 if let notice = sourceFormatNotice(path) { issues.append(notice) }
                 if role == "input" {
-                    let digits = suffix.replacingOccurrences(of: "^(?:diffuse|diff|color|col|albedo)_?", with: "", options: .regularExpression)
+                    let digits = suffix.filter(\.isNumber)
                     source["variant_id"] = digits.isEmpty ? "color_default" : "color_\(Int(digits) ?? 0)"
                     if let prior = variants.first(where: { $0["variant_id"] as? String == source["variant_id"] as? String }) {
                         if prior["file_sha256"] as? String == source["file_sha256"] as? String { ignored.append(path.lastPathComponent) } else { problems.append("Different maps claim the same color variant; choose one explicitly.") }

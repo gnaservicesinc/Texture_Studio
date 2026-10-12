@@ -11,6 +11,7 @@ enum NativeMaterialCommands {
         }
         if let result = try await NativeMaterialDatasetService.run(arguments: arguments, onEvent: onEvent) { return result }
         if let result = try await NativeDiffuseClassifierDatasetService.run(arguments: arguments, onEvent: onEvent) { return result }
+        if let result = try await NativeMaterialSpecialistService.run(arguments: arguments, onEvent: onEvent) { return result }
         switch arguments.first {
         case "checkpoint":
             let file = try url("--checkpoint"), expected = value("--expected-sha256")

@@ -23,8 +23,9 @@ enum DepthChoice: String, Codable, CaseIterable, Identifiable {
     case attached = "Attached depth"
     case model = "Local ML depth"
     case materialCheckpoint = "Material checkpoint"
+    case specialists = "Automatic specialist models"
     var id: String { rawValue }
-    static let studioChoices: [DepthChoice] = [.photoDetail, .attached, .materialCheckpoint]
+    static let studioChoices: [DepthChoice] = [.photoDetail, .attached, .materialCheckpoint, .specialists]
 
     var title: String {
         switch self {
@@ -32,6 +33,7 @@ enum DepthChoice: String, Codable, CaseIterable, Identifiable {
         case .attached: "Attached height / depth map"
         case .model: "Custom depth model"
         case .materialCheckpoint: "Trained material model"
+        case .specialists: "Automatic specialist models"
         }
     }
 
@@ -48,6 +50,9 @@ struct TextureRecipe: Codable {
     var settings: TextureSettings
     var materialCheckpoint: MaterialCheckpointIdentity? = nil
     var materialMapCheckpoints: [String: MaterialCheckpointIdentity]? = nil
+    var specialistModels: [String: SelectedMaterialCheckpoint]? = nil
+    var specialistClassification: NativeDiffuseTextureClassifier.Prediction? = nil
+    var specialistFallback: String? = nil
 }
 
 /// Recipes identify model data, independently of the native runtime.

@@ -32,11 +32,7 @@ if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$PLIST" 2>/dev/nu
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "$SCRIPT_DIR/../script/verify_native_bundle.sh" "$APP_BUNDLE"
-UNEXPECTED_PAYLOAD="$(/usr/bin/find "$APP_BUNDLE/Contents" \( -name '*.safetensors' -o -name '*.pt' -o -name '*.pth' -o -name '*.ckpt' -o -name '*.onnx' -o -name '*.npy' -o -name '*.npz' -o -name '*.exr' -o -name '*.blend' -o -name '*.mlmodelc' -o -name '*.mlpackage' -o -name pyvenv.cfg \) -print -quit)"
-if [[ -n "$UNEXPECTED_PAYLOAD" ]]; then
-  echo "Application packaging excludes model weights, numeric experiment maps and runtimes: $UNEXPECTED_PAYLOAD" >&2
-  exit 1
-fi
+"$SCRIPT_DIR/../script/verify_material_payload.sh" "$APP_BUNDLE"
 for ROLE in review compare dataset train; do
   case "$ROLE" in
     review) TOOL_NAME="Material Review"; ICON_NAME=MaterialReview ;;

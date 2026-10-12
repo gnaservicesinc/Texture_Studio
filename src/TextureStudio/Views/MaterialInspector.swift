@@ -98,6 +98,22 @@ struct MaterialInspector: View {
                     Text("The model receives the prepared diffuse map with this same crop and lighting balance.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                if workspace.depthChoice == .specialists {
+                    Text("Approved models follow the diffuse classifier's category. Set up and review them in Model Training → Specialist Models.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Picker("Missing / uncertain category", selection: $workspace.specialistFallback) {
+                        Text("Flat surface").tag("flat")
+                        Text("Selected material model").tag("material")
+                        Text("Local depth model").tag("local")
+                    }
+                    if workspace.specialistFallback == "local" {
+                        Picker("Fallback depth model", selection: $workspace.modelID) {
+                            ForEach(models.catalog) { Text($0.name).tag($0.id) }
+                        }
+                        Button("Manage / Locate Fallback…") { workspace.showModels = true }
+                        Toggle("Higher values mean nearer", isOn: $workspace.customInverseDepth)
+                    }
+                }
                 if workspace.depthChoice == .photoDetail {
                     Text("No inferred relief: displacement stays neutral and normals stay flat unless you explicitly add brightness relief below.")
                         .font(.caption).foregroundStyle(.secondary)

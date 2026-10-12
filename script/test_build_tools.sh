@@ -8,6 +8,15 @@ FIXTURE="$SCRATCH/repository"
 APPLICATION="$SCRATCH/Texture Studio.app"
 mkdir -p "$APPLICATION/Contents/Resources"
 "$SCRIPT_DIR/verify_native_bundle.sh" "$APPLICATION"
+mkdir "$APPLICATION/Contents/Resources/DiffuseTextureTypeClassifier.mlmodelc"
+"$SCRIPT_DIR/verify_material_payload.sh" "$APPLICATION"
+for PAYLOAD in material.safetensors depth.mlpackage unknown.mlmodelc sample.exr; do
+  touch "$APPLICATION/Contents/Resources/$PAYLOAD"
+  if "$SCRIPT_DIR/verify_material_payload.sh" "$APPLICATION" > "$SCRATCH/error" 2>&1; then
+    echo "Unexpected material payload accepted: $PAYLOAD" >&2; exit 1
+  fi
+  /bin/rm "$APPLICATION/Contents/Resources/$PAYLOAD"
+done
 for RESOURCE in worker.py worker.pyc worker.pyo libpython3.14.dylib pyvenv.cfg; do
   printf 'retired resource fixture\n' > "$APPLICATION/Contents/Resources/$RESOURCE"
   if "$SCRIPT_DIR/verify_native_bundle.sh" "$APPLICATION" > "$SCRATCH/error" 2>&1; then

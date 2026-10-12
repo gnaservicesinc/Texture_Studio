@@ -79,6 +79,15 @@ final class WorkbenchStore {
     var classifierSourceFolderPath: String { didSet { preferences.set(classifierSourceFolderPath, forKey: "classifierSourceFolder") } }
     var classifierDatasetPath: String { didSet { preferences.set(classifierDatasetPath, forKey: "classifierDatasetPath") } }
     var classifierDatasetResult: WorkbenchClassifierDatasetResult?
+    var specialistWorkspacePath: String { didSet { preferences.set(specialistWorkspacePath, forKey: "specialistWorkspace") } }
+    var specialistClassifierPath: String { didSet { preferences.set(specialistClassifierPath, forKey: "specialistClassifier") } }
+    var specialistSourceDatasetPath: String { didSet { preferences.set(specialistSourceDatasetPath, forKey: "specialistSourceDataset") } }
+    var specialistRegistry: WorkbenchSpecialistRegistry?
+    var selectedSpecialistID: String? { didSet { preferences.set(selectedSpecialistID, forKey: "selectedSpecialist") } }
+    var specialistTarget: String { didSet { preferences.set(specialistTarget, forKey: "specialistTarget") } }
+    var specialistTrainingContext: WorkbenchSpecialistTrainingContext?
+    var specialistNavigationRequest = UUID()
+    var comparisonNavigationRequest = UUID()
     var sourceRecoverySummary = ""
     var sourceRecoveryResults: [WorkbenchSourceRecoveryResult] = []
     private(set) var trainingPreferenceNotice: String?
@@ -248,6 +257,15 @@ final class WorkbenchStore {
         classifierDatasetPath = defaults.string(forKey: "classifierDatasetPath") ?? (hasDevelopmentCorpus ? "/opt/ipde/classifer_ds" : self.managedWorkspaceURL.appendingPathComponent("Diffuse Classifier Dataset").path)
         let workspace = Self.userWorkspaceURL(configured: defaults.string(forKey: "workspace"), managed: self.managedWorkspaceURL).path
         workspacePath = workspace
+        let specialistWorkspace = defaults.string(forKey: "specialistWorkspace") ?? URL(fileURLWithPath: workspace).appendingPathComponent("Specialist Models").path
+        specialistWorkspacePath = specialistWorkspace
+        specialistClassifierPath = defaults.string(forKey: "specialistClassifier") ?? ""
+        let specialistSourceDataset = defaults.string(forKey: "specialistSourceDataset") ?? defaults.string(forKey: "dataset") ?? ""
+        specialistSourceDatasetPath = specialistSourceDataset
+        selectedSpecialistID = defaults.string(forKey: "selectedSpecialist")
+        specialistTarget = defaults.string(forKey: "specialistTarget") ?? "height"
+        defaults.set(specialistWorkspace, forKey: "specialistWorkspace")
+        defaults.set(specialistSourceDataset, forKey: "specialistSourceDataset")
         defaults.set(workspace, forKey: "workspace")
         let cache = URL(fileURLWithPath: workspace).appendingPathComponent("out/material-training/transfer-models")
         let configuredBase = defaults.string(forKey: "materialModelDirectory")
@@ -836,6 +854,9 @@ final class WorkbenchStore {
 
     private func runTraining(checkpoint: WorkbenchCheckpoint?) {
         let options = training
+        let specialistContext = specialistTrainingContext.flatMap { context in
+            !options.useSelectedMaterialOnly && context.datasetPath == (dataset?.preparation?.sourceDatasetPath ?? dataset?.datasetPath) && context.target == options.target ? context : nil
+        }
         let modelName = effectiveTrainingModelName
         let selectedMaterial = selectedMaterialId
         let dependencies = options.modelFamily.isCompact ? [] : checkpoint.map { dependencyArguments(for: $0) } ?? dependencyArguments
@@ -892,6 +913,16 @@ final class WorkbenchStore {
             } catch {
                 self.lastPackageCheckpointId = nil
                 notices.append("Model saved at \(result.checkpointPath). Could not refresh the model library: \(error.localizedDescription)")
+            }
+            if let specialistContext, (result.completedUpdates ?? 0) > 0 {
+                do {
+                    try await self.recordSpecialistCheckpoint(context: specialistContext,
+                        checkpointPath: result.checkpointPath, trainingSize: options.size,
+                        completedUpdates: result.completedUpdates ?? 0)
+                    notices.append("Saved in \(specialistContext.name). Return to Specialist Models to compare and approve it for automatic generation.")
+                } catch {
+                    notices.append("Model saved; could not update its specialist record: \(error.localizedDescription)")
+                }
             }
             if result.stoppedReason == "time_limit" {
                 let counts = result.completedUpdates.flatMap { completed in
@@ -1296,6 +1327,7 @@ final class WorkbenchStore {
         guard !WorkbenchLifecycle.shared.isTerminating else { throw CancellationError() }
         let trainingWorker = ["train", "refine"].contains(args.first ?? "")
         let classifierWorker = args.first == "refresh-classifier-dataset"
+        let specialistWorker = args.first == "refresh-specialists"
         let progressWorker = trainingWorker || ["dataset", "prepare-size", "scan-folder", "import-folder", "edit-dataset"].contains(args.first ?? "")
         if progressWorker { trainingEventBuffer = "" }
         if trainingWorker { hasTrainingStarted = false }
@@ -1326,6 +1358,7 @@ final class WorkbenchStore {
                 self.logText = events.text
                 if progressWorker, !pending.isEmpty { self.recordTrainingProgress(pending) }
                 if classifierWorker, !pending.isEmpty { self.recordClassifierDatasetProgress(pending) }
+                if specialistWorker, !pending.isEmpty { self.recordSpecialistProgress(pending) }
             }
         }
         let operation = Task { try await NativeMaterialCommands.run(arguments: args, onEvent: event, control: control) }
@@ -1336,6 +1369,7 @@ final class WorkbenchStore {
             let pending = events.drainPending()
             if progressWorker, !pending.isEmpty { recordTrainingProgress(pending) }
             if classifierWorker, !pending.isEmpty { recordClassifierDatasetProgress(pending) }
+            if specialistWorker, !pending.isEmpty { recordSpecialistProgress(pending) }
             runner = nil; activeWorkerId = nil
             logText = events.text
             WorkbenchLifecycle.shared.remove(control)

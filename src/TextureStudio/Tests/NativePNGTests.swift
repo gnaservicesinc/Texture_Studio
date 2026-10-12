@@ -4,6 +4,35 @@ import zlib
 @testable import TextureStudio
 
 final class NativePNGTests: XCTestCase {
+    func testGrayscaleDiffuseReplicatesNativeColorIntoRGBTensorAtBothPrecisions() throws {
+        for bits in [8, 16] { for (color, channels) in [(UInt8(0), 1), (4, 2)] {
+            let maximum = bits == 16 ? 65535 : 255
+            let codes = [0, maximum / 2, maximum]
+            var bytes = Data()
+            for (pixel, code) in codes.enumerated() {
+                let samples = channels == 1 ? [code] : [code, maximum - pixel * maximum / 2]
+                for sample in samples {
+                    if bits == 16 { bytes.append(UInt8(sample >> 8)) }
+                    bytes.append(UInt8(truncatingIfNeeded: sample))
+                }
+            }
+            let source = NativePNG(header: .init(width: 3, height: 1, bits: bits, channels: channels, color: color, interlace: 0),
+                pixels: bytes, colorChunks: [])
+            let normalized = codes.map { Float($0) / Float(maximum) }
+            XCTAssertEqual(try source.modelFloatSamples(role: "input", encoding: "srgb"), normalized + normalized + normalized)
+            let linear = normalized.map { $0 <= 0.04045 ? $0 / 12.92 : pow(($0 + 0.055) / 1.055, 2.4) }
+            XCTAssertEqual(try source.modelFloatSamples(role: "input", encoding: "srgb", inputTransfer: .linear), linear + linear + linear)
+            XCTAssertEqual(try source.modelFloatSamples(role: "input", encoding: "linear_rgb", inputTransfer: .linear),
+                normalized + normalized + normalized)
+            XCTAssertThrowsError(try source.modelFloatSamples(role: "normal"), "Gray color cannot supply normal X/Y/Z components")
+            XCTAssertEqual(source.pixels, bytes)
+            let decoded = try NativePNG.decode(source.encoded())
+            XCTAssertEqual(decoded.header.channels, channels)
+            XCTAssertEqual(decoded.pixels, bytes)
+            XCTAssertEqual(try source.crop([1, 0, 2, 1]).pixels, bytes.suffix(2 * source.header.bytesPerPixel))
+        } }
+    }
+
     func testDiffuseTensorTransferDecodesSRGBOnceAndNeverTransformsNumericTargets() throws {
         for bits in [8, 16] {
             let maximum = bits == 16 ? 65535 : 255

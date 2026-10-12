@@ -1,12 +1,13 @@
 import SwiftUI
 
 private enum TrainingDestination: String, CaseIterable, Identifiable {
-    case overview, dataset, train, compare, review, checkpoints
+    case overview, dataset, specialists, train, compare, review, checkpoints
     var id: String { rawValue }
     var title: String {
         switch self {
         case .overview: "Getting Started"
         case .dataset: "Dataset"
+        case .specialists: "Specialist Models"
         case .train: "Train Material"
         case .compare: "Compare Checkpoints"
         case .review: "Review Details"
@@ -17,6 +18,7 @@ private enum TrainingDestination: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "sparkles"
         case .dataset: "square.stack.3d.up"
+        case .specialists: "arrow.triangle.branch"
         case .train: "graduationcap"
         case .compare: "rectangle.split.2x1"
         case .review: "viewfinder"
@@ -36,6 +38,7 @@ private enum TrainingDestination: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "A practical path from photographed surfaces to a reusable material model."
         case .dataset: "Create, rename and manage datasets, then inspect their original material maps."
+        case .specialists: "Classify materials, then train, compare and approve one category at a time."
         case .train: "Refine displacement, roughness or normals at the selected native pixel grid."
         case .compare: "Prepare diffuse once, then compare matching model outputs."
         case .review: "Inspect original pixels, pan together and pop maps out for a closer look."
@@ -87,6 +90,9 @@ struct ModelTrainingHubView: View {
                             Text(item.guidance).font(.callout).foregroundStyle(.secondary)
                         }
                         Spacer()
+                        if [.train, .compare].contains(item), store.specialistTrainingContext != nil {
+                            Button("Specialist Workflow") { destination = .specialists }
+                        }
                         if let role = item.tool {
                             Button("Separate Window", systemImage: "macwindow.on.rectangle") { MaterialToolLauncher.open(role) }
                                 .help("Open the bundled tool as its own app. Finish saving dataset edits before using two copies at once.")
@@ -97,6 +103,7 @@ struct ModelTrainingHubView: View {
                 switch destination ?? .overview {
                 case .overview: overview.modifier(DatasetManagementPresentation(store: store))
                 case .dataset: MaterialToolRootView(role: .dataset, store: store, review: review, embeddedInHub: true)
+                case .specialists: MaterialSpecialistsView(store: store)
                 case .train: MaterialToolRootView(role: .train, store: store, review: review, embeddedInHub: true)
                 case .compare: MaterialToolRootView(role: .compare, store: store, review: review, embeddedInHub: true)
                 case .review: MaterialToolRootView(role: .review, store: store, review: review, embeddedInHub: true)
@@ -107,16 +114,18 @@ struct ModelTrainingHubView: View {
         .navigationTitle("Model Training")
         .frame(minWidth: 1280, minHeight: 780)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if destination == .overview || destination == .checkpoints || (destination == .review && store.isBusy) {
+            if destination == .overview || destination == .specialists || destination == .checkpoints || (destination == .review && store.isBusy) {
                 WorkbenchActivityView(store: store)
             }
         }
         .alert("Model Training", isPresented: Binding(get: {
-            store.error != nil && destination == .overview && store.datasetSheet == nil
+            store.error != nil && (destination == .overview || destination == .specialists) && store.datasetSheet == nil
         }, set: { if !$0 { store.error = nil } })) {
             Button("OK") { store.error = nil }
         } message: { Text(store.error ?? "") }
         .onChange(of: store.trainingNavigationRequest) { _, _ in destination = .train }
+        .onChange(of: store.specialistNavigationRequest) { _, _ in destination = .specialists }
+        .onChange(of: store.comparisonNavigationRequest) { _, _ in destination = .compare }
         .task { store.restore() }
     }
 
@@ -128,6 +137,9 @@ struct ModelTrainingHubView: View {
                         .font(.largeTitle.bold())
                     Text("Refine small material models with your paired diffuse and surface maps, then inspect the exact inputs and outputs.")
                         .font(.title3).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                startCard("Train category specialists", symbol: "arrow.triangle.branch", description: "Use the diffuse classifier to organize paired materials, then train and review one category or subtype at a time.", button: "Open Specialist Workflow") {
+                    destination = .specialists
                 }
                 HStack(alignment: .top, spacing: 18) {
                     startCard("Create and manage datasets", symbol: "square.stack.3d.up", description: "Give your dataset a name, add paired material maps, and edit or remove datasets from your library.", button: "New Dataset…") {
