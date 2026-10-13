@@ -109,7 +109,7 @@ final class NativeDepthProRefinerTests: XCTestCase {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         try await Task.detached {
             let root = try Self.temporary(); defer { try? FileManager.default.removeItem(at: root) }
-            let dataset = root.appendingPathComponent("dataset")
+            let dataset = root.appendingPathComponent(".training-data/dataset")
             let fixture = try Self.datasetFixture(dataset)
             let counter = Counter()
             let cache = NativeDepthProInputCache(modelSHA256: String(repeating: "d", count: 64),
@@ -127,8 +127,8 @@ final class NativeDepthProRefinerTests: XCTestCase {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         try await Task.detached {
             let root = try Self.temporary(); defer { try? FileManager.default.removeItem(at: root) }
-            let originalRoot = root.appendingPathComponent("original"), dataset = root.appendingPathComponent("prepared")
-            let original = try Self.datasetFixture(originalRoot)
+            let originalRoot = root.appendingPathComponent("original"), dataset = root.appendingPathComponent("prepared/.training-data/dataset")
+            let original = try Self.datasetFixture(originalRoot.appendingPathComponent(".training-data/dataset"))
             let fixture = try Self.datasetFixture(dataset, input: Data(contentsOf: original.inputURL),
                 height: Data(contentsOf: original.heightURL))
             let protectedURLs = [original.inputURL, original.heightURL, fixture.inputURL, fixture.heightURL,
@@ -237,16 +237,18 @@ final class NativeDepthProRefinerTests: XCTestCase {
             let targetBytes = try NativePNG(header: .init(width: 512, height: 512, bits: 16, channels: 1, color: 0, interlace: 0),
                 pixels: Data(repeating: 97, count: 512 * 512 * 2), colorChunks: []).encoded()
             try inputBytes.write(to: sourceInput); try targetBytes.write(to: sourceTarget)
-            let dataset = root.appendingPathComponent("dataset")
+            let dataset = root.appendingPathComponent(".training-data/dataset")
             let fixture = try Self.datasetFixture(dataset,
                 input: NativePNG.crop(inputBytes, rectangle: [128, 128, 256, 256]).encoded(),
                 height: NativePNG.crop(targetBytes, rectangle: [128, 128, 256, 256]).encoded())
             let sampleURL = fixture.inputURL.deletingLastPathComponent().appendingPathComponent("sample.json")
             var sample = try NativeMaterialTransfer.object(sampleURL)
             sample["crop_kind"] = "center"
+            sample["crop_rectangle_top_left_xywh"] = [128, 128, 256, 256]
+            sample["source_square_rectangle_top_left_xywh"] = [0, 0, 512, 512]
             var maps = try XCTUnwrap(sample["map_metadata"] as? [String: [String: Any]])
-            maps["input"]?["source"] = ["path": sourceInput.path, "file_sha256": NativeMaterialTrainer.checksum(inputBytes)]
-            maps["height"]?["source"] = ["path": sourceTarget.path, "file_sha256": NativeMaterialTrainer.checksum(targetBytes)]
+            maps["input"]?["source"] = ["path": sourceInput.path, "file_sha256": NativeMaterialTrainer.checksum(inputBytes), "width": 512, "height": 512]
+            maps["height"]?["source"] = ["path": sourceTarget.path, "file_sha256": NativeMaterialTrainer.checksum(targetBytes), "width": 512, "height": 512]
             sample["map_metadata"] = maps
             try JSONSerialization.data(withJSONObject: sample).write(to: sampleURL)
             let counter = Counter()
@@ -285,7 +287,7 @@ final class NativeDepthProRefinerTests: XCTestCase {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         try await Task.detached {
             let root = try Self.temporary(); defer { try? FileManager.default.removeItem(at: root) }
-            let dataset = root.appendingPathComponent("dataset"), fixture = try Self.datasetFixture(dataset)
+            let dataset = root.appendingPathComponent(".training-data/dataset"), fixture = try Self.datasetFixture(dataset)
             for failure in ["prediction", "cache"] {
                 let cache = NativeDepthProInputCache(modelSHA256: String(repeating: "d", count: 64),
                     directory: root.appendingPathComponent("cache-" + failure)) { image in
@@ -367,8 +369,9 @@ final class NativeDepthProRefinerTests: XCTestCase {
         }.value
     }
 
-    private static func roundTrip(root: URL, dataset: URL, fixture: PairFixture,
+    private static func roundTrip(root: URL, dataset suppliedDataset: URL, fixture: PairFixture,
                                   cache: NativeDepthProInputCache, epochs: Int) throws -> [String: Any] {
+        let dataset = fixture.preparedDatasetURL
         let recorder = Recorder()
         let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path,
             "--output", root.appendingPathComponent("trained").path, "--model-family", "depthpro-height-refiner",
@@ -449,6 +452,7 @@ final class NativeDepthProRefinerTests: XCTestCase {
     }
 
     private struct PairFixture {
+        let preparedDatasetURL: URL
         let inputURL: URL, heightURL: URL
         let inputSHA256: String, heightSHA256: String
     }
@@ -458,7 +462,10 @@ final class NativeDepthProRefinerTests: XCTestCase {
         let configuration = try NativeMaterialTransfer.object(Data(text.utf8))
         return try XCTUnwrap(configuration["training_configuration"] as? [String: Any])
     }
-    private static func datasetFixture(_ root: URL, input: Data? = nil, height: Data? = nil) throws -> PairFixture {
+    private static func datasetFixture(_ requestedRoot: URL, input: Data? = nil, height: Data? = nil) throws -> PairFixture {
+        let root = requestedRoot.deletingLastPathComponent().lastPathComponent == ".training-data"
+            ? requestedRoot : requestedRoot.appendingPathComponent(".training-data/dataset")
+        let original = root.deletingLastPathComponent().deletingLastPathComponent()
         let folder = root.appendingPathComponent("samples/train")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let inputBytes = try input ?? photo(width: 256, height: 256, variant: 0)
@@ -479,14 +486,27 @@ final class NativeDepthProRefinerTests: XCTestCase {
         }
         let inputURL = folder.appendingPathComponent("diffuse.png"), heightURL = folder.appendingPathComponent("height.png")
         try inputBytes.write(to: inputURL); try heightBytes.write(to: heightURL)
-        let fixture = PairFixture(inputURL: inputURL, heightURL: heightURL,
+        let fixture = PairFixture(preparedDatasetURL: root, inputURL: inputURL, heightURL: heightURL,
             inputSHA256: NativeMaterialTrainer.checksum(inputBytes), heightSHA256: NativeMaterialTrainer.checksum(heightBytes))
+        let originals = original.appendingPathComponent("originals/material-a")
+        try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+        try inputBytes.write(to: originals.appendingPathComponent("diffuse.png"))
+        try heightBytes.write(to: originals.appendingPathComponent("height.png"))
+        try JSONSerialization.data(withJSONObject: ["schema_version": 2, "name": "Depth refiner originals", "samples": [[String: Any]]()])
+            .write(to: original.appendingPathComponent("dataset.json"))
+        let transform: [String: Any] = ["type": "native_crop", "algorithm": "exact_native_integer_codes", "range_normalization": false, "gamma_applied": false]
         let sample: [String: Any] = ["sample_id": "train", "material_id": "material-a", "status": "approved", "split": "train",
-            "sample_pixel_dimensions": [256, 256], "maps": ["input": "diffuse.png", "height": "height.png"],
-            "map_metadata": ["input": ["filename": "diffuse.png", "encoding": "srgb", "sample_sha256": fixture.inputSHA256],
-                "height": ["filename": "height.png", "sample_sha256": fixture.heightSHA256]]]
+            "sample_pixel_dimensions": [256, 256], "crop_rectangle_top_left_xywh": [0, 0, 256, 256],
+            "source_square_rectangle_top_left_xywh": [0, 0, 256, 256], "maps": ["input": "diffuse.png", "height": "height.png"],
+            "map_metadata": ["input": ["filename": "diffuse.png", "encoding": "srgb", "sample_sha256": fixture.inputSHA256,
+                "storage": "prepared_crop", "exact_source_crop": true, "transforms": [transform],
+                "source": ["path": originals.appendingPathComponent("diffuse.png").path, "file_sha256": fixture.inputSHA256, "width": 256, "height": 256]],
+                "height": ["filename": "height.png", "sample_sha256": fixture.heightSHA256,
+                "storage": "prepared_crop", "exact_source_crop": true, "transforms": [transform],
+                "source": ["path": originals.appendingPathComponent("height.png").path, "file_sha256": fixture.heightSHA256, "width": 256, "height": 256]]]]
         try JSONSerialization.data(withJSONObject: sample).write(to: folder.appendingPathComponent("sample.json"))
         try JSONSerialization.data(withJSONObject: ["schema_version": 2,
+            "native_size_preparation": ["schema": "texture-studio-native-crops-v1", "source_dataset_path": original.path, "target_resized": false],
             "samples": [["sample_id": "train", "material_id": "material-a", "status": "approved", "split": "train", "path": "samples/train"]],
             "validation": ["enabled": false, "quick_count": 0]]).write(to: root.appendingPathComponent("dataset.json"))
         return fixture

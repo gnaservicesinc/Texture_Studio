@@ -284,11 +284,17 @@ enum NativeDiffuseClassifierDatasetService {
         if let dataset {
             let root = dataset.pathExtension.lowercased() == "json" ? dataset.deletingLastPathComponent() : dataset
             let manifest = root.appendingPathComponent("dataset.json")
-            if !FileManager.default.fileExists(atPath: manifest.path) {
+            if try NativeMaterialDatasetService.sourceFolderIsAuthoritative(root) {
                 return try discoverReport(dataset: nil, sourceFolder: root, minimumSize: requestedSize)
             }
             if let index = try? object(Data(contentsOf: manifest)), let folder = index["source_folder_dataset_path"] as? String {
                 return try discoverReport(dataset: nil, sourceFolder: URL(fileURLWithPath: folder),
+                    minimumSize: requestedSize ?? index["crop_size"] as? Int ?? index["training_size"] as? Int)
+            }
+            if let index = try? object(Data(contentsOf: manifest)),
+               let lineage = index["native_size_preparation"] as? Object,
+               let original = lineage["source_dataset_path"] as? String {
+                return try discoverReport(dataset: URL(fileURLWithPath: original), sourceFolder: nil,
                     minimumSize: requestedSize ?? index["crop_size"] as? Int ?? index["training_size"] as? Int)
             }
         }
@@ -321,18 +327,12 @@ enum NativeDiffuseClassifierDatasetService {
                 root = URL(fileURLWithPath: original).resolvingSymlinksInPath().standardizedFileURL
                 index = try object(Data(contentsOf: root.appendingPathComponent("dataset.json")))
             }
-            guard let entries = index["samples"] as? [Object] else { throw StudioError("Material dataset source inventory is missing.") }
-            for entry in entries {
+            guard let records = try NativeMaterialDatasetService.folderProjectionRecords(root) else {
+                throw StudioError("Read classifier inputs from the current original source folder.")
+            }
+            for record in records {
                 try Task.checkCancellation()
-                guard let relative = entry["path"] as? String else { throw StudioError("Material sample source path is missing.") }
-                let sampleURL = try contained(root, relative).appendingPathComponent("sample.json")
-                let sample: Object
-                do { sample = try object(Data(contentsOf: sampleURL)) }
-                catch {
-                    unreadable += 1
-                    warnings.append("Could not read material source registration \(sampleURL.path): \(error.localizedDescription)")
-                    continue
-                }
+                let sample = record.sample
                 guard !["excluded", "rejected"].contains(sample["status"] as? String ?? "") else { continue }
                 let family = sample["source_family_id"] as? String ?? sample["asset_family_id"] as? String ?? sample["name"] as? String ?? "Material"
                 let maps = sample["map_metadata"] as? [String: Object] ?? [:]
@@ -341,7 +341,7 @@ enum NativeDiffuseClassifierDatasetService {
                     let source = map["source"] as? Object ?? [:]
                     guard let path = source["path"] as? String, path.hasPrefix("/") else {
                         unreadable += 1
-                        warnings.append("Original diffuse path is missing from \(sampleURL.path). Its registration remains preserved.")
+                        warnings.append("Original diffuse path is missing from the current material folder.")
                         continue
                     }
                     let url = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
@@ -467,7 +467,7 @@ enum NativeDiffuseClassifierDatasetService {
             if let priorEntry { liveIDs.insert(priorEntry.id) }
             let metadata = providerMetadata[source.family.lowercased()] ?? priorEntry?.providerMetadata ?? source.metadata ?? related.compactMap(\.providerMetadata).first
             let savedTags = NativeSourceFileTags.read(source.url)
-            let manualLabel = savedTags?.classifierIdentity == "user" ? savedTags?.classLabel : nil
+            let manualLabel = savedTags?.hasManualClass == true ? savedTags?.classLabel : nil
             let hasManualLabel = manualLabel != nil
             if let manualLabel, catalog.allSatisfy({ $0.id != manualLabel && $0.name.caseInsensitiveCompare(manualLabel) != .orderedSame }), validClassFolderName(manualLabel) {
                 let folder = root.appendingPathComponent(manualLabel, isDirectory: true)
@@ -612,7 +612,7 @@ enum NativeDiffuseClassifierDatasetService {
             entries.append(entry)
             // Every successful copy is durable even if the user cancels later.
             try saveManifest(entries + previous.filter { !liveIDs.contains($0.id) }, to: manifestURL, root: root, catalog: catalog, minimumSize: minimumSize)
-            if savedTags?.classifierIdentity != "user", let label = catalog.first(where: { $0.id == entry.currentClass })?.name {
+            if savedTags?.hasManualClass != true, let label = catalog.first(where: { $0.id == entry.currentClass })?.name {
                 do {
                     let userCurated = ["moved_by_user", "adopted_user_class", "inherited_user_class"].contains(entry.status)
                     try NativeSourceFileTags.update(source.url, role: "input", classLabel: label,

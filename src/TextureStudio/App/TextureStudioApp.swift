@@ -213,23 +213,14 @@ struct StudioCommands: Commands {
             Button("Add Material…") { datasetStore?.showAddMaterialSheet = true }
                 .keyboardShortcut("a", modifiers: [.command, .shift])
                 .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
-            if datasetStore?.dataset?.isSourceFolder != true {
-                Button("Preview Folder Crops…") { datasetStore?.importMaterialFolder() }
-                    .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
-            }
             Divider()
-            Button("Rename / Edit Dataset Info…") { datasetStore?.showDatasetInfoSheet = true }
+            Button("Dataset Info…") { datasetStore?.showDatasetInfoSheet = true }
                 .keyboardShortcut("i")
                 .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
             Button("Show Dataset in Finder") { datasetStore?.revealDataset() }
                 .disabled(datasetStore?.dataset == nil)
             Button("Close Dataset") { datasetStore?.closeDataset() }
                 .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
-            Divider()
-            if datasetStore?.dataset?.isSourceFolder != true {
-                Button("Move Dataset to Trash…", role: .destructive) { datasetStore?.showTrashDatasetConfirmation = true }
-                    .disabled(datasetStore?.dataset == nil || datasetStore?.isBusy == true)
-            }
         }
         CommandMenu("Material") {
             Button("Generate / Update Material") {

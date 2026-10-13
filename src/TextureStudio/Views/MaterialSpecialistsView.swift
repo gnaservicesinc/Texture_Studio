@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct MaterialSpecialistsView: View {
     @Bindable var store: WorkbenchStore
@@ -82,29 +83,30 @@ struct MaterialSpecialistsView: View {
                                                 Button(specialist.latestModel(for: target) == nil ? "Set Up Training" : "Continue Training") {
                                                     store.specialistTarget = target
                                                     store.openSpecialistTrainer(continuing: specialist.latestModel(for: target) != nil)
-                                                }.disabled(store.isBusy || (specialist.targetInfo(target)?.materialCount ?? 0) == 0)
+                                                }.disabled(store.isBusy)
+                                                    .help("Check this category's current image tags and paired maps, then open Trainer.")
                                             }
                                         }
                                         Divider()
                                         Picker("Surface map", selection: $store.specialistTarget) {
                                             ForEach(["height", "roughness", "normal"], id: \.self) { target in
-                                                Text("\(WorkbenchStore.specialistMapTitle(target)) (\(specialist.targetInfo(target)?.materialCount ?? 0) paired sets)").tag(target)
+                                                Text("\(WorkbenchStore.specialistMapTitle(target)) (\(specialist.targetInfo(target)?.materialCount ?? 0) at last check)").tag(target)
                                             }
                                         }
                                         let count = specialist.targetInfo(store.specialistTarget)?.materialCount ?? 0
                                         if count == 0 {
-                                            Text("Add paired \(WorkbenchStore.specialistMapTitle(store.specialistTarget).lowercased()) maps, then refresh this library.")
+                                            Text("Open training setup to check the current folder for paired \(WorkbenchStore.specialistMapTitle(store.specialistTarget).lowercased()) maps tagged for \(specialist.classLabel).")
                                                 .font(.callout).foregroundStyle(.secondary)
                                         }
                                         HStack {
                                             Button("Set Up Training", systemImage: "graduationcap") { store.openSpecialistTrainer() }
-                                                .buttonStyle(.glassProminent).disabled(store.isBusy || count == 0)
+                                                .buttonStyle(.glassProminent).disabled(store.isBusy)
                                             if specialist.latestModel(for: store.specialistTarget) != nil {
                                                 Button("Continue Saved Model") { store.openSpecialistTrainer(continuing: true) }
-                                                    .disabled(store.isBusy || count == 0)
+                                                    .disabled(store.isBusy)
                                             }
                                         }
-                                        Text("The Trainer opens with this category, map and model name. Set resolution and training settings there. Crops retain their original pixel grid.")
+                                        Text("Setup checks current files and tags, then opens Trainer with this category, map and model name at your chosen resolution. Crops retain their original pixel grid.")
                                             .font(.caption).foregroundStyle(.secondary)
                                     }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
                                 }
@@ -165,17 +167,25 @@ struct MaterialSpecialistsView: View {
     private var workshopSources: some View {
         GroupBox("1. Organize your original folders and image tags") {
             VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(store.dataset == nil ? "Open a source folder to begin" : store.datasetName).font(.headline)
-                        Text(store.dataset == nil ? "Images and maps stay at their original dimensions. Add, inspect and label them inside this app." : store.datasetInventorySummary)
-                            .font(.callout).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(store.dataset == nil ? "Open a source folder to begin" : store.datasetName).font(.headline)
+                    Text(store.dataset == nil ? "Images and maps stay at their original dimensions. Add, inspect and label them inside this app." : store.datasetInventorySummary)
+                        .font(.callout).foregroundStyle(.secondary)
+                    if !store.modelWorkshopSourcePath.isEmpty {
+                        Text(store.modelWorkshopSourcePath)
+                            .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     }
-                    Spacer()
-                    Button("Open Source Folder…", systemImage: "folder") { store.chooseDataset() }.disabled(store.isBusy)
+                }
+                HStack {
+                    Button("Open Source Folder", systemImage: "folder") { openSourceFolder() }
+                        .disabled(store.modelWorkshopSourcePath.isEmpty)
+                        .help("Open the current original source folder in Finder.")
+                    Button("Choose Source Folder…") { store.chooseDataset() }.disabled(store.isBusy)
+                        .help("Select a different folder of original images and material maps.")
                     Button("Add Images or Folders…", systemImage: "photo.badge.plus") { store.addMaterialFolder(workshop: true) }.disabled(store.isBusy)
                     Button("Manage Images & Tags", systemImage: "tag") { store.openModelWorkshopSources() }
                         .disabled(store.isBusy || store.dataset == nil)
+                    Spacer(minLength: 0)
                 }
                 if !store.modelWorkshopSourceFolders.isEmpty {
                     DisclosureGroup("Current source folders (\(store.modelWorkshopSourceFolders.count))") {
@@ -234,6 +244,20 @@ struct MaterialSpecialistsView: View {
         }
     }
 
+    private func openSourceFolder() {
+        let path = store.modelWorkshopSourcePath
+        guard !path.isEmpty else { return }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            store.error = "The source folder is no longer available at \(path). Choose its current location."
+            return
+        }
+        guard NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: true)) else {
+            store.error = "Finder could not open the source folder at \(path)."
+            return
+        }
+    }
+
     private var workshopClassifier: some View {
         GroupBox("2. Teach the diffuse classifier") {
             VStack(alignment: .leading, spacing: 12) {
@@ -260,12 +284,12 @@ struct MaterialSpecialistsView: View {
 
     private func mapTrainingSummary(_ specialist: WorkbenchSpecialistRegistry.Specialist, target: String) -> String {
         let count = specialist.targetInfo(target)?.materialCount ?? 0
-        guard count > 0 else { return "No paired maps available for this category" }
+        guard count > 0 else { return "Last check found no paired maps · Setup checks current tags" }
         if let model = specialist.latestModel(for: target) {
             let current = model.membershipSha256 == specialist.targetInfo(target)?.membershipSha256
-            return "\(count) paired sets · " + (!current ? "Sources changed" : model.approved == true ? "Approved model" : "Saved model needs review")
+            return "Last check: \(count) paired sets · " + (!current ? "Sources changed" : model.approved == true ? "Approved model" : "Saved model needs review")
         }
-        return "\(count) paired sets · Ready for training"
+        return "Last check: \(count) paired sets · Setup checks current tags"
     }
 
     private func originalTagSummary(_ image: WorkbenchSourceInventoryItem) -> String {

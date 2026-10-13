@@ -25,6 +25,28 @@ enum NativeMaterialTrainer {
         let job = Task.detached(priority: .userInitiated) {
             var arguments = arguments
             var options = try Options(arguments)
+            if options.command != "infer" {
+                guard options.materials.isEmpty else {
+                    throw StudioError("Choose a material category to train. Its current file tags determine the training maps.")
+                }
+                let category = try trainingCategory(for: options.dataset!)
+                let manifest = try? NativeMaterialTransfer.object(options.dataset!.appendingPathComponent("dataset.json"))
+                let lineage = manifest?["native_size_preparation"] as? [String: Any]
+                let recordedSeed = (lineage?["crop_selection"] as? [String: Any])?["seed"] as? String
+                let cropSeed = arguments.contains("--crop-selection-prepared") ? recordedSeed : nil
+                let seed = cropSeed ?? String(options.randomizeCrops == .never ? 0 : UInt64.random(in: 1...UInt64.max))
+                // Re-evaluate the category against the physical folder before
+                // every product run. A still-current prepared cache is reused;
+                // additions, removals, teaching and rewritten pixels reprepare.
+                let text = try await NativeMaterialDatasetService.run(arguments: ["prepare-size", "--dataset", category.path,
+                    "--size", String(options.size), "--target", options.target, "--automatic-validation", "--crop-seed", seed], onEvent: onEvent)!
+                let prepared = try NativeMaterialTransfer.object(Data(text.utf8))
+                guard let path = prepared["dataset_path"] as? String, let offset = arguments.firstIndex(of: "--dataset") else {
+                    throw StudioError("The native crop preparation did not return its dataset.")
+                }
+                arguments[offset + 1] = path
+                options = try Options(arguments)
+            }
             let depthProCache: NativeDepthProInputCache?
             if options.modelFamily == .depthProHeightRefiner {
                 try control.check()
@@ -34,34 +56,42 @@ enum NativeMaterialTrainer {
                                                             fallbackDirectories: options.depthProFallbackCacheURLs)
             } else { depthProCache = nil }
             if options.command == "infer" { return try infer(options, control: control, depthProCache: depthProCache) }
-            if let dataset = options.dataset,
-               let manifest = try JSONSerialization.jsonObject(with: Data(contentsOf: dataset.appendingPathComponent("dataset.json"))) as? [String: Any],
-               (manifest["storage_policy"] as? String == "original-source-references-v1" ||
-                manifest["native_size_preparation"] != nil && !arguments.contains("--crop-selection-prepared")) {
-                var preparation = ["prepare-size", "--dataset", dataset.path, "--size", String(options.size),
-                    "--target", options.target, "--automatic-validation", "--crop-seed",
-                    String(options.randomizeCrops == .never ? 0 : UInt64.random(in: 1...UInt64.max))]
-                if let material = options.materials.first { preparation += ["--material", material] }
-                let text = try await NativeMaterialDatasetService.run(arguments: preparation, onEvent: onEvent)!
-                let prepared = try NativeMaterialTransfer.object(Data(text.utf8))
-                guard let path = prepared["dataset_path"] as? String, let offset = arguments.firstIndex(of: "--dataset") else {
-                    throw StudioError("The native crop preparation did not return its dataset.")
-                }
-                arguments[offset + 1] = path
-                while let selection = arguments.firstIndex(of: "--material"), selection + 1 < arguments.count {
-                    arguments.removeSubrange(selection...(selection + 1))
-                }
-                options = try Options(arguments)
-            }
             return try train(options, onEvent: onEvent, control: control, depthProCache: depthProCache)
         }
         return try await withTaskCancellationHandler { try await job.value } onCancel: { control.stop(); job.cancel() }
+    }
+    /// The product trains categories only. Loose manifests and source-folder
+    /// preparation utilities cannot turn a whole folder into a trainable scope.
+    static func trainingCategory(for supplied: URL) throws -> URL {
+        let root = supplied.resolvingSymlinksInPath().standardizedFileURL
+        guard try !NativeMaterialDatasetService.sourceFolderIsAuthoritative(root) else {
+            throw StudioError("Choose a material category to train.")
+        }
+        if FileManager.default.fileExists(atPath: root.appendingPathComponent(".specialist-binding.json").path) {
+            guard try NativeMaterialDatasetService.folderProjectionRecords(root) != nil else {
+                throw StudioError("Choose a material category to train.")
+            }
+            return root
+        }
+        let manifest = try NativeMaterialTransfer.object(root.appendingPathComponent("dataset.json"))
+        guard let preparation = manifest["native_size_preparation"] as? [String: Any],
+              let path = preparation["source_dataset_path"] as? String, path.hasPrefix("/"),
+              root.deletingLastPathComponent().lastPathComponent == ".training-data" else {
+            throw StudioError("Choose a material category to train.")
+        }
+        let category = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
+        guard FileManager.default.fileExists(atPath: category.appendingPathComponent(".specialist-binding.json").path),
+              try !NativeMaterialDatasetService.sourceFolderIsAuthoritative(category),
+              try NativeMaterialDatasetService.folderProjectionRecords(category) != nil else {
+            throw StudioError("Choose a material category to train.")
+        }
+        return category
     }
     struct Options: Sendable {
         let command: String, target: String, scope: String
         let modelFamily: MaterialTrainingModelFamily
         let randomizeCrops: MaterialTrainingCropRandomization
-        let randomFlip: Bool, randomSpinCentercut: Bool
+        let randomFlip: Bool, randomSpinCentercut: Bool, shuffleTrainingOrder: Bool, exaggerateFeatures: Bool
         let compactWidth: Int
         let depthProModelURL: URL, depthProCacheURL: URL
         let depthProFallbackCacheURLs: [URL], trainingCacheRootURL: URL?, cropCacheURL: URL
@@ -92,6 +122,9 @@ enum NativeMaterialTrainer {
                 throw StudioError("Choose crop randomization never, run or epoch.")
             }
             randomizeCrops = timing
+            let shuffle = value("--shuffle-training-order") ?? "true"
+            guard ["true", "false"].contains(shuffle) else { throw StudioError("Choose whether to shuffle training order: true or false.") }
+            shuffleTrainingOrder = shuffle == "true"
             randomFlip = timing != .never && arguments.contains("--random-flip")
             randomSpinCentercut = timing != .never && arguments.contains("--random-spin-centercut")
             let requestedSHA256 = value("--expected-sha256")
@@ -106,6 +139,10 @@ enum NativeMaterialTrainer {
             let name = requestedName.isEmpty ? recordedName : requestedName
             modelName = name.isEmpty ? nil : name
             target = value("--target") ?? recorded["target"] as? String ?? "height"
+            exaggerateFeatures = arguments.contains("--exaggerate-features")
+            guard !exaggerateFeatures || target == "height" else {
+                throw StudioError("Exaggerate features is available for height / displacement training.")
+            }
             let recordedArchitecture = recorded["architecture"] as? String
             let recordedFamily: String? = recorded["model_family"] as? String ??
                 (recordedArchitecture == "texture-studio-compact-scalar-native-v1" ? "compact-scalar" :
@@ -193,7 +230,9 @@ enum NativeMaterialTrainer {
                 "minimum_learning_rate": max(Float.leastNonzeroMagnitude, learningRate * minimumLearningRateRatio),
                 "warmup_updates": warmupUpdates, "seed": seed, "precision": "Float32",
                 "randomize_crops": randomizeCrops.rawValue, "random_flip": randomFlip,
-                "random_spin_centercut": randomSpinCentercut,
+                "random_spin_centercut": randomSpinCentercut, "shuffle_training_order": shuffleTrainingOrder,
+                "exaggerate_features": exaggerateFeatures,
+                "depth_target_transform": exaggerateFeatures ? "native-range-anchored-tanh-contrast-strength-2" : "original-native-values",
                 "value_loss_weight": 1, "detail_loss_weight": 4,
                 "model_family": modelFamily.rawValue, "trainable_parameters": modelFamily == .pbrnxt ? "LoRA factors" : "complete compact network",
                 "optimizer_state_restored": false,
@@ -331,8 +370,11 @@ enum NativeMaterialTrainer {
         }
         if let name = options.modelName { model.configuration["model_name"] = name }
         model.configuration["texture_pipeline"] = MaterialModelCard.pipelineName
-        let sourceManifest = try directories.last.map { try NativeMaterialTransfer.object($0.appendingPathComponent("dataset.json")) } ?? [:]
-        model.configuration["training_dataset_name"] = sourceManifest["name"] as? String ?? dataset.lastPathComponent
+        // A physical original folder needs no manifest. This optional display
+        // metadata cannot be a prerequisite for verified prepared maps.
+        let sourceManifest = directories.last.flatMap { try? NativeMaterialTransfer.object($0.appendingPathComponent("dataset.json")) } ?? [:]
+        model.configuration["training_dataset_name"] = sourceManifest["name"] as? String ??
+            (sourceManifest["source_folder_dataset_path"] as? String).map { URL(fileURLWithPath: $0).lastPathComponent } ?? dataset.lastPathComponent
         let subjects = descriptors.filter { $0.split == "train" }.compactMap(\.materialName)
         let previousSubjects = model.configuration["training_subjects"] as? [String] ?? []
         model.configuration["training_subjects"] = Array(Set(previousSubjects + subjects)).sorted()
@@ -382,7 +424,7 @@ enum NativeMaterialTrainer {
         try control.check()
         guard !FileManager.default.fileExists(atPath: options.output.path) else { throw StudioError("Choose a new training output directory.") }
         try FileManager.default.createDirectory(at: options.output, withIntermediateDirectories: true)
-        if options.randomizeCrops != .never && (options.randomFlip || options.randomSpinCentercut) {
+        if options.randomizeCrops != .never {
             guard !FileManager.default.fileExists(atPath: options.cropCacheURL.path) else {
                 throw StudioError("This training output already owns a crop cache. Choose a new output directory.")
             }
@@ -395,7 +437,7 @@ enum NativeMaterialTrainer {
             try JSONSerialization.data(withJSONObject: receipt.merging(["crop_cache_path": options.cropCacheURL.path]) { _, new in new }, options: [.sortedKeys]).write(
                 to: options.output.appendingPathComponent("crop-cache.json"), options: .atomic)
         }
-        let cropAugmentation = options.randomizeCrops != .never && (options.randomFlip || options.randomSpinCentercut) ?
+        let cropAugmentation = options.randomizeCrops != .never ?
             NativeMaterialCropAugmentation(directory: options.cropCacheURL, target: options.target, seed: options.seed) : nil
         defer { try? cropAugmentation?.saveHistory() }
         var started = now(), trainingClockStarted = false
@@ -473,7 +515,7 @@ enum NativeMaterialTrainer {
             } else { rgb = try input.modelFloatSamples(role: "input", encoding: descriptor.inputEncoding,
                 inputTransfer: model.diffuseInputTransfer) }
             let reference = try target.modelFloatSamples(role: options.target, normalConvention: descriptor.targetConvention)
-            return (rgb, reference)
+            return (rgb, options.exaggerateFeatures ? exaggeratedDepth(reference) : reference)
         }
         func quarantine(_ sample: NativeMaterialDatasetService.TrainingSample, phase: String, error: Error) throws {
             // An explicit Abort or task cancellation always wins over recovery.
@@ -570,7 +612,8 @@ enum NativeMaterialTrainer {
             var refreshed = 0
             try emit(["event": "crop_preparation", "operation": "Refreshing cached crops", "completed": 0, "total": 1, "sample_id": sample.id])
             let paired = try cropAugmentation.refresh([sample], epoch: epoch, flip: options.randomFlip,
-                spin: options.randomSpinCentercut, depthProCache: depthProCache, check: { try control.check() },
+                spin: options.randomSpinCentercut, randomizePosition: true,
+                depthProCache: depthProCache, check: { try control.check() },
                 onProgress: { done, total, sampleID in
                     refreshed = done
                     try emit(["event": "crop_preparation", "operation": "Refreshing cached crops", "completed": done,
@@ -597,7 +640,9 @@ enum NativeMaterialTrainer {
                 try control.check()
                 if control.shouldStopAndSave || timeLimitReached() { break }
                 currentEpoch = epoch + 1
-                var order = Array(training.indices); random.shuffle(&order)
+                var order = Array(training.indices)
+                if options.shuffleTrainingOrder { random.shuffle(&order) }
+                if !options.shuffleTrainingOrder { accumulationOrder = order; accumulationPosition = 0 }
                 var epochFinished = true
                 for (position, index) in order.enumerated() {
                     try control.check()
@@ -621,7 +666,8 @@ enum NativeMaterialTrainer {
                         if microbatch == 0 { accumulatedIndex = index }
                         else {
                             if accumulationPosition == accumulationOrder.count {
-                                accumulationOrder = Array(training.indices); accumulationRandom.shuffle(&accumulationOrder)
+                                accumulationOrder = Array(training.indices)
+                                if options.shuffleTrainingOrder { accumulationRandom.shuffle(&accumulationOrder) }
                                 accumulationPosition = 0
                             }
                             accumulatedIndex = accumulationOrder[accumulationPosition]
@@ -799,6 +845,22 @@ enum NativeMaterialTrainer {
             if let name = options.modelName { failure["model_name"] = name }
             try? writeJSON(failure, to: options.output.appendingPathComponent("run.json"))
             throw error
+        }
+    }
+    /// A bounded nonlinear contrast curve stretches depth changes around the
+    /// middle and contracts the extremes. Preserve the original range and
+    /// constant maps; this transforms training references, never image files.
+    static func exaggeratedDepth(_ values: [Float]) -> [Float] {
+        guard let lower = values.min(), let upper = values.max(),
+              lower.isFinite, upper.isFinite, upper > lower else { return values }
+        let midpoint = (Double(lower) + Double(upper)) * 0.5
+        let halfRange = (Double(upper) - Double(lower)) * 0.5
+        let scale = tanh(2.0)
+        return values.map { value in
+            if value <= lower { return lower }
+            if value >= upper { return upper }
+            let unit = (Double(value) - midpoint) / halfRange
+            return Float(midpoint + halfRange * tanh(2 * unit) / scale)
         }
     }
     static func cadenceDue(every: Int, unit: MaterialTrainingIntervalUnit, steps: Int, epochs: Int, epochBoundary: Bool) -> Bool {

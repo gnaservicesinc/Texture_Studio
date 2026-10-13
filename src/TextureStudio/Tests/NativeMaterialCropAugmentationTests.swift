@@ -3,6 +3,49 @@ import XCTest
 @testable import TextureStudio
 
 final class NativeMaterialCropAugmentationTests: XCTestCase {
+    func testPositionsRefreshWithoutFlipOrRotationAndKeepEveryColorAndTargetAligned() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let sourceInput = root.appendingPathComponent("source-diffuse.png"), sourceTarget = root.appendingPathComponent("source-height.png")
+        let ramp = (0..<64).map { $0 * 1000 }
+        let diffuse = png(width: 8, height: 8, channels: 3, codes: ramp.flatMap { [$0, $0, $0] })
+        let height = png(width: 8, height: 8, channels: 1, codes: ramp)
+        let originalRGB = try diffuse.encoded(), originalHeight = try height.encoded()
+        try originalRGB.write(to: sourceInput); try originalHeight.write(to: sourceTarget)
+        let rectangle = [1, 1, 4, 4]
+        let input = root.appendingPathComponent("crop-diffuse.png"), target = root.appendingPathComponent("crop-height.png")
+        let inputBytes = try diffuse.crop(rectangle).encoded(), targetBytes = try height.crop(rectangle).encoded()
+        try inputBytes.write(to: input); try targetBytes.write(to: target)
+        var samples = ["a", "b"].map { variant in
+            Sample(id: "paired|" + variant, split: "train", width: 4, height: 4,
+                inputURL: input, targetURL: target, inputSHA256: NativeMaterialTrainer.checksum(inputBytes),
+                targetSHA256: NativeMaterialTrainer.checksum(targetBytes), inputEncoding: "srgb", targetConvention: "opengl",
+                augmentationSourceInputURL: sourceInput, augmentationSourceInputSHA256: NativeMaterialTrainer.checksum(originalRGB),
+                augmentationSourceTargetURL: sourceTarget, augmentationSourceTargetSHA256: NativeMaterialTrainer.checksum(originalHeight),
+                cropRectangle: rectangle, sourceSquareRectangle: [0, 0, 8, 8])
+        }
+        let augmentation = NativeMaterialCropAugmentation(directory: root.appendingPathComponent("crop-cache"), target: "height", seed: 17)
+        var previous = rectangle
+        for epoch in 1...3 {
+            for index in samples.indices {
+                samples[index] = try augmentation.refresh([samples[index]], epoch: epoch, flip: false, spin: false,
+                    randomizePosition: true, depthProCache: nil, check: {})[0]
+            }
+            let selected = try XCTUnwrap(samples[0].cropRectangle)
+            XCTAssertNotEqual(selected, previous, "A new epoch selects different pixels whenever another position fits")
+            XCTAssertEqual(samples[0].cropRectangle, samples[1].cropRectangle)
+            for sample in samples {
+                let rgb = try NativePNG.decode(Data(contentsOf: sample.inputURL))
+                let scalar = try NativePNG.decode(Data(contentsOf: sample.targetURL))
+                XCTAssertEqual(scalar.pixels, try height.crop(selected).pixels)
+                XCTAssertEqual(stride(from: 0, to: 48, by: 3).map { codes(rgb)[$0] }, codes(scalar))
+            }
+            previous = selected
+        }
+        XCTAssertTrue(augmentation.history.allSatisfy { $0["crop_position_randomized"] as? Bool == true })
+        XCTAssertEqual(try Data(contentsOf: sourceInput), originalRGB)
+        XCTAssertEqual(try Data(contentsOf: sourceTarget), originalHeight)
+    }
+
     func testUnchangedCropCopiesExactBytesAndReusesOriginalDepthProIdentity() throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let input = root.appendingPathComponent("input.png"), target = root.appendingPathComponent("height.png")

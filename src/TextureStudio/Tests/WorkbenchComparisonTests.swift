@@ -5,6 +5,71 @@ import XCTest
 
 @MainActor
 final class WorkbenchComparisonTests: XCTestCase {
+    func testComparisonKeepsModelNameAsPrimaryIdentityInResultsAndSavedReview() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "comparison-model-name-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = WorkbenchStore(preferences: defaults, managedWorkspaceURL: root, workerOverride: { arguments, _ in
+            let output = arguments[try XCTUnwrap(arguments.firstIndex(of: "--output")) + 1]
+            return "{\"outputs\":{\"height\":{\"path\":\"\(output)/height.exr\"}},\"checkpoint_sha256\":\"named-model\"}"
+        })
+        store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: """
+        {"dataset_path":"/dataset","index_sha256":"index","materials":[{"material_id":"brick","samples":[{"sample_id":"brick","status":"approved","split":"train","width":1024,"height":1024,"maps":{"input":{"path":"/dataset/photo.png"},"height":{"path":"/dataset/height.png"}}}]}]}
+        """)
+        store.selectedSampleId = "brick"
+        var model = try checkpoint(sha: "named-model", target: "height")
+        model.modelName = "Bricks Small"
+        store.checkpoints = [model]
+        store.comparisonCheckpointIds = [model.id]
+        store.comparisonIncludesBase = false
+        store.compare()
+        try await waitForOperation(store)
+        XCTAssertNil(store.error)
+        let output = try XCTUnwrap(store.comparisonCandidates.first { $0.role == "checkpoint" })
+        XCTAssertEqual(output.label, "Bricks Small")
+        XCTAssertEqual(output.displayTitle, "Bricks Small")
+        XCTAssertEqual(output.displaySummary, "Step 42 · Displacement")
+        XCTAssertEqual(output.modelIdentity?.modelName, "Bricks Small")
+        let review = ReviewSessionStore(preferences: defaults)
+        review.load(try XCTUnwrap(store.lastOutputURL).appendingPathComponent("review-manifest.json"))
+        XCTAssertNil(review.error)
+        XCTAssertEqual(review.groups.first?.candidates.last?.displayTitle, "Bricks Small")
+        XCTAssertEqual(review.groups.first?.candidates.last?.modelIdentity?.checkpointStep, 42)
+    }
+
+    func testComparisonShowsTwoReadableModelPanesAndKeepsReferenceAvailable() {
+        let models = (0..<8).map { index in
+            MapReviewCandidate(id: "model-\(index)", label: "old export label", mapURL: URL(fileURLWithPath: "/model-\(index).exr"),
+                numeric: true, role: "checkpoint", modelIdentity: MapReviewModelIdentity(checkpointStep: index * 100,
+                    mapType: "height", modelName: "Model \(index)"))
+        }
+        let reference = MapReviewCandidate(id: "reference", label: "Source displacement · reference",
+            mapURL: URL(fileURLWithPath: "/reference.png"), numeric: true, role: "target")
+        let candidates = [reference] + models
+        let initial = ReviewWorkbenchView.resolvedComparisonCandidates(candidates, visibleIDs: [])
+        XCTAssertEqual(initial.map(\.id), ["model-6", "model-7", "reference"])
+        let chosen = ReviewWorkbenchView.resolvedComparisonCandidates(candidates, visibleIDs: ["model-1", "model-3"])
+        XCTAssertEqual(chosen.map(\.id), ["model-1", "model-3", "reference"])
+        XCTAssertEqual(chosen.first?.displayTitle, "Model 1")
+        XCTAssertEqual(chosen.first?.displaySummary, "Step 100 · Displacement")
+        XCTAssertEqual(reference.displayTitle, "Reference map")
+        XCTAssertEqual(ReviewWorkbenchView.resolvedComparisonCandidates(candidates, visibleIDs: Set(models.map(\.id))).count, 3)
+    }
+
+    func testLegacyExportFolderDoesNotReplaceTheModelName() throws {
+        let checkpoint = try WorkbenchResult.decode(WorkbenchCheckpoint.self, output: """
+        {"checkpoint_path":"/runs/Brick Model/export/checkpoints/model.safetensors","sha256":"legacy-model","schema":"texture-studio-material-checkpoint-v1","target":"height","step":330,"compatible":true}
+        """)
+        XCTAssertEqual(checkpoint.comparisonName, "Brick Model")
+        let candidate = MapReviewCandidate(label: "export · displacement", mapURL: URL(fileURLWithPath: "/height.exr"),
+            numeric: true, role: "checkpoint", modelIdentity: MapReviewModelIdentity(checkpointPath: checkpoint.checkpointPath,
+                checkpointStep: checkpoint.step, mapType: checkpoint.target))
+        XCTAssertEqual(candidate.displayTitle, "Brick Model")
+        XCTAssertTrue(candidate.accessibleLabel.hasPrefix("Brick Model"))
+    }
+
     func testImportedPhotosPrepareAtCompactGridRegardlessOfSourceDimensions() async throws {
         for (side, width, height) in [(512, 64, 48), (512, 777, 529), (512, 2048, 1536), (256, 777, 529)] {
             let root = try temporaryDirectory()

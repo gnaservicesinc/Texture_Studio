@@ -154,20 +154,22 @@ final class NativeDepthProResourcesTests: XCTestCase {
         XCTAssertEqual(originalPhoto.header.height, originalHeight.header.height)
         let rectangle = [(originalPhoto.header.width - 256) / 2, (originalPhoto.header.height - 256) / 2, 256, 256]
         let photoBytes = try originalPhoto.crop(rectangle).encoded(), heightBytes = try originalHeight.crop(rectangle).encoded()
-        let dataset = run.appendingPathComponent("dataset"), sample = dataset.appendingPathComponent("samples/train")
+        let dataset = run.appendingPathComponent("Sources"), sample = dataset.appendingPathComponent("White Stucco")
         try FileManager.default.createDirectory(at: sample, withIntermediateDirectories: true)
-        let croppedPhoto = sample.appendingPathComponent("diffuse.png")
-        try photoBytes.write(to: croppedPhoto); try heightBytes.write(to: sample.appendingPathComponent("height.png"))
-        let item: [String: Any] = ["sample_id": "train", "material_id": "white-stucco", "status": "approved", "split": "train",
-            "sample_pixel_dimensions": [256, 256], "maps": ["input": "diffuse.png", "height": "height.png"],
-            "map_metadata": ["input": ["filename": "diffuse.png", "encoding": "srgb", "sample_sha256": NativeMaterialTrainer.checksum(photoBytes)],
-                "height": ["filename": "height.png", "sample_sha256": NativeMaterialTrainer.checksum(heightBytes)]]]
-        try JSONSerialization.data(withJSONObject: item).write(to: sample.appendingPathComponent("sample.json"))
-        try JSONSerialization.data(withJSONObject: ["schema_version": 2,
-            "samples": [["sample_id": "train", "material_id": "white-stucco", "status": "approved", "split": "train", "path": "samples/train"]],
-            "validation": ["enabled": false, "quick_count": 0]]).write(to: dataset.appendingPathComponent("dataset.json"))
+        let croppedPhoto = sample.appendingPathComponent("diffuse.png"), croppedHeight = sample.appendingPathComponent("height.png")
+        try photoBytes.write(to: croppedPhoto); try heightBytes.write(to: croppedHeight)
+        try NativeSourceFileTags.update(croppedPhoto, role: "input", classLabel: "Stucco", classifierIdentity: "user", reviewStatus: "approved")
+        try NativeSourceFileTags.update(croppedHeight, role: "height", classLabel: "Stucco", classifierIdentity: "user", reviewStatus: "approved")
+        _ = try await NativeMaterialDatasetService.run(arguments: ["edit-dataset", "--dataset", dataset.path,
+            "--training-size", "256", "--validation-enabled", "no"])
+        let classifier = NativeMaterialSpecialistService.Classifier(path: "/unused-tagged-only", sha256: String(repeating: "a", count: 64),
+            labels: ["Stucco"], predict: { _ in throw StudioError("Manual teaching must not invoke classifier prediction") })
+        let registry = try await NativeMaterialSpecialistService.refresh(datasetURL: dataset,
+            workspaceURL: run.appendingPathComponent("Categories"), classifier: classifier)
+        let category = try XCTUnwrap(registry.specialists.first { $0.classLabel == "Stucco" })
+        XCTAssertEqual(category.materialIds.count, 1)
         let missing = run.appendingPathComponent("missing/DepthPro.mlpackage")
-        let trainedText = try await NativeMaterialTrainer.run(arguments: ["train", "--dataset", dataset.path,
+        let trainedText = try await NativeMaterialTrainer.run(arguments: ["train", "--dataset", category.datasetPath,
             "--output", run.appendingPathComponent("trained").path, "--target", "height", "--size", "256",
             "--model-family", "depthpro-height-refiner", "--compact-width", "16", "--updates-per-map", "1",
             "--learning-rate", "0.001", "--depthpro-model", missing.path],

@@ -91,7 +91,8 @@ enum NativeMaterialSpecialistService {
         let trainingSize: Int
         let completedUpdates: Int
         let completedAt: String
-        let membershipSha256: String
+        var membershipSha256: String
+        var membershipSchema: String? = nil
         var approved: Bool
         var approvedAt: String?
     }
@@ -109,14 +110,16 @@ enum NativeMaterialSpecialistService {
         let path: String
         let sha256: String
         let labels: [String]
+        let minimumImageSize: Int
         let predict: @Sendable (URL) throws -> NativeDiffuseTextureClassifier.Prediction
         init(_ model: NativeDiffuseTextureClassifier) {
             path = model.modelURL.path; sha256 = model.modelSHA256; labels = model.labels
+            minimumImageSize = 2048
             predict = { try model.predict(url: $0) }
         }
-        init(path: String, sha256: String, labels: [String],
+        init(path: String, sha256: String, labels: [String], minimumImageSize: Int = 2048,
              predict: @escaping @Sendable (URL) throws -> NativeDiffuseTextureClassifier.Prediction) {
-            self.path = path; self.sha256 = sha256; self.labels = labels; self.predict = predict
+            self.path = path; self.sha256 = sha256; self.labels = labels; self.minimumImageSize = minimumImageSize; self.predict = predict
         }
     }
     private typealias Object = [String: Any]
@@ -202,9 +205,10 @@ enum NativeMaterialSpecialistService {
             if let classLabel, specialist.classLabel != classLabel || specialist.isCustom || !(specialist.subtype?.isEmpty ?? true) {
                 continue
             }
+            let historical = try historicalMaterials(specialist)
             let materials = try readMaterials(URL(fileURLWithPath: specialist.datasetPath), includeExcluded: true)
-            try validateCurrentSources(materials)
-            registry.specialists[offset].targets = targetStatuses(materials, models: specialist.models)
+            try migrateModelProofs(&registry.specialists[offset], historical: historical, current: materials)
+            registry.specialists[offset].targets = try targetStatuses(materials, models: registry.specialists[offset].models)
             registry.specialists[offset].materialIds = materials.map(\.id).sorted()
             registry.specialists[offset].familyIds = Array(Set(materials.map(\.family))).sorted()
         }
@@ -269,7 +273,7 @@ enum NativeMaterialSpecialistService {
             return paths.sorted().map { URL(fileURLWithPath: $0) }
         }
         let taughtLabels = materials.flatMap(inputFiles).compactMap { file -> String? in
-            guard let tags = NativeSourceFileTags.read(file), tags.classifierIdentity == "user",
+            guard let tags = NativeSourceFileTags.read(file),
                   let label = tags.classLabel, !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
             return label
         }
@@ -293,18 +297,31 @@ enum NativeMaterialSpecialistService {
         for (offset, family) in groups.keys.sorted().enumerated() {
             try Task.checkCancellation()
             let group = groups[family]!
-            let sourceFolder = !FileManager.default.fileExists(atPath: dataset.appendingPathComponent("dataset.json").path)
+            let sourceFolder = try NativeMaterialDatasetService.sourceFolderIsAuthoritative(dataset)
+            let tagged = group.filter { material in
+                inputFiles(material).contains { file in
+                    guard let tags = NativeSourceFileTags.read(file),
+                          let label = tags.classLabel, !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+                    return true
+                }
+            }
             let eligible = sourceFolder ? group.filter {
                 let dimensions = $0.sample["source_pixel_dimensions"] as? [Int] ?? []
-                return dimensions.count == 2 && dimensions.allSatisfy { $0 >= 2048 }
+                return dimensions.count == 2 && dimensions.allSatisfy { $0 >= classifier.minimumImageSize }
             } : group
-            guard let chosen = eligible.sorted(by: { $0.area == $1.area ? $0.input.path < $1.input.path : $0.area < $1.area }).first else {
+            // Existing teaching needs no classifier inference and therefore
+            // no classifier-sized image. Keep tagged native 1024 families in
+            // their material specialist instead of silently dropping them.
+            let candidates = eligible.isEmpty ? tagged : eligible
+            guard let chosen = candidates.sorted(by: { $0.area == $1.area ? $0.input.path < $1.input.path : $0.area < $1.area }).first else {
                 warnings.append("\(family): no original diffuse image supplies the 2048 classifier grid. Its source folder is retained.")
                 continue
             }
             let tags = NativeSourceFileTags.read(chosen.input)
-            let familyTags = group.flatMap(inputFiles).compactMap { NativeSourceFileTags.read($0) }
-                .filter { $0.classifierIdentity == "user" }
+            let allFamilyTags = group.flatMap(inputFiles).compactMap { NativeSourceFileTags.read($0) }
+                .filter { $0.classLabel != nil }
+            let manualFamilyTags = allFamilyTags.filter { $0.hasManualClass }
+            let familyTags = manualFamilyTags.isEmpty ? allFamilyTags : manualFamilyTags
             let familyLabels = Set(familyTags.compactMap { tag -> String? in
                 guard let label = tag.classLabel, !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
                 return label
@@ -321,10 +338,10 @@ enum NativeMaterialSpecialistService {
                 warnings.append("\(family): original diffuse changed since registration; classification was skipped.")
                 continue
             }
-            let manualLabel = tags?.classifierIdentity == "user" ? tags?.classLabel : nil
+            let manualLabel = tags?.hasManualClass == true ? tags?.classLabel : nil
             let chosenTeaching = manualLabel.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
             let taught = chosenTeaching ?? (familyLabels.count == 1 ? familyLabels.first : nil)
-            let taggedPrediction = tags?.classifierIdentity == classifier.sha256 ? tags?.classLabel : nil
+            let taggedPrediction = tags?.classLabel
             let cached = priorAssignments[family]
             let reusable = cached.flatMap { assignment -> Assignment? in
                 guard assignment.inputSha256 == chosenHash, assignment.classifierSha256 == classifier.sha256,
@@ -359,14 +376,22 @@ enum NativeMaterialSpecialistService {
                   try NativeSourceFileTags.identity(chosen.input) == identity, stablePredictionBytes else {
                 throw StudioError("The classifier returned an invalid prediction or the original diffuse changed during classification.")
             }
-            if performedPrediction, NativeSourceFileTags.read(chosen.input)?.classifierIdentity != "user" {
+            if performedPrediction, NativeSourceFileTags.read(chosen.input)?.hasManualClass != true {
                 do { try NativeSourceFileTags.update(chosen.input, classLabel: prediction.label,
                                                      classifierIdentity: classifier.sha256, verifiedSHA256: chosenHash) }
                 catch { warnings.append("\(family): classification was saved in the specialist workspace, but its optional file tag could not be saved: \(error.localizedDescription)") }
             }
-            let curatedLabels = Set(group.flatMap { inputHashes($0.sample).flatMap { curation.labelsByHash[$0] ?? [] } })
+            let curatedHashes = try curationURL == nil ? [] : group.flatMap(inputFiles).map { try fileHash($0) }
+            let curatedLabels = Set(curatedHashes.flatMap { curation.labelsByHash[$0] ?? [] })
             var label = prediction.label, source = taught == nil ? "classifier" : "user_file_tag"
-            if taught == nil, curatedLabels.count == 1, let curated = curatedLabels.first { label = curated; source = "curated_classifier_dataset" }
+            if taught == nil, curatedLabels.count == 1, let curated = curatedLabels.first {
+                label = curated; source = "curated_classifier_dataset"
+                // A curated class is explicit teaching of these originals.
+                // Save that teaching where live category reads obtain it.
+                for file in group.flatMap(inputFiles) {
+                    try NativeSourceFileTags.update(file, classLabel: curated, classifierIdentity: "user")
+                }
+            }
             else if taught == nil, curatedLabels.count > 1 { warnings.append("\(family): curated color variants have different labels; retained classifier prediction for review.") }
             let hint = curation.hints[family]
             let semantic = semanticTerms(chosen, hint: hint)
@@ -454,9 +479,11 @@ enum NativeMaterialSpecialistService {
             throw StudioError("A specialist model needs a saved checkpoint with completed training updates.")
         }
         var specialist = registry.specialists[offset]
+        let historical = try historicalMaterials(specialist)
         let records = try readMaterials(URL(fileURLWithPath: specialist.datasetPath), includeExcluded: true)
-        try validateCurrentSources(records)
-        specialist.targets = targetStatuses(records, models: specialist.models)
+        try migrateModelProofs(&specialist, historical: historical, current: records)
+        try validateCurrentSources(records, target: target)
+        specialist.targets = try targetStatuses(records, models: specialist.models)
         guard let membership = specialist.targets.first(where: { $0.target == target }), membership.materialCount > 0,
               expectedMembershipSHA256 == nil || expectedMembershipSHA256 == membership.membershipSha256 else {
             throw StudioError("The specialist's eligible originals changed during training. Keep the saved checkpoint and refresh its membership before registering it.")
@@ -482,9 +509,10 @@ enum NativeMaterialSpecialistService {
         if !specialist.models.contains(where: { $0.checkpointSha256 == hash && $0.membershipSha256 == membership.membershipSha256 }) {
             specialist.models.append(.init(id: "model-" + hash.prefix(16), target: target, modelFamily: family,
                 checkpointPath: path, checkpointSha256: hash, trainingSize: trainingSize, completedUpdates: completedUpdates,
-                completedAt: timestamp(), membershipSha256: membership.membershipSha256, approved: false, approvedAt: nil))
+                completedAt: timestamp(), membershipSha256: membership.membershipSha256,
+                membershipSchema: contentProofSchema, approved: false, approvedAt: nil))
         }
-        specialist.targets = targetStatuses(records, models: specialist.models)
+        specialist.targets = try targetStatuses(records, models: specialist.models)
         registry.specialists[offset] = specialist; registry.updatedAt = timestamp()
         try save(registry, workspace: workspace)
         return registry
@@ -498,12 +526,15 @@ enum NativeMaterialSpecialistService {
               let modelOffset = registry.specialists[specialistOffset].models.firstIndex(where: { $0.id == modelID }) else {
             throw StudioError("Choose a saved specialist model to review.")
         }
-        var specialist = registry.specialists[specialistOffset], model = specialist.models[modelOffset]
+        var specialist = registry.specialists[specialistOffset]
+        let historical = try historicalMaterials(specialist)
         let records = try readMaterials(URL(fileURLWithPath: specialist.datasetPath), includeExcluded: true)
+        try migrateModelProofs(&specialist, historical: historical, current: records)
+        var model = specialist.models[modelOffset]
         if approved {
-            try validateCurrentSources(records)
+            try validateCurrentSources(records, target: model.target)
             let inspected = try object(try NativeMaterialCheckpoint.inspect(at: URL(fileURLWithPath: model.checkpointPath), expectedSHA256: model.checkpointSha256))
-            let current = targetStatuses(records, models: specialist.models).first { $0.target == model.target }
+            let current = try targetStatuses(records, models: specialist.models).first { $0.target == model.target }
             guard model.completedUpdates > 0, inspected["variant"] as? String == "full",
                   ["compact-scalar", "compact-normal"].contains(model.modelFamily),
                   inspected["model_family"] as? String == model.modelFamily, inspected["target"] as? String == model.target,
@@ -513,7 +544,7 @@ enum NativeMaterialSpecialistService {
             }
         }
         model.approved = approved; model.approvedAt = approved ? timestamp() : nil
-        specialist.models[modelOffset] = model; specialist.targets = targetStatuses(records, models: specialist.models)
+        specialist.models[modelOffset] = model; specialist.targets = try targetStatuses(records, models: specialist.models)
         registry.specialists[specialistOffset] = specialist; registry.updatedAt = timestamp()
         try save(registry, workspace: workspace)
         return registry
@@ -523,10 +554,18 @@ enum NativeMaterialSpecialistService {
                                             warnings: inout [String]) async throws {
         let root = URL(fileURLWithPath: specialist.datasetPath), manifest = root.appendingPathComponent("dataset.json")
         let bindingURL = root.appendingPathComponent(".specialist-binding.json")
+        let source = try object(workspace.appendingPathComponent(".specialist-workspace.json"))["source_dataset_path"] as? String
+        func writeCurrentBinding() throws {
+            guard let source else { throw StudioError("The material category has no current original source folder.") }
+            let scopedSource = specialist.isCustom && (specialist.subtype?.isEmpty ?? true) ? root.path : source
+            try write(["schema": schema, "specialist_id": specialist.id, "workspace_path": workspace.path,
+                "source_folder_path": scopedSource, "class_label": specialist.classLabel,
+                "subtype": specialist.subtype ?? ""], to: bindingURL)
+        }
         if !FileManager.default.fileExists(atPath: manifest.path) {
             _ = try await NativeMaterialDatasetService.run(arguments: ["create-dataset", "--dataset", root.path,
                 "--name", specialist.name, "--description", "Original material references for \(specialist.classLabel) specialization."])
-            try write(["schema": schema, "specialist_id": specialist.id, "workspace_path": workspace.path], to: bindingURL)
+            try writeCurrentBinding()
         } else {
             let binding = try object(bindingURL)
             guard binding["schema"] as? String == schema, binding["specialist_id"] as? String == specialist.id,
@@ -534,51 +573,15 @@ enum NativeMaterialSpecialistService {
                 throw StudioError("An unrelated dataset occupies the specialist folder; it was preserved.")
             }
         }
-        var current = try readMaterials(root, includeExcluded: true)
-        var automaticRemovals = Set(specialist.automaticallyRemovedMaterialIds)
-        let desiredIDs = Set(desired.map(\.id)), priorIDs = Set(specialist.automaticallyManagedMaterialIds)
-        let manualIDs = Set(current.map(\.id)).subtracting(priorIDs)
-        try refreshManagedSourceReferences(root, current: current, desired: desired, managedIDs: priorIDs, warnings: &warnings)
-        current = try readMaterials(root, includeExcluded: true)
-        for material in current where priorIDs.contains(material.id) && !desiredIDs.contains(material.id) {
-            let status = material.sample["status"] as? String ?? "unreviewed"
-            if status == "unreviewed", (material.sample["curation_note"] as? String ?? "").isEmpty {
-                _ = try await NativeMaterialDatasetService.run(arguments: ["remove-material", "--dataset", root.path, "--material", material.id])
-                automaticRemovals.insert(material.id)
-            } else {
-                warnings.append("\(specialist.name): retained curated material \(material.id) after its classifier assignment changed.")
-            }
-        }
-        current = try readMaterials(root, includeExcluded: true)
-        let index = try object(root.appendingPathComponent("dataset.json"))
-        let tombstones = Set((index["removed_materials"] as? [Object] ?? []).compactMap { $0["material_id"] as? String })
-        let present = Set(current.map(\.id))
-        let additions = desired.filter { !present.contains($0.id) && (!tombstones.contains($0.id) || automaticRemovals.contains($0.id)) }
-        if !additions.isEmpty {
-            let stage = workspace.appendingPathComponent(".specialist-import-" + UUID().uuidString)
-            try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false)
-            defer { try? FileManager.default.removeItem(at: stage) }
-            var entries: [Object] = []
-            for material in additions {
-                let sampleID = material.sample["sample_id"] as? String ?? material.id + "_full"
-                let relative = "samples/" + safeIdentifier(sampleID)
-                let folder = stage.appendingPathComponent(relative)
-                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                try write(material.sample, to: folder.appendingPathComponent("sample.json"))
-                var entry = material.entry; entry["path"] = relative; entry["sample_id"] = sampleID
-                entries.append(entry)
-            }
-            try write(["schema_version": 2, "storage_policy": "original-source-references-v1", "samples": entries], to: stage.appendingPathComponent("dataset.json"))
-            let deferred = additions.contains { $0.inputHash.isEmpty }
-            _ = try await NativeMaterialDatasetService.run(arguments: ["import-folder", "--dataset", root.path, "--folder", stage.path]
-                + (deferred ? ["--managed-import", "true", "--skip-source-recovery"] : []))
-            for material in additions { automaticRemovals.remove(material.id) }
-        }
+        let historical = try historicalMaterials(specialist)
+        try writeCurrentBinding()
+        try NativeMaterialDatasetService.refreshFolderProjection(root)
         let final = try readMaterials(root, includeExcluded: true)
         specialist.materialIds = final.map(\.id).sorted(); specialist.familyIds = Array(Set(final.map(\.family))).sorted()
-        specialist.targets = targetStatuses(final, models: specialist.models)
-        specialist.automaticallyManagedMaterialIds = Array(priorIDs.union(desiredIDs.subtracting(manualIDs))).sorted()
-        specialist.automaticallyRemovedMaterialIds = automaticRemovals.sorted()
+        try migrateModelProofs(&specialist, historical: historical, current: final)
+        specialist.targets = try targetStatuses(final, models: specialist.models)
+        specialist.automaticallyManagedMaterialIds = desired.map(\.id).sorted()
+        specialist.automaticallyRemovedMaterialIds = []
     }
 
     /// A folder rename changes authoritative paths while retaining a material
@@ -666,21 +669,16 @@ enum NativeMaterialSpecialistService {
         }
     }
 
-    /// The exact input variants and target hashes bind completion and routing to
-    /// current active originals; excluded entries and classifier photos never
-    /// contribute a fictional target.
-    private static func targetStatuses(_ records: [Material], models: [ModelRecord]) -> [TargetStatus] {
-        ["height", "roughness", "normal"].map { target in
-            let active = records.filter { material in
-                !["excluded", "rejected"].contains(material.sample["status"] as? String ?? "unreviewed") &&
-                    (material.sample["available_targets"] as? [String] ?? []).contains(target)
-            }
-            let identities: [[String]] = active.sorted { $0.id < $1.id }.map { material in
-                let metadata = material.sample["map_metadata"] as? [String: Object] ?? [:]
-                let source = metadata[target]?["source"] as? Object ?? [:]
-                return [material.id, material.family, source["path"] as? String ?? "", source["file_sha256"] as? String ?? ""] + inputHashes(material.sample).sorted()
-            }
-            let membership = hash((try? JSONSerialization.data(withJSONObject: identities, options: [.sortedKeys])) ?? Data())
+    private static let contentProofSchema = "texture-studio-material-content-proof-v1"
+
+    /// Hash actual current pairs, independently of file names, derived IDs and
+    /// whether an earlier operation cached source verification. Keep duplicate
+    /// pairs in the multiset so additions and removals still change the proof.
+    private static func targetStatuses(_ records: [Material], models: [ModelRecord]) throws -> [TargetStatus] {
+        var checksums: [String: String] = [:]
+        return try ["height", "roughness", "normal"].map { target in
+            let active = eligibleMaterials(records, target: target)
+            let membership = try contentProof(active, target: target, historical: false, checksums: &checksums)
             let saved = models.filter { $0.target == target && $0.completedUpdates > 0 }
             let current = saved.filter { $0.membershipSha256 == membership }
             let status = active.isEmpty ? "no_targets" : current.contains(where: \.approved) ? "approved" : !current.isEmpty ? "awaiting_review" : saved.isEmpty ? "ready" : "needs_update"
@@ -688,11 +686,123 @@ enum NativeMaterialSpecialistService {
         }
     }
 
+    private static func eligibleMaterials(_ records: [Material], target: String) -> [Material] {
+        records.filter { !["excluded", "rejected"].contains($0.sample["status"] as? String ?? "unreviewed") &&
+            ($0.sample["available_targets"] as? [String] ?? []).contains(target) }
+    }
+
+    private static func currentSourceHash(_ source: Object, checksums: inout [String: String]) throws -> String {
+        guard let path = source["path"] as? String, path.hasPrefix("/") else {
+            throw StudioError("The current category has an original map without its physical path.")
+        }
+        if let checksum = checksums[path] { return checksum }
+        let url = URL(fileURLWithPath: path)
+        let before = try NativeSourceFileTags.identity(url)
+        let checksum = try NativeSourceFileTags.read(url)?.verifiedSHA256 ?? fileHash(url)
+        guard try NativeSourceFileTags.identity(url) == before else {
+            throw StudioError("An original map changed while checking category training: \(path)")
+        }
+        checksums[path] = checksum
+        return checksum
+    }
+
+    private static func contentProof(_ records: [Material], target: String, historical: Bool,
+                                     checksums: inout [String: String]) throws -> String {
+        func checksum(_ detail: Object) throws -> String {
+            guard let source = detail["source"] as? Object else { throw StudioError("Original map metadata is missing.") }
+            if historical {
+                guard let checksum = source["file_sha256"] as? String, checksum.count == 64 else {
+                    throw StudioError("Historical model proof has no verified original checksum.")
+                }
+                return checksum
+            }
+            return try currentSourceHash(source, checksums: &checksums)
+        }
+        var pairs: [String] = []
+        for material in records {
+            let metadata = material.sample["map_metadata"] as? [String: Object] ?? [:]
+            guard let output = metadata[target], let input = metadata["input"] else {
+                throw StudioError("The category's current training pair is incomplete.")
+            }
+            let variants = material.sample["input_variants"] as? [Object] ?? []
+            let inputs = try (variants.isEmpty ? [input] : variants).map { detail -> String in
+                let identity: Object = ["sha256": try checksum(detail), "encoding": detail["encoding"] ?? NSNull()]
+                return hash(try JSONSerialization.data(withJSONObject: identity, options: [.sortedKeys]))
+            }
+            let outputSource = output["source"] as? Object ?? [:]
+            let identity: Object = ["target_sha256": try checksum(output), "inputs": inputs.sorted(),
+                "normal_convention": target == "normal" && outputSource["suffix"] as? String == "nor_dx" ? "directx" : "opengl"]
+            pairs.append(hash(try JSONSerialization.data(withJSONObject: identity, options: [.sortedKeys])))
+        }
+        return hash(try JSONSerialization.data(withJSONObject: ["schema": contentProofSchema, "target": target,
+            "pairs": pairs.sorted()], options: [.sortedKeys]))
+    }
+
+    /// Historical sample JSON supplies evidence only for a saved model's old
+    /// proof. It never adds members to the current physical-folder projection.
+    private static func historicalMaterials(_ specialist: Specialist) throws -> [Material] {
+        guard specialist.models.contains(where: { $0.membershipSchema != contentProofSchema }) else { return [] }
+        let root = canonical(URL(fileURLWithPath: specialist.datasetPath))
+        guard FileManager.default.fileExists(atPath: root.appendingPathComponent("dataset.json").path) else { return [] }
+        let binding = try object(root.appendingPathComponent(".specialist-binding.json"))
+        guard binding["schema"] as? String == schema, binding["specialist_id"] as? String == specialist.id,
+              let workspace = binding["workspace_path"] as? String,
+              canonical(URL(fileURLWithPath: workspace).appendingPathComponent("datasets/" + specialist.id)).path == root.path else {
+            throw StudioError("The saved model's category proof lost its workspace ownership.")
+        }
+        // Incomplete or edited disposable history cannot authorize migration,
+        // and cannot prevent reading the actual current category either.
+        let records: [Material]? = try? {
+            let index = try object(root.appendingPathComponent("dataset.json"))
+            return try (index["samples"] as? [Object] ?? []).map { entry in
+                guard let relative = entry["path"] as? String else { throw StudioError("Historical category sample path is missing.") }
+                let folder = canonical(root.appendingPathComponent(relative))
+                guard folder.path.hasPrefix(root.path + "/") else { throw StudioError("Historical category metadata escapes its owned folder.") }
+                let sample = try object(folder.appendingPathComponent("sample.json"))
+                let source = ((sample["map_metadata"] as? [String: Object])?["input"]?["source"] as? Object) ?? [:]
+                return Material(id: sample["material_id"] as? String ?? "", family: sample["source_family_id"] as? String ?? sample["asset_family_id"] as? String ?? sample["material_id"] as? String ?? "",
+                    entry: entry, sample: sample, input: URL(fileURLWithPath: source["path"] as? String ?? "/"),
+                    inputHash: source["file_sha256"] as? String ?? "", area: 0)
+            }
+        }()
+        return records ?? []
+    }
+
+    private static func legacyContentProof(_ records: [Material], target: String) throws -> String {
+        let identities = eligibleMaterials(records, target: target).sorted { $0.id < $1.id }.map { material -> [String] in
+            let source = ((material.sample["map_metadata"] as? [String: Object])?[target]?["source"] as? Object) ?? [:]
+            return [material.id, material.family, source["path"] as? String ?? "", source["file_sha256"] as? String ?? ""] + inputHashes(material.sample).sorted()
+        }
+        return hash(try JSONSerialization.data(withJSONObject: identities, options: [.sortedKeys]))
+    }
+
+    private static func migrateModelProofs(_ specialist: inout Specialist, historical: [Material], current: [Material]) throws {
+        guard specialist.models.contains(where: { $0.membershipSchema != contentProofSchema }) else { return }
+        let statuses = try targetStatuses(current, models: specialist.models)
+        var checksums: [String: String] = [:]
+        for offset in specialist.models.indices {
+            let model = specialist.models[offset]
+            guard model.membershipSchema != contentProofSchema,
+                  let currentProof = statuses.first(where: { $0.target == model.target })?.membershipSha256 else { continue }
+            if model.membershipSha256 == currentProof {
+                specialist.models[offset].membershipSchema = contentProofSchema
+                continue
+            }
+            guard try legacyContentProof(historical, target: model.target) == model.membershipSha256,
+                  let historicalProof = try? contentProof(eligibleMaterials(historical, target: model.target),
+                    target: model.target, historical: true, checksums: &checksums), historicalProof == currentProof else { continue }
+            specialist.models[offset].membershipSha256 = currentProof
+            specialist.models[offset].membershipSchema = contentProofSchema
+        }
+    }
+
     private static func readMaterials(_ supplied: URL, includeExcluded: Bool = false) throws -> [Material] {
         let root = datasetRoot(supplied)
         let registrations: [(entry: Object, sample: Object)]
-        if !FileManager.default.fileExists(atPath: root.appendingPathComponent("dataset.json").path) {
+        if try NativeMaterialDatasetService.sourceFolderIsAuthoritative(root) {
             registrations = try NativeMaterialDatasetService.sourceFolderRecords(root)
+        } else if let projected = try NativeMaterialDatasetService.folderProjectionRecords(root) {
+            registrations = projected
         } else {
             let index = try object(root.appendingPathComponent("dataset.json"))
             guard index["schema_version"] as? Int == 2, index["storage_policy"] as? String == "original-source-references-v1",
@@ -741,7 +851,11 @@ enum NativeMaterialSpecialistService {
         if FileManager.default.fileExists(atPath: manifestURL.path) {
             manifest = try JSONDecoder().decode(NativeDiffuseClassifierDatasetService.Manifest.self, from: Data(contentsOf: manifestURL))
         } else { manifest = nil }
-        let known = Set(materials.flatMap { inputHashes($0.sample) })
+        let known = Set(try materials.flatMap { material -> [String] in
+            let maps = material.sample["input_variants"] as? [Object] ?? []
+            let paths = Set([material.input.path] + maps.compactMap { ($0["source"] as? Object)?["path"] as? String })
+            return try paths.map { try fileHash(URL(fileURLWithPath: $0)) }
+        })
         var labels = Set<String>(), labelsByHash: [String: Set<String>] = [:]
         var assets: [ClassifierOnlyAsset] = [], warnings: [String] = []
         let folders = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles])
@@ -807,26 +921,18 @@ enum NativeMaterialSpecialistService {
         } + inputHashes(material.sample).map { ["input_variant", $0] }
         return hash((try? JSONSerialization.data(withJSONObject: identities, options: [.sortedKeys])) ?? Data())
     }
-    private static func validateCurrentSources(_ materials: [Material]) throws {
-        var checked = Set<String>()
+    private static func validateCurrentSources(_ materials: [Material], target: String? = nil) throws {
+        var checksums: [String: String] = [:]
         for material in materials where !["excluded", "rejected"].contains(material.sample["status"] as? String ?? "unreviewed") {
+            if let target, !(material.sample["available_targets"] as? [String] ?? []).contains(target) { continue }
             let metadata = material.sample["map_metadata"] as? [String: Object] ?? [:]
-            let details = Array(metadata.values) + (material.sample["input_variants"] as? [Object] ?? [])
+            let details = Array(metadata.filter { target == nil || $0.key == "input" || $0.key == target }.values)
+                + (material.sample["input_variants"] as? [Object] ?? [])
             for detail in details {
-                guard let source = detail["source"] as? Object, let path = source["path"] as? String,
-                      let expected = source["file_sha256"] as? String else { throw StudioError("A specialist original source binding is missing.") }
-                guard checked.insert(path).inserted else { continue }
-                var actual = stat()
-                guard stat(path, &actual) == 0 else { throw StudioError("A specialist original map is missing: \(path)") }
-                let proof = source["source_stat"] as? Object ?? [:]
-                let size = (proof["size"] as? NSNumber)?.int64Value
-                let mtime = (proof["mtime_ns"] as? NSNumber)?.int64Value
-                let ctime = (proof["ctime_ns"] as? NSNumber)?.int64Value
-                let same = size == Int64(actual.st_size) &&
-                    mtime == Int64(actual.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(actual.st_mtimespec.tv_nsec) &&
-                    ctime == Int64(actual.st_ctimespec.tv_sec) * 1_000_000_000 + Int64(actual.st_ctimespec.tv_nsec)
-                guard try same || fileHash(URL(fileURLWithPath: path)) == expected else {
-                    throw StudioError("A specialist original map changed after training: \(path)")
+                guard let source = detail["source"] as? Object else { throw StudioError("Current original map metadata is missing.") }
+                let actual = try currentSourceHash(source, checksums: &checksums)
+                if let expected = source["file_sha256"] as? String, expected.count == 64, expected != actual {
+                    throw StudioError("An original map changed while checking category training: \(source["path"] as? String ?? "")")
                 }
             }
         }
@@ -862,9 +968,9 @@ enum NativeMaterialSpecialistService {
         let registryURL = root.appendingPathComponent(registryFilename)
         let registry = FileManager.default.fileExists(atPath: registryURL.path) ? try load(workspaceURL: root) : nil
         if let registry, datasetRoot(URL(fileURLWithPath: registry.sourceDatasetPath)).path != oldSource.path { return false }
+        if let registry { try validateMigrationBindings(registry, workspace: root) }
         if oldSource.path == source.path { return true }
-        guard let registry else { return false }
-        try validateMigrationBindings(registry, workspace: root)
+        guard registry != nil else { return false }
         return try legacyDatasetUsesFolder(oldSource, folder: source)
     }
     private static func legacyDatasetUsesFolder(_ legacy: URL, folder: URL) throws -> Bool {

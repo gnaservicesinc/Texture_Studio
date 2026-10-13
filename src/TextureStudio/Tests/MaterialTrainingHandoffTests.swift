@@ -9,6 +9,8 @@ final class MaterialTrainingHandoffTests: XCTestCase {
             training.randomizeCrops = timing
             training.randomFlip = true
             training.randomSpinCentercut = true
+            training.shuffleTrainingOrder = false
+            training.exaggerateFeatures = true
             let handoff = try MaterialTrainingHandoff(checkpoint: checkpoint(), dataset: nil, training: training,
                 sampleID: nil, inputVariantID: nil)
             let document = try handoff.writeTemporary()
@@ -17,6 +19,8 @@ final class MaterialTrainingHandoffTests: XCTestCase {
             XCTAssertEqual(restored.training.randomizeCrops, timing)
             XCTAssertTrue(restored.training.randomFlip)
             XCTAssertTrue(restored.training.randomSpinCentercut)
+            XCTAssertFalse(restored.training.shuffleTrainingOrder)
+            XCTAssertTrue(restored.training.exaggerateFeatures)
             XCTAssertEqual(restored.training.cropArguments, training.cropArguments)
         }
     }
@@ -79,6 +83,8 @@ final class MaterialTrainingHandoffTests: XCTestCase {
         XCTAssertEqual(restored.training.target, "normal")
         XCTAssertEqual(restored.training.validationUnit, .step)
         XCTAssertEqual(restored.training.checkpointUnit, .epoch)
+        XCTAssertFalse(restored.training.shuffleTrainingOrder)
+        XCTAssertTrue(restored.training.exaggerateFeatures)
     }
 
     func testReadRejectsUnknownSchemaRemotePathsAndInvalidTrainingSettings() throws {
@@ -149,7 +155,8 @@ final class MaterialTrainingHandoffTests: XCTestCase {
         options.validationUnit = .step
         options.checkpointEvery = 125
         options.checkpointUnit = .epoch
-        options.useSelectedMaterialOnly = true
+        options.shuffleTrainingOrder = false
+        options.exaggerateFeatures = true
         return options
     }
     private func checkpoint() throws -> WorkbenchCheckpoint {

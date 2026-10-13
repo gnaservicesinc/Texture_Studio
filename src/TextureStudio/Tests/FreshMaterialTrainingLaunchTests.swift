@@ -34,7 +34,7 @@ import XCTest
         XCTAssertEqual(value("--scope", in: calls[0]), "full-model")
         XCTAssertEqual(value("--dataset", in: calls[1]), fixture.dataset.path)
         XCTAssertEqual(value("--target", in: calls[1]), "height")
-        XCTAssertEqual(value("--default-review-size", in: calls[1]), "1024")
+        XCTAssertEqual(value("--review-size", in: calls[1]), "1024")
         XCTAssertFalse(calls.joined().contains("--depthpro-model"))
         XCTAssertFalse(calls.joined().contains("--model-directory"))
         XCTAssertEqual(store.dataset?.datasetPath, fixture.dataset.path)
@@ -47,10 +47,11 @@ import XCTest
         XCTAssertEqual(store.training.maxMinutes, original.maxMinutes)
         XCTAssertEqual(store.training.randomizeCrops, original.randomizeCrops)
         XCTAssertEqual(store.training.randomFlip, original.randomFlip)
+        XCTAssertEqual(store.training.shuffleTrainingOrder, original.shuffleTrainingOrder)
+        XCTAssertEqual(store.training.exaggerateFeatures, original.exaggerateFeatures)
         XCTAssertEqual(store.training.checkpointEvery, original.checkpointEvery)
         XCTAssertEqual(store.training.seed, original.seed)
         XCTAssertFalse(store.training.useWarmStart)
-        XCTAssertFalse(store.training.useSelectedMaterialOnly)
         XCTAssertTrue(store.checkpoints.isEmpty)
         XCTAssertNil(store.selectedCheckpointId)
         XCTAssertTrue(store.comparisonCheckpointIds.isEmpty)
@@ -64,6 +65,11 @@ import XCTest
         XCTAssertNil(store.lastPackageURL)
         XCTAssertNil(store.lastPackageCheckpointId)
         XCTAssertNil(store.specialistTrainingContext, "An ordinary dataset cannot inherit an unrelated specialist context")
+        XCTAssertEqual(store.trainingConfigurationIssue, "Choose a material category in Loom Room.")
+        store.startTraining()
+        XCTAssertEqual(store.error, "Choose a material category in Loom Room.")
+        XCTAssertEqual(calls.map { $0[0] }, ["capabilities", "dataset"], "Opening an ordinary folder cannot create a global training path")
+        XCTAssertFalse(store.isBusy)
         XCTAssertEqual(fixture.defaults.stringArray(forKey: "checkpoints"), [])
         XCTAssertEqual(fixture.defaults.string(forKey: "dataset"), fixture.dataset.path)
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.oldCheckpoint.path), "Fresh launch disconnects the old model without deleting it")
@@ -90,7 +96,7 @@ import XCTest
         var calls = 0
         let store = fixture.store { arguments, _ in
             calls += 1
-            return arguments.first == "capabilities" ? "{\"training_sizes\":[1024,2048]}" : try fixture.datasetJSON()
+            return arguments.first == "capabilities" ? "{\"training_sizes\":[512,1024,2048]}" : try fixture.datasetJSON()
         }
         let savedData = fixture.defaults.data(forKey: WorkbenchPreferences.key)
         let original = store.training
@@ -147,7 +153,7 @@ import XCTest
         var calls: [String] = []
         let store = fixture.store { arguments, _ in
             calls.append(arguments[0])
-            return arguments.first == "capabilities" ? "{\"training_sizes\":[1024,2048]}" : try fixture.datasetJSON()
+            return arguments.first == "capabilities" ? "{\"training_sizes\":[512,1024,2048]}" : try fixture.datasetJSON()
         }
         store.restore(arguments: fixture.freshArguments)
         try await settled(store)
@@ -157,17 +163,51 @@ import XCTest
         XCTAssertEqual(store.specialistTrainingContext?.datasetPath, fixture.dataset.path)
         XCTAssertEqual(store.specialistTrainingContext?.target, "height")
         XCTAssertEqual(store.specialistTrainingContext?.membershipSHA256, "current-bark-height-members")
+        XCTAssertEqual(store.dataset?.sourceFolderPath, fixture.sources.path)
+        XCTAssertEqual(store.modelWorkshopSourcePath, fixture.sources.path)
+        XCTAssertNil(store.trainingConfigurationIssue)
         XCTAssertEqual(store.training.modelName, "Bark Displacement")
         XCTAssertFalse(store.training.useWarmStart)
         XCTAssertTrue(store.checkpoints.isEmpty, "Restoring the specialist registration context cannot load its old models")
 
         fixture.defaults.set("other-specialist", forKey: "selectedSpecialist")
         let unrelated = fixture.store { arguments, _ in
-            arguments.first == "capabilities" ? "{\"training_sizes\":[1024,2048]}" : try fixture.datasetJSON()
+            arguments.first == "capabilities" ? "{\"training_sizes\":[512,1024,2048]}" : try fixture.datasetJSON()
         }
         unrelated.restore(arguments: fixture.freshArguments)
         try await settled(unrelated)
         XCTAssertNil(unrelated.specialistTrainingContext, "The dataset binding must match the selected specialist exactly")
+    }
+
+    func testFreshBoundCategoryWithCachedZeroCountRestoresIdentityAndRefreshesBeforeTraining() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        fixture.seedStalePreferences()
+        try fixture.bindSpecialist(heightCount: 0, heightMembership: "")
+        var calls: [[String]] = []
+        let store = fixture.store { args, _ in
+            calls.append(args)
+            switch args.first {
+            case "capabilities": return "{\"training_sizes\":[256,512,1024,2048]}"
+            case "dataset": return try fixture.datasetJSON()
+            case "refresh-specialists": throw StudioError("Reached current category tag refresh.")
+            default: XCTFail("Fresh launch must resolve its category before preparing or training: \(args)"); return "{}"
+            }
+        }
+        defer { store.observeSourceFolder(nil) }
+        store.restore(arguments: fixture.freshArguments + ["--training-size", "2048"])
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.specialistTrainingContext?.specialistID, "class-bark")
+        XCTAssertEqual(store.specialistTrainingContext?.membershipSHA256, "")
+        XCTAssertEqual(store.training.size, 2048)
+        XCTAssertNil(store.trainingConfigurationIssue, "A cached empty category cannot block current paired maps")
+        store.startTraining()
+        try await settled(store)
+        let refresh = try XCTUnwrap(calls.first { $0.first == "refresh-specialists" })
+        XCTAssertEqual(value("--dataset", in: refresh), fixture.sources.path)
+        XCTAssertEqual(store.error, "Reached current category tag refresh.")
+        XCTAssertFalse(calls.contains { ["prepare-size", "train", "refine"].contains($0.first ?? "") })
+        XCTAssertEqual(store.training.size, 2048)
     }
 
     private func value(_ flag: String, in arguments: [String]) -> String? {
@@ -182,15 +222,18 @@ import XCTest
     @MainActor private struct Fixture {
         let root: URL
         let dataset: URL
+        let sources: URL
         let oldCheckpoint: URL
         let suite = "org.ipde.fresh-launch.\(UUID().uuidString)"
         let defaults: UserDefaults
         init() throws {
             root = FileManager.default.temporaryDirectory.appendingPathComponent("fresh-launch-\(UUID().uuidString)")
             dataset = root.appendingPathComponent("new-bark")
+            sources = root.appendingPathComponent("originals")
             oldCheckpoint = root.appendingPathComponent("gray.safetensors")
             defaults = UserDefaults(suiteName: suite)!
             try FileManager.default.createDirectory(at: dataset, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: true)
             try Data("{}".utf8).write(to: dataset.appendingPathComponent("dataset.json"))
             try Data("old gray model".utf8).write(to: oldCheckpoint)
             defaults.set(root.path, forKey: "workspace")
@@ -205,9 +248,10 @@ import XCTest
             training.updatesPerCrop = 25
             training.maxMinutes = 80
             training.useWarmStart = true
-            training.useSelectedMaterialOnly = true
             training.randomizeCrops = .epoch
             training.randomFlip = true
+            training.shuffleTrainingOrder = false
+            training.exaggerateFeatures = true
             training.checkpointEvery = 3
             training.seed = 91
             WorkbenchPreferences(training: training, selectedSampleId: "old-gray-sample", selectedRole: "normal",
@@ -227,28 +271,34 @@ import XCTest
                 selectedCheckpointRegistryURL: root.appendingPathComponent("selected.json"), workerOverride: worker)
         }
         func datasetJSON() throws -> String {
-            let object: [String: Any] = ["dataset_path": dataset.path, "index_sha256": "new-index",
+            var object: [String: Any] = ["dataset_path": dataset.path, "index_sha256": "new-index",
                 "training_size": 2048, "supported_training_sizes": [256, 512, 1024, 2048],
                 "materials": [["material_id": "sycamore", "samples": [["sample_id": "new-sycamore",
                     "status": "approved", "split": "train", "width": 2048, "height": 4096,
                     "maps": ["input": ["path": dataset.appendingPathComponent("diffuse.png").path, "width": 2048, "height": 4096],
-                             "height": ["path": dataset.appendingPathComponent("height.png").path, "width": 2048, "height": 4096]]]]]]]
+                             "height": ["path": dataset.appendingPathComponent("height.png").path, "width": 2048, "height": 4096,
+                                        "source_bits": 16]]]]]]]
+            if FileManager.default.fileExists(atPath: dataset.appendingPathComponent(".specialist-binding.json").path) {
+                object["source_folder_path"] = sources.path
+            }
             return String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
         }
-        func bindSpecialist() throws {
+        func bindSpecialist(heightCount: Int = 1, heightMembership: String = "current-bark-height-members") throws {
             let workspace = root.appendingPathComponent("specialists")
             try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
             defaults.set(workspace.path, forKey: "specialistWorkspace")
             defaults.set("class-bark", forKey: "selectedSpecialist")
+            defaults.set(sources.path, forKey: "specialistSourceDataset")
             let binding: [String: Any] = ["schema": NativeMaterialSpecialistService.schema,
                 "specialist_id": "class-bark", "workspace_path": workspace.path]
             try JSONSerialization.data(withJSONObject: binding).write(to: dataset.appendingPathComponent(".specialist-binding.json"))
-            let registry: [String: Any] = ["workspace_path": workspace.path, "source_dataset_path": "/original",
+            let registry: [String: Any] = ["workspace_path": workspace.path, "source_dataset_path": sources.path,
                 "classifier_sha256": "classifier", "classifier_labels": ["Bark"], "updated_at": "2026-10-12",
                 "classifier_only_count": 0, "material_count": 1, "family_count": 1, "warnings": [],
                 "specialists": [["id": "class-bark", "name": "Bark", "class_label": "Bark", "is_custom": false,
                     "dataset_path": dataset.path, "material_ids": ["sycamore"], "family_ids": ["sycamore"],
-                    "targets": [["target": "height", "material_count": 1, "status": "ready", "membership_sha256": "current-bark-height-members"]],
+                    "targets": [["target": "height", "material_count": heightCount, "status": heightCount > 0 ? "ready" : "no_targets",
+                        "membership_sha256": heightMembership]],
                     "models": [["id": "old", "target": "height", "checkpoint_path": oldCheckpoint.path,
                         "checkpoint_sha256": "old", "training_size": 1024, "completed_at": "2026-10-10", "membership_sha256": "old-members"]]]]]
             try JSONSerialization.data(withJSONObject: registry).write(to: workspace.appendingPathComponent("specialists.json"))

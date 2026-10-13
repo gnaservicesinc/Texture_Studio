@@ -72,13 +72,24 @@ import XCTest
         XCTAssertEqual(capabilities.trainingSizes, [256, 512, 1024, 2048, 4096])
         let datasetURL = root.appendingPathComponent("test-dataset")
         let created = try WorkbenchResult.decode(WorkbenchDataset.self, output: await store.worker([
-            "create-dataset", "--dataset", datasetURL.path, "--name", "Native dataset", "--description", "Original samples stay untouched",
-            "--training-size", "1024"
+            "create-dataset", "--dataset", datasetURL.path, "--source-folder", "true", "--training-size", "1024"
         ]))
-        XCTAssertEqual(created.name, "Native dataset")
+        XCTAssertEqual(created.name, datasetURL.lastPathComponent)
+        let material = datasetURL.appendingPathComponent("Stone")
+        try FileManager.default.createDirectory(at: material, withIntermediateDirectories: false)
+        for (filename, role, channels, bits) in [("color.png", "input", 3, 8), ("relief.png", "height", 1, 16)] {
+            let file = material.appendingPathComponent(filename)
+            try NativePNG(header: .init(width: 1024, height: 1024, bits: bits, channels: channels,
+                color: channels == 1 ? 0 : 2, interlace: 0), pixels: Data(repeating: 91,
+                count: 1024 * 1024 * channels * bits / 8), colorChunks: []).encoded().write(to: file)
+            try NativeSourceFileTags.update(file, role: role, classLabel: "stone", classifierIdentity: "user")
+        }
+        _ = try await store.worker(["edit-dataset", "--dataset", datasetURL.path, "--training-size", "1024"])
         try await store.loadDataset(datasetURL)
         XCTAssertEqual(store.dataset?.datasetPath, datasetURL.path)
-        XCTAssertEqual(store.dataset?.name, "Native dataset")
+        XCTAssertEqual(store.dataset?.name, datasetURL.lastPathComponent)
+        XCTAssertEqual(store.dataset?.samples.count, 1, "Routing reads the actual tagged images in the source folder")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: datasetURL.appendingPathComponent("dataset.json").path))
     }
 
     func testCheckpointLibraryInspectionRunsNatively() async throws {

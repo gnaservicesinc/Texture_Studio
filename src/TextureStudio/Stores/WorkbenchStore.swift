@@ -100,7 +100,13 @@ final class WorkbenchStore {
     var specialistRegistry: WorkbenchSpecialistRegistry?
     var selectedSpecialistID: String? { didSet { preferences.set(selectedSpecialistID, forKey: "selectedSpecialist") } }
     var specialistTarget: String { didSet { preferences.set(specialistTarget, forKey: "specialistTarget") } }
-    var specialistTrainingContext: WorkbenchSpecialistTrainingContext?
+    var specialistTrainingContext: WorkbenchSpecialistTrainingContext? {
+        didSet {
+            if let context = specialistTrainingContext, let data = try? JSONEncoder().encode(context) {
+                preferences.set(data, forKey: "activeSpecialistTrainingContext.v1")
+            } else { preferences.removeObject(forKey: "activeSpecialistTrainingContext.v1") }
+        }
+    }
     var specialistNavigationRequest = UUID()
     var comparisonNavigationRequest = UUID()
     var sourceRecoverySummary = ""
@@ -219,14 +225,17 @@ final class WorkbenchStore {
         return "\(folders) \(folders == 1 ? "folder" : "folders") · \(files) original \(files == 1 ? "file" : "files") · \(sets) paired \(sets == 1 ? "set" : "sets")"
     }
     var trainingScopeSummary: String {
-        training.useSelectedMaterialOnly ? selectedMaterialName.map { "Selected source folder: \($0) · includes all resolution tiers" }
-            ?? "Select a source folder in Dataset." : "Training scope: all \(datasetSourceFolderCount) material folders"
+        if let context = specialistTrainingContext {
+            return "\(context.name) tags · \(Self.specialistMapTitle(training.target)) maps"
+        }
+        return "Choose a category in Loom Room"
     }
     var trainingCurrentCropSummary: String {
-        guard let dataset else { return "No training crops registered" }
-        let scoped = training.useSelectedMaterialOnly ? trainingFolderSamples : samples
+        guard specialistTrainingContext != nil else { return "Choose a material category in Loom Room." }
+        guard let dataset else { return "No training crops available" }
+        let scoped = samples
         let count: Int
-        if !training.useSelectedMaterialOnly, let plan = (dataset.resolutionPlans?[String(training.size)] ?? dataset.trainingPlans)?[training.target], plan.size == training.size {
+        if let plan = (dataset.resolutionPlans?[String(training.size)] ?? dataset.trainingPlans)?[training.target], plan.size == training.size {
             count = plan.trainCount
         } else { count = scoped.filter { $0.split == "train" && sampleIsTrainable($0) }.count }
         let stage = dataset.preparation == nil ? "Currently available" : "Prepared"
@@ -307,6 +316,9 @@ final class WorkbenchStore {
         modelDirectory = materialBasePath
         defaults.set(materialBasePath, forKey: "materialModelDirectory")
         depthProModelPath = NativeDepthProContract.configuredModelURL(in: depthProPreferences, migrating: defaults).path
+        if let data = defaults.data(forKey: "activeSpecialistTrainingContext.v1") {
+            specialistTrainingContext = try? JSONDecoder().decode(WorkbenchSpecialistTrainingContext.self, from: data)
+        }
         let saved = WorkbenchPreferences.load(from: defaults)
         if let options = saved.training {
             training = options.restored(for: resources)
@@ -366,8 +378,7 @@ final class WorkbenchStore {
                 let url = URL(fileURLWithPath: datasetPath)
                 try await self.loadDataset(url)
                 if self.dataset?.isSourceFolder == true {
-                    self.specialistTrainingContext = nil
-                    self.useOpenSourcesInModelWorkshop()
+                    if self.specialistTrainingContext == nil { self.useOpenSourcesInModelWorkshop() }
                     try await self.alignModelWorkshopWorkspace(with: self.modelWorkshopSourcePath)
                 }
             }
@@ -386,7 +397,7 @@ final class WorkbenchStore {
                 self.selectedSampleId = nil
                 self.selectedInputVariantId = nil
                 self.restoreFreshSpecialistTrainingContext()
-                self.activity = "Ready to train a fresh RGB height model on all material folders."
+                self.activity = self.specialistTrainingContext.map { "Ready to train \($0.name) displacement." } ?? "Choose a material category in Loom Room."
             }
         }
     }
@@ -432,7 +443,6 @@ final class WorkbenchStore {
         options.target = "height"
         options.scope = "full-model"
         options.useWarmStart = false
-        options.useSelectedMaterialOnly = false
         if let size = launch.trainingSize { options.size = size }
         if let rate = launch.learningRate { options.learningRate = rate }
         if let updates = launch.updatesPerMap { options.updatesPerCrop = updates }
@@ -467,7 +477,7 @@ final class WorkbenchStore {
     }
 
     private func restoreFreshSpecialistTrainingContext() {
-        guard let folder = datasetFolderURL, let specialistID = selectedSpecialistID else { return }
+        guard let folder = datasetURL, let specialistID = selectedSpecialistID else { return }
         let bindingURL = folder.appendingPathComponent(".specialist-binding.json")
         guard let data = try? Data(contentsOf: bindingURL),
               let binding = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -485,12 +495,14 @@ final class WorkbenchStore {
               let specialist = registry.specialists.first(where: {
                   $0.id == specialistID && canonical($0.datasetPath) == folder.standardizedFileURL.resolvingSymlinksInPath()
               }),
-              let height = specialist.targetInfo("height"), height.materialCount > 0,
-              !height.membershipSha256.isEmpty, let datasetPath = dataset?.datasetPath else { return }
+              let datasetPath = dataset?.datasetPath else { return }
         specialistRegistry = registry
         specialistTarget = "height"
+        // Restore the chosen category's identity. Training resolves its maps
+        // from current tags; old target counts cannot veto this selection.
         specialistTrainingContext = .init(workspacePath: registry.workspacePath, specialistID: specialist.id,
-            name: specialist.name, target: "height", datasetPath: datasetPath, membershipSHA256: height.membershipSha256)
+            name: specialist.name, target: "height", datasetPath: datasetPath,
+            membershipSHA256: specialist.targetInfo("height")?.membershipSha256 ?? "")
         training.modelName = "\(specialist.name) Displacement"
     }
 
@@ -582,15 +594,13 @@ final class WorkbenchStore {
     }
 
     func loadDataset(_ url: URL, recoverSources: Bool = false, reviewSize: Int? = nil) async throws {
+        let requestedSize = reviewSize ?? training.size
         var result: WorkbenchDataset = try WorkbenchResult.decode(WorkbenchDataset.self,
             output: await worker(["dataset", "--dataset", url.path, "--target", training.target,
-                                  "--default-review-size", String(training.size)]
-                + (reviewSize.map { ["--review-size", String($0)] } ?? [])
+                                  "--review-size", String(requestedSize)]
                 + (recoverSources ? [] : ["--skip-source-recovery"])))
-        if let reviewSize {
-            result.trainingSize = reviewSize
-            result.reviewSize = reviewSize
-        }
+        result.trainingSize = requestedSize
+        result.reviewSize = requestedSize
         adoptDataset(result)
         datasetPreparationSummary = ""
         sourceRecoverySummary = result.sourceRecovery?.summary ?? ""
@@ -610,13 +620,15 @@ final class WorkbenchStore {
     func adoptDataset(_ result: WorkbenchDataset, preferredMaterial: String? = nil) {
         let material = preferredMaterial ?? selectedMaterialId
         dataset = result
-        observeSourceFolder(result.isSourceFolder == true ? URL(fileURLWithPath: result.sourceFolderPath ?? result.datasetPath) : nil)
+        let originalFolder = result.sourceFolderPath ?? (result.isSourceFolder == true ? result.datasetPath :
+            specialistTrainingContext.flatMap { _ in specialistRegistry?.sourceDatasetPath })
+        observeSourceFolder(originalFolder.map { URL(fileURLWithPath: $0) })
         sourceRecoverySummary = result.sourceRecovery?.summary ?? ""
         sourceRecoveryResults = result.sourceRecoveryResults ?? []
         if let size = result.trainingSize {
             training.size = size
         }
-        supportedTrainingSizes = backendTrainingSizes.filter { result.supportedTrainingSizes?.contains($0) ?? true || result.samples.contains(where: canRecoverCropTiers) }
+        supportedTrainingSizes = backendTrainingSizes.filter { result.supportedTrainingSizes?.contains($0) ?? true }
         let browserMaterials = result.browserMaterials(datasetBrowserMode)
         let browserSamples = browserMaterials.flatMap(\.samples)
         if !browserSamples.contains(where: { $0.id == selectedSampleId }) {
@@ -627,8 +639,14 @@ final class WorkbenchStore {
     func selectTrainingSize(_ size: Int) {
         guard !isBusy else { return }
         guard supportedTrainingSizes.contains(size) else { error = "Choose a training size supplied by the original source maps."; return }
-        guard dataset != nil else { training.size = size; return }
-        updateDatasetInfo(name: datasetName, description: datasetDescription, size: size)
+        guard let dataset else { training.size = size; return }
+        if dataset.sourceFolderPath != nil, dataset.isSourceFolder != true {
+            let projection = dataset.preparation?.sourceDatasetPath ?? dataset.datasetPath
+            operation("Selecting \(size) × \(size) training maps…") {
+                try await self.loadDataset(URL(fileURLWithPath: projection), reviewSize: size)
+                self.training.size = size
+            }
+        } else { updateDatasetInfo(name: datasetName, description: datasetDescription, size: size) }
     }
 
     func selectTrainingTarget(_ target: String) {
@@ -662,7 +680,7 @@ final class WorkbenchStore {
         let options = training
         let size = options.size
         let selectedMaterial = selectedMaterialId
-        let material = options.useSelectedMaterialOnly ? selectedMaterial : nil
+        let material: String? = nil
         guard dataset?.readyForTraining(size: size, material: material, target: options.target) != true else { return }
         operation("Preparing \(size) × \(size) complete training maps…") {
             _ = try await self.ensureTrainingDataset(options: options, selectedMaterial: selectedMaterial)
@@ -689,15 +707,14 @@ final class WorkbenchStore {
         let target = options.target
         guard let current = dataset else { throw StudioError("Open a material dataset first.") }
         guard supportedTrainingSizes.contains(size) else { throw StudioError("Choose a training size supported by the model and original source maps.") }
-        let checkMaterial = options.useSelectedMaterialOnly ? selectedMaterial : nil
+        let checkMaterial: String? = nil
         isPreparingDataset = true
         activity = "Preparing \(size) × \(size) complete training maps from the original materials…"
         defer { isPreparingDataset = false }
         var arguments = [
             "prepare-size", "--dataset", current.isSourceFolder == true ? current.sourceFolderPath ?? current.datasetPath : current.datasetPath, "--size", String(size), "--target", target,
-            "--automatic-validation", "--expected-index-sha256", current.indexSha256]
+            "--automatic-validation"]
         arguments += ["--crop-seed", String(options.randomizeCrops == .never ? 0 : UInt64.random(in: 1...UInt64.max))]
-        if let reviewHash = current.reviewSha256 { arguments += ["--expected-review-sha256", reviewHash] }
         if let checkMaterial { arguments += ["--material", checkMaterial] }
         let result: WorkbenchDataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: await worker(arguments))
         guard result.readyForTraining(size: size, material: checkMaterial, target: target), let preparation = result.preparation,
@@ -873,12 +890,12 @@ final class WorkbenchStore {
                 guard result.checkpointSha256 == checkpoint.sha256, let map = result.outputs[checkpoint.target] else {
                     throw StudioError("The comparison did not use the selected checkpoint or map type.")
                 }
-                candidates.append(MapReviewCandidate(id: checkpoint.id, label: "\(checkpoint.url.deletingLastPathComponent().lastPathComponent) · \(targetLabel)",
+                candidates.append(MapReviewCandidate(id: checkpoint.id, label: checkpoint.comparisonName,
                     mapURL: URL(fileURLWithPath: map.path), numeric: true, sampleLabel: sampleLabel,
                     detail: "Trained model prediction · not the real source map · \(checkpoint.trainingBaseLabel) · \(checkpoint.url.lastPathComponent) · step \(checkpoint.step.formatted()) · SHA256 \(checkpoint.sha256.prefix(12))", role: "checkpoint",
                     modelIdentity: MapReviewModelIdentity(checkpointPath: checkpoint.checkpointPath,
                         checkpointSHA256: checkpoint.sha256, checkpointStep: checkpoint.step,
-                        architecture: checkpoint.trainingBaseLabel, mapType: checkpoint.target)))
+                        architecture: checkpoint.trainingBaseLabel, mapType: checkpoint.target, modelName: checkpoint.comparisonName)))
             }
             self.comparisonCandidates = candidates
             self.lastOutputURL = parent
@@ -917,10 +934,7 @@ final class WorkbenchStore {
         let result = try WorkbenchResult.decode(WorkbenchTrainingCapabilities.self,
             output: await worker(["capabilities", "--scope", training.effectiveScope, "--model-family", training.modelFamily.rawValue]))
         backendTrainingSizes = result.trainingSizes.filter { [256, 512, 1024, 2048].contains($0) }.sorted()
-        supportedTrainingSizes = backendTrainingSizes.filter { dataset?.supportedTrainingSizes?.contains($0) ?? true || samples.contains(where: canRecoverCropTiers) }
-        if dataset?.trainingSize == nil, !supportedTrainingSizes.contains(training.size), let size = supportedTrainingSizes.last {
-            training.size = size
-        }
+        supportedTrainingSizes = backendTrainingSizes.filter { dataset?.supportedTrainingSizes?.contains($0) ?? true }
     }
 
     func refreshTrainingCapabilities() {
@@ -948,18 +962,11 @@ final class WorkbenchStore {
 
     var trainingConfigurationIssue: String? {
         if let issue = training.configurationIssue { return issue }
-        if dataset == nil { return "Open your source dataset first." }
-        if !supportedTrainingSizes.contains(training.size) {
-            if dataset?.supportedTrainingSizes?.contains(training.size) == false { return "Choose a training size supplied by the original source maps." }
-            return "Choose a supported training size."
-        }
-        if training.useSelectedMaterialOnly && selectedMaterialId == nil { return "Select a material first." }
-        let selected = training.useSelectedMaterialOnly ? trainingFolderSamples : samples
-        let eligible = selected.filter { self.sampleIsTrainable($0) || !["excluded", "rejected"].contains($0.status) && canRecoverCropTiers($0) }
-        if eligible.isEmpty { return "No included material provides a registered \(training.target == "height" ? "16-bit displacement" : training.target) target at this size." }
-        if eligible.allSatisfy({ $0.split == "validation" && $0.splitAssignment == "manual" }) {
-            return "Assign at least one included material to Training in Dataset. All available materials are assigned to Validation."
-        }
+        guard specialistTrainingContext != nil else { return "Choose a material category in Loom Room." }
+        if dataset == nil { return "Open your source folder first." }
+        // Eligibility is resolved from live folder tags when launching. A
+        // cached browser inventory must never block a newly added material.
+        if !backendTrainingSizes.contains(training.size) { return "Choose a supported training size." }
         if training.useWarmStart {
             guard let checkpoint = selectedCheckpoint, checkpoint.supportsTrainingWarmStart else { return "Select a material checkpoint to refine." }
             if checkpoint.modelFamily != training.modelFamily { return "Choose a starting checkpoint from the selected model family." }
@@ -976,40 +983,6 @@ final class WorkbenchStore {
             (sample.availableTargets?.contains(training.target) ?? (sample.maps[training.target] != nil))
     }
 
-    /// Training selects a folder's balanced zoom tiers, including originals
-    /// which preparation will obtain from the registered provider when absent.
-    var trainingFolderSamples: [WorkbenchSample] {
-        guard let dataset else { return [] }
-        let materials = dataset.materials
-        guard let selected = (dataset.originalMaterials ?? materials).first(where: { $0.id == selectedMaterialId })
-                ?? materials.first(where: { $0.id == selectedMaterialId }) else { return [] }
-        guard let selectedFolder = sourceFolder(for: selected) else { return selected.samples }
-        let family = selected.samples.first?.sourceFamilyId
-        return materials.filter { material in
-            sourceFolder(for: material) == selectedFolder && (family == nil || material.samples.first?.sourceFamilyId == nil || material.samples.first?.sourceFamilyId == family)
-        }.flatMap(\.samples)
-    }
-
-    private func canRecoverCropTiers(_ sample: WorkbenchSample) -> Bool {
-        guard let input = sample.maps["input"] else { return false }
-        let source = URL(fileURLWithPath: input.originalSourcePath ?? input.path)
-        let filename = source.lastPathComponent.lowercased()
-        let scale: Int?
-        if filename.range(of: #"_(?:diff|col(?:_.+)?)_(?:1|2|4|8|16)k\.png$"#, options: .regularExpression) != nil {
-            scale = source.deletingPathExtension().lastPathComponent.split(separator: "_").last.flatMap { Int($0.dropLast()) }
-        } else if filename.range(of: #"^[a-z][a-z0-9]*_[1248]k-png_color\.png$"#, options: .regularExpression) != nil,
-                  let tier = filename.range(of: #"(?<=_)[1248](?=k-png_color\.png$)"#, options: .regularExpression) {
-            scale = Int(filename[tier])
-        } else { return false }
-        guard let scale else { return false }
-        let pixels = scale * 1024, tolerance = max(2, Int(ceil(Double(pixels) * 0.02)))
-        let width = input.originalSourceWidth ?? sample.width, height = input.originalSourceHeight ?? sample.height
-        // Published source fields can be rectangular. A verified nominal axis
-        // identifies their tier; preparation checks the final crop's short edge.
-        return width > 0 && height > 0 &&
-            (abs(width - pixels) <= tolerance || abs(height - pixels) <= tolerance)
-    }
-
     func startTraining() {
         if let issue = trainingConfigurationIssue { error = issue; return }
         runTraining(checkpoint: training.useWarmStart ? selectedCheckpoint : nil)
@@ -1017,9 +990,7 @@ final class WorkbenchStore {
 
     private func runTraining(checkpoint: WorkbenchCheckpoint?) {
         let options = training
-        let specialistContext = specialistTrainingContext.flatMap { context in
-            !options.useSelectedMaterialOnly && context.datasetPath == (dataset?.preparation?.sourceDatasetPath ?? dataset?.datasetPath) && context.target == options.target ? context : nil
-        }
+        let activeContext = specialistTrainingContext
         let modelName = effectiveTrainingModelName
         let selectedMaterial = selectedMaterialId
         let dependencies = options.modelFamily.isCompact ? [] : checkpoint.map { dependencyArguments(for: $0) } ?? dependencyArguments
@@ -1027,6 +998,7 @@ final class WorkbenchStore {
         let developer = developerMode
         let publishAfterTraining = developer && uploadAfterTraining
         operation(options.modelFamily == .depthProHeightRefiner ? "Training DepthPro Height Refiner…" : options.modelFamily.isCompact ? "Training compact material model…" : checkpoint == nil ? "Training material LoRA…" : "Refining material LoRA…", training: true) {
+            let specialistContext = try await self.refreshActiveTrainingCategory(activeContext, options: options)
             let prepared = try await self.ensureTrainingDataset(options: options, selectedMaterial: selectedMaterial)
             let output = try self.newOutputURL(prefix: "material-\(options.target)")
             self.lastOutputURL = output
@@ -1049,12 +1021,14 @@ final class WorkbenchStore {
                 "--warmup-updates", String(options.warmupUpdates), "--seed", String(options.seed)] + dependencies
             args += depthProArguments
             args += options.cropArguments
+            args += ["--shuffle-training-order", options.shuffleTrainingOrder ? "true" : "false"]
+            if options.target == "height", options.exaggerateFeatures { args += ["--exaggerate-features"] }
             args += ["--crop-selection-prepared"]
             if options.modelFamily.isCompact && checkpoint == nil { args += ["--compact-width", String(options.compactWidth)] }
             if !options.modelFamily.isCompact { args += ["--lora-rank", String(options.loraRank), "--lora-alpha", String(options.loraAlpha)] }
             if developer { args += ["--developer-mode"] }
-            // Preparation already restricted the selected folder across all zoom
-            // tiers; filtering its original resolution ID would discard the rest.
+            // The derived category contains current tagged pairs. Browser selection
+            // never restricts training membership.
             if let checkpoint { args += ["--checkpoint", checkpoint.checkpointPath, "--expected-sha256", checkpoint.sha256] }
             self.isResumingTraining = checkpoint != nil
             let result: WorkbenchTrainingResponse
@@ -1189,14 +1163,17 @@ final class WorkbenchStore {
                 throw StudioError("The requested training family or target does not match this compact checkpoint.")
             }
             self.training = handoff.training
-            if let dataset = handoff.datasetURL { try await self.loadDataset(dataset) }
-            self.training = handoff.training
-            if let sample = handoff.sampleID {
-                guard self.samples.contains(where: { $0.id == sample }) else {
-                    throw StudioError("The requested material is no longer in this dataset. Select it in Dataset before training.")
+            if let dataset = handoff.datasetURL {
+                if let context = self.specialistTrainingContext,
+                   dataset.resolvingSymlinksInPath().standardizedFileURL.path != URL(fileURLWithPath: context.datasetPath).resolvingSymlinksInPath().standardizedFileURL.path {
+                    self.specialistTrainingContext = nil
                 }
-                self.selectedSampleId = sample
+                try await self.loadDataset(dataset)
             }
+            self.training = handoff.training
+            if let sample = handoff.sampleID, self.samples.contains(where: { $0.id == sample }) {
+                self.selectedSampleId = sample
+            } else { self.selectedSampleId = nil }
             self.selectedInputVariantId = handoff.inputVariantID
             self.configureCheckpointForRefinement(checkpoint)
             self.activity = "Ready to refine \(checkpoint.title)."
@@ -1215,14 +1192,14 @@ final class WorkbenchStore {
     }
 
     @discardableResult func reportMissingDatasetSource(_ url: URL) -> String {
-        if dataset?.isSourceFolder == true {
-            sourceFolderNeedsRefresh = true
-            refreshSourceFolderIfNeeded()
-            let notice = "Original moved or removed: \(url.path). The source folder list will refresh."
+        if FileManager.default.fileExists(atPath: url.path) {
+            let notice = "The image is present at \(url.path). Its preview could not be read."
             activity = notice
             return notice
         }
-        let notice = "Original file is unavailable at \(url.path). Its reference is kept in this dataset."
+        sourceFolderNeedsRefresh = true
+        refreshSourceFolderIfNeeded()
+        let notice = "Original moved or deleted: \(url.path). The folder list will refresh."
         activity = notice
         return notice
     }
@@ -1574,6 +1551,27 @@ final class WorkbenchStore {
         events.append(output + "\n")
         if !trainingWorker || !Self.hasSavedTrainingResult(output) { try Task.checkCancellation() }
         return output
+    }
+
+    var readableOperationLog: String {
+        var lines: [String] = []
+        for line in logText.split(separator: "\n") {
+            let text = String(line)
+            let display: String?
+            if let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] {
+                if let error = object["error"] as? String { display = error }
+                else if let message = object["message"] as? String { display = message }
+                else if let operation = object["operation"] as? String {
+                    if let completed = object["completed"] as? Int, let total = object["total"] as? Int, total > 0 {
+                        display = "\(operation) · \(completed.formatted()) / \(total.formatted())"
+                    } else { display = operation }
+                } else if object["event"] as? String == "training_started" {
+                    display = "Training started · \((object["requested_updates"] as? Int ?? 0).formatted()) planned updates"
+                } else { display = nil }
+            } else { display = text }
+            if let display, lines.last != display { lines.append(display) }
+        }
+        return lines.suffix(60).joined(separator: "\n")
     }
 
     private static func hasSavedTrainingResult(_ output: String) -> Bool {

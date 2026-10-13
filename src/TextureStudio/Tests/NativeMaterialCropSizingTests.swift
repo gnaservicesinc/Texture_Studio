@@ -7,9 +7,9 @@ import XCTest
 final class NativeMaterialCropSizingTests: XCTestCase {
     func testTwoKReviewOmitsOneKOriginalsAndSwitchingGridRestoresTheirExactCrops() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("Dataset"), sources = root.appendingPathComponent("Anti Skid Tiles")
-        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: false)
-        _ = try await command(["create-dataset", "--dataset", dataset.path, "--name", "Selected grid", "--training-size", "2048", "--validation-enabled", "no"])
+        let dataset = root.appendingPathComponent("Dataset"), sources = dataset.appendingPathComponent("Anti Skid Tiles")
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: true)
+        _ = try await command(["edit-dataset", "--dataset", dataset.path, "--training-size", "2048", "--validation-enabled", "no"])
         var originals: [URL: Data] = [:]
         for size in [1024, 2048] {
             for (role, bits, channels) in [("diff", 8, 3), ("disp", 16, 1)] {
@@ -18,7 +18,7 @@ final class NativeMaterialCropSizingTests: XCTestCase {
                 try bytes.write(to: path); originals[path] = bytes
             }
         }
-        let imported = try await command(["import-folder", "--dataset", dataset.path, "--folder", sources.path])
+        let imported = try await command(["dataset", "--dataset", dataset.path])
         XCTAssertEqual(imported["source_set_count"] as? Int, 2, "Both original resolutions remain registered")
         let snapshot = try metadataSnapshot(dataset)
         for _ in 0..<2 {
@@ -70,12 +70,13 @@ final class NativeMaterialCropSizingTests: XCTestCase {
     func testManualNearSizedMapsUsePerMapExactCropWhenCommonIntersectionEqualsGrid() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let dataset = root.appendingPathComponent("Dataset")
-        _ = try await command(["create-dataset", "--dataset", dataset.path, "--name", "Common pixels", "--training-size", "256", "--validation-enabled", "no"])
+        try FileManager.default.createDirectory(at: dataset, withIntermediateDirectories: false)
+        _ = try await command(["edit-dataset", "--dataset", dataset.path, "--training-size", "256", "--validation-enabled", "no"])
         let fixtures = [("input", 264, 262, 8, 3), ("height", 256, 256, 16, 1),
                         ("roughness", 260, 258, 8, 1), ("normal", 258, 264, 8, 3)]
         var paths: [String: URL] = [:], originals: [URL: Data] = [:]
         for (role, width, height, bits, channels) in fixtures {
-            let path = root.appendingPathComponent(role + ".png"), bytes = try png(width: width, height: height, bits: bits, channels: channels, varying: true)
+            let path = dataset.appendingPathComponent(role + ".png"), bytes = try png(width: width, height: height, bits: bits, channels: channels, varying: true)
             try bytes.write(to: path); paths[role] = path; originals[path] = bytes
         }
         let arguments = paths.keys.sorted().flatMap { ["--" + $0, paths[$0]!.path] }
@@ -121,41 +122,6 @@ final class NativeMaterialCropSizingTests: XCTestCase {
         ]))
     }
 
-    func testDeveloperBadMonkeyReadOnlyProjectionContainsOnlyExactTwoKCrops() throws {
-        guard ProcessInfo.processInfo.environment["TEXTURE_STUDIO_BADMONKEY_CROP_PROOF"] == "1" else {
-            throw XCTSkip("Set TEXTURE_STUDIO_BADMONKEY_CROP_PROOF=1 to inspect the existing live dataset without source or metadata writes.")
-        }
-        let dataset = URL(fileURLWithPath: "/Users/andrewsmith/Documents/Texture Studio Datasets/BadMonkey")
-        let snapshot = try metadataSnapshot(dataset), index = try object(dataset.appendingPathComponent("dataset.json"))
-        let entries = try XCTUnwrap(index["samples"] as? [[String: Any]])
-        var undersized = 0
-        for entry in entries {
-            let sample = try object(dataset.appendingPathComponent(try XCTUnwrap(entry["path"] as? String)).appendingPathComponent("sample.json"))
-            let dimensions = try XCTUnwrap(sample["source_pixel_dimensions"] as? [Int])
-            if dimensions.min()! < 2048 { undersized += 1 }
-        }
-        XCTAssertGreaterThan(undersized, 0, "This proof exercises the reported smaller original tiers")
-        let started = Date()
-        let info = try NativeMaterialDatasetService.readOnlyDatasetInfo(datasetURL: dataset, size: 2048)
-        let elapsed = Date().timeIntervalSince(started), rows = samples(info)
-        XCTAssertFalse(rows.isEmpty)
-        XCTAssertTrue(rows.allSatisfy { $0["width"] as? Int == 2048 && $0["height"] as? Int == 2048 })
-        XCTAssertFalse(rows.contains { $0["sample_id"] as? String == "anti_skid_tiles_1k_full" })
-        for row in rows {
-            for map in (row["maps"] as? [String: [String: Any]] ?? [:]).values {
-                let rectangle = try XCTUnwrap(map["crop_rectangle"] as? [Int])
-                XCTAssertEqual(Array(rectangle.suffix(2)), [2048, 2048])
-                XCTAssertLessThanOrEqual(rectangle[0] + 2048, try XCTUnwrap(map["original_source_width"] as? Int))
-                XCTAssertLessThanOrEqual(rectangle[1] + 2048, try XCTUnwrap(map["original_source_height"] as? Int))
-            }
-        }
-        XCTAssertEqual(try metadataSnapshot(dataset), snapshot)
-        try JSONSerialization.data(withJSONObject: ["dataset_path": dataset.path, "registered_source_set_count": entries.count,
-            "undersized_registered_originals": undersized, "visible_exact_2048_crops": rows.count,
-            "read_only_projection_seconds": elapsed, "source_and_registration_modified": false], options: [.prettyPrinted, .sortedKeys])
-            .write(to: URL(fileURLWithPath: "/tmp/texture-badmonkey-crop-proof.json"))
-    }
-
     private func samples(_ info: [String: Any]) -> [[String: Any]] {
         (info["materials"] as? [[String: Any]] ?? []).flatMap { $0["samples"] as? [[String: Any]] ?? [] }
     }
@@ -163,14 +129,12 @@ final class NativeMaterialCropSizingTests: XCTestCase {
         try WorkbenchResult.decode(WorkbenchDataset.self, output: String(decoding: JSONSerialization.data(withJSONObject: info), as: UTF8.self))
     }
     private func metadataSnapshot(_ root: URL) throws -> [String: String] {
-        let index = try object(root.appendingPathComponent("dataset.json"))
-        var files = [root.appendingPathComponent("dataset.json")]
-        files += (index["samples"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }.map { root.appendingPathComponent($0).appendingPathComponent("sample.json") }
-        for filename in [".material-size-reviews.json", ".material-workbench.lock"] {
-            let path = root.appendingPathComponent(filename)
-            if FileManager.default.fileExists(atPath: path.path) { files.append(path) }
+        let files = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]))
+        var snapshot: [String: String] = [:]
+        for case let file as URL in files where try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+            snapshot[file.path] = SHA256.hash(data: try Data(contentsOf: file)).map { String(format: "%02x", $0) }.joined()
         }
-        return try Dictionary(uniqueKeysWithValues: files.map { ($0.path, SHA256.hash(data: try Data(contentsOf: $0)).map { String(format: "%02x", $0) }.joined()) })
+        return snapshot
     }
     private func png(width: Int, height: Int, bits: Int, channels: Int, varying: Bool = false) throws -> Data {
         let count = width * height * channels * bits / 8

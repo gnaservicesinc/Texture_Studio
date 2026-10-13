@@ -167,25 +167,26 @@ final class NativeDiffuseClassifierDatasetTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: moved), bytes)
     }
 
-    func testDatasetAndPreparedDatasetDiscoveryUseTheirOwnSelectedGrid() throws {
+    func testPhysicalFolderAndPreparedDatasetDiscoveryUseTheSelectedNativeGrid() throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("Dataset"), prepared = root.appendingPathComponent("Prepared")
-        var rows: [[String: Any]] = []
+        let dataset = root.appendingPathComponent("Dataset")
+        let prepared = dataset.appendingPathComponent(".training-data/prepared")
+        try FileManager.default.createDirectory(at: dataset, withIntermediateDirectories: false)
         for (index, edge) in [8, 16, 32].enumerated() {
-            let path = "samples/tier\(index)", file = root.appendingPathComponent("wood_diff_\(index + 1)k.png")
+            let file = dataset.appendingPathComponent("wood_diff_\(index + 1)k.png")
             try png(width: edge, height: edge, value: UInt8(edge)).write(to: file)
-            try FileManager.default.createDirectory(at: dataset.appendingPathComponent(path), withIntermediateDirectories: true)
-            try writeJSON(["source_family_id": "wood", "input_variants": [["variant_id": "color_1", "source": ["path": file.path]]]],
-                          to: dataset.appendingPathComponent(path + "/sample.json"))
-            rows.append(["path": path])
         }
-        try writeJSON(["training_size": 8, "samples": rows], to: dataset.appendingPathComponent("dataset.json"))
+        // Old ordinary manifests cannot choose the classifier grid or hide physical originals.
+        try writeJSON(["training_size": 8, "samples": []], to: dataset.appendingPathComponent("dataset.json"))
         try FileManager.default.createDirectory(at: prepared, withIntermediateDirectories: true)
-        try writeJSON(["crop_size": 16, "native_size_preparation": ["source_dataset_path": dataset.path]],
-                      to: prepared.appendingPathComponent("dataset.json"))
-        XCTAssertEqual(try NativeDiffuseClassifierDatasetService.discover(dataset: dataset, sourceFolder: nil).first?.width, 8)
+        try writeJSON(["crop_size": 16, "source_folder_dataset_path": dataset.path,
+            "native_size_preparation": ["schema": "texture-studio-native-crops-v1", "source_dataset_path": dataset.path, "target_resized": false]],
+            to: prepared.appendingPathComponent("dataset.json"))
+        XCTAssertEqual(try NativeDiffuseClassifierDatasetService.discover(dataset: dataset, sourceFolder: nil, minimumSize: 8).first?.width, 8)
         XCTAssertEqual(try NativeDiffuseClassifierDatasetService.discover(dataset: prepared, sourceFolder: nil).first?.width, 16)
         XCTAssertEqual(try NativeDiffuseClassifierDatasetService.discover(dataset: dataset, sourceFolder: nil, minimumSize: 32).first?.width, 32)
+        XCTAssertTrue(try NativeDiffuseClassifierDatasetService.discover(dataset: dataset, sourceFolder: nil).isEmpty,
+            "A stale ordinary manifest does not override the default classifier resolution")
     }
 
     func testHigherNativeTierPreservesLegacyCurationAndFiltersAllSmallCuratedImages() throws {
@@ -632,23 +633,25 @@ final class NativeDiffuseClassifierDatasetTests: XCTestCase {
         XCTAssertEqual(try manifest(destination).entries.first?.status, "moved_by_user")
     }
 
-    func testDatasetDiscoveryUsesOriginalSourcesAndIgnoresExcludedSamples() throws {
+    func testDatasetDiscoveryUsesCurrentContainedOriginalsAndIgnoresStaleReferenceLists() throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("Dataset"), original = root.appendingPathComponent("wood_planks_diff_1k.png")
-        try png(width: 18, height: 14, value: 84).write(to: original)
-        try FileManager.default.createDirectory(at: dataset.appendingPathComponent("samples/wood"), withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: dataset.appendingPathComponent("samples/excluded"), withIntermediateDirectories: true)
-        let map: [String: Any] = ["variant_id": "color_1", "source": ["path": original.path]]
-        for (path, status) in [("wood", "unreviewed"), ("excluded", "excluded")] {
-            try writeJSON(["source_family_id": "wood_planks", "status": status, "input_variants": [map]],
-                to: dataset.appendingPathComponent("samples/\(path)/sample.json"))
-        }
-        try writeJSON(["training_size": 12, "samples": [["path": "samples/wood"], ["path": "samples/excluded"]]], to: dataset.appendingPathComponent("dataset.json"))
-        let sources = try NativeDiffuseClassifierDatasetService.discover(dataset: dataset, sourceFolder: nil)
+        let dataset = root.appendingPathComponent("Dataset")
+        try FileManager.default.createDirectory(at: dataset, withIntermediateDirectories: false)
+        let original = dataset.appendingPathComponent("wood_planks_diff_1k.png")
+        let outside = root.appendingPathComponent("outside_diff_1k.png")
+        let bytes = try png(width: 18, height: 14, value: 84)
+        try bytes.write(to: original); try bytes.write(to: outside)
+        let stale: [String: Any] = ["training_size": 12,
+            "source_folders": [root.path], "samples": [["path": "../outside"], ["path": "samples/excluded"]]]
+        try writeJSON(stale, to: dataset.appendingPathComponent("dataset.json"))
+        let sources = try NativeDiffuseClassifierDatasetService.discover(dataset: dataset, sourceFolder: nil, minimumSize: 12)
         XCTAssertEqual(sources.count, 1); XCTAssertEqual(sources.first?.url, original)
         XCTAssertEqual(sources.first?.width, 18); XCTAssertEqual(sources.first?.height, 14)
-        try writeJSON(["samples": [["path": "../outside"]]], to: dataset.appendingPathComponent("dataset.json"))
-        XCTAssertThrowsError(try NativeDiffuseClassifierDatasetService.discover(dataset: dataset, sourceFolder: nil))
+        XCTAssertEqual(try Data(contentsOf: original), bytes)
+        try FileManager.default.removeItem(at: original)
+        XCTAssertTrue(try NativeDiffuseClassifierDatasetService.discover(dataset: dataset, sourceFolder: nil, minimumSize: 12).isEmpty,
+            "A reference list cannot retain deleted originals or include files outside the open folder")
+        XCTAssertEqual(try Data(contentsOf: outside), bytes)
     }
 
     func testRefreshRejectsSymlinkClassAndOriginalMapDestination() throws {

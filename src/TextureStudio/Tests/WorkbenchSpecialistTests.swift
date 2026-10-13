@@ -61,15 +61,83 @@ import XCTest
         store.specialistSourceDatasetPath = "/original/main"
         store.specialistTrainingContext = .init(workspacePath: "/library", specialistID: "wood", name: "Wood",
             target: "normal", datasetPath: "/specialist/wood", membershipSHA256: "members")
-        store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: Self.dataset(path: "/specialist/wood"))
+        store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: """
+            {"dataset_path":"/specialist/wood","source_folder_path":"/original/main","is_source_folder":false,
+             "index_sha256":"current","training_size":2048,"supported_training_sizes":[1024,2048],"materials":[]}
+            """)
+        XCTAssertTrue(store.modelWorkshopNeedsOriginalSources, "A category's original-source link does not make its projection the original folder")
         store.openModelWorkshopSources()
         try await wait(store)
         XCTAssertNil(store.error)
         XCTAssertEqual(store.dataset?.datasetPath, "/original/main")
-        XCTAssertNil(store.specialistTrainingContext)
+        XCTAssertEqual(store.specialistTrainingContext?.specialistID, "wood",
+                       "Browsing original files must preserve the trainer's tag category")
         XCTAssertEqual(store.datasetBrowserMode, .originals)
         XCTAssertEqual(calls.first?.first, "dataset")
         XCTAssertTrue(calls.first?.contains("--skip-source-recovery") == true)
+    }
+
+    func testTrainerCategoryAndGridSurviveOriginalBrowsingAndRelaunch() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        var calls: [[String]] = []
+        let store = fixture.store { args, _ in
+            calls.append(args)
+            return Self.originalFolder(path: self.value("--dataset", in: args) ?? "")
+        }
+        store.specialistSourceDatasetPath = "/original/main"
+        store.specialistTrainingContext = .init(workspacePath: "/library", specialistID: "wood", name: "Wood",
+            target: "height", datasetPath: "/specialist/wood", membershipSHA256: "members")
+        store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: Self.dataset(path: "/specialist/wood"))
+        store.training.size = 2048
+        store.returnToModelWorkshop()
+        try await wait(store)
+        XCTAssertEqual(store.dataset?.datasetPath, "/original/main")
+        XCTAssertEqual(store.specialistTrainingContext?.specialistID, "wood")
+        XCTAssertEqual(store.training.size, 2048)
+        store.openActiveTrainerDataset()
+        try await wait(store)
+        XCTAssertEqual(store.dataset?.datasetPath, "/specialist/wood")
+        XCTAssertEqual(value("--review-size", in: try XCTUnwrap(calls.last)), "2048")
+        XCTAssertEqual(fixture.store { _, _ in "" }.specialistTrainingContext?.specialistID, "wood")
+    }
+
+    func testCategoryResolutionSelectionReadsProjectionWithoutEditingMembership() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        var calls: [[String]] = []
+        let json = """
+            {"dataset_path":"/specialist/wood","source_folder_path":"/original/main","is_source_folder":false,
+             "index_sha256":"current","training_size":1024,"supported_training_sizes":[1024,2048],"materials":[]}
+            """
+        let store = fixture.store { args, _ in calls.append(args); return json }
+        store.adoptDataset(try WorkbenchResult.decode(WorkbenchDataset.self, output: json))
+        store.selectTrainingSize(2048)
+        try await wait(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(calls.map { $0[0] }, ["dataset"])
+        XCTAssertEqual(value("--review-size", in: calls[0]), "2048")
+        XCTAssertEqual(store.training.size, 2048)
+    }
+
+    func testTrainingRefreshesTagMembershipAndPreservesRequestedGrid() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        var calls: [[String]] = []
+        let store = fixture.store { args, _ in
+            calls.append(args)
+            return args.first == "refresh-specialists" ? Self.registry : Self.dataset(path: "/specialist/wood")
+        }
+        store.specialistSourceDatasetPath = "/original/main"
+        let context = WorkbenchSpecialistTrainingContext(workspacePath: "/library", specialistID: "wood", name: "Wood",
+            target: "height", datasetPath: "/old/wood", membershipSHA256: "stale")
+        store.specialistTrainingContext = context
+        var options = store.training
+        options.size = 2048
+        let updated = try await store.refreshActiveTrainingCategory(context, options: options)
+        XCTAssertEqual(updated?.membershipSHA256, "height-members")
+        XCTAssertEqual(updated?.datasetPath, "/specialist/wood")
+        XCTAssertEqual(calls.map { $0[0] }, ["refresh-specialists", "dataset"])
+        XCTAssertEqual(value("--dataset", in: calls[0]), "/original/main")
+        XCTAssertEqual(value("--review-size", in: calls[1]), "2048")
+        XCTAssertEqual(store.training.size, 2048)
     }
 
     func testReturningToWorkshopFromCategoryComparisonRestoresOriginalRoot() async throws {
@@ -108,7 +176,7 @@ import XCTest
         XCTAssertNil(store.error)
         XCTAssertEqual(calls.map { $0[0] }, ["dataset", "add-source", "dataset"])
         XCTAssertTrue(calls.allSatisfy { value("--dataset", in: $0) == "/original/main" })
-        XCTAssertNil(store.specialistTrainingContext)
+        XCTAssertEqual(store.specialistTrainingContext?.specialistID, "wood")
         XCTAssertEqual(store.dataset?.datasetPath, "/original/main")
         XCTAssertEqual(try Data(contentsOf: source), Data("Original image bytes".utf8))
     }
@@ -136,8 +204,8 @@ import XCTest
         XCTAssertEqual(calls.map { $0[0] }, ["dataset", "refresh-classifier-dataset"])
         let refresh = try XCTUnwrap(calls.last)
         XCTAssertEqual(value("--dataset", in: refresh), "/original/main")
-        XCTAssertEqual(value("--size", in: refresh), "2048")
-        XCTAssertNil(store.specialistTrainingContext)
+        XCTAssertEqual(value("--size", in: refresh), "1024")
+        XCTAssertEqual(store.specialistTrainingContext?.specialistID, "wood")
     }
 
     func testOpeningAnotherSourceFolderClearsOldWorkshopTrainingContext() async throws {
@@ -151,6 +219,7 @@ import XCTest
         store.classifierUseSourceFolder = true
         store.classifierSourceFolderPath = "/stale/1k-sources"
         store.classifierSourceMinimumSize = 1024
+        store.training.size = 2048
         store.specialistTrainingContext = .init(workspacePath: "/library", specialistID: "wood", name: "Wood",
             target: "height", datasetPath: "/specialist/wood", membershipSHA256: "members")
         store.openDataset(URL(fileURLWithPath: "/new/originals"))
@@ -260,7 +329,7 @@ import XCTest
                        "Switching source roots must preserve the other workspace")
     }
 
-    func testOpeningBareFolderKeepsLegacyWorkspaceForTheSameOriginalCorpus() async throws {
+    func testLegacyExternalReferenceListCannotBindAnEmptyFolderToOriginalCorpus() async throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let originals = fixture.root.appendingPathComponent("Original images"), legacy = fixture.root.appendingPathComponent("Legacy dataset")
         try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
@@ -285,8 +354,9 @@ import XCTest
         store.openDataset(originals)
         try await wait(store)
         XCTAssertNil(store.error)
-        XCTAssertEqual(store.specialistWorkspacePath, workspace.path)
-        XCTAssertEqual(store.specialistRegistry?.specialists.map(\.name), ["Wood", "Bark"])
+        XCTAssertNotEqual(store.specialistWorkspacePath, workspace.path,
+            "External paths in an obsolete member list cannot establish physical folder membership")
+        XCTAssertNil(store.specialistRegistry)
         XCTAssertEqual(store.modelWorkshopSourcePath, originals.path)
         XCTAssertEqual(calls.map { $0[0] }, ["dataset"])
         XCTAssertEqual(try Data(contentsOf: workspace.appendingPathComponent("specialists.json")), before,
@@ -333,6 +403,7 @@ import XCTest
             calls.append(args)
             switch args.first {
             case "capabilities": return "{\"training_sizes\":[256,512,1024,2048]}"
+            case "refresh-specialists": return Self.registry
             case "dataset": return Self.dataset(path: "/specialist/wood")
             case "checkpoint": return """
             {"checkpoint_path":"/checkpoints/wood.safetensors","sha256":"model-sha","schema":"texture-studio-compact-material-v1",
@@ -346,12 +417,11 @@ import XCTest
         store.openSpecialistTrainer(continuing: true)
         try await wait(store)
         XCTAssertNil(store.error)
-        XCTAssertEqual(calls.map { $0[0] }, ["capabilities", "dataset", "checkpoint"])
+        XCTAssertEqual(calls.map { $0[0] }, ["capabilities", "refresh-specialists", "dataset", "checkpoint"])
         XCTAssertFalse(calls.joined().contains("--model-directory"))
         XCTAssertEqual(store.training.modelFamily, .compactNormal)
         XCTAssertEqual(store.training.target, "normal")
         XCTAssertEqual(store.training.modelName, "Wood Normals")
-        XCTAssertFalse(store.training.useSelectedMaterialOnly)
         XCTAssertTrue(store.training.useWarmStart)
         XCTAssertEqual(store.dataset?.datasetPath, "/specialist/wood")
         XCTAssertEqual(store.specialistTrainingContext?.specialistID, "wood")
@@ -364,6 +434,7 @@ import XCTest
         let store = fixture.store { args, _ in
             calls.append(args)
             if args.first == "capabilities" { return "{\"training_sizes\":[256,512,1024,2048]}" }
+            if args.first == "refresh-specialists" { return Self.registry }
             if self.value("--dataset", in: args) == "/original/main" { return Self.originalFolder(path: "/original/main") }
             return """
                 {"dataset_path":"/specialist/wood","index_sha256":"category-sha","training_size":1024,
@@ -378,11 +449,12 @@ import XCTest
         }
         store.specialistRegistry = try WorkbenchResult.decode(WorkbenchSpecialistRegistry.self, output: Self.registry)
         store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: Self.originalFolder(path: "/original/main"))
+        store.training.size = 2048
         store.specialistTarget = "height"
         store.openSpecialistTrainer()
         try await wait(store)
         XCTAssertNil(store.error)
-        XCTAssertEqual(calls.map { $0[0] }, ["capabilities", "dataset"])
+        XCTAssertEqual(calls.map { $0[0] }, ["capabilities", "refresh-specialists", "dataset"])
         XCTAssertEqual(value("--review-size", in: try XCTUnwrap(calls.last)), "2048")
         XCTAssertEqual(store.training.size, 2048)
         XCTAssertEqual(store.datasetResolution, 2048)
@@ -400,27 +472,119 @@ import XCTest
         store.openSpecialistTrainer()
         try await wait(store)
         XCTAssertNil(store.error)
-        XCTAssertEqual(calls.map { $0[0] }, ["dataset", "capabilities", "dataset"],
+        XCTAssertEqual(calls.map { $0[0] }, ["dataset", "capabilities", "refresh-specialists", "dataset"],
                        "A category comparison restores the original source grid before another training handoff")
         XCTAssertEqual(value("--dataset", in: try XCTUnwrap(calls.first)), "/original/main")
-        XCTAssertEqual(value("--review-size", in: try XCTUnwrap(calls.last)), "2048")
-        XCTAssertEqual(store.training.size, 2048)
-        XCTAssertTrue(store.samples.allSatisfy { $0.width == 2048 && $0.height == 2048 })
+        XCTAssertEqual(value("--review-size", in: try XCTUnwrap(calls.last)), "1024")
+        XCTAssertEqual(store.training.size, 1024, "Explicit training choice survives original-folder navigation")
     }
 
-    func testMissingPairedMapStopsSetupAndNextSpecialistSkipsFinishedModels() throws {
+    func testLiveMissingPairedMapStopsSetupAndNextSpecialistSkipsFinishedModels() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
-        let store = fixture.store { _, _ in XCTFail("Missing maps must not launch a worker"); return "" }
+        var calls: [[String]] = []
+        let store = fixture.store { args, _ in
+            calls.append(args)
+            if args.first == "capabilities" { return "{\"training_sizes\":[256,512,1024,2048]}" }
+            XCTAssertEqual(args.first, "refresh-specialists")
+            return Self.registry
+        }
         store.specialistRegistry = try WorkbenchResult.decode(WorkbenchSpecialistRegistry.self, output: Self.registry)
         store.specialistTarget = "roughness"
         store.openSpecialistTrainer()
+        try await wait(store)
         XCTAssertFalse(store.isBusy)
-        XCTAssertNotNil(store.error)
+        XCTAssertTrue(store.error?.contains("no included paired roughness maps") == true)
+        XCTAssertEqual(calls.map { $0[0] }, ["capabilities", "refresh-specialists"])
         store.specialistTarget = "height"
         store.selectedSpecialistID = "wood"
         store.selectNextSpecialist()
         XCTAssertEqual(store.selectedSpecialistID, "bark")
+    }
+
+    func testOpeningCachedEmptyCategoryChecksRetaggedAndNewPhysicalMaterialsAtSavedGrid() async throws {
+        for retagExisting in [true, false] {
+            let fixture = try Fixture(); defer { fixture.remove() }
+            let originals = fixture.root.appendingPathComponent("Originals")
+            let workspace = fixture.root.appendingPathComponent("Models")
+            try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+            let existing = try writeTaggedMaterial("Existing", label: "Bark", in: originals)
+            let classifier = NativeMaterialSpecialistService.Classifier(path: "/test/offline", sha256: String(repeating: "a", count: 64),
+                labels: ["Wood", "Bark"], minimumImageSize: 0) { _ in
+                    throw StudioError("Explicit image tags must determine this category without a prediction")
+                }
+            let previous = try await NativeMaterialSpecialistService.refresh(datasetURL: originals,
+                workspaceURL: workspace, classifier: classifier)
+            let emptyWood = try XCTUnwrap(previous.specialists.first { $0.classLabel == "Wood" })
+            XCTAssertEqual(emptyWood.targets.first { $0.target == "height" }?.materialCount, 0)
+            let selectedInput: URL
+            if retagExisting {
+                for file in existing { try NativeSourceFileTags.update(file, classLabel: "Wood", classifierIdentity: "user") }
+                selectedInput = existing[0]
+            } else {
+                selectedInput = try writeTaggedMaterial("Added", label: "Wood", in: originals)[0]
+            }
+            let originalBytes = try Data(contentsOf: selectedInput)
+            let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
+            var calls: [[String]] = []
+            let store = fixture.store { args, _ in
+                calls.append(args)
+                switch args.first {
+                case "capabilities": return "{\"training_sizes\":[256,512,1024,2048]}"
+                case "refresh-specialists":
+                    XCTAssertEqual(self.value("--dataset", in: args), originals.path)
+                    let current = try await NativeMaterialSpecialistService.refresh(datasetURL: originals,
+                        workspaceURL: workspace, classifier: classifier)
+                    return String(decoding: try encoder.encode(current), as: UTF8.self)
+                case "dataset":
+                    let response = try await NativeMaterialDatasetService.run(arguments: args)
+                    return try XCTUnwrap(response)
+                default: throw StudioError("Unexpected opening command: \(args)")
+                }
+            }
+            defer { store.observeSourceFolder(nil) }
+            store.specialistRegistry = try WorkbenchResult.decode(WorkbenchSpecialistRegistry.self,
+                output: String(decoding: encoder.encode(previous), as: UTF8.self))
+            store.selectedSpecialistID = emptyWood.id
+            store.specialistWorkspacePath = workspace.path
+            store.specialistSourceDatasetPath = originals.path
+            store.specialistTarget = "height"
+            store.training.size = 2048
+            let previousNavigation = store.trainingNavigationRequest
+            store.openSpecialistTrainer()
+            try await wait(store)
+            XCTAssertNil(store.error, retagExisting ? "Retagged material" : "New material")
+            XCTAssertEqual(calls.map { $0[0] }, ["capabilities", "refresh-specialists", "dataset"])
+            XCTAssertEqual(value("--review-size", in: try XCTUnwrap(calls.last)), "2048")
+            XCTAssertEqual(store.training.size, 2048)
+            XCTAssertEqual(store.dataset?.datasetPath, emptyWood.datasetPath)
+            XCTAssertEqual(store.dataset?.sourceFolderPath, originals.resolvingSymlinksInPath().path)
+            XCTAssertEqual(store.specialistTrainingContext?.specialistID, emptyWood.id)
+            XCTAssertEqual(store.selectedSpecialist?.targetInfo("height")?.materialCount, 1)
+            XCTAssertNotEqual(store.specialistTrainingContext?.membershipSHA256,
+                emptyWood.targets.first { $0.target == "height" }?.membershipSha256)
+            XCTAssertEqual(Set(store.dataset?.originalSamples.compactMap { $0.maps["input"]?.originalSourcePath } ?? []),
+                [selectedInput.resolvingSymlinksInPath().path])
+            XCTAssertEqual(try Data(contentsOf: selectedInput), originalBytes)
+            XCTAssertNil(store.trainingConfigurationIssue)
+            XCTAssertNotEqual(store.trainingNavigationRequest, previousNavigation)
+        }
+    }
+
+    private func writeTaggedMaterial(_ name: String, label: String, in originals: URL) throws -> [URL] {
+        let folder = originals.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let size = 2048
+        var files: [URL] = []
+        for (filename, role, channels, bits) in [("BaseColor.png", "input", 3, 8), ("Height.png", "height", 1, 16)] {
+            let file = folder.appendingPathComponent(filename)
+            try NativePNG(header: .init(width: size, height: size, bits: bits, channels: channels,
+                color: channels == 1 ? 0 : 2, interlace: 0), pixels: Data(repeating: 91,
+                    count: size * size * channels * bits / 8), colorChunks: []).encoded().write(to: file)
+            try NativeSourceFileTags.update(file, role: role, classLabel: label, classifierIdentity: "user")
+            files.append(file)
+        }
+        return files
     }
 
     func testOriginalLibraryChoiceSurvivesTrainingDatasetSelectionAndRelaunch() throws {

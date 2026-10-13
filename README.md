@@ -31,13 +31,15 @@ Open `src/TextureStudio/TextureStudio.xcodeproj` and select the shared `TextureS
 
 Numeric map exports receive no photographic gamma or tone mapping. Float32 export preserves the current Float32 samples; it cannot recover detail absent from a source or prediction. Original files and precision-preserving HEIF auxiliary exports remain unchanged.
 
-## Refine a material model
+## Train material models
 
 Dataset Studio can [create and refresh a separate diffuse type classifier dataset](docs/diffuse-classifier-dataset.md) for review in Create ML. New compact RGB models use [recorded linear-light input](docs/material-linear-data.md); numeric material targets and EXR exports preserve their data values.
 
-Training uses complete registered diffuse and target maps at one explicit grid. Every input, target and training review matches that grid; no smaller random crop is hidden inside the loader. Supported training sizes are filtered by the available source pixels; the selected grid is never silently reduced. A test photo passes through the same diffuse preparation as application generation before reaching the model.
+Open your existing source folder in Loom Room. The files physically inside that folder are the dataset; saved manifests cannot add outside materials or hide current images. Material and map tags determine category membership and the diffuse/target pairs used for training. Browsing originals preserves the chosen category, map and training size. Training requires a category and derives membership from its current file tags. User tags and pairing identities travel with images across renames; pixel edits refresh verification without deleting teaching.
 
-Exact-size originals are referenced directly. Exact crops create temporary training images when the originals exceed the selected grid; maps are not rescaled or padded. Changing size, finishing training or stopping a run removes those owned files while preserving original sources and small per-size review records. Dataset entries reference original material maps without duplicating their image files.
+Training uses paired diffuse and target crops at one explicitly selected grid. Supported training sizes depend on the available source pixels; the selected grid is never silently reduced. Larger images can supply random crop positions independently of optional flips and rotations. All paired maps receive the same spatial changes, without resizing or padding. A test photo passes through the same diffuse preparation as application generation before reaching the model.
+
+Original images remain in the source folder. Category inventories, checksum records and prepared crops are derived app data, stored outside that folder and rebuilt from current files and tags. Cleanup removes owned temporary images while retaining originals, saved models and review choices.
 
 The native MPSGraph implementation uses a complete pinned PBRnxt material network adapted to native output scale. It refines height, roughness or normal with LoRA. Training settings expose learning rate, AdamW or Adam, gradient accumulation, weight decay, scheduling, clipping and adapter parameters; the effective recipe is saved with each run and model. Enable **Developer mode** in Settings to select decoder scope and export a full fused `.safetensors` checkpoint plus the separate LoRA. Normal mode exports the LoRA. Compatible adapters can be combined with explicit weights against the same base and target modules.
 

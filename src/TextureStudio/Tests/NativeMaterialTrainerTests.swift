@@ -7,7 +7,7 @@ import XCTest
 final class NativeMaterialTrainerTests: XCTestCase {
     func testTrainingCachesResolveOriginalDatasetAndExplicitOverride() throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let original = root.appendingPathComponent("dataset"), prepared = original.appendingPathComponent(".training-data/256-fixture")
+        let original = root.appendingPathComponent(".training-data/dataset"), prepared = original.appendingPathComponent(".training-data/256-fixture")
         try FileManager.default.createDirectory(at: prepared, withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: ["native_size_preparation": [
             "schema": "texture-studio-native-crops-v1", "source_dataset_path": original.path]]).write(to: prepared.appendingPathComponent("dataset.json"))
@@ -26,7 +26,38 @@ final class NativeMaterialTrainerTests: XCTestCase {
         let misplaced = root.appendingPathComponent("unowned-prepared")
         try FileManager.default.createDirectory(at: misplaced, withIntermediateDirectories: true)
         try FileManager.default.copyItem(at: prepared.appendingPathComponent("dataset.json"), to: misplaced.appendingPathComponent("dataset.json"))
-        XCTAssertThrowsError(try NativeMaterialTrainer.Options(["train", "--dataset", misplaced.path, "--output", output.path]))
+        let loose = try NativeMaterialTrainer.Options(["train", "--dataset", misplaced.path, "--output", output.path])
+        XCTAssertTrue(try NativeMaterialDatasetService.sourceFolderIsAuthoritative(misplaced))
+        XCTAssertNotEqual(loose.trainingCacheRootURL?.path, original.appendingPathComponent(".training-data").path,
+                          "A copied manifest cannot bind an ordinary folder to another folder's cache")
+    }
+
+    func testShuffleTrainingOrderCanBeDisabledAcrossEpochsAndAccumulation() async throws {
+        try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let dataset = root.appendingPathComponent(".training-data/dataset")
+        try datasetFixture(dataset, validationEnabled: false, trainingCount: 3)
+        let model = try trainerModel(), events = Recorder()
+        let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path,
+            "--output", root.appendingPathComponent("trained").path, "--size", "256", "--updates-per-map", "2",
+            "--randomize-crops", "never", "--shuffle-training-order", "false", "--gradient-accumulation-steps", "2"])
+        let text = try await Task.detached { try NativeMaterialTrainer.train(options,
+            onEvent: events.append, control: .init(), model: model) }.value
+        let result = try NativeMaterialTransfer.object(Data(text.utf8))
+        XCTAssertEqual(result["completed_updates"] as? Int, 6)
+        let updates = events.events.filter { $0["event"] as? String == "update" }.compactMap { $0["sample_id"] as? String }
+        XCTAssertEqual(updates, ["train-0", "train-1", "train-2", "train-0", "train-1", "train-2"])
+        let accumulation = events.events.filter { $0["event"] as? String == "accumulation_sample" }.compactMap { $0["sample_id"] as? String }
+        XCTAssertEqual(Array(accumulation.prefix(6)), Array(accumulation.suffix(6)),
+                       "Disabling shuffle also preserves the additional accumulated-map order each epoch")
+        XCTAssertEqual((result["training_configuration"] as? [String: Any])?["shuffle_training_order"] as? Bool, false)
+    }
+
+    func testShuffleOrderDefaultsToEnabledAndRejectsInvalidValues() throws {
+        let arguments = ["train", "--dataset", "/dataset", "--output", "/output"]
+        XCTAssertTrue(try NativeMaterialTrainer.Options(arguments).shuffleTrainingOrder)
+        XCTAssertFalse(try NativeMaterialTrainer.Options(arguments + ["--shuffle-training-order", "false"]).shuffleTrainingOrder)
+        XCTAssertThrowsError(try NativeMaterialTrainer.Options(arguments + ["--shuffle-training-order", "sometimes"]))
     }
 
     func testCadenceUsesEpochByDefaultAndRejectsRetiredOrInvalidUnits() throws {
@@ -49,7 +80,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testEpochAndStepCadenceTriggerAtDifferentSuccessfulBoundaries() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset")
+        let dataset = root.appendingPathComponent(".training-data/dataset")
         try datasetFixture(dataset, trainingCount: 2)
         for (validationUnit, checkpointUnit, expectedSaves, expectedQuick) in [
             ("epoch", "epoch", [4, 6], [2, 6]), ("step", "step", [2, 4, 6], [1, 3, 5]),
@@ -70,7 +101,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testMalformedAndChangedTrainingMapsAreQuarantinedAcrossEpochs() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("trained")
+        let dataset = root.appendingPathComponent(".training-data/dataset"), output = root.appendingPathComponent("trained")
         try datasetFixture(dataset, validationEnabled: false, trainingCount: 3)
         try Data("changed".utf8).write(to: dataset.appendingPathComponent("samples/train-0/diffuse.png"))
         let malformed = Data("malformed png".utf8), sampleURL = dataset.appendingPathComponent("samples/train-1/sample.json")
@@ -98,7 +129,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testFinalValidationFailureStillPublishesTrainedCheckpointAndPackage() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("trained")
+        let dataset = root.appendingPathComponent(".training-data/dataset"), output = root.appendingPathComponent("trained")
         try datasetFixture(dataset)
         let model = try trainerModel(), events = Recorder(), original = model.adapterWeights
         let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
@@ -123,11 +154,11 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testSkippedMicrobatchesFlushOnlyValidGradientsAndAllBadSamplesSaveProgress() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("trained")
+        let dataset = root.appendingPathComponent(".training-data/dataset"), output = root.appendingPathComponent("trained")
         try datasetFixture(dataset, validationEnabled: false)
         let model = try trainerModel(), events = Recorder()
         let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
-            "--size", "256", "--updates-per-map", "3", "--gradient-accumulation-steps", "3"])
+            "--size", "256", "--updates-per-map", "3", "--gradient-accumulation-steps", "3", "--randomize-crops", "never"])
         let text = try await Task.detached { try NativeMaterialTrainer.train(options, onEvent: { line in
             events.append(line)
             if let event = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
@@ -148,7 +179,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testAccumulationKeepsOptimizerStepPlanAndRecordsEffectiveCheckpointConfiguration() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset")
+        let dataset = root.appendingPathComponent(".training-data/dataset")
         try datasetFixture(dataset, validationEnabled: false)
         var finalFactors: [[String: NativeTensor]] = []
         for accumulation in [1, 3] {
@@ -192,7 +223,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testStopAndSaveFlushesPartialAccumulationUsingActualMapCount() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("trained")
+        let dataset = root.appendingPathComponent(".training-data/dataset"), output = root.appendingPathComponent("trained")
         try datasetFixture(dataset, validationEnabled: false)
         let model = try trainerModel(), events = Recorder(), control = NativeMaterialTrainingControl()
         let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
@@ -244,7 +275,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
         // A count larger than the old hard-coded three proves saved dataset
         // settings drive runtime selection. Both zero settings disable cadence.
         for (index, configuration) in [(0, (every: 0, quick: 4)), (1, (every: 1, quick: 0)), (2, (every: 1, quick: 4))] {
-            let dataset = root.appendingPathComponent("dataset-\(index)")
+            let dataset = root.appendingPathComponent(".training-data/dataset-\(index)")
             let output = root.appendingPathComponent("output-\(index)")
             try datasetFixture(dataset, validationCount: 5, quickCount: configuration.quick)
             let model = try trainerModel(), events = Recorder()
@@ -280,7 +311,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testDisabledValidationDoesNotRunValidationOrEmitAnEmptyCropWarning() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("output")
+        let dataset = root.appendingPathComponent(".training-data/dataset"), output = root.appendingPathComponent("output")
         try datasetFixture(dataset, validationEnabled: false)
         let model = try trainerModel(), events = Recorder()
         let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
@@ -335,7 +366,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testRealTrainerUpdatesValidatesSnapshotsAndStopsWithCompleteNativePackage() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("trained")
+        let dataset = root.appendingPathComponent(".training-data/dataset"), output = root.appendingPathComponent("trained")
         try datasetFixture(dataset)
         let fixture = NativeMaterialModelFixture(), original = try fixture.model(adapter: true)
         var configuration: [String: Any] = ["schema": "texture-studio-material-lora-v1", "architecture": "pbrnxt-native-v1",
@@ -391,7 +422,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testAbortFromFinalValidationPreventsCheckpointAndExport() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("aborted-before-save")
+        let dataset = root.appendingPathComponent(".training-data/dataset"), output = root.appendingPathComponent("aborted-before-save")
         try datasetFixture(dataset)
         let model = try trainerModel()
         let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
@@ -415,7 +446,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testAbortFromFinalCheckpointEventKeepsCheckpointAndPreventsExport() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("aborted")
+        let dataset = root.appendingPathComponent(".training-data/dataset"), output = root.appendingPathComponent("aborted")
         try datasetFixture(dataset)
         let original = try NativeMaterialModelFixture().model(adapter: true)
         var configuration: [String: Any] = ["schema": "texture-studio-material-lora-v1", "architecture": "pbrnxt-native-v1",
@@ -447,7 +478,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testTimeLimitAfterBaselineStartsNoUpdateAndSavesUnchangedCheckpoint() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("timed-out-before-update")
+        let dataset = root.appendingPathComponent(".training-data/dataset"), output = root.appendingPathComponent("timed-out-before-update")
         try datasetFixture(dataset)
         let model = try trainerModel(), original = model.adapterWeights
         let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
@@ -479,13 +510,13 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testCropRandomizationPreparesRequestedPairsOncePerSelectedInterval() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset")
+        let dataset = root.appendingPathComponent(".training-data/dataset")
         try datasetFixture(dataset, validationCount: 0, trainingCount: 3)
         for timing in ["run", "epoch"] {
             let output = root.appendingPathComponent("lazy-crops-" + timing)
             let model = try trainerModel(), events = Recorder()
             let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
-                "--size", "256", "--updates-per-map", "2", "--randomize-crops", timing, "--random-flip"])
+                "--size", "256", "--updates-per-map", "2", "--randomize-crops", timing])
             let text = try await Task.detached {
                 try NativeMaterialTrainer.train(options, onEvent: { events.append($0) }, control: .init(), model: model)
             }.value
@@ -495,6 +526,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
             let recorded = events.events
             let starts = recorded.enumerated().filter { $0.element["event"] as? String == "crop_preparation" && $0.element["operation"] as? String == "Refreshing cached crops" && $0.element["completed"] as? Int == 0 }
             XCTAssertEqual(starts.count, timing == "run" ? 3 : 6)
+            XCTAssertFalse(options.randomFlip); XCTAssertFalse(options.randomSpinCentercut)
             for start in starts {
                 let previous = recorded[..<start.offset].last { $0["event"] as? String == "update_started" }
                 XCTAssertEqual(previous?["current_update"] as? Int, start.element["current_update"] as? Int)
@@ -509,7 +541,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testCropPreparationFinishesOnlyActivePairBeforeDeadlineOrStop() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset")
+        let dataset = root.appendingPathComponent(".training-data/dataset")
         try datasetFixture(dataset, validationCount: 0, trainingCount: 3)
         for stopAndSave in [false, true] {
             let output = root.appendingPathComponent(stopAndSave ? "stop-after-active-crop" : "deadline-after-active-crop")
@@ -553,7 +585,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testTimeLimitDuringUpdateFinishesCurrentStepAndReportsDuration() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("timed-out-after-update")
+        let dataset = root.appendingPathComponent(".training-data/dataset"), output = root.appendingPathComponent("timed-out-after-update")
         try datasetFixture(dataset, trainingInputCode: 126)
         let model = try trainerModel(), original = model.adapterWeights
         let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
@@ -580,7 +612,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testAllRequestedUpdatesRemainCompletedWhenLastStepCrossesDeadline() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset"), output = root.appendingPathComponent("completed-at-deadline")
+        let dataset = root.appendingPathComponent(".training-data/dataset"), output = root.appendingPathComponent("completed-at-deadline")
         try datasetFixture(dataset, trainingInputCode: 126)
         let model = try trainerModel(), clock = ManualTrainingClock(), events = Recorder()
         let options = try NativeMaterialTrainer.Options(["train", "--dataset", dataset.path, "--output", output.path,
@@ -604,7 +636,7 @@ final class NativeMaterialTrainerTests: XCTestCase {
     func testStopDuringNumericStepFinishesItAndAbortDiscardsUnfinishedStep() async throws {
         try XCTSkipIf(MTLCreateSystemDefaultDevice() == nil)
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let dataset = root.appendingPathComponent("dataset")
+        let dataset = root.appendingPathComponent(".training-data/dataset")
         try datasetFixture(dataset, trainingInputCode: 126)
         for abort in [false, true] {
             let output = root.appendingPathComponent(abort ? "abort-in-step" : "stop-in-step")
@@ -971,7 +1003,10 @@ final class NativeMaterialTrainerTests: XCTestCase {
     }
     private func datasetFixture(_ root: URL, trainingInputCode: UInt8 = 127, validationCount: Int = 1,
                                 validationEnabled: Bool = true, quickCount: Int = 4, trainingCount: Int = 1) throws {
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let original = root.deletingLastPathComponent().deletingLastPathComponent()
+        try JSONSerialization.data(withJSONObject: ["schema_version": 2, "name": "Training originals", "samples": [[String: Any]]()])
+            .write(to: original.appendingPathComponent("dataset.json"))
         var entries: [[String: Any]] = []
         let identities = (0..<trainingCount).map { (id: trainingCount == 1 ? "train" : "train-\($0)", split: "train") } + (0..<validationCount).map {
             (id: validationCount == 1 ? "validation" : "validation-\($0)", split: "validation")
@@ -986,13 +1021,17 @@ final class NativeMaterialTrainerTests: XCTestCase {
             try input.write(to: folder.appendingPathComponent("diffuse.png")); try target.write(to: folder.appendingPathComponent("height.png"))
             let entry: [String: Any] = ["sample_id": id, "material_id": id, "status": "approved", "split": split, "path": "samples/" + id]
             entries.append(entry)
+            let originals = original.appendingPathComponent("originals/" + id)
+            try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+            try input.write(to: originals.appendingPathComponent("diffuse.png")); try target.write(to: originals.appendingPathComponent("height.png"))
+            let transform: [String: Any] = ["type": "native_crop", "algorithm": "exact_native_integer_codes", "range_normalization": false, "gamma_applied": false]
             let sample: [String: Any] = ["sample_id": id, "material_id": id, "status": "approved", "split": split,
                 "sample_pixel_dimensions": [256, 256], "maps": ["input": "diffuse.png", "height": "height.png"],
-                "map_metadata": ["input": ["filename": "diffuse.png", "encoding": "srgb", "sample_sha256": NativeMaterialTrainer.checksum(input)],
-                    "height": ["filename": "height.png", "sample_sha256": NativeMaterialTrainer.checksum(target)]]]
+                "map_metadata": ["input": ["filename": "diffuse.png", "encoding": "srgb", "sample_sha256": NativeMaterialTrainer.checksum(input), "storage": "prepared_crop", "exact_source_crop": true, "transforms": [transform], "source": ["path": originals.appendingPathComponent("diffuse.png").path, "file_sha256": NativeMaterialTrainer.checksum(input), "width": 256, "height": 256]],
+                    "height": ["filename": "height.png", "sample_sha256": NativeMaterialTrainer.checksum(target), "storage": "prepared_crop", "exact_source_crop": true, "transforms": [transform], "source": ["path": originals.appendingPathComponent("height.png").path, "file_sha256": NativeMaterialTrainer.checksum(target), "width": 256, "height": 256]]]]
             try JSONSerialization.data(withJSONObject: sample).write(to: folder.appendingPathComponent("sample.json"))
         }
-        try JSONSerialization.data(withJSONObject: ["schema_version": 2, "samples": entries,
+        try JSONSerialization.data(withJSONObject: ["schema_version": 2, "native_size_preparation": ["schema": "texture-studio-native-crops-v1", "source_dataset_path": original.path, "target_resized": false], "samples": entries,
             "validation": ["enabled": validationEnabled, "quick_count": quickCount]]).write(to: root.appendingPathComponent("dataset.json"))
     }
     private func temporary() throws -> URL {

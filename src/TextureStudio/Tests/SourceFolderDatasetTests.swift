@@ -4,6 +4,62 @@ import XCTest
 
 @MainActor
 final class SourceFolderDatasetTests: XCTestCase {
+    func testArbitraryImageRenamesKeepNamedPairsAndTagsWithoutKeepingRemovedFiles() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let template = try writeMaterial(root, name: "Template")
+        let source = root.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: false)
+        for family in ["brick_wall_001", "brick_wall_002"] {
+            try FileManager.default.copyItem(at: template.appendingPathComponent("BaseColor.png"),
+                to: source.appendingPathComponent(family + "_diff_1k.png"))
+            try FileManager.default.copyItem(at: template.appendingPathComponent("Height.png"),
+                to: source.appendingPathComponent(family + "_disp_1k.png"))
+        }
+        let diffuse = source.appendingPathComponent("brick_wall_001_diff_1k.png")
+        let height = source.appendingPathComponent("brick_wall_001_disp_1k.png")
+        try NativeSourceFileTags.update(diffuse, classLabel: "Bricks", classifierIdentity: "user")
+        let before = try await read(source, size: 256)
+        XCTAssertEqual((before["original_materials"] as? [Any])?.count, 2)
+        let diffuseBytes = try Data(contentsOf: diffuse), heightBytes = try Data(contentsOf: height)
+        let renamedDiffuse = source.appendingPathComponent("My renamed photo.png")
+        let renamedHeight = source.appendingPathComponent("My renamed depth.png")
+        try FileManager.default.moveItem(at: diffuse, to: renamedDiffuse)
+        try FileManager.default.moveItem(at: height, to: renamedHeight)
+        let renamed = try await read(source, size: 256)
+        XCTAssertEqual((renamed["original_materials"] as? [Any])?.count, 2,
+            "Two equal-sized families keep their own pairs after arbitrary image renames")
+        XCTAssertEqual((renamed["source_inventory"] as? [Any])?.count, 4)
+        XCTAssertEqual(NativeSourceFileTags.read(renamedDiffuse)?.classLabel, "Bricks")
+        XCTAssertEqual(NativeSourceFileTags.read(renamedHeight)?.role, "height")
+        XCTAssertEqual(try Data(contentsOf: renamedDiffuse), diffuseBytes)
+        XCTAssertEqual(try Data(contentsOf: renamedHeight), heightBytes)
+        try FileManager.default.moveItem(at: renamedDiffuse, to: root.appendingPathComponent("Moved photo.png"))
+        let removed = try await read(source, size: 256)
+        XCTAssertEqual((removed["original_materials"] as? [Any])?.count, 1)
+        XCTAssertEqual((removed["source_inventory"] as? [Any])?.count, 3,
+            "Remembered pairing names cannot create an absent physical member")
+    }
+
+    func testObsoleteManifestCannotHideAddedMaterialsOrKeepRemovedLastMaterial() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let sources = root.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: false)
+        let original = try writeMaterial(sources, name: "Physical Material")
+        let manifest = sources.appendingPathComponent("dataset.json")
+        let legacy: [String: Any] = ["schema_version": 2, "generator": "ipde-material-dataset-v2",
+            "dataset_management": ["schema": "texture-studio-dataset-management-v1", "owns_directory": true],
+            "storage_policy": "original-source-references-v1", "samples": [["material_id": "ghost", "sample_id": "ghost_full", "path": "samples/ghost_full"]]]
+        let bytes = try JSONSerialization.data(withJSONObject: legacy)
+        try bytes.write(to: manifest)
+        let added = try await read(sources, size: 256)
+        XCTAssertEqual((added["original_materials"] as? [Any])?.count, 1, "A saved listing cannot omit physical folders")
+        try FileManager.default.moveItem(at: original, to: root.appendingPathComponent("Moved Out"))
+        let removed = try await read(sources, size: 256)
+        XCTAssertEqual((removed["original_materials"] as? [Any])?.count, 0, "The last removed material cannot survive as a manifest ghost")
+        XCTAssertEqual((removed["source_inventory"] as? [Any])?.count, 0)
+        XCTAssertEqual(try Data(contentsOf: manifest), bytes, "Folder inspection does not rewrite unrelated metadata")
+    }
+
     func testFolderIsDatasetAndMembershipFollowsAddedAndMovedDirectoriesWithoutMetadata() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let sources = root.appendingPathComponent("Sources")
@@ -33,6 +89,113 @@ final class SourceFolderDatasetTests: XCTestCase {
         let result = try await command(["create-dataset", "--dataset", folder.path, "--name", "New Folder", "--source-folder", "true"])
         XCTAssertEqual(result["is_source_folder"] as? Bool, true)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: folder.path), [])
+    }
+
+    func testCreatedFolderKeepsRequestedGridAndValidationPreferencesOnNextRead() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Configured Folder")
+        _ = try await command(["create-dataset", "--dataset", folder.path, "--source-folder", "true",
+            "--training-size", "1024", "--validation-enabled", "no"])
+        let reopened = try await read(folder)
+        XCTAssertEqual(reopened["training_size"] as? Int, 1024)
+        XCTAssertEqual((reopened["validation"] as? [String: Any])?["enabled"] as? Bool, false)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: folder.path), [])
+    }
+
+    func testUnownedProjectionMarkersNeverRestoreSavedMaterialLists() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let prepared = root.appendingPathComponent("Unowned Cache")
+        try FileManager.default.createDirectory(at: prepared, withIntermediateDirectories: false)
+        let marker: [String: Any] = ["native_size_preparation": ["schema": "texture-studio-native-crops-v1",
+            "source_dataset_path": root.path, "target_resized": false],
+            "samples": [["material_id": "ghost", "path": "samples/ghost"]]]
+        try JSONSerialization.data(withJSONObject: marker).write(to: prepared.appendingPathComponent("dataset.json"))
+        _ = try writeMaterial(prepared, name: "Physical Material")
+        let physical = try NativeMaterialDatasetService.readOnlyDatasetInfo(datasetURL: prepared, size: 256)
+        XCTAssertEqual((physical["original_materials"] as? [Any])?.count, 1, "Loose native-cache metadata cannot replace the ordinary physical folder")
+        let ownedLocation = root.appendingPathComponent(".training-data/Invalid Cache")
+        try FileManager.default.createDirectory(at: ownedLocation, withIntermediateDirectories: true)
+        var invalid = marker
+        invalid["native_size_preparation"] = ["schema": "texture-studio-native-crops-v1", "source_dataset_path": root.appendingPathComponent("Unrelated").path, "target_resized": false]
+        try JSONSerialization.data(withJSONObject: invalid).write(to: ownedLocation.appendingPathComponent("dataset.json"))
+        XCTAssertThrowsError(try NativeMaterialDatasetService.readOnlyDatasetInfo(datasetURL: ownedLocation, size: 256))
+        let workspace = root.appendingPathComponent("Workspace"), category = workspace.appendingPathComponent("datasets/wood")
+        try FileManager.default.createDirectory(at: category, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: ["samples": [["material_id": "ghost", "path": "samples/ghost"]]])
+            .write(to: category.appendingPathComponent("dataset.json"))
+        try JSONSerialization.data(withJSONObject: ["schema": "texture-studio-material-specialists-v1",
+            "specialist_id": "wood", "workspace_path": workspace.path])
+            .write(to: category.appendingPathComponent(".specialist-binding.json"))
+        XCTAssertThrowsError(try NativeMaterialDatasetService.readOnlyDatasetInfo(datasetURL: category, size: 256))
+    }
+
+    func testPreparedMapsFollowCurrentTargetRolesReviewAndPhysicalMembership() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let material = try writeMaterial(folder, name: "Current")
+        let target = material.appendingPathComponent("Height.png")
+        let prepared = try NativeMaterialDatasetService.prepareTrainingDataset(datasetURL: folder, size: 256,
+            target: "height", automaticValidation: false)
+        XCTAssertEqual(try NativeMaterialDatasetService.trainingSamples(datasetURL: prepared, size: 256, target: "height").count, 1)
+        try NativeSourceFileTags.update(target, role: "roughness")
+        XCTAssertEqual(try NativeMaterialDatasetService.trainingSamples(datasetURL: prepared, size: 256, target: "height").count, 0)
+        try NativeSourceFileTags.update(target, role: "height", reviewStatus: "excluded")
+        let excludedTarget = try await read(folder, size: 256)
+        let plans = try XCTUnwrap(excludedTarget["training_plans"] as? [String: [String: Any]])
+        XCTAssertEqual(plans["height"]?["train_count"] as? Int, 0)
+        XCTAssertEqual((excludedTarget["source_inventory"] as? [Any])?.count, 3, "Excluded target maps remain physically visible")
+        XCTAssertThrowsError(try NativeMaterialDatasetService.prepareTrainingDataset(datasetURL: folder, size: 256,
+            target: "height", automaticValidation: false))
+        XCTAssertEqual(try NativeMaterialDatasetService.trainingSamples(datasetURL: prepared, size: 256, target: "height").count, 0)
+        try NativeSourceFileTags.update(target, reviewStatus: "approved")
+        XCTAssertEqual(try NativeMaterialDatasetService.trainingSamples(datasetURL: prepared, size: 256, target: "height").count, 1)
+        try FileManager.default.moveItem(at: material, to: root.appendingPathComponent("Moved Out"))
+        XCTAssertEqual(try NativeMaterialDatasetService.trainingSamples(datasetURL: prepared, size: 256, target: "height").count, 0)
+        let current = try NativeMaterialDatasetService.readOnlyDatasetInfo(datasetURL: prepared, size: 256)
+        XCTAssertEqual((current["materials"] as? [Any])?.count, 0)
+        XCTAssertEqual((current["original_materials"] as? [Any])?.count, 0)
+    }
+
+    func testRewritingLargerOriginalAtSamePathCannotTrainStalePreparedPixels() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let material = try writeMaterial(folder, name: "Replaceable", width: 512, height: 512)
+        let target = material.appendingPathComponent("Height.png")
+        let prepared = try NativeMaterialDatasetService.prepareTrainingDataset(datasetURL: folder, size: 256,
+            target: "height", automaticValidation: false)
+        XCTAssertFalse(try NativeMaterialDatasetService.trainingSamples(datasetURL: prepared, size: 256, target: "height").isEmpty)
+        let original = try NativePNG.decode(Data(contentsOf: target))
+        var changed = original.pixels; changed[0] ^= 255
+        try NativePNG(header: original.header, pixels: changed, colorChunks: original.colorChunks).encoded().write(to: target)
+        XCTAssertThrowsError(try NativeMaterialDatasetService.trainingSamples(datasetURL: prepared, size: 256, target: "height")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Prepare fresh training crops"))
+        }
+        let current = try NativeMaterialDatasetService.readOnlyDatasetInfo(datasetURL: folder, size: 256)
+        XCTAssertEqual((current["original_materials"] as? [Any])?.count, 1)
+    }
+
+    func testNamedTargetTagsDetermineInventoryRoleAndManualCollisionsRemainVisible() async throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("Sources")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let material = try writeMaterial(folder, name: "Named")
+        let input = material.appendingPathComponent("wood_diff_1k.png"), target = material.appendingPathComponent("wood_disp_1k.png")
+        try FileManager.default.moveItem(at: material.appendingPathComponent("BaseColor.png"), to: input)
+        try FileManager.default.moveItem(at: material.appendingPathComponent("Height.png"), to: target)
+        try NativeSourceFileTags.update(target, role: "roughness")
+        let tagged = try await read(folder, size: 256)
+        let catalog = try XCTUnwrap(tagged["source_inventory"] as? [[String: Any]])
+        XCTAssertEqual(catalog.first { $0["path"] as? String == target.path }?["role"] as? String, "roughness")
+        let extra = material.appendingPathComponent("AO.png")
+        _ = try await command(["add-material", "--dataset", folder.path, "--name", "Named",
+            "--input", input.path, "--height", target.path, "--roughness", extra.path])
+        try NativeSourceFileTags.update(extra, role: "height")
+        let ambiguous = try await read(folder, size: 256)
+        XCTAssertEqual((ambiguous["source_inventory"] as? [Any])?.count, 3, "Ambiguous teaching cannot hide originals")
+        XCTAssertEqual((ambiguous["original_materials"] as? [Any])?.count, 0, "An ambiguous target cannot be selected by dictionary order")
+        XCTAssertTrue((ambiguous["warnings"] as? [String] ?? []).contains { $0.contains("multiple maps to height") })
     }
 
     func testSixteenBitDepthAndOddEdgesSurviveTrainingPreparationOutsideSourceFolder() async throws {

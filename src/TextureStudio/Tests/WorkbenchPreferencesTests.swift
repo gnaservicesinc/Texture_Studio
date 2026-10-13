@@ -97,6 +97,8 @@ final class WorkbenchPreferencesTests: XCTestCase {
         XCTAssertEqual(legacy.randomizeCrops, .run)
         XCTAssertFalse(legacy.randomFlip)
         XCTAssertFalse(legacy.randomSpinCentercut)
+        XCTAssertTrue(legacy.shuffleTrainingOrder)
+        XCTAssertFalse(legacy.exaggerateFeatures)
         XCTAssertEqual(legacy.cropArguments, ["--randomize-crops", "run"])
         let flip = try decoder.decode(MaterialTrainingOptions.self, from: Data("{\"randomFlip\":true}".utf8))
         XCTAssertEqual(flip.randomizeCrops, .run)
@@ -107,6 +109,24 @@ final class WorkbenchPreferencesTests: XCTestCase {
             options.randomSpinCentercut = true
             XCTAssertEqual(try decoder.decode(MaterialTrainingOptions.self, from: JSONEncoder().encode(options)), options)
         }
+    }
+
+    func testTrainingOrderAndFeatureChoicesPersistIndependentlyOfCropTiming() throws {
+        let fixture = try PreferencesFixture(); defer { fixture.remove() }
+        let store = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
+        XCTAssertTrue(store.training.shuffleTrainingOrder)
+        XCTAssertFalse(store.training.exaggerateFeatures)
+        store.training.shuffleTrainingOrder = false
+        store.training.exaggerateFeatures = true
+        store.training.randomizeCrops = .never
+        let reopened = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
+        XCTAssertFalse(reopened.training.shuffleTrainingOrder)
+        XCTAssertTrue(reopened.training.exaggerateFeatures)
+        XCTAssertEqual(reopened.training.randomizeCrops, .never)
+        XCTAssertEqual(reopened.training, store.training)
+        reopened.training.shuffleTrainingOrder = true
+        reopened.training.exaggerateFeatures = false
+        XCTAssertEqual(WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources).training, reopened.training)
     }
 
     func testDepthProModelPreferenceSharesCanonicalSuiteAndPreservesConfiguredPath() throws {
@@ -231,7 +251,6 @@ final class WorkbenchPreferencesTests: XCTestCase {
         first.training.size = 2048
         first.training.updatesPerCrop = 875
         first.training.maxMinutes = 120
-        first.training.useSelectedMaterialOnly = true
         first.training.useWarmStart = true
         first.selectedSampleId = "soil_crop_002"
         first.selectedRole = "roughness"
@@ -394,12 +413,13 @@ final class WorkbenchPreferencesTests: XCTestCase {
         XCTAssertEqual(reopened.training.size, 2048)
     }
 
-    func testValidDatasetCanRunBeforeCapabilityDiscovery() throws {
+    func testTaggedCategoryCanRunBeforeCapabilityDiscovery() throws {
         let fixture = try PreferencesFixture()
         defer { fixture.remove() }
         let resources = MachineResources(physicalBytes: 8 * MachineResources.gibibyte)
         let store = WorkbenchStore(preferences: fixture.defaults, resources: resources)
         store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: Self.datasetJSON())
+        selectCategory(in: store, fixture: fixture)
         store.training.size = 1024
         XCTAssertNil(store.trainingConfigurationIssue)
         XCTAssertTrue(store.supportedTrainingSizes.contains(1024))
@@ -442,51 +462,43 @@ final class WorkbenchPreferencesTests: XCTestCase {
             Self.sourceMaterial(id: "stone_2k", folder: folder + "/../stone", filename: "diffuse-large.png", pixels: 2048, height: true)]
         let store = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
         store.adoptDataset(try Self.sourceDataset(materials: materials, sizes: [1024, 2048]))
+        selectCategory(in: store, fixture: fixture)
         store.selectedSampleId = "stone_1k_sample"
-        store.training.useSelectedMaterialOnly = true
         store.selectTrainingModelFamily(.compactScalar)
         store.training.size = 2048
-        XCTAssertEqual(Set(store.trainingFolderSamples.map(\.id)), ["stone_1k_sample", "stone_2k_sample"])
         XCTAssertEqual(store.datasetInventorySummary, "1 folder · 3 original files · 2 paired sets")
         XCTAssertEqual(store.trainingCurrentCropSummary, "Currently available: 1 height training crop at 2048 × 2048")
-        XCTAssertTrue(store.trainingScopeSummary.contains("includes all resolution tiers"))
+        XCTAssertEqual(store.trainingScopeSummary, "Stone tags · Displacement maps")
         XCTAssertNil(store.trainingConfigurationIssue,
                      "An undersized selected original must not discard another eligible tier in its source folder")
     }
 
-    func testRegisteredProviderWithoutTargetOrSizeSupportCanAttemptPreparation() async throws {
-        let fixture = try PreferencesFixture()
-        defer { fixture.remove() }
-        let folder = fixture.root.appendingPathComponent("sources/stone").path
+    func testProviderNameCannotAdvertiseMissingPixelsOrTargets() async throws {
+        let fixture = try PreferencesFixture(); defer { fixture.remove() }
         var calls: [[String]] = []
         let store = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources,
             workerOverride: { arguments, _ in
                 calls.append(arguments)
                 if arguments.first == "capabilities" { return "{\"training_sizes\":[1024,2048]}" }
-                if arguments.first == "prepare-size" { throw StudioError("The provider did not publish the requested height tier.") }
-                throw StudioError("Unexpected test command")
+                XCTAssertEqual(arguments.first, "refresh-specialists")
+                throw StudioError("Stone has no included paired displacement maps in the current source folder and tags.")
             })
         store.selectTrainingModelFamily(.compactScalar)
         store.adoptDataset(try Self.sourceDataset(materials: [
-            Self.sourceMaterial(id: "stone_1k", folder: folder, filename: "stone_diff_1k.png", pixels: 1024, height: false)], sizes: []))
-        XCTAssertTrue(store.supportedTrainingSizes.contains(1024))
-        XCTAssertTrue(store.supportedTrainingSizes.contains(2048))
+            Self.sourceMaterial(id: "stone_1k", folder: fixture.root.appendingPathComponent("stone").path,
+                filename: "stone_diff_1k.png", pixels: 1024, height: false)], sizes: []))
+        selectCategory(in: store, fixture: fixture)
         try await store.loadTrainingCapabilities()
-        XCTAssertEqual(store.supportedTrainingSizes, [1024, 2048])
+        XCTAssertTrue(store.supportedTrainingSizes.isEmpty)
         store.training.size = 2048
-        store.training.useSelectedMaterialOnly = true
-        XCTAssertNil(store.trainingConfigurationIssue)
         store.startTraining()
         try await settled(store)
-        let preparation = try XCTUnwrap(calls.first { $0.first == "prepare-size" })
-        XCTAssertEqual(preparation[try XCTUnwrap(preparation.firstIndex(of: "--size")) + 1], "2048")
-        XCTAssertEqual(preparation[try XCTUnwrap(preparation.firstIndex(of: "--target")) + 1], "height")
-        XCTAssertEqual(preparation[try XCTUnwrap(preparation.firstIndex(of: "--material")) + 1], "stone_1k")
-        XCTAssertEqual(store.error, "The provider did not publish the requested height tier.")
-        XCTAssertFalse(calls.contains { $0.first == "train" })
+        XCTAssertNotNil(store.error)
+        XCTAssertTrue(calls.contains { $0.first == "refresh-specialists" }, "Current folder tags decide eligibility")
+        XCTAssertFalse(calls.contains { ["prepare-size", "train"].contains($0.first ?? "") })
     }
 
-    func testSelectedFolderDoesNotBorrowTargetFromAnUnrelatedFolder() throws {
+    func testBrowserSelectionCannotRestrictPairsWithinChosenTaggedCategory() throws {
         let fixture = try PreferencesFixture()
         defer { fixture.remove() }
         let store = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
@@ -495,17 +507,13 @@ final class WorkbenchPreferencesTests: XCTestCase {
                 filename: "diffuse-small.png", pixels: 1024, height: false),
             Self.sourceMaterial(id: "stone_2k", folder: fixture.root.appendingPathComponent("sources/unrelated").path,
                 filename: "diffuse-large.png", pixels: 2048, height: true)], sizes: [1024, 2048]))
+        selectCategory(in: store, fixture: fixture)
         store.selectedSampleId = "stone_1k_sample"
         store.selectTrainingModelFamily(.compactScalar)
         store.training.size = 2048
-        store.training.useSelectedMaterialOnly = true
-        XCTAssertEqual(store.trainingFolderSamples.map(\.id), ["stone_1k_sample"])
         XCTAssertEqual(store.datasetInventorySummary, "2 folders · 3 original files · 2 paired sets")
-        XCTAssertEqual(store.trainingCurrentCropSummary, "Currently available: 0 height training crops at 2048 × 2048")
-        XCTAssertNotNil(store.trainingConfigurationIssue)
-        store.training.useSelectedMaterialOnly = false
         XCTAssertEqual(store.trainingCurrentCropSummary, "Currently available: 1 height training crop at 2048 × 2048")
-        XCTAssertNil(store.trainingConfigurationIssue, "The unrelated target remains eligible when the full dataset is selected")
+        XCTAssertNil(store.trainingConfigurationIssue)
     }
 
     func testProviderFilenameWithWrongNominalDimensionsDoesNotEnableLargerTiers() throws {
@@ -515,49 +523,26 @@ final class WorkbenchPreferencesTests: XCTestCase {
         store.adoptDataset(try Self.sourceDataset(materials: [
             Self.sourceMaterial(id: "stone_1k", folder: fixture.root.appendingPathComponent("sources/stone").path,
                 filename: "stone_diff_1k.png", pixels: 256, height: false)], sizes: []))
+        selectCategory(in: store, fixture: fixture)
         store.selectTrainingModelFamily(.compactScalar)
         store.training.size = 2048
         XCTAssertFalse(store.supportedTrainingSizes.contains(1024))
         XCTAssertFalse(store.supportedTrainingSizes.contains(2048))
-        XCTAssertNotNil(store.trainingConfigurationIssue,
-                        "Provider naming alone cannot establish a genuine original resolution")
+        XCTAssertNil(store.trainingConfigurationIssue,
+                     "Cached map dimensions cannot block a live refresh; preparation verifies the real pixels")
     }
 
-    func testAmbientColorOriginalCanRecoverTiersOnlyAtItsVerifiedNominalDimensions() throws {
-        let fixture = try PreferencesFixture()
-        defer { fixture.remove() }
+    func testRectangularOriginalCannotAdvertiseAbsentLargerTiers() throws {
+        let fixture = try PreferencesFixture(); defer { fixture.remove() }
         let store = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
-        let folder = fixture.root.appendingPathComponent("sources/Wicker013").path
         store.selectTrainingModelFamily(.compactScalar)
         store.adoptDataset(try Self.sourceDataset(materials: [
-            Self.sourceMaterial(id: "wicker_1k", folder: folder, filename: "Wicker013_1K-PNG_Color.png",
-                pixels: 1024, height: false)], sizes: []))
+            Self.sourceMaterial(id: "field", folder: fixture.root.appendingPathComponent("field").path,
+                filename: "wool_diff_2k.png", pixels: 2048, height: false, heightPixels: 2538)], sizes: [1024,2048]))
+        selectCategory(in: store, fixture: fixture)
+        XCTAssertEqual(store.supportedTrainingSizes, [1024,2048])
         store.training.size = 2048
-        XCTAssertTrue(store.supportedTrainingSizes.contains(2048))
-        XCTAssertNil(store.trainingConfigurationIssue)
-        store.adoptDataset(try Self.sourceDataset(materials: [
-            Self.sourceMaterial(id: "wicker_1k", folder: folder, filename: "Wicker013_1K-PNG_Color.png",
-                pixels: 256, height: false)], sizes: []))
-        XCTAssertFalse(store.supportedTrainingSizes.contains(2048))
-        XCTAssertNotNil(store.trainingConfigurationIssue)
-    }
-
-    func testPublishedRectangularProviderFieldsCanRecoverMissingCropTiers() throws {
-        let fixture = try PreferencesFixture()
-        defer { fixture.remove() }
-        let store = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
-        store.selectTrainingModelFamily(.compactScalar)
-        let fields = [("jersey_diff_4k.png", 4096, 3893), ("scuba_diff_4k.png", 4096, 4005),
-                      ("wool_diff_2k.png", 2048, 2538), ("wool_diff_4k.png", 4096, 5076),
-                      ("portrait_diff_4k.png", 3893, 4096)]
-        for (filename, width, height) in fields {
-            store.adoptDataset(try Self.sourceDataset(materials: [
-                Self.sourceMaterial(id: "field", folder: fixture.root.appendingPathComponent("sources/field").path,
-                    filename: filename, pixels: width, height: false, heightPixels: height)], sizes: []))
-            store.training.size = 2048
-            XCTAssertTrue(store.supportedTrainingSizes.contains(2048), filename)
-            XCTAssertNil(store.trainingConfigurationIssue, filename)
-        }
+        XCTAssertNil(store.trainingConfigurationIssue, "Target membership is verified from current tags when training starts")
     }
 
     func testPreparedInventoryCountsResolutionGroupsSeparatelyFromDiagnosticCrops() throws {
@@ -585,10 +570,29 @@ final class WorkbenchPreferencesTests: XCTestCase {
             output: String(decoding: JSONSerialization.data(withJSONObject: document), as: UTF8.self))
         let store = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources)
         store.adoptDataset(dataset)
+        selectCategory(in: store, fixture: fixture)
         store.selectTrainingModelFamily(.compactScalar)
-        store.training.useSelectedMaterialOnly = false
         XCTAssertEqual(store.datasetInventorySummary, "1 folder · 8 original files · 3 paired sets")
         XCTAssertEqual(store.trainingCurrentCropSummary, "Prepared: 3 height training crops at 1024 × 1024")
+    }
+
+    func testRetiredFolderSelectionPreferenceCannotRestrictRestoredTraining() throws {
+        let options = try JSONDecoder().decode(MaterialTrainingOptions.self,
+            from: Data("{\"useSelectedMaterialOnly\":true,\"size\":2048}".utf8))
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(options), as: UTF8.self).contains("useSelectedMaterialOnly"))
+        XCTAssertEqual(options.size, 2048)
+    }
+
+    func testCapabilityRefreshCannotSilentlyReduceChosenGrid() async throws {
+        let fixture = try PreferencesFixture(); defer { fixture.remove() }
+        let store = WorkbenchStore(preferences: fixture.defaults, resources: fixture.resources,
+            workerOverride: { _, _ in "{\"training_sizes\":[256,512,1024]}" })
+        store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: Self.datasetJSON(size: 2048))
+        selectCategory(in: store, fixture: fixture)
+        store.training.size = 2048
+        try await store.loadTrainingCapabilities()
+        XCTAssertEqual(store.training.size, 2048)
+        XCTAssertNotNil(store.trainingConfigurationIssue)
     }
 
     func testRuntimeAndUploadEditsSaveImmediately() throws {
@@ -729,6 +733,12 @@ final class WorkbenchPreferencesTests: XCTestCase {
         while store.isBusy, Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
         XCTAssertFalse(store.isBusy)
     }
+    private func selectCategory(in store: WorkbenchStore, fixture: PreferencesFixture) {
+        store.specialistSourceDatasetPath = fixture.root.appendingPathComponent("sources").path
+        store.specialistTrainingContext = .init(workspacePath: fixture.root.appendingPathComponent("models").path,
+            specialistID: "stone", name: "Stone", target: "height", datasetPath: store.dataset!.datasetPath,
+            membershipSHA256: "current-stone-height-tags")
+    }
     private static func sourceMaterial(id: String, folder: String, filename: String, pixels: Int, height: Bool,
                                        heightPixels: Int? = nil) -> [String: Any] {
         let imageHeight = heightPixels ?? pixels
@@ -740,7 +750,7 @@ final class WorkbenchPreferencesTests: XCTestCase {
             "maps": maps, "available_targets": height ? ["height"] : [String]()]]]
     }
     private static func sourceDataset(materials: [[String: Any]], sizes: [Int]) throws -> WorkbenchDataset {
-        let object: [String: Any] = ["dataset_path": "/dataset", "index_sha256": "source-sha",
+        let object: [String: Any] = ["dataset_path": "/categories/stone", "source_folder_path": "/dataset", "index_sha256": "source-sha",
             "supported_training_sizes": sizes, "materials": materials]
         return try WorkbenchResult.decode(WorkbenchDataset.self,
             output: String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self))

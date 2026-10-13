@@ -1,7 +1,7 @@
 import Foundation
 
-/// Mutable run-owned crop storage. Original and prepared dataset files remain
-/// immutable; an epoch flip reads the preceding cached crop, never its source.
+/// Mutable run-owned crop storage. Position changes read paired originals;
+/// orientation-only updates can reuse the preceding cached crop.
 final class NativeMaterialCropAugmentation {
     typealias Sample = NativeMaterialDatasetService.TrainingSample
     static let centerSpinSampling = "exact-quarter-turn-pixel-permutation-v1"
@@ -10,7 +10,7 @@ final class NativeMaterialCropAugmentation {
     private var random: NativeMaterialRandom
     private(set) var history: [[String: Any]] = []
     private var activeEpoch: Int?
-    private var decisions: [String: (Int, Bool, Bool, Bool)] = [:]
+    private var decisions: [String: (Int, Bool, Bool, Bool, [Int]?)] = [:]
     private var targets: [String: (URL, String, String)] = [:]
 
     init(directory: URL, target: String, seed: UInt64) {
@@ -18,7 +18,7 @@ final class NativeMaterialCropAugmentation {
         random = .init(seed: seed ^ 0x63726f70732d7632)
     }
 
-    func refresh(_ samples: [Sample], epoch: Int, flip: Bool, spin: Bool,
+    func refresh(_ samples: [Sample], epoch: Int, flip: Bool, spin: Bool, randomizePosition: Bool = false,
                  depthProCache: NativeDepthProInputCache?, check: () throws -> Void,
                  onProgress: (_ completed: Int, _ total: Int, _ sampleID: String) throws -> Void = { _, _, _ in },
                  onOperation: (_ operation: String, _ sampleID: String) throws -> Void = { _, _ in }) throws -> [Sample] {
@@ -36,6 +36,28 @@ final class NativeMaterialCropAugmentation {
             // All color variants share target geometry and orientation.
             let geometry = String(sample.id.split(separator: "|", maxSplits: 1)[0])
             if decisions[geometry] == nil {
+                var rectangle: [Int]?
+                if randomizePosition, let inputSource = sample.augmentationSourceInputURL,
+                   let targetSource = sample.augmentationSourceTargetURL,
+                   sample.augmentationSourceInputSHA256 != nil, sample.augmentationSourceTargetSHA256 != nil {
+                    let inputHeader = try NativePNG.inspect(inputSource), targetHeader = try NativePNG.inspect(targetSource)
+                    let field = sample.sourceSquareRectangle ?? [0, 0,
+                        min(inputHeader.width, targetHeader.width), min(inputHeader.height, targetHeader.height)]
+                    guard field.count == 4, field[0] >= 0, field[1] >= 0,
+                          field[2] >= sample.width, field[3] >= sample.height,
+                          field[0] + field[2] <= min(inputHeader.width, targetHeader.width),
+                          field[1] + field[3] <= min(inputHeader.height, targetHeader.height) else {
+                        throw StudioError("The original paired maps cannot supply the recorded crop field.")
+                    }
+                    let columns = field[2] - sample.width + 1, rows = field[3] - sample.height + 1
+                    if columns > 1 || rows > 1 {
+                        var x = Int(random.next() % UInt64(columns)), y = Int(random.next() % UInt64(rows))
+                        if sample.cropRectangle == [field[0] + x, field[1] + y, sample.width, sample.height] {
+                            if columns > 1 { x = (x + 1) % columns } else { y = (y + 1) % rows }
+                        }
+                        rectangle = [field[0] + x, field[1] + y, sample.width, sample.height]
+                    }
+                }
                 var degrees = spin && sample.cropKind == "center" ? (Int(random.next() % 3) + 1) * 90 : 0
                 var insufficientSupport = false
                 if degrees > 0 {
@@ -51,9 +73,9 @@ final class NativeMaterialCropAugmentation {
                     }
                 }
                 let choice = flip ? random.next() % 4 : 0
-                decisions[geometry] = (degrees, choice & 1 != 0, choice & 2 != 0, insufficientSupport)
+                decisions[geometry] = (degrees, choice & 1 != 0, choice & 2 != 0, insufficientSupport, rectangle)
             }
-            let (degrees, horizontal, vertical, insufficientSupport) = decisions[geometry]!
+            let (degrees, horizontal, vertical, insufficientSupport, rectangle) = decisions[geometry]!
             let stem = NativeMaterialTrainer.checksum(Data(sample.id.utf8))
             let inputURL = directory.appendingPathComponent(stem + "-diffuse.png")
             let targetStem = NativeMaterialTrainer.checksum(Data(geometry.utf8))
@@ -68,11 +90,11 @@ final class NativeMaterialCropAugmentation {
             var beforeBytes: Data?
             var beforeSHA = sample.inputSHA256
             var convention = sample.targetConvention
-            if degrees > 0, let source = sample.augmentationSourceInputURL,
+            if (degrees > 0 || rectangle != nil), let source = sample.augmentationSourceInputURL,
                let sha = sample.augmentationSourceInputSHA256 {
-                try onOperation("Spinning center crop", sample.id)
-                input = try Self.spunCenter(source: source, expectedSHA256: sha, size: sample.width, degrees: degrees,
-                    rectangle: sample.cropRectangle)
+                try onOperation(rectangle == nil ? "Spinning center crop" : "Selecting paired crop position", sample.id)
+                input = try Self.sourceCrop(source: source, expectedSHA256: sha, size: sample.width, degrees: degrees,
+                    rectangle: rectangle ?? sample.cropRectangle)
             } else {
                 // An unchanged crop keeps its exact compressed bytes and cache
                 // identity. Decode only when a pixel permutation is requested.
@@ -108,11 +130,11 @@ final class NativeMaterialCropAugmentation {
             if targets[geometry] == nil {
                 var output: NativePNG?
                 var originalBytes: Data?
-                if degrees > 0, let source = sample.augmentationSourceTargetURL,
+                if (degrees > 0 || rectangle != nil), let source = sample.augmentationSourceTargetURL,
                    let sha = sample.augmentationSourceTargetSHA256 {
-                    output = try Self.spunCenter(source: source, expectedSHA256: sha, size: sample.width,
+                    output = try Self.sourceCrop(source: source, expectedSHA256: sha, size: sample.width,
                         degrees: degrees, normal: target == "normal", normalConvention: sample.augmentationSourceTargetConvention ?? sample.targetConvention,
-                        rectangle: sample.cropRectangle)
+                        rectangle: rectangle ?? sample.cropRectangle)
                     if target == "normal" { convention = "opengl" }
                 } else { originalBytes = try readBytes(sample.targetURL, expected: sample.targetSHA256) }
                 let bytes: Data
@@ -132,16 +154,20 @@ final class NativeMaterialCropAugmentation {
             var changed = sample
             changed.inputURL = inputURL; changed.inputSHA256 = inputSHA
             changed.targetURL = paired.0; changed.targetSHA256 = paired.1; changed.targetConvention = paired.2
+            if let rectangle { changed.cropRectangle = rectangle }
             refreshed.append(changed)
             let receipt: [String: Any] = ["sample_id": sample.id, "epoch": epoch, "source_center_spin_degrees": degrees,
                 "center_spin_sampling": degrees > 0 ? Self.centerSpinSampling : "exact-crop-or-flip",
                 "horizontal_flip": horizontal, "vertical_flip": vertical,
                 "input_sha256": inputSHA, "target_sha256": paired.1,
                 "center_spin_skipped_insufficient_support": insufficientSupport,
+                "crop_rectangle": changed.cropRectangle as Any? ?? NSNull(),
+                "crop_position_randomized": rectangle != nil,
                 "source_pixels_resized": false, "source_pixels_interpolated": false,
-                "progressive_cached_flip": degrees == 0, "original_sources_modified": false]
+                "progressive_cached_flip": degrees == 0 && rectangle == nil, "original_sources_modified": false]
             try appendHistory(receipt)
             history.append(receipt)
+            if history.count > 4096 { history.removeFirst(history.count - 4096) }
             try onProgress(refreshed.count, samples.count, sample.id)
         }
         return refreshed
@@ -209,9 +235,18 @@ final class NativeMaterialCropAugmentation {
     /// every original code; normal X/Y are only swapped and/or complemented.
     static func spunCenter(source: URL, expectedSHA256: String, size: Int, degrees: Int,
                            normal: Bool = false, normalConvention: String = "opengl", rectangle: [Int]? = nil) throws -> NativePNG {
+        guard [90, 180, 270].contains(degrees) else {
+            throw StudioError("Center crops rotate only by 90, 180 or 270 degrees to preserve exact source pixels.")
+        }
+        return try sourceCrop(source: source, expectedSHA256: expectedSHA256, size: size, degrees: degrees,
+            normal: normal, normalConvention: normalConvention, rectangle: rectangle)
+    }
+
+    private static func sourceCrop(source: URL, expectedSHA256: String, size: Int, degrees: Int,
+                           normal: Bool = false, normalConvention: String = "opengl", rectangle: [Int]? = nil) throws -> NativePNG {
         let bytes = try Data(contentsOf: source, options: .mappedIfSafe)
         guard NativeMaterialTrainer.checksum(bytes) == expectedSHA256, size > 0,
-              [90, 180, 270].contains(degrees) else {
+              [0, 90, 180, 270].contains(degrees) else {
             throw StudioError("Center crops rotate only by 90, 180 or 270 degrees to preserve exact source pixels.")
         }
         let header = try NativePNG.inspect(source)
@@ -225,7 +260,7 @@ final class NativeMaterialCropAugmentation {
         let selected = try NativePNG.crop(bytes,
             rectangle: selectedRectangle,
             flipGreen: normal && normalConvention == "directx")
-        let rotated = try quarterTurn(selected, degrees: degrees, normal: normal)
+        let rotated = try degrees == 0 ? selected : quarterTurn(selected, degrees: degrees, normal: normal)
         guard NativeMaterialTrainer.checksum(try Data(contentsOf: source, options: .mappedIfSafe)) == expectedSHA256 else {
             throw StudioError("Original source changed during center rotation.")
         }

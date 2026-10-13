@@ -12,20 +12,25 @@ struct TrainingWorkbenchView: View {
             Form {
                 Section("Training data") {
                     HStack {
-                        Button("Open Dataset…") { store.chooseDataset() }
-                            .help("Choose an existing dataset folder containing your material maps.")
+                        Button("Choose Source Folder…") { store.chooseDataset() }
+                            .help("Select the folder containing your original images and material maps.")
                         Button("Dataset Info…") { store.showDatasetInfoSheet = true }.disabled(store.dataset == nil)
-                        Button("New Dataset…") { store.showNewDatasetSheet = true }
-                            .help("Open Material Dataset to create or rename datasets, edit their info, and add or remove materials.")
+                        Button("Show Folder") { store.revealDataset() }.disabled(store.dataset == nil)
                     }.disabled(store.isBusy)
                     if let dataset = store.dataset {
                         Text(store.datasetName).font(.headline).textSelection(.enabled)
                         Text(store.datasetDisplayURL?.path ?? dataset.datasetPath)
                             .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                         Text(store.datasetInventorySummary)
+                        LabeledContent("Materials", value: store.trainingScopeSummary)
+                            .font(.callout)
+                        if store.specialistTrainingContext == nil {
+                            Text("Choose a material category in Loom Room.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         Text(store.datasetNativeSizeLabel).font(.caption).foregroundStyle(.secondary)
                     } else {
-                        Text("Create a dataset in Manage Datasets, add paired material maps, then open its folder here.")
+                        Text("Choose your source folder. Each material subfolder contains a diffuse image and its surface maps; image tags identify the material category and map type.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     // Avoid Swift 6.3 IRGen's actor-isolated bound-method conversion.
@@ -34,30 +39,17 @@ struct TrainingWorkbenchView: View {
                             Text("\(size) × \(size)").tag(size)
                         }
                     }.disabled(store.isBusy || store.supportedTrainingSizes.isEmpty)
-                    if !store.training.useSelectedMaterialOnly, let plans = store.dataset?.resolutionPlans?[String(store.training.size)] ?? store.dataset?.trainingPlans {
+                    if store.specialistTrainingContext != nil, let plans = store.dataset?.resolutionPlans?[String(store.training.size)] ?? store.dataset?.trainingPlans {
                         DatasetPlanSummary(plans: plans)
                     }
                     Text(store.trainingCurrentCropSummary).font(.callout).monospacedDigit()
-                    Text("Every diffuse and target map uses this exact grid. Matching sources are referenced directly; each crop is saved once in temporary training storage; smaller source sets are excluded.")
+                    Text("Diffuse and target crops use the same position and pixel size. Originals are never resized. A source smaller than this crop size remains available for inspection.")
                         .font(.caption).foregroundStyle(.secondary)
+                    Toggle("Randomize image order each epoch", isOn: $store.training.shuffleTrainingOrder)
+                        .toggleStyle(.checkbox)
+                        .accessibilityIdentifier("training.shuffle-order")
+                        .help("Turn off to use the same image order each epoch.")
                     TrainingCropSelectionFields(options: $store.training)
-                    Toggle("Train only selected source folder", isOn: $store.training.useSelectedMaterialOnly)
-                    Text(store.trainingScopeSummary).font(.caption).foregroundStyle(.secondary)
-                    Text("Setup obtains the 1×, 2× and 4× paired tiers when published before training. The counts above reflect files currently available; unavailable tiers are reported explicitly.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Button("Refresh Training Tiers") { store.refreshTrainingTiers() }.disabled(store.dataset == nil)
-                    if !store.sourceRecoverySummary.isEmpty {
-                        Text(store.sourceRecoverySummary).font(.caption).foregroundStyle(.secondary)
-                    }
-                    let unavailable = store.sourceRecoveryResults.filter { ["not_published", "failed"].contains($0.status) }
-                    if !unavailable.isEmpty {
-                        DisclosureGroup("Unavailable source tiers (\(unavailable.count))") {
-                            ForEach(unavailable) { result in
-                                Text("\(result.asset) · \(result.resolution) \(result.target): \(result.reason ?? result.status)")
-                                    .font(.caption).textSelection(.enabled)
-                            }
-                        }
-                    }
                     if !store.datasetPreparationSummary.isEmpty {
                         Text(store.datasetPreparationSummary).font(.caption).foregroundStyle(.secondary)
                     }
@@ -73,6 +65,12 @@ struct TrainingWorkbenchView: View {
                             Text("Roughness").tag("roughness")
                             Text("Normals").tag("normal")
                         }
+                    }
+                    if store.training.target == "height" {
+                        Toggle("Exaggerate features", isOn: $store.training.exaggerateFeatures)
+                            .toggleStyle(.checkbox)
+                            .accessibilityIdentifier("training.exaggerate-features")
+                            .help("Increase depth contrast with a nonlinear stretch. Originals stay unchanged.")
                     }
                     Toggle("Start from selected checkpoint", isOn: $store.training.useWarmStart)
                     if store.training.modelFamily.isCompact {
@@ -109,7 +107,9 @@ struct TrainingWorkbenchView: View {
                         }
                     }
                     if !store.training.useWarmStart, store.training.modelFamily.isCompact, store.training.modelFamily != .depthProHeightRefiner {
-                        Text("Diffuse input: linear sRGB. Height, roughness and normal targets keep their numerical values.")
+                        Text(store.training.target == "height" && store.training.exaggerateFeatures
+                             ? "Diffuse input: linear sRGB. Depth targets use the selected feature contrast."
+                             : "Diffuse input: linear sRGB. Height, roughness and normal targets keep their numerical values.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     NumericField("Updates per map", value: $store.training.updatesPerCrop, atLeast: 1, unit: "updates")
@@ -226,7 +226,7 @@ struct TrainingWorkbenchView: View {
                 }
                 if let progress = store.trainingProgress { TrainingProgressView(progress: progress) }
                 ScrollView {
-                    Text(store.logText.isEmpty ? "Training and dataset preparation progress appears here." : store.logText)
+                    Text(store.readableOperationLog.isEmpty ? "Training and dataset preparation progress appears here." : store.readableOperationLog)
                         .font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }.frame(maxHeight: .infinity)
@@ -290,23 +290,34 @@ struct TrainingCropSelectionFields: View {
     @Binding var options: MaterialTrainingOptions
 
     var body: some View {
-        Picker("Randomize Crops when", selection: $options.randomizeCrops) {
+        Picker("Choose new crop positions", selection: $options.randomizeCrops) {
             ForEach(MaterialTrainingCropRandomization.allCases, id: \.self) { timing in
-                Text(timing.label).tag(timing)
+                Text(timing == .never ? "Keep initial crops" : timing.label).tag(timing)
             }
         }
         .pickerStyle(.menu)
         .accessibilityIdentifier("training.randomize-crops")
-        Toggle("Randomly Flip Crop", isOn: $options.randomFlip)
+        Toggle("Randomly flip crops", isOn: $options.randomFlip)
             .disabled(!options.cropAugmentationEnabled)
             .accessibilityIdentifier("training.random-flip")
-            .help("Choose equally among vertical flip, horizontal flip, both or unchanged. Every epoch applies the choice to the current cached crop.")
-        Toggle("Randomly Rotate Center Crops", isOn: $options.randomSpinCentercut)
+            .help("Randomly mirror each paired crop horizontally, vertically, both ways or neither. Diffuse and target maps always receive the same flip.")
+        Toggle("Randomly rotate center crops", isOn: $options.randomSpinCentercut)
             .disabled(!options.cropAugmentationEnabled)
             .accessibilityIdentifier("training.random-spin-centercut")
-            .help("Take an exact center crop from the original source, then randomly rotate it by 90, 180 or 270 degrees. Pixel codes are preserved without scaling or interpolation; an optional flip follows.")
-        Text("Never uses the deterministic crop selection and pauses both options. Each crop refreshes when its update needs it, once per run or epoch. DepthPro predictions are reused for unchanged inputs.")
+            .help("Rotate paired center crops by 90°, 180° or 270°. Both maps receive the same rotation, with no resizing or interpolation.")
+        Text(cropDescription)
             .font(.caption).foregroundStyle(.secondary)
+    }
+
+    private var cropDescription: String {
+        switch options.randomizeCrops {
+        case .never:
+            "Keep each initial crop throughout training. Random flips and rotations are paused."
+        case .run:
+            "Choose random positions at the start of each run when an image has room for more than one crop. Keep those crops and any flips or rotations for the run."
+        case .epoch:
+            "Choose new random positions for each pass through the materials when an image has room for more than one crop. Refresh enabled flips and rotations with those crops."
+        }
     }
 }
 

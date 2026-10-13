@@ -36,11 +36,11 @@ private enum TrainingDestination: String, CaseIterable, Identifiable {
     }
     var guidance: String {
         switch self {
-        case .overview: "A practical path from photographed surfaces to a reusable material model."
-        case .dataset: "Create, rename and manage datasets, then inspect their original material maps."
+        case .overview: "Open your source folder, tag your materials and train a model for each surface map."
+        case .dataset: "Inspect the images in your source folders and edit their material and map tags."
         case .specialists: "Organize source folders and image tags, teach the classifier, then train and review each material map."
-        case .train: "Refine displacement, roughness or normals at the selected native pixel grid."
-        case .compare: "Prepare diffuse once, then compare matching model outputs."
+        case .train: "Train displacement, roughness or normal models from matching tagged materials."
+        case .compare: "Choose a photo and models, then inspect their outputs side by side."
         case .review: "Inspect original pixels, pan together and pop maps out for a closer look."
         case .checkpoints: "Use, export and recover your material models."
         }
@@ -142,6 +142,8 @@ struct ModelTrainingHubView: View {
     }
 
     private func reconnectModelsForDestination() {
+        if destination == .dataset, store.modelWorkshopNeedsOriginalSources { store.openModelWorkshopSources() }
+        if destination == .train { store.openActiveTrainerDataset() }
         let modelDestination = destination == .train || destination == .compare
         if destination == .checkpoints || (modelDestination && store.specialistTrainingContext == nil && !store.modelWorkshopNeedsOriginalSources) {
             store.reconnectSavedCheckpoints()
@@ -152,35 +154,30 @@ struct ModelTrainingHubView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Label("MatterLoom texture pipeline", systemImage: "graduationcap")
+                    Label("Train your material models", systemImage: "graduationcap")
                         .font(.largeTitle.bold())
-                    Text("Build your MatterLoom pipeline with models for surface height, roughness and normals. Train with paired diffuse and surface maps, then inspect the exact inputs and outputs.")
+                    Text("Your source folder is your dataset. Keep each material's original images and maps in its own subfolder, tag them by material and map type, then train displacement, roughness or normal models.")
                         .font(.title3).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
-                startCard("Build your material models", symbol: "arrow.triangle.branch", description: "Organize your original folders and image tags, teach the classifier, then train displacement, roughness and normal models.", button: "Open Loom Room") {
+                startCard("Organize materials by their tags", symbol: "arrow.triangle.branch", description: "Loom Room groups your tagged materials into categories. Choose a category and surface map to open its training setup.", button: "Open Loom Room") {
                     destination = .specialists
                 }
                 HStack(alignment: .top, spacing: 18) {
-                    startCard("Create and manage datasets", symbol: "square.stack.3d.up", description: "Give your dataset a name, add paired material maps, and edit or remove datasets from your library.", button: "New Dataset…") {
+                    startCard("Inspect images and map tags", symbol: "square.stack.3d.up", description: "Review all files in your source folders. Correct material categories and diffuse, displacement, roughness or normal tags before training.", button: "Open Dataset") {
                         destination = .dataset
-                        store.showNewDatasetSheet = true
                     }
-                    startCard("Train your material model", symbol: "shippingbox", description: "Refine the selected material base and save a separate LoRA. Developer mode also saves a full fused checkpoint.", button: "Open Trainer") {
+                    startCard("Train a surface map", symbol: "graduationcap", description: "Choose the model family, crop size and training settings. Training pairs matching diffuse images with the selected surface-map type.", button: "Open Trainer") {
                         destination = .train
                     }
                 }
                 GroupBox("Your workspace") {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
-                            Label(store.dataset.map { "\($0.materials.count) materials · \($0.samples.count) material sets" } ?? "Create or open a dataset", systemImage: "square.stack.3d.up")
+                            Label(store.dataset == nil ? "Choose a source folder to begin" : store.datasetInventorySummary, systemImage: "square.stack.3d.up")
                             Spacer()
-                            Button("Manage Datasets") { destination = .dataset }.disabled(store.isBusy)
-                            Button("New Dataset…") {
-                                destination = .dataset
-                                store.showNewDatasetSheet = true
-                            }.disabled(store.isBusy)
-                            Button("Open Dataset…") { store.chooseDataset() }.disabled(store.isBusy)
-                                .help("Choose an existing dataset folder. Open it in Dataset to rename it, edit its info, add materials or move it to Trash.")
+                            Button("Inspect Images & Tags") { destination = .dataset }.disabled(store.isBusy)
+                            Button("Choose Source Folder…") { store.chooseDataset() }.disabled(store.isBusy)
+                                .help("Select the folder containing your original images and material maps.")
                         }
                         if let dataset = store.dataset {
                             Text(dataset.datasetPath).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
@@ -192,11 +189,11 @@ struct ModelTrainingHubView: View {
                 }
                 VStack(alignment: .leading, spacing: 14) {
                     Text("A workflow you can return to").font(.title2.bold())
-                    workflowRow("1", .dataset, "Set up your dataset", "Choose rendering and training resolution, import a material folder, then review the planned native crops and validation checks.")
-                    workflowRow("2", .train, "Train material detail", "Choose your map and type the training settings directly. Complete registered maps share the exact grid shown in Dataset.")
-                    workflowRow("3", .compare, "Compare what changed", "Use the same prepared diffuse for each checkpoint. Inspect detail, noise, inversion and relief.")
-                    workflowRow("4", .review, "Inspect at full quality", "Use 100% zoom, linked dragging and pop-out windows. Export the untouched map or open an editable copy in GIMP.")
-                    workflowRow("5", .checkpoints, "Keep the model", "Save the LoRA or full checkpoint, upload it to Hugging Face, and download it again when needed.")
+                    workflowRow("1", .dataset, "Open your folder and review tags", "Choose your existing source folder. Its current images appear here; correct each material category and map type as needed.")
+                    workflowRow("2", .specialists, "Choose a material category", "Refresh categories in Loom Room. Select the category and displacement, roughness or normal map you want to train.")
+                    workflowRow("3", .train, "Set the crop size and train", "Use a size that your paired maps can supply. Crop position, flips and rotations are shared by the diffuse and target maps; originals keep their pixels.")
+                    workflowRow("4", .compare, "Compare saved models", "Run models on the same photo and compare their outputs side by side. Open Review Details to inspect matching areas at full quality.")
+                    workflowRow("5", .checkpoints, "Choose and keep a model", "Name, select and export your saved checkpoints. Approve a category model in Loom Room when you want automatic material generation to use it.")
                 }
             }.padding(30).frame(maxWidth: 1100, alignment: .leading).frame(maxWidth: .infinity)
         }

@@ -1,8 +1,9 @@
 import Darwin
 import Foundation
 
-/// Optional extended attributes travel with originals without changing image
-/// bytes. Changed or replaced files lose their cached checks and predictions.
+/// Semantic teaching travels with originals without changing image bytes.
+/// A changed file keeps that teaching but loses cached verification and
+/// prediction evidence.
 enum NativeSourceFileTags {
     static let attribute = "org.ipde.texture-studio.source"
     private static let lock = NSLock()
@@ -23,6 +24,14 @@ enum NativeSourceFileTags {
         var verifiedSHA256: String?
         var verifiedMetadata: String?
         var reviewStatus: String?
+        var pairingName: String?
+        var classOrigin: String?
+
+        var hasManualClass: Bool {
+            guard classLabel != nil else { return false }
+            if let classOrigin { return classOrigin == "user" }
+            return classifierIdentity == nil || classifierIdentity == "user"
+        }
     }
     static func identity(_ url: URL) throws -> Identity {
         var value = stat()
@@ -47,22 +56,42 @@ enum NativeSourceFileTags {
         guard size > 0, size < 16_384 else { return nil }
         var data = Data(count: size)
         let count = data.withUnsafeMutableBytes { getxattr(url.path, attribute, $0.baseAddress, size, 0, 0) }
-        guard count == size, let tags = try? JSONDecoder().decode(Tags.self, from: data),
-              tags.identity == identity else { return nil }
-        return tags
+        guard count == size, let tags = try? JSONDecoder().decode(Tags.self, from: data) else { return nil }
+        guard tags.identity != identity else { return tags }
+        // File identity belongs to cached pixel evidence, not to the user's
+        // teaching. Keep unchanged semantic tags even after an edit or copy.
+        var current = Tags(identity: identity)
+        current.role = tags.role
+        current.reviewStatus = tags.reviewStatus
+        current.pairingName = tags.pairingName
+        current.classLabel = tags.classLabel
+        current.classOrigin = tags.classOrigin ?? tags.classLabel.map { _ in
+            tags.classifierIdentity == "user" || tags.classifierIdentity == nil ? "user" : "classifier"
+        }
+        current.classifierIdentity = tags.classifierIdentity == "user" ? "user" : nil
+        return current
     }
     static func update(_ url: URL, role: String? = nil, classLabel: String? = nil,
                        classifierIdentity: String? = nil, verifiedSHA256: String? = nil,
-                       reviewStatus: String? = nil, verifiedMetadata: String? = nil) throws {
+                       reviewStatus: String? = nil, verifiedMetadata: String? = nil,
+                       pairingName: String? = nil, classOrigin: String? = nil) throws {
         try lock.withLock {
         let initial = try identity(url)
         var tags = read(url) ?? Tags(identity: initial)
         if let role { tags.role = role }
-        if let classLabel { tags.classLabel = classLabel }
+        if let classLabel {
+            tags.classLabel = classLabel
+            // An explicit classifier identity marks a prediction. A label
+            // written without one is manual teaching, including legacy tags.
+            tags.classifierIdentity = classifierIdentity
+            tags.classOrigin = classOrigin ?? (classifierIdentity == nil || classifierIdentity == "user" ? "user" : "classifier")
+        }
         if let classifierIdentity { tags.classifierIdentity = classifierIdentity }
         if let verifiedSHA256 { tags.verifiedSHA256 = verifiedSHA256 }
         if let verifiedMetadata { tags.verifiedMetadata = verifiedMetadata }
         if let reviewStatus { tags.reviewStatus = reviewStatus }
+        if let pairingName { tags.pairingName = pairingName }
+        if let classOrigin { tags.classOrigin = classOrigin }
         let data = try JSONEncoder().encode(tags)
         guard try identity(url) == initial else { throw StudioError("Image changed while saving its tags.") }
         let result = data.withUnsafeBytes { setxattr(url.path, attribute, $0.baseAddress, data.count, 0, 0) }

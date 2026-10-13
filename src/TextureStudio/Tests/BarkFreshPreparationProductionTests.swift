@@ -168,7 +168,7 @@ final class BarkFreshPreparationProductionTests: XCTestCase {
         var options = settings.training ?? MaterialTrainingOptions()
         options.modelFamily = .compactScalar; options.target = "height"; options.scope = "full-model"
         options.modelName = "Bark Displacement"; options.size = 1024; options.learningRate = 0.0001
-        options.useWarmStart = false; options.useSelectedMaterialOnly = false
+        options.useWarmStart = false
         options.validationEvery = 1; options.validationUnit = .epoch
         options.checkpointEvery = 1; options.checkpointUnit = .epoch
         options.maxMinutes = 20000

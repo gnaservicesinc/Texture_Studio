@@ -65,10 +65,11 @@ final class NativeMaterialFilenameTests: XCTestCase {
                        "carpetsubstance001_compiled")
     }
 
-    func testAuthoredAndAmbientImportsKeepEveryTargetExactOriginalIdentityAndPairedCrops() async throws {
+    func testAuthoredAndAmbientPhysicalFoldersKeepEveryTargetExactOriginalIdentityAndPairedCrops() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
-        let sources = root.appendingPathComponent("Originals"), dataset = root.appendingPathComponent("Dataset")
-        try FileManager.default.createDirectory(at: sources, withIntermediateDirectories: false)
+        let dataset = root.appendingPathComponent("Dataset"), sources = dataset
+        _ = try await command(["create-dataset", "--dataset", dataset.path, "--name", "New source formats", "--training-size", "256", "--source-folder", "true"])
+        _ = try await command(["edit-dataset", "--dataset", dataset.path, "--training-size", "256", "--subject-validation", "disabled"])
         var originals: [URL: Data] = [:], cardboard: [URL] = []
         for (family, dimension, format) in [("Cardboard_01", 512, "generic"), ("Paper003", 512, "ambient"), ("My Surface", 513, "native")] {
             let folder = sources.appendingPathComponent(family)
@@ -84,10 +85,9 @@ final class NativeMaterialFilenameTests: XCTestCase {
         }
         XCTAssertTrue(NativeMaterialDatasetService.croppingRecoveryRequests(files: cardboard, size: 256, target: "height").isEmpty,
                       "Generic authored filenames do not authorize a guessed provider download")
-        _ = try await command(["create-dataset", "--dataset", dataset.path, "--name", "New source formats", "--training-size", "256", "--subject-validation", "disabled"])
-        let imported = try await command(["import-folder", "--dataset", dataset.path, "--folder", sources.path, "--skip-source-recovery"])
+        let imported = try await command(["dataset", "--dataset", dataset.path, "--review-size", "256"])
         XCTAssertEqual(imported["source_set_count"] as? Int, 3)
-        let classifier = try NativeDiffuseClassifierDatasetService.discover(dataset: dataset, sourceFolder: sources)
+        let classifier = try NativeDiffuseClassifierDatasetService.discover(dataset: dataset, sourceFolder: sources, minimumSize: 256)
         XCTAssertEqual(Set(classifier.map(\.family)), ["cardboard_01", "paper003", "my_surface"])
         XCTAssertEqual(classifier.count, 3, "Dataset and folder discovery share each original diffuse identity")
         for target in ["height", "normal", "roughness"] {
@@ -108,7 +108,7 @@ final class NativeMaterialFilenameTests: XCTestCase {
                 }
                 XCTAssertEqual(sample.inputSHA256, NativeMaterialTrainer.checksum(try Data(contentsOf: sample.inputURL)))
                 XCTAssertEqual(sample.targetSHA256, NativeMaterialTrainer.checksum(try Data(contentsOf: sample.targetURL)))
-                XCTAssertFalse(try XCTUnwrap(sample.materialName).isEmpty, "Training descriptors retain the registered material name for model cards")
+                XCTAssertFalse(try XCTUnwrap(sample.materialName).isEmpty, "Training descriptors retain the material name for model cards")
             }
             _ = try await command(["cleanup-size", "--dataset", preparedURL.path])
         }
@@ -118,11 +118,12 @@ final class NativeMaterialFilenameTests: XCTestCase {
     func testExplicitGrayAndGrayAlphaSourcesPreserveNativeCropCodesAtBothPrecisions() async throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         let dataset = root.appendingPathComponent("Dataset")
-        _ = try await command(["create-dataset", "--dataset", dataset.path, "--name", "Grayscale sources", "--training-size", "256", "--subject-validation", "disabled"])
+        _ = try await command(["create-dataset", "--dataset", dataset.path, "--name", "Grayscale sources", "--training-size", "256", "--source-folder", "true"])
+        _ = try await command(["edit-dataset", "--dataset", dataset.path, "--training-size", "256", "--subject-validation", "disabled"])
         var originals: [URL: Data] = [:]
         for bits in [8, 16] {
             for channels in [1, 2] {
-                let name = "Gray \(bits) Channels \(channels)", folder = root.appendingPathComponent(name)
+                let name = "Gray \(bits) Channels \(channels)", folder = dataset.appendingPathComponent(name)
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
                 let diffuse = folder.appendingPathComponent("diffuse.png"), height = folder.appendingPathComponent("height.png")
                 for (path, precision, count) in [(diffuse, bits, channels), (height, 16, 1)] {

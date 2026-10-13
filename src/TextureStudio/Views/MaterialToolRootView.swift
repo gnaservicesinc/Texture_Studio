@@ -13,10 +13,6 @@ struct MaterialToolRootView: View {
         self.store = store
         self._review = State(initialValue: review ?? ReviewSessionStore())
     }
-    private var comparisonReady: Bool {
-        store.comparisonConfigurationIssue == nil
-    }
-
     var body: some View {
         Group {
             switch role {
@@ -68,9 +64,7 @@ struct MaterialToolRootView: View {
             }
             var isDirectory: ObjCBool = false
             let directoryExists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
-            let containsDataset = directoryExists && (FileManager.default.fileExists(atPath: url.appendingPathComponent("dataset.json").path)
-                || (url.lastPathComponent == "sources" && FileManager.default.fileExists(atPath: url.deletingLastPathComponent().appendingPathComponent("dataset.json").path)))
-            if url.lastPathComponent == "dataset.json" || containsDataset || (role == .dataset && directoryExists) { store.receiveDataset(url) }
+            if url.lastPathComponent == "dataset.json" || directoryExists && role != .review { store.receiveDataset(url) }
             else if url.pathExtension == "json" { review.load(url) }
             else if url.pathExtension.lowercased() == "safetensors" {
                 if role == .train { store.receiveResumeCheckpoint(url) }
@@ -149,70 +143,9 @@ struct MaterialToolRootView: View {
         }
     }
     private var compareView: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Button("Test Photo…", systemImage: "photo") { store.chooseSourceImage() }
-                    .disabled(store.isBusy)
-                    .help("Use the same prepared diffuse at the chosen grid, for every checkpoint. A selected dataset material is used when no separate photo is chosen.")
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(store.sourceImageURL.map { "Source photo: \($0.lastPathComponent)" }
-                         ?? store.selectedSampleId.map { "Dataset material: \($0)" } ?? "Choose a photo or dataset material")
-                        .lineLimit(1).truncationMode(.middle)
-                    if store.sourceImageURL != nil {
-                        Text("This saved photo is used instead of the dataset selection.").font(.caption)
-                    }
-                }.foregroundStyle(.secondary)
-                if store.sourceImageURL != nil {
-                    Button("Use Dataset Material") { store.sourceImageURL = nil }
-                        .disabled(store.isBusy || store.selectedDiffuseMap == nil)
-                        .help("Switch back to the material currently selected in Dataset. Its diffuse and reference map will be used for this comparison.")
-                }
-                Spacer()
-                Button("Choose Checkpoints…") { store.chooseCheckpoint() }
-                    .disabled(store.isBusy)
-                    .help("Select one or more checkpoints predicting the same map type. Inspect an output on its own or beside the source map and optional untrained initialization / material base. Exact model hashes are recorded with the results.")
-                Button("Run Comparison", systemImage: "play.fill") { store.compare() }
-                    .buttonStyle(.glassProminent).disabled(store.isBusy || !comparisonReady)
-                    .help("Run checked candidates one at a time on Metal, then inspect their matching full-resolution outputs.")
-            }.padding()
-            if store.sourceImageURL != nil {
-                DisclosureGroup("Prepare test diffuse") {
-                    HStack(alignment: .top, spacing: 20) {
-                        VStack {
-                            DoubleControl(title: "Tilt X", value: $store.testPhotoSettings.rotationX, range: -70...70, suffix: "°")
-                            DoubleControl(title: "Tilt Y", value: $store.testPhotoSettings.rotationY, range: -70...70, suffix: "°")
-                            DoubleControl(title: "Rotate", value: $store.testPhotoSettings.rotationZ, range: -180...180, suffix: "°", enforcesSliderRange: false)
-                        }
-                        VStack {
-                            FloatControl(title: "Lighting balance", value: $store.testPhotoSettings.lightingStrength, range: 0...1)
-                            FloatControl(title: "Lighting scale", value: $store.testPhotoSettings.lightingRadius, range: 0...1)
-                            Text("The shared Studio pipeline prepares one diffuse map at the selected grid. Inspect it alongside predictions before rating the result.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }.padding(.horizontal).padding(.bottom, 10).disabled(store.isBusy)
-            }
-            ScrollView(.horizontal) {
-                HStack {
-                    ForEach(store.checkpoints) { checkpoint in
-                        Toggle(isOn: Binding(get: { store.comparisonCheckpointIds.contains(checkpoint.id) }, set: { enabled in
-                            if enabled { store.comparisonCheckpointIds.insert(checkpoint.id) } else { store.comparisonCheckpointIds.remove(checkpoint.id) }
-                        })) { Text("\(checkpoint.title) · \(checkpoint.target) · step \(checkpoint.step)") }.toggleStyle(.checkbox)
-                    }
-                }.padding(.horizontal)
-            }.disabled(store.isBusy)
-            Toggle(store.comparisonBaselineLabel, isOn: $store.comparisonIncludesBase)
-                .toggleStyle(.checkbox).disabled(store.isBusy).padding(.horizontal).padding(.vertical, 8)
-            if let issue = store.comparisonConfigurationIssue, !store.isBusy {
-                Text(issue)
-                    .font(.caption).foregroundStyle(.secondary).padding(.horizontal).padding(.vertical, 8)
-            }
-            Divider()
-            if !store.comparisonCandidates.isEmpty { ReviewWorkbenchView(candidates: store.comparisonCandidates) }
-            else { ContentUnavailableView("Compare material models", systemImage: "rectangle.split.2x1", description: Text("Compare saved checkpoints on the same photo and inspect matching details. Each result identifies its source sample, training step and exact model. Source photos and dataset targets are available in Maps.")) }
-            WorkbenchActivityView(store: store)
-        }
+        CheckpointComparisonView(store: store)
     }
+
 }
 
 struct WorkbenchActivityView: View {

@@ -12,6 +12,7 @@ private struct ReviewPaneHeaderHeights: PreferenceKey {
 struct ReviewWorkbenchView: View {
     let candidates: [MapReviewCandidate]
     var blendURL: URL? = nil
+    let comparisonLayout: Bool
     @State private var viewport: InspectionViewport
     @State private var notice: String?
     @State private var inspectedHashes: [String: String] = [:]
@@ -22,15 +23,17 @@ struct ReviewWorkbenchView: View {
     @State private var paneHeaderHeight: CGFloat = 0
     @State private var qualityCandidateID: String?
     @State private var missingIDs: Set<String> = []
+    @State private var detailsCandidate: MapReviewCandidate?
     private let preferences: UserDefaults
     private let onMissingSource: ((URL) -> Void)?
     private let onConfirmReview: ((String, MaterialQualityDecision.Recommendation) -> Void)?
-    init(candidates: [MapReviewCandidate], blendURL: URL? = nil,
+    init(candidates: [MapReviewCandidate], blendURL: URL? = nil, comparisonLayout: Bool = false,
          preferences: UserDefaults = UserDefaults(suiteName: "org.ipde.material-tools")!,
          onMissingSource: ((URL) -> Void)? = nil,
          onConfirmReview: ((String, MaterialQualityDecision.Recommendation) -> Void)? = nil) {
         self.candidates = candidates
         self.blendURL = blendURL
+        self.comparisonLayout = comparisonLayout
         self.preferences = preferences
         self.onMissingSource = onMissingSource
         self.onConfirmReview = onConfirmReview
@@ -46,7 +49,9 @@ struct ReviewWorkbenchView: View {
         selectionPreferenceKey(candidates) + ".display"
     }
     private var visibleCandidates: [MapReviewCandidate] {
-        Self.resolvedCandidates(candidates.filter { !missingIDs.contains($0.id) }, visibleIDs: visibleIDs)
+        let available = candidates.filter { !missingIDs.contains($0.id) }
+        return comparisonLayout ? Self.resolvedComparisonCandidates(available, visibleIDs: visibleIDs)
+            : Self.resolvedCandidates(available, visibleIDs: visibleIDs)
     }
     private var diffuseCandidate: MapReviewCandidate? {
         candidates.first { !missingIDs.contains($0.id) && !$0.numeric && ($0.role == "diffuse" || $0.label.lowercased().contains("diffuse")) }
@@ -75,13 +80,22 @@ struct ReviewWorkbenchView: View {
         }
         return [target]
     }
+    static func resolvedComparisonCandidates(_ candidates: [MapReviewCandidate], visibleIDs: Set<String>) -> [MapReviewCandidate] {
+        let selected = candidates.filter { !$0.isReference && visibleIDs.contains($0.id) }
+        let predictions = candidates.filter { ["base", "checkpoint", "model"].contains($0.role) }
+        let outputs = selected.isEmpty ? Array((predictions.isEmpty ? candidates.filter { !$0.isReference } : predictions).suffix(2))
+            : Array(selected.suffix(2))
+        // Model names head the results; the real reference remains beside them.
+        return outputs + Array(candidates.filter(\.isReference).prefix(1))
+    }
     var body: some View {
         VStack(spacing: 0) {
             if let sample = candidates.compactMap(\.sampleLabel).first {
                 HStack(alignment: .firstTextBaseline) {
-                    Label("Sample: \(sample)", systemImage: "photo").font(.headline).textSelection(.enabled)
+                    Text(comparisonLayout ? "Results" : "Sample: \(sample)").font(.headline).textSelection(.enabled)
                     Spacer()
-                    Text("\(candidates.count) maps · same source").font(.caption).foregroundStyle(.secondary)
+                    Text(comparisonLayout ? sample : "\(candidates.count) maps · same source")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }.padding(.horizontal, 12).padding(.vertical, 8).background(.bar)
             }
             if !candidates.contains(where: \.isReference), candidates.contains(where: { ["base", "checkpoint", "model"].contains($0.role) }) {
@@ -90,33 +104,14 @@ struct ReviewWorkbenchView: View {
                     .help("A real source displacement map must be identified explicitly in the review manifest. A model output is never substituted for it.")
             }
             inspectionControls.padding(8).background(.bar)
-            if let map = qualityCandidate {
-                VStack(alignment: .leading, spacing: 6) {
-                    Picker("Comparison output", selection: Binding(get: { map.id }, set: { qualityCandidateID = $0 })) {
-                        ForEach(qualityCandidates) { candidate in
-                            Text(candidate.modelIdentity?.checkpointStep.map { "\(candidate.label) · step \($0.formatted())" } ?? candidate.label)
-                                .tag(candidate.id)
-                        }
-                    }.frame(maxWidth: 440)
-                    if let diffuse = diffuseCandidate {
-                        MaterialQualityReviewPanel(diffuseURL: diffuse.mapURL, mapURL: map.mapURL,
-                            mapType: map.modelIdentity?.mapType ?? "height", purpose: .result,
-                            diffuseTransform: diffuse.displayTransform, mapTransform: map.displayTransform,
-                            onApply: onConfirmReview.map { confirm in { recommendation in confirm(map.id, recommendation) } })
-                    }
-                }.padding(.horizontal, 12).padding(.vertical, 8)
-            }
-            if let map = qualityCandidate, ["height", "roughness"].contains(map.modelIdentity?.mapType ?? ""),
-               let reference = candidates.first(where: {
-                   $0.isReference && $0.modelIdentity?.mapType == map.modelIdentity?.mapType
-               }) {
-                MaterialScalarAgreementPanel(reference: reference, prediction: map)
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-            }
+            if comparisonLayout {
+                DisclosureGroup("Evaluate a model") { evaluationControls }
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+            } else { evaluationControls }
             HStack {
-                Text("Drag or scroll to pan · Pinch or Option-scroll to zoom · 100% shows original pixels")
+                Text(comparisonLayout ? "Pan and zoom are linked across maps" : "Drag or scroll to pan · Pinch or Option-scroll to zoom · 100% shows original pixels")
                 Spacer()
-                Button("Export Visible Maps (\(visibleCandidates.count))…", systemImage: "square.and.arrow.up") { exportSelected() }
+                Button(comparisonLayout ? "Export Maps…" : "Export Visible Maps (\(visibleCandidates.count))…", systemImage: "square.and.arrow.up") { exportSelected() }
                     .buttonStyle(.bordered)
                     .disabled(candidates.isEmpty || isExporting)
                     .help("Save every currently visible map into a new folder, with its sample and model name. Copies keep their original resolution, bit depth and exact bytes; display adjustments are not exported.")
@@ -134,27 +129,28 @@ struct ReviewWorkbenchView: View {
                 ContentUnavailableView("Choose maps to compare", systemImage: "square.split.2x1")
             } else {
                 HSplitView {
-                    ForEach(Array(visibleCandidates.enumerated()), id: \.element.id) { position, candidate in
+                    ForEach(visibleCandidates) { candidate in
                         VStack(spacing: 0) {
                             VStack(spacing: 0) {
                                 HStack(alignment: .top) {
                                     VStack(alignment: .leading, spacing: 4) {
                                         HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                            Text("\(position + 1)").font(.caption.bold()).foregroundStyle(.secondary)
-                                                .accessibilityLabel("Pane \(position + 1)")
-                                            Text(candidate.label).font(.headline).textSelection(.enabled)
+                                            Text(candidate.displayTitle).font(.headline).textSelection(.enabled)
                                         }
-                                        if let detail = candidate.detail {
-                                            Text(detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                                        if !candidate.displaySummary.isEmpty {
+                                            Text(candidate.displaySummary).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                                         }
                                         if let description = inspectedDescriptions[candidate.id] {
                                             Text(description).font(.caption.bold()).textSelection(.enabled)
                                         }
-                                        Text(candidate.mapURL.lastPathComponent).font(.caption2).foregroundStyle(.secondary)
-                                            .lineLimit(1).truncationMode(.middle).help(candidate.mapURL.path)
                                     }.accessibilityElement(children: .ignore).accessibilityLabel(candidate.accessibleLabel)
                                     Spacer()
                                     Menu {
+                                        Button("Details…", systemImage: "info.circle") { detailsCandidate = candidate }
+                                        if comparisonLayout {
+                                            Button("Export Original…", systemImage: "square.and.arrow.up") { export(candidate) }
+                                            Button("Open Copy in GIMP", systemImage: "paintbrush") { openInGIMP(candidate) }
+                                        }
                                         Button("Open Full Map in New Window") { ReviewWindowController.shared.open(candidates: [candidate]) }
                                         Button("Show Original in Finder") { NSWorkspace.shared.activateFileViewerSelecting([candidate.mapURL]) }
                                         if let source = candidate.fullSourceReference {
@@ -168,15 +164,15 @@ struct ReviewWorkbenchView: View {
                                     .fixedSize(horizontal: false, vertical: true)
                                     .layoutPriority(2)
                                     .background(.bar)
-                                ViewThatFits(in: .horizontal) {
+                                if !comparisonLayout { ViewThatFits(in: .horizontal) {
                                     HStack { exportControls(candidate); Spacer(minLength: 0) }
                                     VStack(alignment: .leading) { exportControls(candidate) }.frame(maxWidth: .infinity, alignment: .leading)
                                 }.font(.caption).padding(.horizontal, 10).padding(.bottom, 8).disabled(isExporting)
                                     .fixedSize(horizontal: false, vertical: true)
                                     .layoutPriority(1)
-                                    .background(.bar)
+                                    .background(.bar) }
                                 if let source = candidate.fullSourceReference {
-                                    Button("Open Full Source \(candidate.referenceMapName.capitalized) Map", systemImage: "arrow.up.left.and.arrow.down.right") {
+                                    Button(comparisonLayout ? "Open full original" : "Open Full Source \(candidate.referenceMapName.capitalized) Map", systemImage: "arrow.up.left.and.arrow.down.right") {
                                         ReviewWindowController.shared.open(candidates: [source])
                                     }.font(.caption).padding(.horizontal, 10).padding(.bottom, 8)
                                         .help("Inspect the complete original source displacement map at its own resolution. The comparison above uses the recorded crop; this does not run a model or produce a full-source prediction.")
@@ -195,13 +191,13 @@ struct ReviewWorkbenchView: View {
                             Divider()
                             MapInspectionView(url: candidate.mapURL, numeric: candidate.numeric, viewport: viewport, onLoad: { value in
                                 inspectedHashes[candidate.id] = value?.sourceSHA256
-                                inspectedDescriptions[candidate.id] = value.map { "Displayed \(candidate.displayTransform == nil ? "file" : "training grid"): \($0.pixelWidth) × \($0.pixelHeight) · \($0.storageDescription)" }
+                                inspectedDescriptions[candidate.id] = value.map { "\($0.pixelWidth.formatted()) × \($0.pixelHeight.formatted()) · \($0.storageDescription)" }
                             }, onMissingSource: { source in
                                 missingIDs.insert(candidate.id)
                                 visibleIDs.remove(candidate.id)
                                 onMissingSource?(source)
                             }, displayTransform: candidate.displayTransform).frame(maxWidth: .infinity, maxHeight: .infinity).clipped()
-                        }.frame(minWidth: 240)
+                        }.frame(minWidth: comparisonLayout ? 180 : 240)
                     }
                 }
             }
@@ -209,6 +205,7 @@ struct ReviewWorkbenchView: View {
         .alert("Map inspection", isPresented: Binding(get: { notice != nil }, set: { if !$0 { notice = nil } })) {
             Button("OK") { notice = nil }
         } message: { Text(notice ?? "") }
+        .popover(item: $detailsCandidate) { candidate in candidateDetails(candidate) }
         .onAppear {
             viewport.useDisplayContext(Self.displayPreferenceKey(candidates))
             restoreVisibleMaps()
@@ -234,47 +231,110 @@ struct ReviewWorkbenchView: View {
         Button("Open Copy in GIMP", systemImage: "paintbrush") { openInGIMP(candidate) }
             .help("Open a byte-identical copy for closer inspection or editing. The original map is retained.")
     }
+    @ViewBuilder private var evaluationControls: some View {
+        if let map = qualityCandidate {
+            VStack(alignment: .leading, spacing: 6) {
+                Picker("Model", selection: Binding(get: { map.id }, set: { qualityCandidateID = $0 })) {
+                    ForEach(qualityCandidates) { candidate in Text(candidate.selectionTitle).tag(candidate.id) }
+                }.frame(maxWidth: 440)
+                if let diffuse = diffuseCandidate {
+                    MaterialQualityReviewPanel(diffuseURL: diffuse.mapURL, mapURL: map.mapURL,
+                        mapType: map.modelIdentity?.mapType ?? "height", purpose: .result,
+                        diffuseTransform: diffuse.displayTransform, mapTransform: map.displayTransform,
+                        onApply: onConfirmReview.map { confirm in { recommendation in confirm(map.id, recommendation) } })
+                }
+                if ["height", "roughness"].contains(map.modelIdentity?.mapType ?? ""),
+                   let reference = candidates.first(where: { $0.isReference && $0.modelIdentity?.mapType == map.modelIdentity?.mapType }) {
+                    MaterialScalarAgreementPanel(reference: reference, prediction: map)
+                }
+            }.padding(.horizontal, comparisonLayout ? 0 : 12).padding(.vertical, 8)
+        }
+    }
+
+    private func candidateDetails(_ candidate: MapReviewCandidate) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(candidate.displayTitle).font(.title3.bold())
+                if !candidate.displaySummary.isEmpty { Text(candidate.displaySummary).foregroundStyle(.secondary) }
+                if let sample = candidate.sampleLabel { LabeledContent("Test image", value: sample) }
+                if let identity = candidate.modelIdentity {
+                    if let architecture = identity.architecture { LabeledContent("Architecture", value: architecture) }
+                    if let path = identity.checkpointPath { LabeledContent("Checkpoint", value: URL(fileURLWithPath: path).lastPathComponent) }
+                    if let hash = identity.checkpointSHA256 { LabeledContent("SHA256", value: hash) }
+                }
+                if let source = candidate.sourceIdentity {
+                    ForEach(source.recordedDetails, id: \.self) { Text($0).font(.caption) }
+                }
+                if let detail = candidate.detail { Text(detail).font(.caption).foregroundStyle(.secondary) }
+                Divider()
+                LabeledContent("Map file", value: candidate.mapURL.path)
+                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([candidate.mapURL]) }
+            }.textSelection(.enabled).padding(18).frame(width: 430, alignment: .leading)
+        }.frame(maxHeight: 450)
+    }
     private var inspectionControls: some View {
-        HStack {
-                Button("Fit") { viewport.fit() }
-                Button("100%") { viewport.setActualSize() }.help("One source pixel per display pixel")
-                Button("200%") { viewport.setZoom(2) }
-                Button { viewport.setZoom(viewport.zoom / 1.25) } label: { Image(systemName: "minus.magnifyingglass") }
-                Button { viewport.setZoom(viewport.zoom * 1.25) } label: { Image(systemName: "plus.magnifyingglass") }
-                Text("Zoom").font(.caption)
-                NumericTextField(title: "Zoom percent", value: Binding(
-                    get: { Double(viewport.zoom) * 100 },
-                    set: { viewport.setZoom(CGFloat($0 / 100)) }), greaterThan: 0)
-                    .frame(width: 85)
-                Text(viewport.fitToView ? "% manual · Fit active" : "% · linked pan")
-                    .font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Menu("Visible Maps (\(visibleCandidates.count))") {
-                    ForEach(candidates) { candidate in
-                        Toggle(candidate.label, isOn: Binding(get: { visibleCandidates.contains(where: { $0.id == candidate.id }) }, set: { shown in
-                            if visibleIDs.isEmpty { visibleIDs = Set(visibleCandidates.map(\.id)) }
-                            if shown { visibleIDs.insert(candidate.id) } else if !candidate.isReference && visibleIDs.count > 1 { visibleIDs.remove(candidate.id) }
-                        }))
-                        .disabled(candidate.isReference)
+        VStack(alignment: .leading, spacing: 8) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    zoomControls
+                    Spacer(minLength: 8)
+                    visibleMapMenu
+                    Button("Pop Out", systemImage: "macwindow.on.rectangle") { ReviewWindowController.shared.open(candidates: visibleCandidates, blendURL: blendURL) }
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack { zoomControls; Spacer(minLength: 0) }
+                    HStack {
+                        visibleMapMenu
+                        Spacer()
+                        Button("Pop Out", systemImage: "macwindow.on.rectangle") { ReviewWindowController.shared.open(candidates: visibleCandidates, blendURL: blendURL) }
                     }
                 }
-                .help("The real source reference stays visible beside model predictions. Choose additional photos and predictions here. Every pane retains its identity when popped out.")
-                Button("Pop Out Comparison") { ReviewWindowController.shared.open(candidates: visibleCandidates, blendURL: blendURL) }
-                if let blendURL { Button("Open Displaced Surface in Blender") { NSWorkspace.shared.open(blendURL) } }
-        }.help("Drag or scroll to pan. Pinch, or hold Option/Command while scrolling, to zoom. Pan and zoom are linked across maps.")
-            .safeAreaInset(edge: .bottom, spacing: 8) {
-                if visibleCandidates.contains(where: \.numeric) {
+            }
+            if visibleCandidates.contains(where: \.numeric) {
+                DisclosureGroup("Display contrast") {
                     HStack {
-                        DoubleControl(title: "Display contrast", value: $viewport.displayContrast, range: 1...32, suffix: "×", enforcesSliderRange: false, greaterThan: 0)
-                            .frame(maxWidth: 220)
+                        DoubleControl(title: "Contrast", value: $viewport.displayContrast, range: 1...32, suffix: "×", enforcesSliderRange: false, greaterThan: 0)
                         DoubleControl(title: "Midpoint", value: $viewport.displayMidpoint, range: 0...1)
-                            .frame(maxWidth: 200)
-                        Button("Reset Display") { viewport.displayContrast = 1; viewport.displayMidpoint = 0.5 }
-                        Spacer()
-                        Text("Display only · saved for next time · exports keep raw values").foregroundStyle(.secondary)
-                    }.font(.caption)
+                        Button("Reset") { viewport.displayContrast = 1; viewport.displayMidpoint = 0.5 }
+                    }.font(.caption).padding(.top, 6)
+                    Text("Adjusts the preview. Original map values are preserved.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            if let blendURL { Button("Open Displaced Surface in Blender") { NSWorkspace.shared.open(blendURL) } }
+        }.help("Drag or scroll to pan. Pinch, or hold Option/Command while scrolling, to zoom. Pan and zoom are linked across maps.")
+    }
+    private var zoomControls: some View {
+        HStack(spacing: 6) {
+            Button("Fit") { viewport.fit() }
+            Button("100%") { viewport.setActualSize() }.help("One map pixel per display pixel")
+            Button { viewport.setZoom(viewport.zoom / 1.25) } label: { Image(systemName: "minus.magnifyingglass") }
+            Button { viewport.setZoom(viewport.zoom * 1.25) } label: { Image(systemName: "plus.magnifyingglass") }
+            NumericTextField(title: "Zoom percent", value: Binding(
+                get: { Double(viewport.zoom) * 100 },
+                set: { viewport.setZoom(CGFloat($0 / 100)) }), greaterThan: 0)
+                .frame(width: 65)
+            Text("%").font(.caption).foregroundStyle(.secondary)
+        }
+    }
+    private var visibleMapMenu: some View {
+        Menu("Visible Maps (\(visibleCandidates.count))") {
+            if comparisonLayout { Text("Show up to two outputs beside the reference") }
+            ForEach(comparisonLayout ? candidates.filter({ ["checkpoint", "model", "base"].contains($0.role) })
+                    + candidates.filter({ !["checkpoint", "model", "base"].contains($0.role) }) : candidates) { candidate in
+                Toggle(candidate.selectionTitle, isOn: Binding(get: { visibleCandidates.contains(where: { $0.id == candidate.id }) }, set: { shown in
+                    if visibleIDs.isEmpty { visibleIDs = Set(visibleCandidates.map(\.id)) }
+                    if shown {
+                        if comparisonLayout, !candidate.isReference,
+                           let replaced = visibleCandidates.filter({ !$0.isReference }).first,
+                           visibleCandidates.filter({ !$0.isReference }).count >= 2 {
+                            visibleIDs.remove(replaced.id)
+                        }
+                        visibleIDs.insert(candidate.id)
+                    } else if !candidate.isReference && visibleIDs.count > 1 { visibleIDs.remove(candidate.id) }
+                })).disabled(candidate.isReference)
+            }
+        }.help("Choose the model outputs to inspect. The dataset reference stays visible beside them.")
     }
     private func restoreVisibleMaps() {
         let known = Set(candidates.map(\.id))

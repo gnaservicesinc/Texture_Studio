@@ -99,7 +99,6 @@ struct MaterialDatasetInfoSheet: View {
                     TextField("Description", text: $description, axis: .vertical).lineLimit(3...5)
                 }
                 DatasetResolutionPicker(size: $size)
-                if store.dataset?.isSourceFolder != true { DatasetSourceTierControls(count: $sourceTierCount, size: size) }
                 DatasetValidationControls(settings: $validation)
                 if let plans = store.dataset?.resolutionPlans?[String(size)] {
                     DatasetPlanSummary(plans: plans, validation: validation)
@@ -262,23 +261,6 @@ struct DatasetSheetOperationNotice: View {
     }
 }
 
-struct DatasetSourceTierControls: View {
-    @Binding var count: Int
-    let size: Int
-
-    private var fetchedSizes: [Int] {
-        Array(Set((0..<count).map { max(1024, size) * (1 << $0) }.filter { [1024, 2048, 4096, 8192, 16384].contains($0) })).sorted()
-    }
-
-    var body: some View {
-        NumericField("Source tiers to fetch", value: $count, in: 1...3, unit: "tiers")
-        Text(fetchedSizes.isEmpty
-             ? "No published provider tier matches this grid. Existing original maps remain available."
-             : "Fetch published \(fetchedSizes.map { "\($0 / 1024)K" }.joined(separator: ", ")) maps as needed. Higher tiers use more disk space. Existing original maps remain available; prepared crops use \(size) × \(size) pixels.")
-            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-    }
-}
-
 struct DatasetResolutionPicker: View {
     @Binding var size: Int
     var body: some View {
@@ -287,7 +269,7 @@ struct DatasetResolutionPicker: View {
                 Text("\(value) × \(value)").tag(value)
             }
         }
-        Text("Uses exact original pixels: one centered crop per source set, or three disjoint corner crops for sources at least 8192 × 8192. Smaller sources remain available for inspection but cannot train at this size. No resizing or padding is applied. Final material export has its own size setting.")
+        Text("Uses exact original pixels: one crop per source set, or three separate corner crops for sources at least 8192 × 8192. Crop positions follow the training settings. Smaller sources remain available for inspection but cannot supply this crop size. No resizing or padding is applied.")
             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
     }
 }

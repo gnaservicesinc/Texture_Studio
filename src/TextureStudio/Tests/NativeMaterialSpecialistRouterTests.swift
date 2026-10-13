@@ -100,13 +100,16 @@ final class NativeMaterialSpecialistRouterTests: XCTestCase {
         let root = try temporary()
         defer { try? FileManager.default.removeItem(at: root) }
         let saved = try checkpoint(root, target: "height")
-        let sampleURL = try sourceReferenceDataset(root, diffuse: source)
+        let originalInput = try sourceCategoryDataset(root, diffuse: source)
         var registry = makeRegistry(root, specialists: [makeSpecialist(root, models: [saved])])
         let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
         let registryURL = root.appendingPathComponent(NativeMaterialSpecialistService.registryFilename)
         try encoder.encode(registry).write(to: registryURL)
         let current = try NativeMaterialSpecialistService.routingRegistry(workspaceURL: root)
-        let currentMembership = try XCTUnwrap(current.specialists.first?.targets.first { $0.target == "height" }?.membershipSha256)
+        let target = try XCTUnwrap(current.specialists.first?.targets.first { $0.target == "height" })
+        XCTAssertEqual(target.materialCount, 1, "The actual copied maps and their Bricks tags determine current membership")
+        XCTAssertEqual(try NativeMaterialTransfer.hash(originalInput), try NativeMaterialTransfer.hash(source))
+        let currentMembership = target.membershipSha256
         let approved = record(saved, membership: currentMembership)
         registry.specialists[0].models = [approved]
         try encoder.encode(registry).write(to: registryURL)
@@ -122,9 +125,7 @@ final class NativeMaterialSpecialistRouterTests: XCTestCase {
         XCTAssertEqual(result.checkpoints["height"]?.sha256, approved.checkpointSha256)
         XCTAssertNil(result.checkpoints["normal"])
         XCTAssertNil(result.checkpoints["roughness"])
-        var sample = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: sampleURL)) as? [String: Any])
-        sample["status"] = "excluded"
-        try JSONSerialization.data(withJSONObject: sample).write(to: sampleURL)
+        try NativeSourceFileTags.update(originalInput, reviewStatus: "excluded")
         let afterExclusion = try await NativeMaterialSpecialistRouter.route(diffuse: linear, workspaceURL: root,
             modelDirectory: "", classifierModelURL: custom)
         XCTAssertTrue(afterExclusion.checkpoints.isEmpty,
@@ -175,28 +176,24 @@ final class NativeMaterialSpecialistRouterTests: XCTestCase {
             completedAt: original.completedAt, membershipSha256: membership ?? original.membershipSha256,
             approved: original.approved, approvedAt: original.approvedAt)
     }
-    private func sourceReferenceDataset(_ root: URL, diffuse: URL) throws -> URL {
-        let dataset = root.appendingPathComponent("datasets/bricks"), folder = dataset.appendingPathComponent("samples/original")
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let input = try NativePNG.inspect(diffuse)
-        let height = root.appendingPathComponent("original-height.png")
-        try NativePNG(header: .init(width: input.width, height: input.height, bits: 16, channels: 1, color: 0, interlace: 0),
-            pixels: Data(repeating: 0, count: input.width * input.height * 2), colorChunks: []).encoded().write(to: height)
-        func metadata(_ url: URL) throws -> [String: Any] {
-            let header = try NativePNG.inspect(url), digest = try NativeMaterialTransfer.hash(url)
-            return ["storage": "source_reference", "exact_source_crop": true, "sample_sha256": digest,
-                "source": ["path": url.path, "file_sha256": digest, "width": header.width, "height": header.height]]
-        }
-        let sample: [String: Any] = ["sample_id": "brick-full", "material_id": "brick-original", "source_family_id": "brick-family",
-            "status": "approved", "available_targets": ["height"], "sample_pixel_dimensions": [input.width, input.height],
-            "maps": ["input": diffuse.path, "height": height.path],
-            "map_metadata": ["input": try metadata(diffuse), "height": try metadata(height)]]
-        let sampleURL = folder.appendingPathComponent("sample.json")
-        try JSONSerialization.data(withJSONObject: sample).write(to: sampleURL)
-        try JSONSerialization.data(withJSONObject: ["schema_version": 2, "storage_policy": "original-source-references-v1",
-            "samples": [["sample_id": "brick-full", "material_id": "brick-original", "path": "samples/original"]]])
-            .write(to: dataset.appendingPathComponent("dataset.json"))
-        return sampleURL
+    private func sourceCategoryDataset(_ root: URL, diffuse: URL) throws -> URL {
+        let dataset = root.appendingPathComponent("datasets/bricks"), originals = root.appendingPathComponent("source/Brick")
+        try FileManager.default.createDirectory(at: dataset, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: originals, withIntermediateDirectories: true)
+        let header = try NativePNG.inspect(diffuse), input = originals.appendingPathComponent("Diffuse.png")
+        let height = originals.appendingPathComponent("Height.png")
+        try FileManager.default.copyItem(at: diffuse, to: input)
+        try NativePNG(header: .init(width: header.width, height: header.height, bits: 16, channels: 1, color: 0, interlace: 0),
+            pixels: Data(repeating: 0, count: header.width * header.height * 2), colorChunks: []).encoded().write(to: height)
+        try NativeSourceFileTags.update(input, role: "input", classLabel: "Bricks", classifierIdentity: "user", reviewStatus: "approved")
+        try NativeSourceFileTags.update(height, role: "height", reviewStatus: "approved")
+        try JSONSerialization.data(withJSONObject: ["schema_version": 2, "name": "Bricks", "storage_policy": "original-source-references-v1",
+            "managed_source_folders": true, "samples": []]).write(to: dataset.appendingPathComponent("dataset.json"))
+        try JSONSerialization.data(withJSONObject: ["schema": NativeMaterialSpecialistService.schema, "specialist_id": "bricks",
+            "workspace_path": root.path, "source_folder_path": root.appendingPathComponent("source").path,
+            "class_label": "Bricks"]).write(to: dataset.appendingPathComponent(".specialist-binding.json"))
+        try NativeMaterialDatasetService.refreshFolderProjection(dataset)
+        return input
     }
     private func temporary() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("specialist-router-tests-\(UUID().uuidString)")

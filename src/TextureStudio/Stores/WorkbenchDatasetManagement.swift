@@ -34,7 +34,7 @@ extension WorkbenchStore {
     func chooseDatasetParent(selected: URL? = nil, completion: @escaping (URL) -> Void) {
         guard !isBusy else { return }
         let panel = NSOpenPanel()
-        panel.title = "Choose where to save your new dataset"
+        panel.title = "Choose where to create your source folder"
         panel.prompt = "Choose Location"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -48,7 +48,7 @@ extension WorkbenchStore {
         guard !isBusy else { return }
         let panel = NSOpenPanel()
         panel.title = title
-        panel.message = "Choose an original PNG map. Files are referenced at their original dimensions and precision."
+        panel.message = "Choose an original PNG map inside the current source folder. Its dimensions and precision are preserved."
         panel.allowedContentTypes = [.png]
         panel.directoryURL = selected?.deletingLastPathComponent()
         panel.begin { response in
@@ -104,20 +104,8 @@ extension WorkbenchStore {
         guard let current = dataset else { throw StudioError("Create or open a dataset first.") }
         if let preparation = current.preparation {
             let sourceURL = URL(fileURLWithPath: preparation.sourceDatasetPath)
-            if current.isSourceFolder == true {
-                _ = try await worker(["cleanup-size", "--dataset", current.datasetPath])
-                try await loadDataset(sourceURL, recoverSources: false)
-                return dataset!
-            }
-            let indexURL = sourceURL.lastPathComponent == "dataset.json" ? sourceURL : sourceURL.appendingPathComponent("dataset.json")
-            guard NativeMaterialTrainer.checksum(try Data(contentsOf: indexURL)) == preparation.sourceIndexSha256 else {
-                throw StudioError("The original dataset changed since preparation. Review its current information before editing.")
-            }
             _ = try await worker(["cleanup-size", "--dataset", current.datasetPath])
             try await loadDataset(sourceURL, recoverSources: false)
-            guard dataset?.indexSha256 == preparation.sourceIndexSha256 else {
-                throw StudioError("The original dataset changed since preparation. Review its current information before editing.")
-            }
         }
         return dataset!
     }

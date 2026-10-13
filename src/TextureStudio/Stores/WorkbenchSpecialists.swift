@@ -57,7 +57,7 @@ struct WorkbenchSpecialistRegistry: Decodable, Sendable {
     let warnings: [String]
 }
 
-struct WorkbenchSpecialistTrainingContext: Sendable {
+struct WorkbenchSpecialistTrainingContext: Codable, Sendable {
     let workspacePath: String
     let specialistID: String
     let name: String
@@ -80,16 +80,18 @@ extension WorkbenchStore {
 
     var modelWorkshopNeedsOriginalSources: Bool {
         guard let dataset, !modelWorkshopSourcePath.isEmpty else { return false }
-        return specialistTrainingContext != nil || URL(fileURLWithPath: dataset.datasetPath).standardizedFileURL.path != URL(fileURLWithPath: modelWorkshopSourcePath).standardizedFileURL.path
+        return URL(fileURLWithPath: dataset.datasetPath).resolvingSymlinksInPath().standardizedFileURL.path !=
+            URL(fileURLWithPath: modelWorkshopSourcePath).resolvingSymlinksInPath().standardizedFileURL.path
     }
 
     func restoreModelWorkshopSourcesIfNeeded() async throws {
         let source = modelWorkshopSourcePath
         guard !source.isEmpty else { return }
         if modelWorkshopNeedsOriginalSources {
-            try await loadDataset(URL(fileURLWithPath: source), recoverSources: false)
+            let options = training
+            try await loadDataset(URL(fileURLWithPath: source), recoverSources: false, reviewSize: options.size)
+            training = options
         }
-        specialistTrainingContext = nil
         specialistSourceDatasetPath = source
         datasetBrowserMode = .originals
         try await alignModelWorkshopWorkspace(with: source)
@@ -150,7 +152,6 @@ extension WorkbenchStore {
             }
             return
         }
-        specialistTrainingContext = nil
         datasetBrowserMode = .originals
         datasetNavigationRequest = UUID()
     }
@@ -191,38 +192,72 @@ extension WorkbenchStore {
     }
 
     func openSpecialistTrainer(continuing: Bool = false) {
-        guard let specialist = selectedSpecialist,
-              (specialist.targetInfo(specialistTarget)?.materialCount ?? 0) > 0 else {
-            error = "This category needs paired \(specialistTarget) maps before training."; return
-        }
+        guard !isBusy else { return }
+        guard let specialist = selectedSpecialist else { error = "Choose a material category in Loom Room."; return }
         specialistSourceDatasetPath = modelWorkshopSourcePath
-        let target = specialistTarget, workspace = specialistWorkspacePath
+        let target = specialistTarget, workspace = specialistRegistry?.workspacePath ?? specialistWorkspacePath
         operation("Opening \(specialist.name) training dataset…") {
             if self.modelWorkshopNeedsOriginalSources { try await self.restoreModelWorkshopSourcesIfNeeded() }
-            let sourceGrid = self.datasetResolution
+            let sourceGrid = self.training.size
             let family: MaterialTrainingModelFamily = target == "normal" ? .compactNormal : .compactScalar
             if self.training.modelFamily != family { self.training.learningRate = 0.0003 }
             self.training.modelFamily = family
             self.training.target = target
             self.training.scope = "full-model"
-            self.training.useSelectedMaterialOnly = false
             self.training.useWarmStart = false
             self.training.modelName = "\(specialist.name) \(Self.specialistMapTitle(target))"
             try await self.loadTrainingCapabilities()
-            try await self.loadDataset(URL(fileURLWithPath: specialist.datasetPath), reviewSize: sourceGrid)
             self.training.size = sourceGrid
+            self.specialistTrainingContext = .init(workspacePath: workspace, specialistID: specialist.id,
+                name: specialist.name, target: target, datasetPath: specialist.datasetPath,
+                membershipSHA256: specialist.targetInfo(target)?.membershipSha256 ?? "")
+            _ = try await self.refreshActiveTrainingCategory(self.specialistTrainingContext, options: self.training)
             self.selectedRole = target
-            if continuing, let saved = specialist.latestModel(for: target) {
+            if continuing, let saved = self.specialistRegistry?.specialists.first(where: { $0.id == specialist.id })?.latestModel(for: target) {
                 try await self.loadCheckpoint(URL(fileURLWithPath: saved.checkpointPath))
                 if self.selectedCheckpoint?.matchesTraining(self.training) == true { self.training.useWarmStart = true }
                 else { throw StudioError("The saved specialist checkpoint cannot continue this model family and map.") }
             }
-            self.specialistTrainingContext = .init(workspacePath: workspace, specialistID: specialist.id,
-                name: specialist.name, target: target, datasetPath: specialist.datasetPath,
-                membershipSHA256: specialist.targetInfo(target)?.membershipSha256 ?? "")
             self.trainingNavigationRequest = UUID()
             self.activity = "\(specialist.name) is ready. Review the training settings, then choose Start Training."
         }
+    }
+
+    /// Browsing originals must not replace the trainer's tagged category.
+    func openActiveTrainerDataset() {
+        guard !isBusy, let context = specialistTrainingContext,
+              (dataset?.preparation?.sourceDatasetPath ?? dataset?.datasetPath) != context.datasetPath else { return }
+        let size = training.size
+        operation("Opening \(context.name) training maps…") {
+            try await self.loadDataset(URL(fileURLWithPath: context.datasetPath), reviewSize: size)
+            self.activity = "\(context.name) · \(Self.specialistMapTitle(self.training.target)) · \(size) × \(size)"
+        }
+    }
+
+    /// Resolve membership from current files and image tags immediately before
+    /// preparation. A saved category manifest is a projection, never the source.
+    func refreshActiveTrainingCategory(_ context: WorkbenchSpecialistTrainingContext?,
+                                      options: MaterialTrainingOptions) async throws -> WorkbenchSpecialistTrainingContext? {
+        guard let context else { throw StudioError("Choose a material category in Loom Room.") }
+        let source = modelWorkshopSourcePath
+        guard !source.isEmpty else { throw StudioError("The category's original source folder is unavailable.") }
+        var args = ["refresh-specialists", "--dataset", source, "--workspace", context.workspacePath,
+                    "--classifier-dataset", classifierDatasetPath]
+        let classifier = specialistClassifierPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !classifier.isEmpty { args += ["--classifier", classifier] }
+        let registry = try WorkbenchResult.decode(WorkbenchSpecialistRegistry.self, output: await worker(args))
+        specialistRegistry = registry
+        guard let category = registry.specialists.first(where: { $0.id == context.specialistID }),
+              let target = category.targetInfo(options.target), target.materialCount > 0 else {
+            throw StudioError("\(context.name) has no included paired \(Self.specialistMapTitle(options.target).lowercased()) maps in the current source folder and tags.")
+        }
+        let refreshed = WorkbenchSpecialistTrainingContext(workspacePath: registry.workspacePath,
+            specialistID: category.id, name: category.name, target: options.target,
+            datasetPath: category.datasetPath, membershipSHA256: target.membershipSha256)
+        specialistTrainingContext = refreshed
+        try await loadDataset(URL(fileURLWithPath: category.datasetPath), reviewSize: options.size)
+        training = options
+        return refreshed
     }
 
     func recordSpecialistCheckpoint(context: WorkbenchSpecialistTrainingContext,

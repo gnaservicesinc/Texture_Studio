@@ -45,7 +45,7 @@ final class DatasetManagementTests: XCTestCase {
         XCTAssertEqual(store.datasetBrowserSamples.count, 2, "Changing the grid view never removes originals")
     }
 
-    func testMissingOriginalInspectionRetainsRegistrationWithoutWorkerMutation() throws {
+    func testMissingOriginalInspectionRequestsLiveFolderRefreshWithoutDeletingMetadata() throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let store = fixture.store()
         store.adoptDataset(try WorkbenchResult.decode(WorkbenchDataset.self, output: managedBrowserDocument(fixture)))
@@ -53,7 +53,8 @@ final class DatasetManagementTests: XCTestCase {
         store.selectDatasetSample(original)
         let index = store.dataset?.indexSha256
         let notice = store.reportMissingDatasetSource(URL(fileURLWithPath: "/unavailable/original.png"))
-        XCTAssertTrue(notice.contains("reference is kept"))
+        XCTAssertTrue(notice.contains("moved or deleted"))
+        XCTAssertTrue(store.sourceFolderNeedsRefresh)
         XCTAssertEqual(store.dataset?.indexSha256, index)
         XCTAssertEqual(store.datasetBrowserSamples.count, 2)
         XCTAssertEqual(store.selectedSample?.id, original.id)
@@ -288,7 +289,7 @@ final class DatasetManagementTests: XCTestCase {
         XCTAssertEqual(store.datasetName, "Source renamed")
     }
 
-    func testPreparedManagementRejectsChangedDurableIndexBeforeCleanupOrSourceRead() async throws {
+    func testPreparedManagementRefreshesCurrentSourceInsteadOfRejectingObsoleteIndex() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let store = fixture.store()
@@ -296,9 +297,10 @@ final class DatasetManagementTests: XCTestCase {
         try Data("changed durable dataset".utf8).write(to: fixture.dataset.appendingPathComponent("dataset.json"))
         store.updateDatasetInfo(name: "Source renamed", description: "")
         try await settled(store)
-        XCTAssertTrue(store.error?.contains("changed since preparation") == true)
-        XCTAssertTrue(fixture.calls.isEmpty, "A stale source snapshot must be rejected before any cleanup, recovery or edit")
-        XCTAssertNotNil(store.dataset?.preparation)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(fixture.calls.map { $0[0] }, ["cleanup-size", "dataset", "edit-dataset"])
+        XCTAssertNil(store.dataset?.preparation)
+        XCTAssertEqual(store.datasetName, "Source renamed")
     }
 
     func testTrashUsesVerifiedMetadataScopeAndClearsLibraryOnlyAfterSuccess() async throws {
@@ -361,21 +363,15 @@ final class DatasetManagementTests: XCTestCase {
         defer { fixture.remove() }
         let source = fixture.root.appendingPathComponent("Sources")
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: false)
-        let input = source.appendingPathComponent("diffuse.png")
-        let height = source.appendingPathComponent("height.png")
+        let input = source.appendingPathComponent("diffuse.png"), height = source.appendingPathComponent("height.png")
         let diffuse = NativePNG(header: .init(width: 256, height: 256, bits: 8, channels: 3, color: 2, interlace: 0),
             pixels: Data(repeating: 127, count: 256 * 256 * 3), colorChunks: [])
         var samples = Data()
         for code in 0..<65536 { samples.append(UInt8(code >> 8)); samples.append(UInt8(code & 255)) }
         let scalar = NativePNG(header: .init(width: 256, height: 256, bits: 16, channels: 1, color: 0, interlace: 0), pixels: samples, colorChunks: [])
-        try diffuse.encoded().write(to: input)
-        try scalar.encoded().write(to: height)
-        let originalBytes = try Data(contentsOf: height)
-        var trashed: [URL] = []
-        let store = WorkbenchStore(preferences: fixture.defaults, trashHandler: { url in
-            trashed.append(url)
-            try FileManager.default.moveItem(at: url, to: fixture.root.appendingPathComponent("Recovered Dataset"))
-        })
+        let inputBytes = try diffuse.encoded(), originalBytes = try scalar.encoded()
+        try inputBytes.write(to: input); try originalBytes.write(to: height)
+        let store = WorkbenchStore(preferences: fixture.defaults)
         store.training.size = 1024
         store.openDataset(source)
         try await settled(store)
@@ -383,91 +379,84 @@ final class DatasetManagementTests: XCTestCase {
         XCTAssertFalse(store.showNewDatasetSheet)
         XCTAssertTrue(store.dataset?.isSourceFolder == true)
         XCTAssertEqual(store.dataset?.sourceSetCount, 1)
-        store.pendingSourceFolder = nil
-        store.showNewDatasetSheet = false
-        store.createDataset(name: "Native Lifecycle", description: "Exact originals", parentURL: fixture.root, size: 1024, sourceFolder: false)
+        store.createDataset(name: "Native Lifecycle", description: "", parentURL: fixture.root, size: 1024)
         try await settled(store)
         XCTAssertNil(store.error)
-        XCTAssertEqual(store.samples.count, 0)
+        let folder = try XCTUnwrap(store.datasetFolderURL)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.appendingPathComponent("dataset.json").path))
+        XCTAssertEqual(store.dataset?.sourceSetCount, 0)
+        store.updateDatasetInfo(name: store.datasetName, description: "", size: 1024)
+        try await settled(store)
         store.addMaterial(name: "壁材", input: input, height: height, roughness: nil, normal: nil)
         try await settled(store)
         XCTAssertNil(store.error)
-        XCTAssertEqual(store.samples.count, 0, "A 256-pixel original cannot be displayed as a 1024 training crop")
-        XCTAssertEqual(store.dataset?.sourceSetCount, 1, "Its original references remain registered")
+        XCTAssertEqual(store.samples.count, 0, "A 256-pixel original cannot supply a 1024 training crop")
+        XCTAssertEqual(store.dataset?.sourceSetCount, 1)
         XCTAssertEqual(store.datasetResolution, 1024)
-        XCTAssertEqual(store.datasetBrowserSamples.count, 1, "Undersized originals remain manageable without changing the grid")
-        store.updateDatasetInfo(name: store.datasetName, description: store.datasetDescription, size: 256)
+        XCTAssertEqual(store.datasetBrowserSamples.count, 1)
+        let copiedFolder = folder.appendingPathComponent("壁材")
+        let copiedInput = copiedFolder.appendingPathComponent(input.lastPathComponent), copiedHeight = copiedFolder.appendingPathComponent(height.lastPathComponent)
+        XCTAssertEqual(try Data(contentsOf: copiedInput), inputBytes)
+        XCTAssertEqual(try Data(contentsOf: copiedHeight), originalBytes)
+        XCTAssertEqual(NativeSourceFileTags.read(copiedInput)?.role, "input")
+        XCTAssertEqual(NativeSourceFileTags.read(copiedHeight)?.role, "height")
+        XCTAssertTrue((store.dataset?.sourceInventory ?? []).allSatisfy { $0.path.hasPrefix(folder.path + "/") })
+        store.updateDatasetInfo(name: store.datasetName, description: "", size: 256)
         try await settled(store)
         XCTAssertNil(store.error)
-        XCTAssertEqual(store.samples.count, 1, "Selecting its native grid restores the original's manageable crop")
-        XCTAssertEqual(store.selectedSample?.width, 256)
-        XCTAssertEqual(store.selectedMaterialName, "壁材")
+        XCTAssertEqual(store.samples.count, 1)
+        XCTAssertEqual(store.datasetResolution, 256)
+        XCTAssertEqual(store.training.size, 256)
+        _ = try await NativeMaterialDatasetService.run(arguments: ["prepare-size", "--dataset", folder.path,
+            "--size", "256", "--target", "height", "--skip-source-recovery"])
+        try await store.loadDataset(folder, recoverSources: false, reviewSize: 256)
         store.datasetBrowserMode = .crops
+        store.selectedSampleId = store.samples.first?.id
+        store.selectedRole = "height"
+        XCTAssertEqual(store.selectedSample?.width, 256)
         let display = try XCTUnwrap(store.datasetDisplayTransform(try XCTUnwrap(store.selectedMap), role: "height"))
         XCTAssertEqual(display.size, 256)
         XCTAssertEqual(display.cropRectangle, [0, 0, 256, 256])
         XCTAssertEqual(display.algorithm, MapReviewDisplayTransform.exactCrop)
-        XCTAssertEqual(display.sourceSHA256, NativeMaterialTrainer.checksum(originalBytes), "The identity crop remains bound to the unchanged original integer codes")
-        store.updateDatasetInfo(name: "Renamed Native Dataset", description: "Edited description")
-        try await settled(store)
-        XCTAssertNil(store.error)
-        XCTAssertEqual(store.datasetDescription, "Edited description")
+        XCTAssertEqual(display.sourceSHA256, NativeMaterialTrainer.checksum(originalBytes))
         store.curateSelected(status: "approved", split: "validation", note: "Retain native precision")
         try await settled(store)
         XCTAssertNil(store.error)
-        XCTAssertEqual(store.selectedSample?.split, "validation", "An explicit crop split must survive the refreshed crop plan")
+        XCTAssertEqual(store.selectedSample?.split, "validation")
         XCTAssertEqual(store.selectedSample?.splitAssignment, "manual")
         XCTAssertEqual(store.selectedSample?.note, "Retain native precision")
         store.curateSelected(status: "approved", note: "")
         try await settled(store)
         XCTAssertNil(store.error)
         XCTAssertEqual(store.selectedSample?.note, "")
-        XCTAssertEqual(store.selectedSample?.split, "validation", "Editing a note retains the manually selected split")
-        store.removeSelectedMaterial()
-        try await settled(store)
-        XCTAssertNil(store.error)
-        XCTAssertEqual(store.samples.count, 0)
-        store.importMaterialFolder(source)
-        try await settled(store)
-        XCTAssertNil(store.error)
-        XCTAssertTrue(store.showImportFolderSheet)
-        XCTAssertEqual(store.folderImport?.addedMaterialCount, 1)
-        XCTAssertEqual(store.samples.count, 0, "Scanning is read-only until Import is pressed")
-        let indexURL = try XCTUnwrap(store.datasetFolderURL).appendingPathComponent("dataset.json")
-        var edited = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: indexURL)) as? [String: Any])
-        edited["description"] = "Changed in another window"
-        try JSONSerialization.data(withJSONObject: edited).write(to: indexURL, options: .atomic)
-        store.commitFolderImport(size: store.folderImportSize)
-        try await settled(store)
-        XCTAssertNotNil(store.error)
-        XCTAssertTrue(store.showImportFolderSheet)
-        XCTAssertEqual(store.samples.count, 0)
-        store.importMaterialFolder(source)
-        try await settled(store)
-        XCTAssertNil(store.error, "Scan Again must reconnect a changed dataset, not repeat the stale-index failure")
-        store.commitFolderImport(size: 256)
-        try await settled(store)
-        XCTAssertNil(store.error)
-        XCTAssertFalse(store.showImportFolderSheet)
-        XCTAssertEqual(store.datasetResolution, 256)
-        XCTAssertEqual(store.samples.count, 1)
-        let folder = try XCTUnwrap(store.datasetFolderURL)
-        let expectedTrashedPath = folder.resolvingSymlinksInPath().standardizedFileURL.path
+        XCTAssertEqual(store.selectedSample?.split, "validation")
         store.closeDataset()
         store.openDataset(folder)
         try await settled(store)
         XCTAssertNil(store.error)
-        XCTAssertEqual(store.datasetName, "Renamed Native Dataset")
-        store.trashDataset()
+        XCTAssertEqual(store.datasetResolution, 256)
+        XCTAssertEqual(store.dataset?.sourceSetCount, 1)
+        store.renameSourceFolder(copiedFolder, name: "Renamed Wall")
         try await settled(store)
         XCTAssertNil(store.error)
-        XCTAssertEqual(trashed.map(\.path), [expectedTrashedPath])
-        XCTAssertNil(store.dataset)
+        let renamed = folder.appendingPathComponent("Renamed Wall")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: copiedFolder.path))
+        XCTAssertEqual(try Data(contentsOf: renamed.appendingPathComponent(height.lastPathComponent)), originalBytes)
+        XCTAssertEqual(store.dataset?.sourceSetCount, 1)
+        let moved = fixture.root.appendingPathComponent("Moved Wall")
+        store.closeDataset()
+        try FileManager.default.moveItem(at: renamed, to: moved)
+        store.openDataset(folder)
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.dataset?.sourceSetCount, 0, "Moving physical originals out removes their membership")
+        XCTAssertEqual(store.dataset?.sourceInventory?.count, 0)
+        XCTAssertEqual(try Data(contentsOf: moved.appendingPathComponent(height.lastPathComponent)), originalBytes)
         XCTAssertEqual(try Data(contentsOf: height), originalBytes)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: input.path))
+        XCTAssertEqual(try Data(contentsOf: input), inputBytes)
     }
 
-    func testTrainerExplainsWhenAllMaterialsAreExplicitlyHeldOut() async throws {
+    func testTrainerRequiresCategoryBeforeUsingCachedValidationInventory() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let store = WorkbenchStore(preferences: fixture.defaults, workerOverride: { args, _ in
@@ -479,9 +468,10 @@ final class DatasetManagementTests: XCTestCase {
                 "maps":{"height":{"path":"\(fixture.original.path)","width":256,"height":256}}}]}]}
                 """.replacingOccurrences(of: "\n", with: "")
         })
+        store.training.size = 256
         try await store.loadTrainingCapabilities()
         try await store.loadDataset(fixture.dataset)
-        XCTAssertTrue(store.trainingConfigurationIssue?.contains("All available materials are assigned to Validation") == true)
+        XCTAssertEqual(store.trainingConfigurationIssue, "Choose a material category in Loom Room.")
         store.startTraining()
         XCTAssertFalse(store.isBusy)
         XCTAssertNotNil(store.error)
@@ -644,6 +634,7 @@ final class DatasetManagementTests: XCTestCase {
             if args[0] == "import-folder" { fixture.trainingSize = Int(fixture.value("--training-size", in: args)!)! }
             return try fixture.document()
         })
+        store.training.size = 2048
         try await store.loadDataset(fixture.dataset)
         store.importMaterialFolder(folder)
         for _ in 0..<100 {
@@ -688,7 +679,6 @@ final class DatasetManagementTests: XCTestCase {
             }
             return try fixture.document()
         })
-        store.training.useSelectedMaterialOnly = true
         store.pendingSourceFolder = folder
         store.createDataset(name: "Balanced", description: "", parentURL: fixture.root, size: 1024, sourceFolder: false)
         try await settled(store)
@@ -698,7 +688,6 @@ final class DatasetManagementTests: XCTestCase {
         XCTAssertNil(store.folderImport)
         XCTAssertFalse(store.showImportFolderSheet)
         XCTAssertTrue(store.sourceRecoverySummary.isEmpty)
-        XCTAssertTrue(store.training.useSelectedMaterialOnly, "Dataset creation preserves the selected-folder preference")
         XCTAssertFalse(fixture.calls.contains { ["train", "prepare-size"].contains($0[0]) })
         let imported = try XCTUnwrap(fixture.calls.first { $0[0] == "import-folder" })
         XCTAssertEqual(fixture.value("--expected-index-sha256", in: imported), "source-hash")

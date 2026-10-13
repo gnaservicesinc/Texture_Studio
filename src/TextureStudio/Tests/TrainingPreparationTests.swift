@@ -80,7 +80,7 @@ final class TrainingPreparationTests: XCTestCase {
         XCTAssertEqual(fixture.calls.last?.first, "prepare-size")
         XCTAssertEqual(value("--size", in: fixture.calls.last!), "1024")
         XCTAssertEqual(value("--preparation-workers", in: fixture.calls.last!), "1")
-        XCTAssertEqual(value("--expected-index-sha256", in: fixture.calls.last!), "source-sha")
+        XCTAssertNil(value("--expected-index-sha256", in: fixture.calls.last!), "Cached browser identity cannot reject unchanged current files")
         XCTAssertEqual(try Data(contentsOf: fixture.original.appendingPathComponent("dataset.json")), Data("original".utf8))
         let count = fixture.calls.count
         store.selectTrainingSize(2048)
@@ -166,6 +166,11 @@ final class TrainingPreparationTests: XCTestCase {
         XCTAssertNil(store.error)
         let train = try XCTUnwrap(fixture.calls.first { $0.first == "train" })
         let preparation = try XCTUnwrap(fixture.calls.first { $0.first == "prepare-size" })
+        let refresh = try XCTUnwrap(fixture.calls.first { $0.first == "refresh-specialists" })
+        XCTAssertEqual(value("--dataset", in: refresh), fixture.source.path)
+        XCTAssertEqual(value("--dataset", in: preparation), fixture.original.path)
+        XCTAssertNil(value("--material", in: preparation), "Browsing one material cannot restrict current tagged category membership")
+        XCTAssertNil(value("--expected-index-sha256", in: preparation))
         XCTAssertEqual(value("--preparation-workers", in: preparation), String(store.preparationWorkers))
         XCTAssertTrue(train.contains("--whole-maps"))
         XCTAssertEqual(value("--size", in: train), "1024")
@@ -195,6 +200,32 @@ final class TrainingPreparationTests: XCTestCase {
         XCTAssertEqual(store.dataset?.datasetPath, fixture.original.path)
         XCTAssertEqual(store.selectedCheckpoint?.url.pathExtension, "safetensors")
         XCTAssertTrue(store.selectedCheckpoint?.supportsTrainingWarmStart == true)
+    }
+
+    func testStaleBrowserIDsCannotPreventRefreshingCurrentTaggedCategory() async throws {
+        let fixture = try Fixture(); defer { fixture.remove() }
+        let store = fixture.store()
+        store.uploadAfterTraining = false
+        store.selectTrainingModelFamily(.compactScalar)
+        try await store.loadTrainingCapabilities()
+        store.dataset = try WorkbenchResult.decode(WorkbenchDataset.self, output: """
+            {"dataset_path":"\(fixture.original.path)","source_folder_path":"\(fixture.source.path)",
+             "index_sha256":"obsolete-cached-ID","supported_training_sizes":[],"materials":[]}
+            """)
+        store.selectedSampleId = "obsolete-selected-sample"
+        store.training.size = 1024
+        XCTAssertNil(store.trainingConfigurationIssue)
+        store.startTraining()
+        try await settled(store)
+        XCTAssertNil(store.error)
+        XCTAssertEqual(fixture.calls.first?.first, "capabilities")
+        XCTAssertEqual(fixture.calls.dropFirst().first?.first, "refresh-specialists")
+        let preparation = try XCTUnwrap(fixture.calls.first { $0.first == "prepare-size" })
+        XCTAssertEqual(value("--dataset", in: preparation), fixture.original.path)
+        XCTAssertNil(value("--expected-index-sha256", in: preparation))
+        XCTAssertNil(value("--material", in: preparation))
+        XCTAssertTrue(fixture.calls.contains { $0.first == "train" })
+        XCTAssertEqual(store.specialistTrainingContext?.membershipSHA256, "current-stone-tags")
     }
 
     func testBlankModelNameUsesSourceDatasetAndMapBeforePreparingTrainingFiles() async throws {
@@ -268,7 +299,8 @@ final class TrainingPreparationTests: XCTestCase {
         fixture.continuation?.resume(); fixture.continuation = nil
         try await settled(store)
         XCTAssertNil(store.error)
-        XCTAssertEqual(store.activity, "Training time limit reached. Saved 1 of 200 updates.")
+        XCTAssertTrue(store.activity.hasPrefix("Training time limit reached. Saved 1 of 200 updates."))
+        XCTAssertTrue(store.activity.contains("Saved in Stone."))
         XCTAssertEqual(store.training.scope, "map-decoder")
         XCTAssertNotNil(store.selectedCheckpoint)
         XCTAssertTrue(fixture.calls.contains { $0.first == "cleanup-size" })
@@ -337,9 +369,11 @@ final class TrainingPreparationTests: XCTestCase {
             fixture.continuation?.resume(); fixture.continuation = nil
             try await settled(store)
             XCTAssertNil(store.error)
-            XCTAssertEqual(store.activity, completed == 0 ?
+            XCTAssertTrue(store.activity.hasPrefix(completed == 0 ?
                 "No valid training samples remain. Saved the current weights without training." :
-                "No valid training samples remain. Saved 3 completed steps.")
+                "No valid training samples remain. Saved 3 completed steps."))
+            XCTAssertEqual(store.activity.contains("Saved in Stone."), completed > 0,
+                "Only actual completed updates register a trained category model")
             XCTAssertEqual(store.trainingProgress?.completedUpdates, completed)
             XCTAssertNotNil(store.selectedCheckpoint)
             XCTAssertTrue(fixture.calls.contains { $0.first == "cleanup-size" })
@@ -616,6 +650,7 @@ final class TrainingPreparationTests: XCTestCase {
     }
     @MainActor private final class Fixture {
         let root: URL
+        let source: URL
         let original: URL
         let prepared: URL
         let defaults: UserDefaults
@@ -630,10 +665,12 @@ final class TrainingPreparationTests: XCTestCase {
         var continuation: CheckedContinuation<Void, Never>?
         init() throws {
             root = FileManager.default.temporaryDirectory.appendingPathComponent("training-grid-\(UUID().uuidString)")
-            original = root.appendingPathComponent("original")
+            source = root.appendingPathComponent("sources")
+            original = root.appendingPathComponent("categories/stone")
             prepared = root.appendingPathComponent(".training-data/grid-1024")
             defaults = UserDefaults(suiteName: suite)!
             try FileManager.default.createDirectory(at: original, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
             try Data("original".utf8).write(to: original.appendingPathComponent("dataset.json"))
             defaults.set(root.path, forKey: "workspace")
         }
@@ -643,9 +680,11 @@ final class TrainingPreparationTests: XCTestCase {
         }
         func dataset(prepared isPrepared: Bool) throws -> String {
             let size = isPrepared ? 1024 : 2048
-            let maps: [String: Any] = ["input": ["path": root.appendingPathComponent("diffuse.png").path, "width": size, "height": size],
-                mapTarget: ["path": root.appendingPathComponent("\(mapTarget).png").path, "width": wrongGrid && isPrepared ? 512 : size, "height": size]]
+            let maps: [String: Any] = ["input": ["path": source.appendingPathComponent("diffuse.png").path, "width": size, "height": size],
+                mapTarget: ["path": source.appendingPathComponent("\(mapTarget).png").path, "width": wrongGrid && isPrepared ? 512 : size,
+                            "height": size, "source_bits": 16]]
             var value: [String: Any] = ["dataset_path": isPrepared ? prepared.path : original.path,
+                "source_folder_path": source.path,
                 "index_sha256": isPrepared ? "prepared-sha" : "source-sha", "supported_training_sizes": [512, 1024, 2048],
                 "automatic_validation": ["policy": "subject-extra-crops-v2", "material_ids": ["soil"]],
                 "materials": [["material_id": "soil", "samples": [["sample_id": "soil", "status": "approved", "split": "train", "width": size, "height": size, "maps": maps]]]]]
@@ -654,10 +693,19 @@ final class TrainingPreparationTests: XCTestCase {
                 "original_dataset_modified": false] }
             return try json(value)
         }
+        func registry() throws -> String {
+            try json(["workspace_path": root.appendingPathComponent("categories").path, "source_dataset_path": source.path,
+                "classifier_sha256": "", "classifier_labels": ["Stone"], "updated_at": "2026-10-12",
+                "classifier_only_count": 0, "material_count": 1, "family_count": 1, "warnings": [],
+                "specialists": [["id": "stone", "name": "Stone", "class_label": "Stone", "is_custom": false,
+                    "dataset_path": original.path, "material_ids": ["soil"], "family_ids": ["soil"], "models": [],
+                    "targets": [["target": mapTarget, "material_count": 1, "status": "ready", "membership_sha256": "current-stone-tags"]]]]])
+        }
         func store() -> WorkbenchStore {
-            WorkbenchStore(preferences: defaults, managedWorkspaceURL: root, workerOverride: { args, script in
+            let store = WorkbenchStore(preferences: defaults, managedWorkspaceURL: root, workerOverride: { args, script in
                 self.calls.append(args)
                 switch args.first {
+                case "refresh-specialists", "record-specialist-model": return try self.registry()
                 case "capabilities":
                     XCTAssertEqual(script, args.first)
                     return "{\"training_sizes\":[512,1024]}"
@@ -685,6 +733,11 @@ final class TrainingPreparationTests: XCTestCase {
                 default: throw StudioError("Unexpected worker command")
                 }
             })
+            store.specialistSourceDatasetPath = source.path
+            store.specialistTrainingContext = .init(workspacePath: root.appendingPathComponent("categories").path,
+                specialistID: "stone", name: "Stone", target: mapTarget, datasetPath: original.path,
+                membershipSHA256: "previous-stone-tags")
+            return store
         }
     }
 }

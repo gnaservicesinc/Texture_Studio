@@ -7,7 +7,6 @@ struct DatasetWorkbenchView: View {
     @State private var expandedCrops: Set<String> = []
     @State private var reviewNote = ""
     @State private var viewport = InspectionViewport()
-    @State private var showRemoveMaterial = false
     @State private var selectedNode: DatasetBrowserNode?
     @State private var selectedInventoryPath: String?
     @State private var unavailableSource: String?
@@ -167,9 +166,6 @@ struct DatasetWorkbenchView: View {
                     HStack {
                         Button("Dataset Info…", systemImage: "info.circle") { store.showDatasetInfoSheet = true }
                         Spacer()
-                        if store.dataset?.isSourceFolder != true {
-                            Button("Delete Dataset…", role: .destructive) { store.showTrashDatasetConfirmation = true }
-                        }
                     }
                     .font(.caption).padding(12).disabled(store.isBusy)
                 }
@@ -237,18 +233,7 @@ struct DatasetWorkbenchView: View {
                 }.padding(12)
             }
         }
-        .confirmationDialog("Delete “\(store.datasetName)”?", isPresented: $store.showTrashDatasetConfirmation, titleVisibility: .visible) {
-            Button("Move Dataset to Trash", role: .destructive) { store.trashDataset() }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Remove this dataset from the library and move its dataset metadata to Trash. Original source maps are kept. You can restore the metadata from Trash.\n\n\(store.datasetFolderURL?.path ?? "")")
-        }
-        .confirmationDialog("Remove “\(store.selectedMaterialName ?? store.selectedMaterialId ?? "material")” from this dataset?", isPresented: $showRemoveMaterial, titleVisibility: .visible) {
-            Button("Remove Source Set", role: .destructive) { store.removeSelectedMaterial() }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Remove this source resolution and all of its paired maps from the dataset. The original files stay in place.")
-        }
+
         .onChange(of: store.selectedSampleId) { _, _ in
             reviewNote = store.selectedSample?.note ?? ""
             viewport.fitToView = true
@@ -285,7 +270,7 @@ struct DatasetWorkbenchView: View {
                     Text("\(store.datasetInventorySummary) · \(dataset.sampleCount ?? dataset.samples.count) training crops · \(store.datasetResolution) × \(store.datasetResolution)")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
-                    Text("Create a dataset and add source folders. You can also drop folders here.").font(.caption).foregroundStyle(.secondary)
+                    Text("Open the folder containing your original images and maps. You can also drop folders here.").font(.caption).foregroundStyle(.secondary)
                 }
             }
             if !store.recentDatasets.isEmpty {
@@ -305,9 +290,6 @@ struct DatasetWorkbenchView: View {
                     Button("Assign Maps Manually…", systemImage: "photo.badge.plus") { store.showAddMaterialSheet = true }
                     if store.dataset?.isSourceFolder == true {
                         Button("Remember Missing Map Tags", systemImage: "tag") { store.repairSourceTags() }
-                    }
-                    if store.dataset?.isSourceFolder != true {
-                        Button("Preview Folder Crops…", systemImage: "viewfinder") { store.importMaterialFolder() }
                     }
                     Button("Show in Finder", systemImage: "folder") { store.revealDataset() }
                     Button("Close Dataset", systemImage: "xmark") { store.closeDataset() }
@@ -368,19 +350,19 @@ struct DatasetWorkbenchView: View {
 
     private var datasetWelcome: some View {
         ContentUnavailableView {
-            Label(store.dataset == nil ? "Make your first dataset" : store.datasetBrowserSamples.isEmpty && matchingInventory.isEmpty ? "Add your source folders" : "Select an original or crop", systemImage: "square.stack.3d.up")
+            Label(store.dataset == nil ? "Open your source folder" : store.datasetBrowserSamples.isEmpty && matchingInventory.isEmpty ? "Add your source images" : "Select an original or crop", systemImage: "square.stack.3d.up")
         } description: {
             if store.dataset == nil {
-                Text("Create a named dataset and add folders. Original images remain visible while you organize maps and prepare training crops.")
+                Text("The folder is your dataset. Open an existing folder to inspect its current images, or create an empty source folder and add material subfolders.")
             } else if store.datasetBrowserSamples.isEmpty && matchingInventory.isEmpty {
-                Text("Add original images and material maps. Pairing, review and training settings are separate from keeping files in this dataset.")
+                Text("Add original images and material maps. Use image tags to identify their material category and map type for training.")
             } else {
-                Text("Choose a material on the left to inspect its maps, inspect its crops and maps, edit its note and enable folder validation.")
+                Text("Choose a material on the left to inspect its maps, edit tags and review notes, or enable folder validation.")
             }
         } actions: {
             if store.dataset == nil {
-                Button("New Dataset…") { store.showNewDatasetSheet = true }.buttonStyle(.glassProminent)
-                Button("Open Dataset Folder…") { store.chooseDataset() }
+                Button("Choose Source Folder…") { store.chooseDataset() }.buttonStyle(.glassProminent)
+                Button("New Source Folder…") { store.showNewDatasetSheet = true }
             } else if store.datasetBrowserSamples.isEmpty && matchingInventory.isEmpty {
                 Button("Add Folder…") { store.addMaterialFolder() }.buttonStyle(.glassProminent)
             }
@@ -530,9 +512,7 @@ struct DatasetWorkbenchView: View {
                 }
                 Spacer()
                 Menu {
-                    if store.dataset?.isSourceFolder != true {
-                        Button("Remove Source Set…", role: .destructive) { showRemoveMaterial = true }
-                    } else {
+                    Group {
                         if let map = store.selectedMap {
                             Button("Edit Image Tags / Folder Name…", systemImage: "tag") { tagImage = URL(fileURLWithPath: map.originalSourcePath ?? map.path) }
                             if URL(fileURLWithPath: map.originalSourcePath ?? map.path).deletingLastPathComponent().resolvingSymlinksInPath().path != store.datasetFolderURL?.resolvingSymlinksInPath().path {
@@ -558,7 +538,7 @@ struct DatasetWorkbenchView: View {
                     }
                 }
                 .disabled(store.isBusy)
-                Text(sample.split == "original" ? "Original diffuse color variants for this source set." : "Training randomly chooses a registered diffuse color for this same target crop.")
+                Text(sample.split == "original" ? "Original diffuse color variants for this source set." : "Training randomly chooses an available diffuse color for this target crop.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             HStack {

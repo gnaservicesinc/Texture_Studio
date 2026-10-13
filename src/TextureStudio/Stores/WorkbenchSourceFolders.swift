@@ -123,12 +123,13 @@ extension WorkbenchStore {
     }
     func refreshSourceFolderIfNeeded() {
         guard sourceFolderNeedsRefresh, !isBusy, !isRefreshingSourceFolder,
-              let current = dataset, current.isSourceFolder == true,
-              current.preparation == nil else { return }
+              let current = dataset, sourceFolderObserver != nil else { return }
         sourceFolderNeedsRefresh = false
         isRefreshingSourceFolder = true
-        let root = current.sourceFolderPath ?? current.datasetPath
-        let size = current.trainingSize ?? 2048
+        let selectedPath = current.datasetPath
+        let root = current.preparation == nil ? selectedPath :
+            specialistTrainingContext?.datasetPath ?? current.sourceFolderPath ?? current.preparation!.sourceDatasetPath
+        let size = training.size
         Task { @MainActor in
             defer {
                 isRefreshingSourceFolder = false
@@ -136,8 +137,13 @@ extension WorkbenchStore {
             }
             do {
                 let output = try await worker(["dataset", "--dataset", root, "--review-size", String(size), "--skip-source-recovery"])
-                let updated = try WorkbenchResult.decode(WorkbenchDataset.self, output: output)
-                guard !isBusy, dataset?.datasetPath == root else { sourceFolderNeedsRefresh = true; return }
+                var updated = try WorkbenchResult.decode(WorkbenchDataset.self, output: output)
+                updated.trainingSize = size
+                updated.reviewSize = size
+                guard !isBusy, dataset?.datasetPath == selectedPath, training.size == size else {
+                    sourceFolderNeedsRefresh = true
+                    return
+                }
                 adoptDataset(updated)
             } catch {
                 if !isBusy { activity = "Source folder update: \(error.localizedDescription)" }

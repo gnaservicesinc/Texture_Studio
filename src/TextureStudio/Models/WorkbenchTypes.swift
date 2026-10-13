@@ -487,10 +487,11 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
     var size = 1024
     var updatesPerCrop = 100
     var maxMinutes = 30.0
-    var useSelectedMaterialOnly = false
     var useWarmStart = false
     var randomizeCrops: MaterialTrainingCropRandomization = .run
     var randomFlip = false
+    var shuffleTrainingOrder = true
+    var exaggerateFeatures = false
     var randomSpinCentercut = false
     var loraRank = 8
     var loraAlpha = 8.0
@@ -514,9 +515,9 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
     init() {}
 
     enum CodingKeys: String, CodingKey {
-        case modelName, modelFamily, compactWidth, target, scope, size, updatesPerCrop, maxMinutes, useSelectedMaterialOnly, useWarmStart, loraRank, loraAlpha, validationEvery, checkpointEvery
+        case modelName, modelFamily, compactWidth, target, scope, size, updatesPerCrop, maxMinutes, useWarmStart, loraRank, loraAlpha, validationEvery, checkpointEvery
         case validationUnit, checkpointUnit
-        case randomizeCrops, randomFlip, randomSpinCentercut
+        case randomizeCrops, randomFlip, randomSpinCentercut, shuffleTrainingOrder, exaggerateFeatures
         case learningRate, gradientAccumulationSteps, optimizer, optimizerBeta1, optimizerBeta2, optimizerEpsilon, weightDecay, maxGradientNorm, learningRateSchedule, minimumLearningRateRatio, warmupUpdates, seed
     }
 
@@ -531,10 +532,11 @@ struct MaterialTrainingOptions: Codable, Equatable, Sendable {
         size = try values.decodeIfPresent(Int.self, forKey: .size) ?? size
         updatesPerCrop = try values.decodeIfPresent(Int.self, forKey: .updatesPerCrop) ?? updatesPerCrop
         maxMinutes = try values.decodeIfPresent(Double.self, forKey: .maxMinutes) ?? maxMinutes
-        useSelectedMaterialOnly = try values.decodeIfPresent(Bool.self, forKey: .useSelectedMaterialOnly) ?? useSelectedMaterialOnly
         useWarmStart = try values.decodeIfPresent(Bool.self, forKey: .useWarmStart) ?? useWarmStart
         randomizeCrops = try values.decodeIfPresent(MaterialTrainingCropRandomization.self, forKey: .randomizeCrops) ?? randomizeCrops
         randomFlip = try values.decodeIfPresent(Bool.self, forKey: .randomFlip) ?? randomFlip
+        shuffleTrainingOrder = try values.decodeIfPresent(Bool.self, forKey: .shuffleTrainingOrder) ?? shuffleTrainingOrder
+        exaggerateFeatures = try values.decodeIfPresent(Bool.self, forKey: .exaggerateFeatures) ?? exaggerateFeatures
         randomSpinCentercut = try values.decodeIfPresent(Bool.self, forKey: .randomSpinCentercut) ?? randomSpinCentercut
         loraRank = try values.decodeIfPresent(Int.self, forKey: .loraRank) ?? loraRank
         loraAlpha = try values.decodeIfPresent(Double.self, forKey: .loraAlpha) ?? loraAlpha

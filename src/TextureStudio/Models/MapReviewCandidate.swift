@@ -140,6 +140,19 @@ struct MapReviewModelIdentity: Hashable {
     }
 }
 
+extension WorkbenchCheckpoint {
+    /// Keep the human model name separate from the checkpoint file and step.
+    var comparisonName: String {
+        let name = modelName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !name.isEmpty { return name }
+        var folder = url.deletingLastPathComponent()
+        while ["export", "exports", "checkpoints", "frozen", "lora"].contains(folder.lastPathComponent.lowercased()), folder.path != "/" {
+            folder.deleteLastPathComponent()
+        }
+        return folder.lastPathComponent.isEmpty ? url.deletingPathExtension().lastPathComponent : folder.lastPathComponent
+    }
+}
+
 struct MapReviewCandidate: Identifiable, Hashable {
     let id: String
     let label: String
@@ -164,7 +177,36 @@ struct MapReviewCandidate: Identifiable, Hashable {
         self.displayTransform = displayTransform
     }
 
-    var accessibleLabel: String { [sampleLabel, label, detail].compactMap { $0 }.joined(separator: " · ") }
+    var displayTitle: String {
+        if ["checkpoint", "model", "base"].contains(role) {
+            let name = modelIdentity?.modelName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !name.isEmpty { return name }
+            if let path = modelIdentity?.checkpointPath {
+                var folder = URL(fileURLWithPath: path).deletingLastPathComponent()
+                while ["export", "exports", "checkpoints", "frozen", "lora"].contains(folder.lastPathComponent.lowercased()), folder.path != "/" {
+                    folder.deleteLastPathComponent()
+                }
+                if !folder.lastPathComponent.isEmpty { return folder.lastPathComponent }
+            }
+        }
+        if isReference { return displayTransform == nil ? "Reference map" : "Reference crop" }
+        if role == "diffuse" { return "Test photo" }
+        return label
+    }
+
+    var displaySummary: String {
+        var fields: [String] = []
+        if let step = modelIdentity?.checkpointStep { fields.append("Step \(step.formatted())") }
+        if let map = modelIdentity?.mapType, map != "input" {
+            fields.append(map == "height" || map == "depth" ? "Displacement" : map == "normal" ? "OpenGL Normal" : map.capitalized)
+        }
+        if isReference { fields.append("Dataset map") }
+        if role == "base" { fields.append("Before training") }
+        return fields.joined(separator: " · ")
+    }
+
+    var selectionTitle: String { [displayTitle, displaySummary].filter { !$0.isEmpty }.joined(separator: " · ") }
+    var accessibleLabel: String { [displayTitle, displaySummary, sampleLabel, detail].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ") }
 
     var isReference: Bool { role == "target" }
     var referenceMapName: String { modelIdentity?.mapType == "height" ? "displacement" : modelIdentity?.mapType ?? "map" }

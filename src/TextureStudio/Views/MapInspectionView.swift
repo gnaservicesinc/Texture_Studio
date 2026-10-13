@@ -74,6 +74,11 @@ struct MapInspectionView: View {
     @State private var pinnedRevision: String?
     @State private var isMissing = false
     @State private var reload = 0
+    private var contentRevision: String {
+        if let sourceSHA256 { return sourceSHA256 }
+        guard let identity = try? NativeSourceFileTags.identity(url) else { return "missing" }
+        return "\(identity.inode):\(identity.bytes):\(identity.modified)"
+    }
     var body: some View {
         VStack(spacing: 0) {
             if let loaded {
@@ -98,9 +103,9 @@ struct MapInspectionView: View {
                 }
             } else { ProgressView("Loading full map…").frame(maxWidth: .infinity, maxHeight: .infinity) }
         }
-        .task(id: url.path + (sourceSHA256 ?? "") + (displayTransform?.identity ?? "") + "\(reload)" + (numeric ? "numeric:\(viewport.displayContrast):\(viewport.displayMidpoint)" : "color")) {
-            if pinnedURL != url || pinnedRevision != sourceSHA256 {
-                loaded = nil; pinnedHash = sourceSHA256; pinnedURL = url; pinnedRevision = sourceSHA256; onLoad?(nil)
+        .task(id: url.path + contentRevision + (displayTransform?.identity ?? "") + "\(reload)" + (numeric ? "numeric:\(viewport.displayContrast):\(viewport.displayMidpoint)" : "color")) {
+            if pinnedURL != url || pinnedRevision != contentRevision {
+                loaded = nil; pinnedHash = sourceSHA256; pinnedURL = url; pinnedRevision = contentRevision; onLoad?(nil)
             }
             failure = nil; isMissing = false
             do {
