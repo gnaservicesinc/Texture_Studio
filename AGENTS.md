@@ -16,3 +16,11 @@ Application outputs and model downloads belong in user storage, outside the
 source repository. Preserve users' original images. User-authorized maintenance
 of this project's downloadable development corpus may modify or remove those
 corpus files when correcting an issue.
+
+Preserve completed, task-related work remotely: commit and push each changed
+repository to its configured origin before finishing, including the independent
+LoomFactory and LoomWorkshop repositories when they are part of the task. Verify
+the remote branch points to the local commit. Do not rely on a local checkout
+surviving between runs, include unrelated changes, or force-push shared history.
+Report a failed push explicitly. This is standing user authorization for these
+task-scoped commits and pushes unless the user later requests otherwise.

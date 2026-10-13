@@ -4,7 +4,7 @@ import SwiftUI
 @MainActor final class ReviewWindowController: NSObject, NSWindowDelegate {
     static let shared = ReviewWindowController()
     private var windows: [ObjectIdentifier: (window: NSWindow, caches: [MaterialRenderCache])] = [:]
-    func open(candidates: [MapReviewCandidate], blendURL: URL? = nil, retaining cache: MaterialRenderCache? = nil) {
+    func open(candidates: [MapReviewCandidate], retaining cache: MaterialRenderCache? = nil) {
         guard !candidates.isEmpty else { return }
         var retained = cache.map { [$0] } ?? []
         // A child inspector may outlive the window that opened it. Inherit
@@ -17,9 +17,8 @@ import SwiftUI
         }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 780),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        let sample = candidates.compactMap(\.sampleLabel).first
-        window.title = candidates.count == 1 ? candidates[0].accessibleLabel : sample.map { "\($0) · Full Resolution Comparison" } ?? "Full Resolution Map Comparison"
-        window.contentView = NSHostingView(rootView: ReviewWorkbenchView(candidates: candidates, blendURL: blendURL))
+        window.title = candidates.count == 1 ? candidates[0].accessibleLabel : "Full Resolution Maps"
+        window.contentView = NSHostingView(rootView: FullQualityMapsView(candidates: candidates))
         window.minSize = NSSize(width: 550, height: 360)
         window.isReleasedWhenClosed = false
         window.delegate = self
@@ -34,5 +33,27 @@ import SwiftUI
         let fileComponents = url.standardizedFileURL.resolvingSymlinksInPath().pathComponents
         let folderComponents = folder.standardizedFileURL.resolvingSymlinksInPath().pathComponents
         return fileComponents.count > folderComponents.count && fileComponents.starts(with: folderComponents)
+    }
+}
+
+private struct FullQualityMapsView: View {
+    let candidates: [MapReviewCandidate]
+    @State private var viewport = InspectionViewport()
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button("Fit") { viewport.fit() }
+                Button("Actual Pixels") { viewport.setActualSize() }
+                Spacer()
+            }.padding(12)
+            HStack(spacing: 1) {
+                ForEach(candidates) { candidate in
+                    VStack(spacing: 0) {
+                        Text(candidate.label).font(.headline).padding(12)
+                        MapInspectionView(url: candidate.mapURL, numeric: candidate.numeric, viewport: viewport)
+                    }
+                }
+            }
+        }
     }
 }

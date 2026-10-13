@@ -29,22 +29,20 @@ struct TextureSettings: Codable, Sendable, Equatable {
     var heightInvert: Bool = false
     var adaptiveRelief: Bool = true
     var attachedMapIsHeight: Bool = true
-    var modelProcessResolution: Int = 1036
     var roughnessBase: Float = 0.65
     var roughnessDetail: Float = 0.2
     var materialWidthMeters: Double = 0.25
     var displacementScaleMeters: Double = 0.005
     static let outputSizes = [1024, 2048, 4096, 8192]
-    /// Comparison input follows the training grid, independently of export size.
+    /// Bounded prepared-image sizes used by preview and classification checks.
     static let diffusePreparationSizes = [256, 512] + outputSizes
-    static let modelProcessResolutions = [1036, 1540, 2044]
     init() {}
 
     private enum CodingKeys: String, CodingKey {
         case rotationX, rotationY, rotationZ, focalLengthPixels, cropScale, cropOffsetX, cropOffsetY,
              outputSize, useSupportingViews, useHDRGainMap, lensDistortion,
              exrPrecision, lightingStrength, lightingRadius, heightStrength,
-             heightDetail, surfacePlaneRemoval, depthCleanup, heightInvert, adaptiveRelief, attachedMapIsHeight, modelProcessResolution,
+             heightDetail, surfacePlaneRemoval, depthCleanup, heightInvert, adaptiveRelief, attachedMapIsHeight,
              roughnessBase, roughnessDetail, materialWidthMeters, displacementScaleMeters
     }
     init(from decoder: Decoder) throws {
@@ -71,7 +69,6 @@ struct TextureSettings: Codable, Sendable, Equatable {
         heightInvert = try c.decodeIfPresent(Bool.self,forKey:.heightInvert) ?? heightInvert
         adaptiveRelief = try c.decodeIfPresent(Bool.self,forKey:.adaptiveRelief) ?? adaptiveRelief
         attachedMapIsHeight = try c.decodeIfPresent(Bool.self,forKey:.attachedMapIsHeight) ?? attachedMapIsHeight
-        modelProcessResolution = try c.decodeIfPresent(Int.self,forKey:.modelProcessResolution) ?? modelProcessResolution
         roughnessBase = try c.decodeIfPresent(Float.self,forKey:.roughnessBase) ?? roughnessBase
         roughnessDetail = try c.decodeIfPresent(Float.self,forKey:.roughnessDetail) ?? roughnessDetail
         materialWidthMeters = try c.decodeIfPresent(Double.self,forKey:.materialWidthMeters) ?? materialWidthMeters

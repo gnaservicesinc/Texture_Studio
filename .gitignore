@@ -28,3 +28,6 @@ xcuserdata/
 *.log
 *.swp
 *~
+# The new applications are independent Git repositories in this checkout.
+/LoomFactory/
+/LoomWorkshop/

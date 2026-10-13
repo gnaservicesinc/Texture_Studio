@@ -1,6 +1,9 @@
 CONFIGURATION ?= Release
 DERIVED_DATA ?= $(CURDIR)/build/TextureStudio
 DESTDIR ?= /
+LOOM_FACTORY_REPO ?= $(CURDIR)/LoomFactory
+LOOM_WORKSHOP_REPO ?= $(CURDIR)/LoomWorkshop
+INSTALL_LAUNCH ?= 1
 XCODE_PROJECT := src/TextureStudio/TextureStudio.xcodeproj
 XCODE_SCHEME := TextureStudio
 APP_BUNDLE := $(DERIVED_DATA)/Build/Products/$(CONFIGURATION)/Texture Studio.app
@@ -19,13 +22,15 @@ configure: check-toolchain
 
 build: check-toolchain
 	$(XCODEBUILD) build
-	./script/stage_material_apps.sh "$(APP_BUNDLE)"
+	./script/stage_texture_loom.sh "$(APP_BUNDLE)"
 
 package: build
 	./scripts/package_macos.sh "$(APP_BUNDLE)" "$(CURDIR)/dist"
 
-install: package
-	/usr/bin/xcrun swift script/install_macos.swift "$(APP_BUNDLE)" --destdir "$(DESTDIR)"
+install:
+	./script/install_suite.sh --derived-data "$(DERIVED_DATA)" --destdir "$(DESTDIR)" \
+		--factory-repo "$(LOOM_FACTORY_REPO)" --workshop-repo "$(LOOM_WORKSHOP_REPO)" \
+		$(if $(filter 0,$(INSTALL_LAUNCH)),--no-launch,)
 
 install-if-closed: package
 	/usr/bin/xcrun swift script/install_macos.swift "$(APP_BUNDLE)" --destdir "$(DESTDIR)" --if-closed

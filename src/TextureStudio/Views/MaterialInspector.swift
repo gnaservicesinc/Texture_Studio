@@ -2,7 +2,6 @@ import SwiftUI
 
 struct MaterialInspector: View {
     @Bindable var workspace: TextureWorkspace
-    let models: ModelManager
 
     var body: some View {
         Form {
@@ -20,7 +19,7 @@ struct MaterialInspector: View {
                     CameraInfoView(source: source)
                     if source.hdrImage != nil {
                         Toggle("Use HDR gain map detail", isOn: $workspace.settings.useHDRGainMap)
-                        Text("HDR detail is balanced in float before the 8-bit diffuse export.")
+                        Text("HDR detail is balanced in float before the 16-bit diffuse export.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     if !source.supportingViews.isEmpty {
@@ -80,39 +79,10 @@ struct MaterialInspector: View {
                     Text("Use a map registered to this photo. Turn this off for camera-distance maps, where larger values mean farther away.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if workspace.depthChoice == .model {
-                    Picker("Model", selection: $workspace.modelID) {
-                        ForEach(models.catalog) { descriptor in Text(descriptor.name).tag(descriptor.id) }
-                    }
-                    Text(models.status(for: workspace.modelID).message).font(.caption).foregroundStyle(.secondary)
-                    Button("Manage / Locate Model…") { workspace.showModels = true }
-                    if workspace.modelID == LocalModelDescriptor.customDepthID {
-                        Toggle("Higher values mean nearer", isOn: $workspace.customInverseDepth)
-                    }
-                    Text("Camera-depth models estimate scene structure. Inspect their fine surface detail before using the result for material displacement.")
+                if workspace.depthChoice == .textureLoom {
+                    Text(workspace.textureLoom.statusDescription)
                         .font(.caption).foregroundStyle(.secondary)
-                }
-                if workspace.depthChoice == .materialCheckpoint {
-                    Text(workspace.selectedMaterialCheckpoint?.modelSummary ?? "Choose a trained material checkpoint in Model Training → Saved Models.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Text("The model receives the prepared diffuse map with this same crop and lighting balance.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                if workspace.depthChoice == .specialists {
-                    Text("Approved models follow the diffuse classifier's category. Set up and review them in Model Training → Loom Room.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Picker("Missing / uncertain category", selection: $workspace.specialistFallback) {
-                        Text("Flat surface").tag("flat")
-                        Text("Selected material model").tag("material")
-                        Text("Local depth model").tag("local")
-                    }
-                    if workspace.specialistFallback == "local" {
-                        Picker("Fallback depth model", selection: $workspace.modelID) {
-                            ForEach(models.catalog) { Text($0.name).tag($0.id) }
-                        }
-                        Button("Manage / Locate Fallback…") { workspace.showModels = true }
-                        Toggle("Higher values mean nearer", isOn: $workspace.customInverseDepth)
-                    }
+                    Button("Manage LoRAs…") { workspace.showModels = true }
                 }
                 if workspace.depthChoice == .photoDetail {
                     Text("No inferred relief: displacement stays neutral and normals stay flat unless you explicitly add brightness relief below.")
@@ -122,12 +92,12 @@ struct MaterialInspector: View {
             Section("Surface maps") {
                 FloatControl(title: "Relief contrast", value: $workspace.settings.heightStrength, range: 0...1)
                 FloatControl(title: "Remove surface slope", value: $workspace.settings.surfacePlaneRemoval, range: 0...1)
-                    .disabled(workspace.depthChoice == .materialCheckpoint)
+                    .disabled(workspace.depthChoice == .textureLoom)
                 FloatControl(title: "Depth artifact cleanup", value: $workspace.settings.depthCleanup, range: 0...1)
-                    .disabled(workspace.depthChoice == .materialCheckpoint)
+                    .disabled(workspace.depthChoice == .textureLoom)
                 Toggle("Invert height", isOn: $workspace.settings.heightInvert)
                 Toggle("Protect near-flat surfaces", isOn: $workspace.settings.adaptiveRelief)
-                    .disabled(workspace.depthChoice == .materialCheckpoint)
+                    .disabled(workspace.depthChoice == .textureLoom)
                 Text("Reduce amplification when relative depth has little surface contrast. This artistic protection can be disabled for deliberate exaggeration.")
                     .font(.caption).foregroundStyle(.secondary)
                 FloatControl(title: "Artistic brightness relief", value: $workspace.settings.heightDetail, range: 0...1)
@@ -155,9 +125,7 @@ struct MaterialInspector: View {
                 .help("16-bit float uses less disk space; 32-bit float preserves the pipeline's numeric precision. Both store linear map data.")
                 Text("Diffuse: 16-bit sRGB PNG. Roughness, normal and displacement: linear EXR.")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("Camera-depth model resolution is set separately. Larger output maps do not add detail absent from the height prediction.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Button("Export Material…", systemImage: "square.and.arrow.up") { workspace.chooseExport(models: models) }
+                Button("Export Material…", systemImage: "square.and.arrow.up") { workspace.chooseExport() }
                     .buttonStyle(.borderedProminent)
                     .disabled(workspace.source == nil)
                     .help("Save all four maps and a Blender setup script in one folder. Any pending changes are generated automatically. ⌘E")

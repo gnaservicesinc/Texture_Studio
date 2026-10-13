@@ -23,7 +23,6 @@ final class OllamaDecisionService {
     @ObservationIgnored private let transport: any OllamaHTTPTransport
     @ObservationIgnored private var operation: Task<Void, Never>?
     @ObservationIgnored private var analysisTask: Task<MaterialDecision, any Error>?
-    @ObservationIgnored private var qualityTask: Task<MaterialQualityDecision, any Error>?
 
     init(transport: any OllamaHTTPTransport = LoopbackOllamaTransport()) {
         self.transport = transport
@@ -67,14 +66,14 @@ final class OllamaDecisionService {
                     if object.status == "success" { succeeded = true }
                 }
                 try Task.checkCancellation()
-                guard succeeded else { throw OllamaDecisionError.server("download stopped before completion; retry in Local Models") }
+                guard succeeded else { throw OllamaDecisionError.server("download stopped before completion; retry in Photo Review") }
                 self.status = .checking
                 try await self.checkModel()
             } catch { self.setFailure(error) }
         }
     }
 
-    func cancel() { operation?.cancel(); analysisTask?.cancel(); qualityTask?.cancel() }
+    func cancel() { operation?.cancel(); analysisTask?.cancel() }
 
     func remove() async throws {
         guard !isBusy else { throw OllamaDecisionError.busy }
@@ -110,74 +109,6 @@ final class OllamaDecisionService {
             status = .ready
             return decision
         } catch { setFailure(error); throw error }
-    }
-
-    func reviewMaterial(diffuse: CGImage, map: CGImage, mapType: String,
-                        purpose: MaterialQualityDecision.Purpose) async throws -> MaterialQualityDecision {
-        guard !isBusy else { throw OllamaDecisionError.busy }
-        guard diffuse.width == map.width, diffuse.height == map.height else {
-            throw OllamaDecisionError.invalidResponse("diffuse and map dimensions must match for an aligned quality review")
-        }
-        status = .checking; lastError = nil
-        let task = Task {
-            do {
-                try await self.checkModel()
-                guard case .ready = self.status else { throw OllamaDecisionError.missing }
-                self.status = .analysing
-                let images = try Self.reviewImages(diffuse: diffuse, map: map)
-                let request = try Self.qualityReviewRequest(imageData: images, mapType: mapType, purpose: purpose)
-                let data = try await self.checkedData(request, decisionEndpoint: true)
-                try Task.checkCancellation()
-                let decision = try MaterialQualityDecision.decodeSystemOne(data)
-                self.status = .ready
-                return decision
-            } catch { self.setFailure(error); throw error }
-        }
-        qualityTask = task
-        defer { qualityTask = nil }
-        return try await withTaskCancellationHandler(operation: { try await task.value }, onCancel: { task.cancel() })
-    }
-
-    /// Two overview previews and two aligned native-pixel center crops. The
-    /// adviser receives sampled display evidence; no training/source file is
-    /// copied or quantized on disk and no full-resolution claim is made.
-    static func reviewImages(diffuse: CGImage, map: CGImage) throws -> [Data] {
-        guard diffuse.width == map.width, diffuse.height == map.height else {
-            throw OllamaDecisionError.invalidResponse("quality review maps must have matching dimensions")
-        }
-        let width = min(768, diffuse.width), height = min(768, diffuse.height)
-        let crop = CGRect(x: (diffuse.width - width) / 2, y: (diffuse.height - height) / 2, width: width, height: height)
-        guard let diffuseCrop = diffuse.cropping(to: crop), let mapCrop = map.cropping(to: crop) else {
-            throw OllamaDecisionError.invalidResponse("could not prepare aligned detail crops")
-        }
-        return try [boundedPNG(diffuse), boundedPNG(map), boundedPNG(diffuseCrop), boundedPNG(mapCrop)]
-    }
-
-    static func qualityReviewRequest(imageData: [Data], mapType: String,
-                                    purpose: MaterialQualityDecision.Purpose) throws -> URLRequest {
-        guard imageData.count == 4, imageData.allSatisfy({ !$0.isEmpty && $0.count <= 4_194_304 }),
-              ["height", "depth", "roughness", "normal"].contains(mapType) else {
-            throw OllamaDecisionError.invalidResponse("quality review requires an aligned diffuse/map pair and detail crops")
-        }
-        var questions: [String: Any] = [:]
-        for (name, criteria) in MaterialQualityDecision.scoreCriteria {
-            let instruction: String
-            switch name {
-            case "detail": instruction = "Rate visible surface detail in the supplied \(mapType) map, using the native-pixel crop. Reward coherent fine structure matching the diffuse texture, not random noise, sharpening halos, or invented detail."
-            case "appeal": instruction = "Rate visual material-map quality and coherence, not the beauty or subject of the photographed surface. Correct normal-map colors and valid roughness variation are not artifacts."
-            default: instruction = "Rate spatial correspondence between the diffuse map and the \(mapType) map. Material color changes need not imply height or roughness. Do not claim physically measured depth from visual evidence."
-            }
-            questions[name] = ["type": "score", "instructions": instruction, "criteria": criteria]
-        }
-        questions["artifact_free"] = ["type": "noul", "instructions": "Is the \(mapType) output free of visible major errors such as seams, double edges, blotches, ringing, invented structures, clipping, or broad lighting copied as false surface shape? Check overview and detail crop."]
-        questions["diffuse_ready"] = ["type": "noul", "instructions": "Is the diffuse input sharp and suitable for training or deployed inference: flat surface view, neutral balanced color, even illumination, no broad shadows or specular hotspots? Preserve real material color and texture; do not treat fine surface detail as noise."]
-        questions["recommendation"] = ["type": "choice", "instructions": "Recommend a human review action for this \(purpose.rawValue) pair. Prefer further review if any evidence is ambiguous. The recommendation never edits or discards files.", "criteria": MaterialQualityDecision.recommendationCriteria]
-        return try request("/v1/systemone", body: ["model": model, "keep_alive": 0,
-            "state": ["task": "Assess a diffuse surface texture and its aligned \(mapType) map for a high-detail material workflow.",
-                      "purpose": purpose.rawValue,
-                      "image_order": ["Diffuse overview (display preview)", "\(mapType) overview (display preview)", "Diffuse center crop at native pixels", "Aligned \(mapType) center crop at native pixels"],
-                      "limits": "Overview images may be reduced to 768 pixels; detail crops cover only the center. These are display evidence, not numerical ground truth. Do not infer absolute metric depth, complete-file quality, or correctness of unseen pixels. No denoising, geometry edits, or training decisions are authorized."],
-            "images": imageData.map { $0.base64EncodedString() }, "questions": questions])
     }
 
     private func checkModel() async throws {

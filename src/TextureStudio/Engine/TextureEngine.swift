@@ -267,7 +267,7 @@ actor TextureEngine {
         if Double(settings.outputSize) > crop.width {
             warnings.append("Output exceeds the crop's \(Int(crop.width)) native pixels per side; upsampling adds no source detail.")
         }
-        if settings.outputSize >= 4098 { warnings.append("Export rendering adapts its tile size to available memory. Preview size and the selected ML inference resolution remain independent of the final output size.") }
+        if settings.outputSize >= 4098 { warnings.append("Export rendering adapts its tile size to available memory. Map inspection and export share the selected output grid.") }
         if settings.lensDistortion != 0 { warnings.append("Manual radial lens correction uses a safe centre zoom; it is not a calibrated lens profile.") }
         let heightCandidate = attachedDepth?.interpretation == .surfaceHeight && settings.heightDetail == 0
             ? baseHeight : kernels.height.apply(extent:output, arguments:[baseHeight,linearDiffuse,lowPhoto,settings.heightDetail])

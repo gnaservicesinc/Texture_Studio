@@ -1,32 +1,26 @@
 import SwiftUI
 
 struct ContentView: View {
-    @Environment(\.openWindow) private var openWindow
-    let models: ModelManager
     let adviser: OllamaDecisionService
-    let materialStore: WorkbenchStore
     @State private var workspace: TextureWorkspace
 
-    init(models: ModelManager, adviser: OllamaDecisionService, materialStore: WorkbenchStore) {
-        self.models = models
+    init(adviser: OllamaDecisionService, textureLoom: TextureLoomStore) {
         self.adviser = adviser
-        self.materialStore = materialStore
-        self._workspace = State(initialValue: TextureWorkspace(preferences: StudioPreferences.defaults))
+        self._workspace = State(initialValue: TextureWorkspace(preferences: StudioPreferences.defaults, textureLoom: textureLoom))
     }
 
     var body: some View {
         NavigationSplitView {
-            StudioSidebar(workspace: workspace, models: models)
+            StudioSidebar(workspace: workspace)
                 .navigationSplitViewColumnWidth(min: 170, ideal: 205, max: 245)
         } detail: {
-            MaterialCanvas(workspace: workspace, models: models)
+            MaterialCanvas(workspace: workspace)
         }
         .inspector(isPresented: $workspace.showInspector) {
-            MaterialInspector(workspace: workspace, models: models)
+            MaterialInspector(workspace: workspace)
                 .inspectorColumnWidth(min: 300, ideal: 330, max: 400)
         }
         .focusedSceneValue(\.textureWorkspace, workspace)
-        .focusedSceneValue(\.textureModels, models)
         .navigationTitle(workspace.source?.url.lastPathComponent ?? "Texture Studio")
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
@@ -34,72 +28,56 @@ struct ContentView: View {
                     .help("Import a surface photo")
                     .disabled(workspace.isBusy)
                 Button { workspace.chooseRecipe() } label: { Label("Open Recipe", systemImage: "folder") }
-                    .help("Restore a saved photo, material settings and model selection.")
+                    .help("Restore a saved photo and material settings.")
                     .disabled(workspace.isBusy)
             }
             ToolbarSpacer(.flexible)
             ToolbarItemGroup(placement: .primaryAction) {
-                Button { workspace.updatePreview(models: models) } label: {
+                Button { workspace.updatePreview() } label: {
                     Label(workspace.materialNeedsUpdate ? (workspace.hasEdits ? "Update Material" : "Generate Material") : "Material Is Current",
                           systemImage: workspace.materialNeedsUpdate ? "arrow.trianglehead.2.clockwise" : "checkmark.circle")
                 }
                     .help("Generate all four maps at the selected output size. Full Quality and export reuse the finished maps until you change a setting.")
                     .disabled(workspace.source == nil || workspace.isBusy || !workspace.materialNeedsUpdate)
-                Button { workspace.chooseExport(models: models) } label: { Label("Export Material…", systemImage: "square.and.arrow.up") }
+                Button { workspace.chooseExport() } label: { Label("Export Material…", systemImage: "square.and.arrow.up") }
                     .labelStyle(.titleAndIcon)
                     .help("Save diffuse PNG, roughness, OpenGL normal and displacement EXRs, plus a Blender setup script, in a material folder. ⌘E")
                     .disabled(workspace.source == nil || workspace.isBusy)
             }
             ToolbarSpacer(.fixed)
             ToolbarItemGroup(placement: .automatic) {
-                Button { openWindow(id: "model-training") } label: { Label("Model Training", systemImage: "graduationcap") }
-                    .help("Prepare crops, refine a model, compare checkpoints and inspect full-resolution material maps.")
                 Button { workspace.showAdvice = true } label: { Label("Review Photo", systemImage: "eye") }
                     .help("Review bounded suggestions from local Clef")
-                Button { workspace.showModels = true } label: { Label("Local Models", systemImage: "shippingbox") }
-                    .help("See the active material model, locate model files and manage local runtimes.")
+                Button { workspace.showModels = true } label: { Label("LoRAs", systemImage: "shippingbox") }
+                    .help("Manage LoRAs for this build’s Texture Loom model.")
                 Button { workspace.showInspector.toggle() } label: { Label("Inspector", systemImage: "sidebar.right") }
                     .help("Show or hide photo, material and export settings. ⌥⌘I")
             }
         }
         .sheet(isPresented: $workspace.showModels) {
-            ModelLibraryView(models: models, materialStore: materialStore, adviser: adviser, workspace: workspace)
+            ModelLibraryView(textureLoom: workspace.textureLoom, adviser: adviser)
                 .frame(width: 660, height: 570)
         }
-        .sheet(isPresented: $workspace.showModelRecovery) {
-            MissingModelView(workspace: workspace, models: models)
-                .frame(width: 530, height: 400)
-        }
         .sheet(isPresented: $workspace.showAdvice) {
-            AdviceReviewView(workspace: workspace, adviser: adviser, models: models)
+            AdviceReviewView(workspace: workspace, adviser: adviser)
                 .frame(width: 600, height: 660)
         }
         .alert(item: $workspace.notice) { notice in
             Alert(title: Text(notice.title), message: Text(notice.message), dismissButton: .default(Text("OK")))
         }
-        .onOpenURL { url in
-            if url.pathExtension.lowercased() == "json" { workspace.openRecipe(url) }
-            else { workspace.importPhoto(url) }
-        }
+        .onOpenURL { workspace.openDocument($0) }
         .task {
-            models.refresh()
-            workspace.reloadSelectedCheckpoint()
-            if CommandLine.arguments.contains("--open-training") { openWindow(id: "model-training") }
             let args = CommandLine.arguments
             if let index = args.firstIndex(of: "--open"), index + 1 < args.count {
                 workspace.importPhoto(URL(fileURLWithPath: args[index + 1]))
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            workspace.reloadSelectedCheckpoint()
-        }
+
     }
 }
 
 struct StudioSidebar: View {
-    @Environment(\.openWindow) private var openWindow
     @Bindable var workspace: TextureWorkspace
-    let models: ModelManager
 
     var body: some View {
         ScrollView {
@@ -113,14 +91,12 @@ struct StudioSidebar: View {
                 }
             }
             Section("Project") {
-                Button { workspace.chooseExport(models: models) } label: { Label("Export Material…", systemImage: "square.and.arrow.up") }
+                Button { workspace.chooseExport() } label: { Label("Export Material…", systemImage: "square.and.arrow.up") }
                     .help("Save all four final maps and a Blender setup script. ⌘E")
                     .disabled(workspace.source == nil || workspace.isBusy)
-                Button { openWindow(id: "model-training") } label: { Label("Model Training", systemImage: "graduationcap") }
-                    .help("Open the guided workspace for data preparation, training, comparison and model export.")
                 Button { workspace.saveRecipe() } label: { Label("Save Recipe…", systemImage: "doc.badge.arrow.up") }
                     .disabled(workspace.source == nil || workspace.isBusy)
-                Button { workspace.showModels = true } label: { Label("Local Models", systemImage: "shippingbox") }
+                Button { workspace.showModels = true } label: { Label("LoRAs", systemImage: "shippingbox") }
             }
           }.padding(10)
         }

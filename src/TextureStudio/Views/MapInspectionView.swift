@@ -66,7 +66,6 @@ struct MapInspectionView: View {
     var onLoad: ((ReviewLoadedImage?) -> Void)? = nil
     var sourceSHA256: String? = nil
     var onMissingSource: ((URL) -> Void)? = nil
-    var displayTransform: MapReviewDisplayTransform? = nil
     @State private var loaded: ReviewLoadedImage?
     @State private var failure: String?
     @State private var pinnedHash: String?
@@ -76,8 +75,8 @@ struct MapInspectionView: View {
     @State private var reload = 0
     private var contentRevision: String {
         if let sourceSHA256 { return sourceSHA256 }
-        guard let identity = try? NativeSourceFileTags.identity(url) else { return "missing" }
-        return "\(identity.inode):\(identity.bytes):\(identity.modified)"
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return "missing" }
+        return "\(attributes[.systemFileNumber] ?? 0):\(attributes[.size] ?? 0):\(attributes[.modificationDate] ?? Date.distantPast)"
     }
     var body: some View {
         VStack(spacing: 0) {
@@ -103,7 +102,7 @@ struct MapInspectionView: View {
                 }
             } else { ProgressView("Loading full map…").frame(maxWidth: .infinity, maxHeight: .infinity) }
         }
-        .task(id: url.path + contentRevision + (displayTransform?.identity ?? "") + "\(reload)" + (numeric ? "numeric:\(viewport.displayContrast):\(viewport.displayMidpoint)" : "color")) {
+        .task(id: url.path + contentRevision + "\(reload)" + (numeric ? "numeric:\(viewport.displayContrast):\(viewport.displayMidpoint)" : "color")) {
             if pinnedURL != url || pinnedRevision != contentRevision {
                 loaded = nil; pinnedHash = sourceSHA256; pinnedURL = url; pinnedRevision = contentRevision; onLoad?(nil)
             }
@@ -111,8 +110,7 @@ struct MapInspectionView: View {
             do {
                 if loaded != nil { try await Task.sleep(for: .milliseconds(120)) }
                 let value = try await ReviewImageLoader.shared.load(url, numeric: numeric,
-                    contrast: viewport.displayContrast, midpoint: viewport.displayMidpoint, expectedSHA256: pinnedHash,
-                    displayTransform: displayTransform)
+                    contrast: viewport.displayContrast, midpoint: viewport.displayMidpoint, expectedSHA256: pinnedHash)
                 try Task.checkCancellation()
                 loaded = value; pinnedHash = value.sourceSHA256
                 onLoad?(value)

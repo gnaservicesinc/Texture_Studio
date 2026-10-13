@@ -1,12 +1,12 @@
 #!/usr/bin/env swift
 // Texture Studio's original vector artwork. Regenerate with:
-//   swift scripts/generate_app_icons.swift out/native-material-tools/icons
+//   swift scripts/generate_app_icons.swift out/texture-studio/icons
 // No photos, model output, fonts, or third-party icon assets are used.
 import AppKit
 import Foundation
 
 let destination = URL(fileURLWithPath: CommandLine.arguments.count > 1
-    ? CommandLine.arguments[1] : "out/native-material-tools/icons", isDirectory: true)
+    ? CommandLine.arguments[1] : "out/texture-studio/icons", isDirectory: true)
 let manager = FileManager.default
 try manager.createDirectory(at: destination, withIntermediateDirectories: true)
 let temporary = manager.temporaryDirectory.appendingPathComponent("texture-studio-icons-\(UUID().uuidString)")
@@ -91,39 +91,7 @@ func drawSurface(_ context: CGContext) {
     context.restoreGState()
 }
 
-func drawBadge(_ context: CGContext, role: String) {
-    guard role != "studio" else { return }
-    let accents: [String: CGColor] = ["review": color(0.16, 0.58, 0.76),
-        "compare": color(0.41, 0.39, 0.76), "dataset": color(0.20, 0.60, 0.48),
-        "train": color(0.84, 0.42, 0.20)]
-    let badge = CGRect(x: 660, y: 120, width: 220, height: 220)
-    context.saveGState()
-    context.setShadow(offset: CGSize(width: 0, height: -8), blur: 14, color: color(0, 0, 0, 0.27))
-    context.setFillColor(accents[role]!); context.fillEllipse(in: badge)
-    context.restoreGState()
-    context.setStrokeColor(color(1, 1, 1, 0.94)); context.setFillColor(color(1, 1, 1, 0.94))
-    context.setLineWidth(13); context.setLineCap(.round); context.setLineJoin(.round)
-    switch role {
-    case "review":
-        context.strokeEllipse(in: CGRect(x: 715, y: 206, width: 75, height: 75))
-        context.addPath(path([point(779, 216), point(824, 173)], close: false)); context.strokePath()
-    case "compare":
-        context.stroke(CGRect(x: 713, y: 179, width: 114, height: 103))
-        context.addPath(path([point(770, 179), point(770, 282)], close: false)); context.strokePath()
-    case "dataset":
-        for x: CGFloat in [714, 781] {
-            for y: CGFloat in [175, 242] { context.fill(CGRect(x: x, y: y, width: 43, height: 43)) }
-        }
-    default:
-        for (x, y): (CGFloat, CGFloat) in [(716, 225), (770, 270), (824, 201)] {
-            context.addPath(path([point(x, 177), point(x, 285)], close: false)); context.strokePath()
-            context.setFillColor(accents[role]!); context.fillEllipse(in: CGRect(x: x - 15, y: y - 15, width: 30, height: 30))
-            context.strokeEllipse(in: CGRect(x: x - 15, y: y - 15, width: 30, height: 30))
-        }
-    }
-}
-
-func render(size: Int, role: String) -> Data {
+func render(size: Int) -> Data {
     let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size,
         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
@@ -150,20 +118,17 @@ func render(size: Int, role: String) -> Data {
     drawTile(context, offset: 0, top: color(0.95, 0.87, 0.70), side: color(0.58, 0.43, 0.29),
              edge: color(0.75, 0.62, 0.43), thickness: 46)
     drawSurface(context)
-    drawBadge(context, role: role)
     return bitmap.representation(using: .png, properties: [:])!
 }
 
-let icons = ["studio": "TextureStudio", "review": "MaterialReview", "compare": "CheckpointCompare",
-             "dataset": "MaterialDataset", "train": "MaterialTrainer"]
-for role in icons.keys.sorted() {
-    let name = icons[role]!
+do {
+    let name = "TextureStudio"
     let iconset = temporary.appendingPathComponent("\(name).iconset")
     try manager.createDirectory(at: iconset, withIntermediateDirectories: true)
     for size in [16, 32, 128, 256, 512] {
         for scale in [1, 2] {
             let suffix = scale == 2 ? "@2x" : ""
-            try render(size: size * scale, role: role).write(to:
+            try render(size: size * scale).write(to:
                 iconset.appendingPathComponent("icon_\(size)x\(size)\(suffix).png"))
         }
     }

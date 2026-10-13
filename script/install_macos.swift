@@ -10,8 +10,7 @@ struct RunningApplication: Error, CustomStringConvertible {
 }
 
 let filesystem = FileManager.default
-let materialTools = [("review", "Material Review"), ("compare", "Checkpoint Compare"),
-                     ("dataset", "Material Dataset"), ("train", "Material Trainer")]
+
 
 func exists(_ url: URL) -> Bool {
     (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true ||
@@ -44,11 +43,11 @@ func readInfo(_ app: URL) throws -> [String: Any] {
 }
 
 func validateBundle(_ source: URL) throws {
-    var applications: [(URL, String, String, String?)] = [(source, "org.ipde.texture-studio", "Texture Studio", nil)]
-    applications += materialTools.map { role, name in
-        (source.appendingPathComponent("Contents/Applications/\(name).app"), "org.ipde.material-\(role)", name, role)
+    guard !exists(source.appendingPathComponent("Contents/Applications")) else {
+        throw InstallFailure(description: "Texture Studio must not include the retired model training tool suite.")
     }
-    for (app, identifier, name, role) in applications {
+    let applications: [(URL, String, String)] = [(source, "org.ipde.texture-studio", "Texture Studio")]
+    for (app, identifier, name) in applications {
         let info = try readInfo(app)
         guard info["IPDEBuildConfiguration"] as? String == "Release" else {
             throw InstallFailure(description: "Install requires an optimized Release build: \(app.path)")
@@ -61,9 +60,7 @@ func validateBundle(_ source: URL) throws {
         guard values.isRegularFile == true, filesystem.isExecutableFile(atPath: executable.path) else {
             throw InstallFailure(description: "Application executable is missing: \(executable.path)")
         }
-        if let role, info["MaterialToolRole"] as? String != role || exists(app.appendingPathComponent("Contents/Applications")) {
-            throw InstallFailure(description: "Invalid or recursively embedded material tool: \(app.path)")
-        }
+
     }
 }
 
@@ -78,7 +75,7 @@ func ensureClosed(_ destination: URL, processes: String) throws {
     for line in processes.split(separator: "\n") {
         let fields = line.split(maxSplits: 1, omittingEmptySubsequences: true, whereSeparator: { $0.isWhitespace })
         if fields.count == 2, fields[1].drop(while: { $0.isWhitespace }).hasPrefix(destination.path + "/") {
-            throw RunningApplication(description: "Close Texture Studio and its material tools before installing (PID \(fields[0]))")
+            throw RunningApplication(description: "Close Texture Studio before installing (PID \(fields[0]))")
         }
     }
 }
@@ -187,23 +184,19 @@ func selfTest() throws {
     let source = root.appendingPathComponent("Source.app")
     let destination = root.appendingPathComponent("Applications/Texture Studio.app")
     try filesystem.createDirectory(at: source, withIntermediateDirectories: true)
-    for (role, name) in [("", "Texture Studio")] + materialTools {
-        let app = role.isEmpty ? source : source.appendingPathComponent("Contents/Applications/\(name).app")
-        let executable = app.appendingPathComponent("Contents/MacOS/\(name)")
+    do {
+        let executable = source.appendingPathComponent("Contents/MacOS/Texture Studio")
         try filesystem.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("fixture".utf8).write(to: executable)
         try filesystem.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        var info = ["CFBundleIdentifier": role.isEmpty ? "org.ipde.texture-studio" : "org.ipde.material-\(role)",
-                    "CFBundleExecutable": name, "IPDEBuildConfiguration": "Release"]
-        if !role.isEmpty { info["MaterialToolRole"] = role }
-        let data = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
-        try data.write(to: app.appendingPathComponent("Contents/Info.plist"))
+        let info = ["CFBundleIdentifier": "org.ipde.texture-studio", "CFBundleExecutable": "Texture Studio", "IPDEBuildConfiguration": "Release"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: source.appendingPathComponent("Contents/Info.plist"))
     }
     try validateBundle(source)
-    let recursive = source.appendingPathComponent("Contents/Applications/Material Trainer.app/Contents/Applications")
-    try filesystem.createDirectory(at: recursive, withIntermediateDirectories: true)
+    let retired = source.appendingPathComponent("Contents/Applications/Material Trainer.app")
+    try filesystem.createDirectory(at: retired, withIntermediateDirectories: true)
     try expectsFailure { try validateBundle(source) }
-    try filesystem.removeItem(at: recursive)
+    try filesystem.removeItem(at: source.appendingPathComponent("Contents/Applications"))
     let infoURL = source.appendingPathComponent("Contents/Info.plist")
     let releaseInfo = try Data(contentsOf: infoURL)
     var info = try readInfo(source)
@@ -211,7 +204,7 @@ func selfTest() throws {
     try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: infoURL)
     try expectsFailure { try validateBundle(source) }
     try releaseInfo.write(to: infoURL)
-    try expectsFailure { try ensureClosed(destination, processes: "  124   \(destination.path)/Contents/Applications/Material Trainer.app/Contents/MacOS/Material Trainer\n") }
+    try expectsFailure { try ensureClosed(destination, processes: "  124   \(destination.path)/Contents/MacOS/Texture Studio\n") }
     try ensureClosed(destination, processes: "124 \(destination.path).backup/Contents/MacOS/Texture Studio\n")
     try require(!isInside(source, destination) && isInside(destination.appendingPathComponent("child"), destination), "path boundaries")
     try filesystem.createDirectory(at: destination, withIntermediateDirectories: true)

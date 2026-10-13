@@ -4,7 +4,6 @@ import AppKit
 struct AdviceReviewView: View {
     @Bindable var workspace: TextureWorkspace
     @Bindable var adviser: OllamaDecisionService
-    let models: ModelManager
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -33,7 +32,7 @@ struct AdviceReviewView: View {
                         Button("Apply Suggestions & Preview") {
                             workspace.applyDecision()
                             dismiss()
-                            workspace.updatePreview(models: models)
+                            workspace.updatePreview()
                         }
                         .buttonStyle(.glassProminent).disabled(workspace.isBusy || adviser.isBusy)
                     }

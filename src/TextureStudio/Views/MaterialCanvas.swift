@@ -3,7 +3,6 @@ import UniformTypeIdentifiers
 
 struct MaterialCanvas: View {
     @Bindable var workspace: TextureWorkspace
-    let models: ModelManager
 
     var body: some View {
         VStack(spacing: 0) {
@@ -75,7 +74,7 @@ struct MaterialCanvas: View {
     private var generateButton: some View {
         Button(workspace.materialNeedsUpdate ? (workspace.hasEdits ? "Update Material" : "Generate Material") : "Material Is Current",
                systemImage: workspace.materialNeedsUpdate ? "arrow.trianglehead.2.clockwise" : "checkmark.circle") {
-            workspace.updatePreview(models: models)
+            workspace.updatePreview()
         }
         .disabled(!workspace.materialNeedsUpdate)
         .help(workspace.materialNeedsUpdate
@@ -85,7 +84,7 @@ struct MaterialCanvas: View {
 
     private var inspectButton: some View {
         Button("Open Full Quality", systemImage: "arrow.up.left.and.arrow.down.right") {
-            workspace.inspectFullQuality(models: models)
+            workspace.inspectFullQuality()
         }
         .disabled(!workspace.fullQualityAvailable)
         .help(workspace.fullQualityAvailable
@@ -94,7 +93,7 @@ struct MaterialCanvas: View {
     }
 
     private var exportButton: some View {
-        Button("Export Material…", systemImage: "square.and.arrow.up") { workspace.chooseExport(models: models) }
+        Button("Export Material…", systemImage: "square.and.arrow.up") { workspace.chooseExport() }
             .buttonStyle(.glassProminent)
             .help("Choose a folder for all four maps and a Blender setup script. Generates any pending changes automatically. ⌘E")
     }

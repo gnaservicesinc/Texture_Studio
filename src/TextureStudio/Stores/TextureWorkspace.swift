@@ -1,6 +1,5 @@
 import AppKit
 import CoreImage
-import CryptoKit
 import Observation
 import UniformTypeIdentifiers
 
@@ -8,25 +7,9 @@ import UniformTypeIdentifiers
 final class TextureWorkspace {
     var source: TextureSource?
     var attachedDepth: TextureDepth?
-    var generatedDepth: TextureDepth?
-    var generatedProvenance: ModelDepthProvenance?
     var depthURL: URL?
     var settings = TextureSettings() { didSet { if settings != oldValue { savePreferences(); markEdited() } } }
-    var depthChoice = DepthChoice.photoDetail {
-        didSet {
-            if depthChoice != oldValue { savePreferences(); markEdited() }
-        }
-    }
-    var heightSourceNotice: String?
-    var specialistClassification: NativeDiffuseTextureClassifier.Prediction?
-    private(set) var specialistModels: [String: SelectedMaterialCheckpoint] = [:]
-    var specialistFallback: String {
-        didSet { UserDefaults(suiteName: "org.ipde.material-tools")?.set(specialistFallback, forKey: "specialistFallback"); markEdited() }
-    }
-    private(set) var selectedMaterialCheckpoint: SelectedMaterialCheckpoint?
-    private(set) var selectedMaterialMaps: [String: SelectedMaterialCheckpoint] = [:]
-    var modelID = LocalModelDescriptor.customDepthID { didSet { if modelID != oldValue { savePreferences(); invalidateModelDepth() } } }
-    var customInverseDepth = true { didSet { if customInverseDepth != oldValue { savePreferences(); invalidateModelDepth() } } }
+    var depthChoice = DepthChoice.textureLoom { didSet { if depthChoice != oldValue { savePreferences(); markEdited() } } }
     var selectedPreview = MaterialPreview.diffuse { didSet { savePreferences() } }
     var renderedPreview = MaterialPreview.source
     var preview: CGImage?
@@ -37,821 +20,302 @@ final class TextureWorkspace {
     var showModels = false
     var showAdvice = false
     var decision: MaterialDecision?
-    var showModelRecovery = false
     var showInspector = true { didSet { savePreferences() } }
     var warnings: [String] = []
     var exportURL: URL?
     var recipeURL: URL?
     var hasEdits = false
+    let textureLoom: TextureLoomStore
+    private(set) var classification: String?
     private let engine = TextureEngine()
-    private let modelService = ModelDepthService()
-    private let materialCheckpointService = MaterialCheckpointService()
+    private let loomService = TextureLoomService()
     private var operation: Task<Void, Never>?
-    private var generatedModelID: String?
-    private var generatedResolution: Int?
-    private var generatedModelPath: String?
-    private var generatedFileSignature: String?
     private var sourcePreview: CGImage?
-    private var recipeCheckpoint: MaterialCheckpointIdentity?
-    private var recipeMapCheckpoints: [String: MaterialCheckpointIdentity]?
-    private var recipeSpecialistModels: [String: SelectedMaterialCheckpoint]?
-    private var lastRegistrySelectionIdentity: String?
-    private var generatedCheckpointKey: String?
     private var materialCache: MaterialRenderCache?
-    @ObservationIgnored private weak var renderModels: ModelManager?
     @ObservationIgnored private let preferences: UserDefaults?
-    @ObservationIgnored private let checkpointPredictor: (@MainActor (TextureSource, SelectedMaterialCheckpoint, Int) async throws -> TextureDepth)?
     @ObservationIgnored private let materialProcessor: (@MainActor (TextureSource, TextureSettings, TextureDepth?) async throws -> MaterialResult)?
-    @ObservationIgnored private let mapPredictor: (@MainActor (CIImage, SelectedMaterialCheckpoint, Int) async throws -> MaterialModelMap)?
-    @ObservationIgnored private let specialistRouter: (@MainActor (CIImage) async throws -> NativeMaterialSpecialistRouter.RouteResult)?
     private var exportDirectory: String?
-    private let checkpointRegistryURL: URL
-    @ObservationIgnored private var selectionObserver: MaterialSelectionObserver?
-    @ObservationIgnored private var pendingCheckpointActivation = false
 
-    init(checkpointRegistryURL: URL = SelectedMaterialCheckpoint.registryURL,
-         preferences: UserDefaults? = nil,
-         checkpointPredictor: (@MainActor (TextureSource, SelectedMaterialCheckpoint, Int) async throws -> TextureDepth)? = nil,
-         materialProcessor: (@MainActor (TextureSource, TextureSettings, TextureDepth?) async throws -> MaterialResult)? = nil,
-         mapPredictor: (@MainActor (CIImage, SelectedMaterialCheckpoint, Int) async throws -> MaterialModelMap)? = nil,
-         specialistRouter: (@MainActor (CIImage) async throws -> NativeMaterialSpecialistRouter.RouteResult)? = nil) {
-        self.checkpointRegistryURL = checkpointRegistryURL
+    init(preferences: UserDefaults? = nil, textureLoom: TextureLoomStore? = nil,
+         materialProcessor: (@MainActor (TextureSource, TextureSettings, TextureDepth?) async throws -> MaterialResult)? = nil) {
         self.preferences = preferences
-        self.checkpointPredictor = checkpointPredictor
+        self.textureLoom = textureLoom ?? TextureLoomStore()
         self.materialProcessor = materialProcessor
-        self.mapPredictor = mapPredictor
-        self.specialistRouter = specialistRouter
-        specialistFallback = UserDefaults(suiteName: "org.ipde.material-tools")?.string(forKey: "specialistFallback") ?? "flat"
-        selectedMaterialCheckpoint = try? SelectedMaterialCheckpoint.read(from: checkpointRegistryURL)
-        selectedMaterialMaps = SelectedMaterialCheckpoint.readAll(heightRegistryURL: checkpointRegistryURL)
-        lastRegistrySelectionIdentity = selectedMaterialCheckpoint?.selectionIdentity
-        if selectedMaterialCheckpoint?.supportsStudioInference == true, selectedMaterialCheckpoint?.target == "height" {
-            depthChoice = .materialCheckpoint
-        }
         if let preferences {
             let saved = StudioPreferences.load(from: preferences)
             settings = saved.settings ?? settings
             depthChoice = saved.depthChoice ?? depthChoice
-            modelID = saved.modelID ?? modelID
-            customInverseDepth = saved.customInverseDepth ?? customInverseDepth
             selectedPreview = saved.selectedPreview.flatMap(MaterialPreview.init(rawValue:)) ?? selectedPreview
             showInspector = saved.showInspector ?? showInspector
             exportDirectory = saved.exportDirectory
         }
-        selectionObserver = MaterialSelectionObserver { [weak self] in
-            self?.reloadSelectedCheckpoint(activate: true, target: self?.selectionObserver?.changedTarget)
-        }
-        if preferences != nil { savePreferences() }
     }
-
     private func savePreferences() {
         guard let preferences else { return }
-        StudioPreferences(settings: settings, depthChoice: depthChoice, modelID: modelID,
-            customInverseDepth: customInverseDepth, selectedPreview: selectedPreview.rawValue,
+        StudioPreferences(settings: settings, depthChoice: depthChoice, selectedPreview: selectedPreview.rawValue,
             showInspector: showInspector, exportDirectory: exportDirectory).save(to: preferences)
     }
-
     private func currentRenderKey() -> MaterialRenderKey? {
         guard let source else { return nil }
-        let depthIdentity: String
+        let identity: String
         switch depthChoice {
-        case .materialCheckpoint:
-            guard let checkpoint = try? currentMaterialCheckpoint() else { return nil }
-            depthIdentity = checkpointCacheKey(checkpoint)
-        case .specialists:
-            let tools = UserDefaults(suiteName: "org.ipde.material-tools")!
-            let workspace = specialistWorkspaceURL(tools: tools)
-            let registry = workspace.appendingPathComponent("specialists.json")
-            let data = (try? Data(contentsOf: registry)) ?? Data()
-            var revision = data
-            if let document = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let specialists = document["specialists"] as? [[String: Any]] {
-                for specialist in specialists.sorted(by: { ($0["id"] as? String ?? "") < ($1["id"] as? String ?? "") }) {
-                    if let path = specialist["dataset_path"] as? String,
-                       let index = try? Data(contentsOf: URL(fileURLWithPath: path).appendingPathComponent("dataset.json")) {
-                        revision.append(index)
-                    }
-                }
-            }
-            let signature = SHA256.hash(data: revision).map { String(format: "%02x", $0) }.joined()
-            let selected = (recipeSpecialistModels ?? specialistModels).keys.sorted().compactMap { (recipeSpecialistModels ?? specialistModels)[$0].map(checkpointCacheKey) }.joined(separator: "|")
-            let threshold = tools.object(forKey: "specialistMinimumConfidence") as? Double ?? 0.7
-            let classifier = tools.string(forKey: "specialistClassifier") ?? "bundled"
-            let classifierDate = (try? URL(fileURLWithPath: classifier).resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate?.timeIntervalSince1970 ?? 0
-            let fallbackPath = renderModels?.records[modelID]?.path ?? ""
-            let fallbackSignature = fallbackPath.isEmpty ? "" : modelFileSignature(URL(fileURLWithPath: fallbackPath), record: renderModels?.records[modelID])
-            depthIdentity = "specialists|\(workspace.path)|\(signature)|\(threshold)|\(classifier)|\(classifierDate)|\(specialistFallback)|\(modelID)|\(fallbackSignature)|\(customInverseDepth)|\(settings.modelProcessResolution)|\(selected)"
-        case .model:
-            let record = renderModels?.records[modelID]
-            let path = record?.path ?? generatedModelPath ?? ""
-            let signature = path.isEmpty ? "" : modelFileSignature(URL(fileURLWithPath: path), record: record)
-            depthIdentity = "\(modelID)|\(settings.modelProcessResolution)|\(customInverseDepth)|\(path)|\(signature)"
+        case .textureLoom: identity = "\(textureLoom.package?.manifest.id ?? "missing")|\(textureLoom.package?.manifest.version ?? "")|\(textureLoom.revision)"
         case .attached:
             guard let attachedDepth else { return nil }
-            depthIdentity = "attached|\(ObjectIdentifier(attachedDepth.image))|\(settings.attachedMapIsHeight)"
-        case .photoDetail: depthIdentity = "flat"
+            identity = "attached|\(ObjectIdentifier(attachedDepth.image))|\(settings.attachedMapIsHeight)"
+        case .photoDetail: identity = "flat"
         }
-        guard let auxiliary = try? activeAuxiliaryCheckpoints() else { return nil }
-        let auxiliaryKey = auxiliary.keys.sorted().compactMap { auxiliary[$0].map(checkpointCacheKey) }.joined(separator: "|")
-        return MaterialRenderKey(sourceIdentity: "\(source.url.path)|\(ObjectIdentifier(source.orientedImage))", depthIdentity: depthIdentity + "|material-maps|" + auxiliaryKey, settings: settings)
+        return MaterialRenderKey(sourceIdentity: "\(source.url.path)|\(ObjectIdentifier(source.orientedImage))", depthIdentity: identity, settings: settings)
     }
-
     private var currentCache: MaterialRenderCache? {
         guard let materialCache, materialCache.key == currentRenderKey() else { return nil }
         return materialCache
     }
-
     var materialNeedsUpdate: Bool { currentCache == nil }
     var fullQualityAvailable: Bool { source != nil && (selectedPreview == .source || currentCache != nil) }
     var materialStatusText: String {
-        if let cache = currentCache { return "\(cache.material.outputSize) × \(cache.material.outputSize) maps ready · Full Quality and export reuse these maps" }
-        return source == nil ? "Import a surface photo to begin" : "Generate material at \(settings.outputSize) × \(settings.outputSize) to inspect or export its maps"
+        if let cache = currentCache { return "\(cache.material.outputSize) × \(cache.material.outputSize) maps ready" }
+        return source == nil ? "Import a surface photo to begin" : "Generate material at \(settings.outputSize) × \(settings.outputSize)"
     }
-    func cachedMaterialMapURL(_ selection: MaterialPreview) -> URL? { currentCache?.mapURL(selection) }
-
-    private func checkpointCacheKey(_ checkpoint: SelectedMaterialCheckpoint) -> String {
-        let file = URL(fileURLWithPath: checkpoint.checkpointPath)
-        let values = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-        return "\(checkpoint.selectionIdentity)|\(checkpoint.modelDirectory)|\(settings.outputSize)|\(source.map { ObjectIdentifier($0.orientedImage).debugDescription } ?? "")|\(values?.fileSize ?? -1)|\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0)"
-    }
-
-    func reloadSelectedCheckpoint(activate: Bool = false, target: String? = nil) {
-        selectedMaterialMaps = SelectedMaterialCheckpoint.readAll(heightRegistryURL: checkpointRegistryURL)
-        let activateHeight = activate && (target == nil || target == "height")
-        if activate, target != "height" { recipeMapCheckpoints = nil; markEdited() }
-        let selected = try? SelectedMaterialCheckpoint.read(from: checkpointRegistryURL)
-        let changed = selected?.selectionIdentity != lastRegistrySelectionIdentity
-        lastRegistrySelectionIdentity = selected?.selectionIdentity
-        if activateHeight || changed { recipeCheckpoint = nil }
-        if let recipeCheckpoint, let selected { selectedMaterialCheckpoint = recipeCheckpoint.resolve(using: selected) }
-        else { selectedMaterialCheckpoint = selected }
-        guard (activateHeight || changed), selected?.target == "height" else { return }
-        guard selected?.supportsStudioInference == true else { return }
-        heightSourceNotice = nil
-        depthChoice = .materialCheckpoint
-        invalidateModelDepth()
-    }
-
     var activeHeightSourceLabel: String {
         switch depthChoice {
-        case .materialCheckpoint: selectedMaterialCheckpoint?.title ?? "Material checkpoint"
-        case .specialists: specialistClassification.map { "\($0.label) · \(Int(($0.confidence * 100).rounded()))%" } ?? "Automatic specialist models"
-        case .model: "Custom local depth model"
+        case .textureLoom: classification.map { "Texture Loom · \($0)" } ?? "Texture Loom"
         case .attached: depthURL?.lastPathComponent ?? "Attached height / depth map"
         case .photoDetail: "Flat surface"
         }
     }
-    var activeMaterialModels: [String: SelectedMaterialCheckpoint] {
-        if depthChoice == .specialists { return specialistModels }
-        var selected = (try? activeAuxiliaryCheckpoints()) ?? [:]
-        if depthChoice == .materialCheckpoint, let height = try? currentMaterialCheckpoint() { selected["height"] = height }
-        return selected
+    func cachedMaterialMapURL(_ selection: MaterialPreview) -> URL? { currentCache?.mapURL(selection) }
+    func openDocument(_ url: URL) {
+        switch url.pathExtension.lowercased() {
+        case "loomlora":
+            showModels = true
+            do {
+                let id = try textureLoom.importAdapter(url)
+                try textureLoom.setEnabled(id, true)
+            } catch {
+                notice = StudioNotice(title: "Import LoRA", message: error.localizedDescription)
+            }
+        case "textureloom":
+            notice = StudioNotice(title: "Texture Loom build package", message: "Include this Loom Factory package when building Texture Studio.")
+        case "json": openRecipe(url)
+        default: importPhoto(url)
+        }
     }
-
     func choosePhoto() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.image]
-        panel.prompt = "Import Photo"
-        panel.begin { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            self?.importPhoto(url)
-        }
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.prompt = "Import Photo"
+        panel.begin { [weak self] response in if response == .OK, let url = panel.url { self?.importPhoto(url) } }
     }
-
     func importPhoto(_ url: URL) {
-        var directory: ObjCBool = false
-        if FileManager.default.fileExists(atPath: url.path, isDirectory: &directory), directory.boolValue {
-            MaterialToolLauncher.open(.dataset, document: url)
-            return
-        }
         guard !isBusy else { return }
-        run("Reading photo and camera information…") {
+        run("Reading photo…") {
             let imported = try await self.engine.importPhoto(url)
             let preview = try await self.engine.preview(imported.orientedImage)
             try Task.checkCancellation()
-            self.source = imported
-            self.sourcePreview = preview
-            self.materialCache = nil
-            self.recipeCheckpoint = nil
-            self.recipeMapCheckpoints = nil
-            self.recipeSpecialistModels = nil
-            self.specialistModels = [:]
-            self.specialistClassification = nil
-            self.attachedDepth = nil
-            self.generatedDepth = nil
-            self.generatedProvenance = nil
-            self.generatedModelID = nil
-            self.generatedCheckpointKey = nil
-            self.generatedResolution = nil
-            self.generatedModelPath = nil
-            self.generatedFileSignature = nil
-            self.decision = nil
-            self.depthURL = nil
-            self.result = nil
-            self.recipeURL = nil
-            self.exportURL = nil
-            self.selectedMaterialCheckpoint = try? SelectedMaterialCheckpoint.read(from: self.checkpointRegistryURL)
-            self.selectedMaterialMaps = SelectedMaterialCheckpoint.readAll(heightRegistryURL: self.checkpointRegistryURL)
-            self.lastRegistrySelectionIdentity = self.selectedMaterialCheckpoint?.selectionIdentity
-            if self.depthChoice == .attached {
-                self.depthChoice = .photoDetail
-            }
-            if self.depthChoice == .materialCheckpoint, self.selectedMaterialCheckpoint?.supportsStudioInference != true {
-                self.depthChoice = .photoDetail
-            }
-            self.hasEdits = false
-            self.preview = preview
-            self.renderedPreview = .source
-            self.warnings = []
+            self.source = imported; self.sourcePreview = preview; self.materialCache = nil
+            self.attachedDepth = nil; self.depthURL = nil; self.classification = nil
+            self.decision = nil; self.result = nil; self.recipeURL = nil; self.exportURL = nil
+            if self.depthChoice == .attached { self.depthChoice = .textureLoom }
+            self.hasEdits = false; self.preview = preview; self.renderedPreview = .source; self.warnings = []
         }
     }
-
     func chooseDepth() {
         guard source != nil, !isBusy else { return }
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.image]
-        panel.prompt = "Attach Depth Map"
-        panel.begin { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            self?.attachDepth(url)
-        }
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.image]; panel.prompt = "Attach Height Map"
+        panel.begin { [weak self] response in if response == .OK, let url = panel.url { self?.attachDepth(url) } }
     }
-
     func attachDepth(_ url: URL) {
         guard let source, !isBusy else { return }
-        run("Reading the attached depth map…") {
+        run("Reading attached map…") {
             let depth = try await self.engine.importDepth(url, matching: source)
             try Task.checkCancellation()
-            self.attachedDepth = depth
-            self.depthURL = url
-            self.depthChoice = .attached
-            self.markEdited()
+            self.attachedDepth = depth; self.depthURL = url; self.depthChoice = .attached; self.markEdited()
         }
     }
-
     func markEdited() {
-        hasEdits = true
-        result = currentCache?.material
-        if result == nil, renderedPreview != .source {
-            preview = sourcePreview
-            renderedPreview = .source
-        }
+        hasEdits = true; result = currentCache?.material
+        if result == nil, renderedPreview != .source { preview = sourcePreview; renderedPreview = .source }
     }
-
-    func updatePreview(models: ModelManager) {
+    func updatePreview() {
         guard source != nil, !isBusy else { return }
-        if depthChoice == .model, models.availableURL(for: modelID) == nil {
-            models.refresh()
-            showModelRecovery = true
-            return
-        }
-        run("Generating \(settings.outputSize) × \(settings.outputSize) material maps…") {
-            let material = try await self.ensureMaterial(models: models).material
-            let selection: MaterialPreview = self.selectedPreview == .source ? .diffuse : self.selectedPreview
-            let (preview, rendered) = try await self.preparePreview(source: self.source!, result: material, selection: selection)
-            try Task.checkCancellation()
-            self.result = material
-            self.warnings = material.warnings + (self.depthChoice == .specialists ? self.heightSourceNotice.map { [$0] } ?? [] : [])
-            self.selectedPreview = selection
-            self.preview = preview
-            self.renderedPreview = rendered
+        run("Generating material maps…") {
+            let material = try await self.ensureMaterial().material
+            if self.selectedPreview == .source { self.selectedPreview = .diffuse }
+            try await self.renderSelectedPreview(material: material)
+            self.result = material; self.warnings = material.warnings
         }
     }
-
-    private func ensureMaterial(models: ModelManager) async throws -> MaterialRenderCache {
-        renderModels = models
+    private func ensureMaterial() async throws -> MaterialRenderCache {
         if let currentCache { return currentCache }
-        guard let source else { throw StudioError("Import a surface photo to generate its material.") }
-        var preparedDiffuse: TextureEngine.PreparedDiffuse?
-        var auxiliary = try activeAuxiliaryCheckpoints()
-        if depthChoice == .materialCheckpoint || depthChoice == .specialists || !auxiliary.isEmpty {
-            activity = "Preparing the diffuse input for the material models…"
-            preparedDiffuse = try await engine.prepareDiffuse(source: source, settings: settings)
-        }
-        if depthChoice == .specialists {
-            if let pins = recipeSpecialistModels {
-                specialistModels = pins
-            } else {
-                activity = "Classifying the prepared diffuse for specialist models…"
-                let routed: NativeMaterialSpecialistRouter.RouteResult
-                if let specialistRouter { routed = try await specialistRouter(preparedDiffuse!.diffuse) }
-                else {
-                    let tools = UserDefaults(suiteName: "org.ipde.material-tools")!
-                    let path = tools.string(forKey: "specialistClassifier") ?? ""
-                    routed = try await NativeMaterialSpecialistRouter.route(diffuse: preparedDiffuse!.diffuse,
-                        workspaceURL: specialistWorkspaceURL(tools: tools),
-                        modelDirectory: tools.string(forKey: "materialModelDirectory") ?? "",
-                        classifierModelURL: path.isEmpty ? nil : URL(fileURLWithPath: path),
-                        minimumConfidence: tools.object(forKey: "specialistMinimumConfidence") as? Double ?? 0.7)
-                }
-                specialistClassification = routed.prediction
-                specialistModels = routed.checkpoints
-                heightSourceNotice = routed.notices.isEmpty ? nil : routed.notices.joined(separator: " ")
+        guard let source, let key = currentRenderKey() else { throw StudioError("Import a photo and choose a height source.") }
+        var depth: TextureDepth?
+        var prepared: TextureEngine.PreparedDiffuse?
+        var maps: [String: MaterialModelMap] = [:]
+        switch depthChoice {
+        case .textureLoom:
+            guard let package = textureLoom.package else { throw StudioError(textureLoom.statusDescription) }
+            activity = "Preparing diffuse and classifying the surface…"
+            prepared = try await engine.prepareDiffuse(source: source, settings: settings)
+            let prediction = try await loomService.predict(diffuse: prepared!.diffuse, package: package, overrides: textureLoom.activeOverrides())
+            classification = prediction.categoryName
+            maps = prediction.maps
+            if let height = maps.removeValue(forKey: "height") {
+                depth = TextureDepth(image: height.image, sourceLabel: height.sourceLabel, interpretation: .surfaceHeight)
+                depth?.alignedToOutput = true
             }
-            auxiliary = specialistModels.filter { ["roughness", "normal"].contains($0.key) }
+        case .attached:
+            guard let attachedDepth else { throw StudioError("Attach a height map before generating the material.") }
+            depth = TextureDepth(image: attachedDepth.image, sourceLabel: attachedDepth.sourceLabel,
+                interpretation: settings.attachedMapIsHeight ? .surfaceHeight : .distance)
+        case .photoDetail: depth = nil
         }
-        let depth: TextureDepth?
-        if depthChoice == .materialCheckpoint || (depthChoice == .specialists && specialistModels["height"] != nil) {
-            let checkpoint = try depthChoice == .specialists ? specialistModels["height"]! : currentMaterialCheckpoint()
-            let prepared = preparedDiffuse!
-            if let checkpointPredictor {
-                let input = TextureSource(url: source.url, orientedImage: prepared.diffuse, camera: source.camera,
-                    pixelWidth: settings.outputSize, pixelHeight: settings.outputSize)
-                depth = try await checkpointPredictor(input, checkpoint, settings.outputSize)
-            } else {
-                depth = try await materialCheckpointService.predict(diffuse: prepared.diffuse, checkpoint: checkpoint, size: settings.outputSize)
-            }
-        } else if depthChoice == .specialists, specialistFallback == "material", let checkpoint = try? currentMaterialCheckpoint() {
-            depth = try await materialCheckpointService.predict(diffuse: preparedDiffuse!.diffuse, checkpoint: checkpoint, size: settings.outputSize)
-            specialistModels["height"] = checkpoint
-        } else { depth = try await selectedDepth(models: models) }
-        var modelMaps: [String: MaterialModelMap] = [:]
-        for target in ["roughness", "normal"] {
-            guard let checkpoint = auxiliary[target], let preparedDiffuse else { continue }
-            activity = "Generating \(target) with \(checkpoint.title)…"
-            if let mapPredictor { modelMaps[target] = try await mapPredictor(preparedDiffuse.diffuse, checkpoint, settings.outputSize) }
-            else { modelMaps[target] = try await materialCheckpointService.predictMap(diffuse: preparedDiffuse.diffuse, checkpoint: checkpoint, size: settings.outputSize) }
-            try Task.checkCancellation()
-        }
-        guard let key = currentRenderKey() else { throw StudioError("Choose a height source before generating the material.") }
-        let renderSettings = settings
-        activity = "Generating \(renderSettings.outputSize) × \(renderSettings.outputSize) maps…"
         let material: MaterialResult
-        if let materialProcessor { material = try await materialProcessor(source, renderSettings, depth) }
-        else { material = try await engine.process(source: source, settings: renderSettings, attachedDepth: depth, preparedDiffuse: preparedDiffuse, modelMaps: modelMaps) }
-        activity = "Retaining native maps for immediate inspection and export…"
+        if let materialProcessor { material = try await materialProcessor(source, settings, depth) }
+        else { material = try await engine.process(source: source, settings: settings, attachedDepth: depth, preparedDiffuse: prepared, modelMaps: maps) }
         let cache = try await MaterialRenderCache.make(material: material, key: key, engine: engine)
         try Task.checkCancellation()
         guard currentRenderKey() == key else { throw CancellationError() }
-        materialCache = cache
-        result = cache.material
-        warnings = cache.material.warnings + (depthChoice == .specialists ? heightSourceNotice.map { [$0] } ?? [] : [])
+        materialCache = cache; result = cache.material; warnings = cache.material.warnings
         return cache
     }
-
     func selectPreview(_ selection: MaterialPreview) {
+        guard !isBusy else { return }
         selectedPreview = selection
-        guard !isBusy, source != nil else { return }
-        run("Updating preview…") { try await self.renderSelectedPreview() }
+        run("Updating preview…") { try await self.renderSelectedPreview(material: self.currentCache?.material) }
     }
-
-    private func renderSelectedPreview() async throws {
+    private func renderSelectedPreview(material: MaterialResult?) async throws {
         guard let source else { return }
-        let (preview, rendered) = try await preparePreview(source: source, result: result, selection: selectedPreview)
-        try Task.checkCancellation()
-        self.preview = preview
-        renderedPreview = rendered
-    }
-
-    private func preparePreview(source: TextureSource, result: MaterialResult?, selection: MaterialPreview) async throws -> (CGImage, MaterialPreview) {
         let image: CIImage
-        if selection == .source { image = source.orientedImage }
-        else if let result {
-            image = switch selection {
-            case .source: source.orientedImage
-            case .diffuse: result.diffuse
-            case .roughness: result.roughness
-            case .normal: result.normal
-            case .height: result.height
+        let choice = material == nil ? MaterialPreview.source : selectedPreview
+        switch choice {
+        case .source: image = source.orientedImage
+        case .diffuse: image = material!.diffuse
+        case .roughness: image = material!.roughness
+        case .normal: image = material!.normal
+        case .height: image = material!.height
+        }
+        let preview = try await (choice == .source || choice == .diffuse ? engine.preview(image) : engine.mapPreview(image))
+        try Task.checkCancellation(); self.preview = preview; renderedPreview = choice
+    }
+    func chooseExport() {
+        guard let source, !isBusy else { return }
+        let panel = NSSavePanel(); panel.title = "Export Blender Material"
+        panel.message = "Save all four maps and a Blender setup script in a new material folder."
+        panel.nameFieldStringValue = source.url.deletingPathExtension().lastPathComponent + "-material"
+        panel.canCreateDirectories = true; panel.prompt = "Export Material"
+        panel.directoryURL = exportDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        panel.begin { [weak self] response in if response == .OK, let url = panel.url { self?.export(to: url) } }
+    }
+    func export(to url: URL, reveal: Bool = true) {
+        guard source != nil, !isBusy else { return }
+        run("Exporting material maps…") {
+            guard !FileManager.default.fileExists(atPath: url.path) else { throw StudioError("Choose a new folder to preserve the previous export.") }
+            let staging = url.deletingLastPathComponent().appendingPathComponent(".texture-export-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: staging) }
+            let cache = try await self.ensureMaterial()
+            try await cache.export(to: staging, precision: self.settings.exrPrecision, settings: self.settings, engine: self.engine)
+            try BlenderMaterialSetup.write(to: staging, settings: self.settings)
+            if self.depthChoice == .textureLoom, let package = self.textureLoom.package {
+                let record: [String: Any] = ["model_id": package.manifest.id, "model_version": package.manifest.version,
+                    "dataset": self.classification ?? "", "loras": self.textureLoom.adapters.filter(\.enabled).map(\.id)]
+                try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+                    .write(to: staging.appendingPathComponent("texture-loom.json"))
             }
-        } else { image = source.orientedImage }
-        let rendered = result == nil ? MaterialPreview.source : selection
-        if rendered == .source || rendered == .diffuse {
-            return (try await engine.preview(image), rendered)
-        } else {
-            return (try await engine.mapPreview(image), rendered)
+            if let decision = self.decision { try JSONEncoder().encode(decision).write(to: staging.appendingPathComponent("photo-review.json")) }
+            try Task.checkCancellation(); try FileManager.default.moveItem(at: staging, to: url)
+            self.exportURL = url; self.exportDirectory = url.deletingLastPathComponent().path; self.savePreferences()
+            if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]) }
         }
     }
-
-    private func selectedDepth(models: ModelManager) async throws -> TextureDepth? {
-        switch depthChoice {
-        case .materialCheckpoint:
-            throw StudioError("Material inference requires the prepared diffuse input.")
-        case .photoDetail: return nil
-        case .attached:
-            guard let attachedDepth else { throw StudioError("Attach a height/depth map, or choose Flat surface.") }
-            return TextureDepth(image: attachedDepth.image, sourceLabel: attachedDepth.sourceLabel,
-                interpretation: settings.attachedMapIsHeight ? .surfaceHeight : .distance)
-        case .specialists where specialistFallback != "local": return nil
-        case .model, .specialists:
-            guard let modelURL = models.availableURL(for: modelID) else {
-                if depthChoice == .specialists {
-                    heightSourceNotice = (heightSourceNotice.map { $0 + " " } ?? "") + "The local fallback depth model is unavailable; using a flat height map."
-                    return nil
-                }
-                showModelRecovery = true
-                throw StudioError("The depth model is missing. Locate it or download it in Models.")
-            }
-            guard let descriptor = models.catalog.first(where: { $0.id == modelID }) else {
-                throw StudioError("Choose an available depth model in Local Models.")
-            }
-            let signature = modelFileSignature(modelURL, record: models.records[modelID])
-            if let generatedDepth, generatedModelID == modelID,
-               generatedModelPath == modelURL.path, generatedResolution == settings.modelProcessResolution,
-               generatedFileSignature == signature {
-                return generatedDepth
-            }
-            activity = "Generating depth with \(descriptor.name)…"
-            let input = try await engine.preview(source!.orientedImage, maxDimension: settings.modelProcessResolution)
-            let prediction: ModelDepthResult
-            do {
-                prediction = try await modelService.predict(image: input, modelURL: modelURL,
-                    outputName: models.records[modelID]?.selectedOutput)
-            } catch LocalModelError.missingModel {
-                models.refresh()
-                showModelRecovery = true
-                throw StudioError("The model moved while loading. Locate it or download it in Models.")
-            }
-            let inverse = customInverseDepth
-            let depth = try TextureDepth(width: prediction.width, height: prediction.height,
-                                         values: prediction.values, sourceLabel: "\(descriptor.name) · \(prediction.width) × \(prediction.height)",
-                                         interpretation: inverse ? .inverseDepth : .distance)
-            try Task.checkCancellation()
-            generatedDepth = depth
-            generatedCheckpointKey = nil
-            generatedProvenance = prediction.provenance
-            generatedModelID = modelID
-            generatedResolution = settings.modelProcessResolution
-            generatedModelPath = modelURL.path
-            generatedFileSignature = signature
-            return depth
-        }
-    }
-
-    func invalidateModelDepth() {
-        generatedDepth = nil
-        generatedCheckpointKey = nil
-        generatedProvenance = nil
-        generatedModelID = nil
-        generatedResolution = nil
-        generatedModelPath = nil
-        generatedFileSignature = nil
-        markEdited()
-    }
-
     func chooseAuxiliaryExport() {
         guard let source, !isBusy else { return }
-        let panel = NSSavePanel()
-        panel.title = "Export Original Auxiliary Data"
-        panel.message = "Copy the photograph's original depth, mattes and gain-map buffers at their native precision."
+        let panel = NSSavePanel(); panel.title = "Export Original Auxiliary Data"
         panel.nameFieldStringValue = source.url.deletingPathExtension().lastPathComponent + "-auxiliary"
-        panel.canCreateDirectories = true
-        panel.prompt = "Export Data"
-        panel.begin { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            self?.exportAuxiliary(to: url)
-        }
+        panel.begin { [weak self] response in if response == .OK, let url = panel.url { self?.exportAuxiliary(to: url) } }
     }
-
     func exportAuxiliary(to url: URL, reveal: Bool = true) {
         guard let source, !isBusy else { return }
         run("Copying original auxiliary data…") {
-            let report = try await NativeAuxiliaryExporter.export(sourceURL: source.url, to: url)
+            _ = try await NativeAuxiliaryExporter.export(sourceURL: source.url, to: url)
             self.exportURL = url
-            self.activity = "Exported \(report.auxiliaryCount) original auxiliary buffers."
             if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]) }
         }
     }
-
-    func chooseExport(models: ModelManager) {
-        guard source != nil, !isBusy else { return }
-        if depthChoice == .model, models.availableURL(for: modelID) == nil {
-            showModelRecovery = true
-            return
-        }
-        let panel = NSSavePanel()
-        panel.title = "Export Blender Material"
-        panel.message = "Create a new material folder containing all four maps and a Blender setup script."
-        panel.nameFieldStringValue = "\(source!.url.deletingPathExtension().lastPathComponent)-material"
-        panel.canCreateDirectories = true
-        panel.prompt = "Export Material"
-        panel.directoryURL = exportDirectory.map { URL(fileURLWithPath: $0, isDirectory: true) }
-        panel.begin { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            self?.export(to: url, models: models)
-        }
-    }
-
-    func export(to url: URL, models: ModelManager, reveal: Bool = true) {
-        guard source != nil, !isBusy else { return }
-        run("Exporting material maps…") {
-            guard !FileManager.default.fileExists(atPath: url.path) else {
-                throw StudioError("Choose a new material folder to preserve the previous export.")
-            }
-            let staging = url.deletingLastPathComponent().appendingPathComponent(".texture-export-\(UUID().uuidString)")
-            defer { try? FileManager.default.removeItem(at: staging) }
-            let cache = try await self.ensureMaterial(models: models)
-            try await self.renderSelectedPreview()
-            let exportSettings = self.settings
-            self.activity = "Writing PNG, linear EXR maps and material metadata…"
-            try await cache.export(to: staging, precision: self.settings.exrPrecision, settings: exportSettings, engine: self.engine)
-            try BlenderMaterialSetup.write(to: staging, settings: exportSettings)
-            if self.depthChoice == .model, let provenance = self.generatedProvenance {
-                let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                try encoder.encode(provenance).write(to: staging.appendingPathComponent("depth-source.json"), options: .atomic)
-            }
-            if self.depthChoice == .materialCheckpoint {
-                try self.materialCheckpointProvenance().write(to: staging.appendingPathComponent("depth-source.json"), options: .atomic)
-            }
-            let modelSelections = try self.activeAuxiliaryCheckpoints()
-            if !modelSelections.isEmpty {
-                let identity = modelSelections.mapValues { ["checkpoint_path": $0.checkpointPath, "checkpoint_sha256": $0.sha256, "target": $0.target, "model_name": $0.title] }
-                try JSONSerialization.data(withJSONObject: ["input": "Shared prepared diffuse map", "native_size": self.settings.outputSize,
-                    "numeric_values_preserved": true, "models": identity], options: [.prettyPrinted, .sortedKeys])
-                    .write(to: staging.appendingPathComponent("material-models.json"), options: .atomic)
-            }
-            if self.depthChoice == .specialists, let classification = self.specialistClassification {
-                let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                try encoder.encode(classification).write(to: staging.appendingPathComponent("specialist-classification.json"), options: .atomic)
-                try JSONSerialization.data(withJSONObject: ["fallback": self.specialistFallback,
-                    "notices": self.heightSourceNotice.map { [$0] } ?? []], options: [.prettyPrinted, .sortedKeys])
-                    .write(to: staging.appendingPathComponent("specialist-routing.json"), options: .atomic)
-            }
-            if let decision = self.decision {
-                let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                try encoder.encode(decision).write(to: staging.appendingPathComponent("photo-review.json"), options: .atomic)
-            }
-            try Task.checkCancellation()
-            try FileManager.default.moveItem(at: staging, to: url)
-            self.exportURL = url
-            self.exportDirectory = url.deletingLastPathComponent().path
-            self.savePreferences()
-            self.warnings = cache.material.warnings + (self.depthChoice == .specialists ? self.heightSourceNotice.map { [$0] } ?? [] : [])
-            if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-        }
-    }
-
-    func saveRecipe() {
-        guard let source, !isBusy else { return }
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = source.url.deletingPathExtension().lastPathComponent + ".texture.json"
-        panel.begin { [weak self] response in
-            guard let self, response == .OK, let url = panel.url else { return }
-            do {
-                let recipe = try self.makeRecipe()
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                try encoder.encode(recipe).write(to: url, options: .atomic)
-                self.recipeURL = url
-                self.hasEdits = false
-            } catch { self.report(error) }
-        }
-    }
-
-    private func currentMaterialCheckpoint() throws -> SelectedMaterialCheckpoint {
-        let runtime = try SelectedMaterialCheckpoint.read(from: checkpointRegistryURL)
-        let checkpoint = recipeCheckpoint?.resolve(using: runtime) ?? runtime
-        guard checkpoint.supportsStudioInference else { throw StudioError("Select a supported material safetensors checkpoint in Model Training.") }
-        return checkpoint
-    }
-    private func activeAuxiliaryCheckpoints() throws -> [String: SelectedMaterialCheckpoint] {
-        if depthChoice == .specialists { return (recipeSpecialistModels ?? specialistModels).filter { ["roughness", "normal"].contains($0.key) } }
-        let selected = SelectedMaterialCheckpoint.readAll(heightRegistryURL: checkpointRegistryURL)
-        guard let pins = recipeMapCheckpoints else { return selected.filter { ["roughness", "normal"].contains($0.key) } }
-        var resolved: [String: SelectedMaterialCheckpoint] = [:]
-        for (target, identity) in pins {
-            guard ["roughness", "normal"].contains(target), identity.target == target,
-                  let runtime = selected[target] ?? selected["height"] ?? selected.values.first else {
-                throw StudioError("Reconnect the material runtime in Model Training to use this recipe's \(target) model.")
-            }
-            resolved[target] = identity.resolve(using: runtime)
-        }
-        return resolved
-    }
-
     func makeRecipe() throws -> TextureRecipe {
         guard let source else { throw StudioError("Import a photo before saving a recipe.") }
-        var recipe = TextureRecipe(photoPath: source.url.path, depthPath: depthURL?.path,
-            depthChoice: depthChoice, modelID: modelID, customInverseDepth: customInverseDepth, settings: settings)
-        if depthChoice == .materialCheckpoint { recipe.materialCheckpoint = MaterialCheckpointIdentity(try currentMaterialCheckpoint()) }
-        recipe.materialMapCheckpoints = try activeAuxiliaryCheckpoints().mapValues(MaterialCheckpointIdentity.init)
-        if depthChoice == .specialists {
-            recipe.specialistModels = specialistModels
-            recipe.specialistClassification = specialistClassification
-            recipe.specialistFallback = specialistFallback
-        }
-        return recipe
+        return TextureRecipe(photoPath: source.url.path, depthPath: depthURL?.path, depthChoice: depthChoice, settings: settings,
+            textureLoomID: textureLoom.package?.manifest.id, textureLoomVersion: textureLoom.package?.manifest.version,
+            enabledLoRAs: textureLoom.adapters.filter(\.enabled).map(\.id))
     }
-
-    private func specialistWorkspaceURL(tools: UserDefaults) -> URL {
-        if let path = tools.string(forKey: "specialistWorkspace"), !path.isEmpty { return URL(fileURLWithPath: path) }
-        let workspace = tools.string(forKey: "workspace").map { URL(fileURLWithPath: $0) }
-            ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("Texture Studio/Material Workspace")
-        return workspace.appendingPathComponent("Specialist Models")
-    }
-
-    func materialCheckpointProvenance() throws -> Data {
-        let checkpoint = try currentMaterialCheckpoint()
-        let inspection = try NativeMaterialTransfer.object(Data(NativeMaterialCheckpoint.inspect(
-            at: URL(fileURLWithPath: checkpoint.checkpointPath), expectedSHA256: checkpoint.sha256).utf8))
-        let recorded = try WorkbenchResult.decode(WorkbenchCheckpoint.self,
-            output: NativeMaterialTransfer.json(inspection))
-        guard recorded.target == checkpoint.target, let family = recorded.modelFamily else {
-            throw StudioError("The selected material model identity does not match its recorded target and family.")
-        }
-        var metadata: [String: Any] = [
-            "backend": "Apple MPSGraph / Metal", "model_type": "PBRnxt material refinement",
-            "input": "Prepared diffuse map shared with material rendering", "checkpoint_path": checkpoint.checkpointPath,
-            "checkpoint_sha256": checkpoint.sha256, "target": checkpoint.target,
-            "model_name": checkpoint.title, "height_interpretation": "surface height; no camera-depth normalization"
-        ]
-        if family != .pbrnxt {
-            metadata["model_type"] = family.label
-            metadata["model_family"] = family.rawValue
-            metadata["architecture"] = recorded.architecture
-            metadata["input_channels"] = inspection["input_channels"]
-            metadata["output_channels"] = inspection["output_channels"]
-        }
-        if family == .depthProHeightRefiner {
-            let grid = [settings.outputSize, settings.outputSize]
-            metadata["backend"] = "Core ML DepthPro followed by Apple MPSGraph / Metal"
-            metadata["input"] = "One-channel normalized inverse DepthPro depth from the shared prepared diffuse map"
-            metadata["height_interpretation"] = "surface height; original linear height codes / code maximum"
-            metadata["depthpro_model_sha256"] = inspection["depthpro_model_sha256"]
-            metadata["depthpro_preparation_contract"] = inspection["depthpro_preparation_contract"]
-            metadata["prepared_diffuse_dimensions"] = grid
-            metadata["depthpro_input_dimensions"] = [NativeDepthProService.inputSize, NativeDepthProService.inputSize]
-            metadata["depthpro_output_dimensions"] = [NativeDepthProService.inputSize, NativeDepthProService.inputSize]
-            metadata["refiner_input_dimensions"] = grid
-            metadata["refiner_output_dimensions"] = grid
-            metadata["depthpro_original_width"] = settings.outputSize
-            metadata["source_pixels_resized"] = settings.outputSize != NativeDepthProService.inputSize
-            metadata["source_pixels_discarded"] = false
-            metadata["refiner_input_resized"] = false
-            metadata["complete_prepared_diffuse_field_of_view"] = true
-            metadata["depthpro_output_preparation"] = "pixel-center bilinear meters to paired grid, then reciprocal and full-field min-max"
-            metadata["refiner_precision"] = "Float32"
-        }
-        return try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys])
-    }
-
-    func chooseRecipe() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.json]
+    func saveRecipe() {
+        guard source != nil, !isBusy else { return }
+        let panel = NSSavePanel(); panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = source!.url.deletingPathExtension().lastPathComponent + ".texture.json"
         panel.begin { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            self?.openRecipe(url)
+            guard let self, response == .OK, let url = panel.url else { return }
+            do { try JSONEncoder().encode(self.makeRecipe()).write(to: url, options: .atomic); self.recipeURL = url; self.hasEdits = false }
+            catch { self.report(error) }
         }
     }
-
+    func chooseRecipe() {
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]
+        panel.begin { [weak self] response in if response == .OK, let url = panel.url { self?.openRecipe(url) } }
+    }
     func openRecipe(_ url: URL) {
         guard !isBusy else { return }
         run("Opening texture recipe…") {
             let recipe = try JSONDecoder().decode(TextureRecipe.self, from: Data(contentsOf: url))
-            guard recipe.version == 3 else { throw StudioError("This recipe version is not supported.") }
-            let runtime = try? SelectedMaterialCheckpoint.read(from: self.checkpointRegistryURL)
-            let pinnedCheckpoint = recipe.depthChoice == .materialCheckpoint ? recipe.materialCheckpoint : nil
-            let photoURL = URL(fileURLWithPath: recipe.photoPath)
-            guard FileManager.default.fileExists(atPath: photoURL.path) else {
-                throw StudioError("The original photo has moved. Import its new location, then reapply the saved settings.")
+            guard recipe.version == 4 else { throw StudioError("This recipe belongs to the previous model architecture. Import its photo to create a new recipe.") }
+            if recipe.depthChoice == .textureLoom {
+                guard self.textureLoom.package?.manifest.id == recipe.textureLoomID,
+                      self.textureLoom.package?.manifest.version == recipe.textureLoomVersion else { throw StudioError("This recipe uses another Texture Loom build.") }
+                guard Set(recipe.enabledLoRAs).isSubset(of: Set(self.textureLoom.adapters.map(\.id))) else { throw StudioError("Import this recipe's LoRAs before opening it.") }
+                for adapter in self.textureLoom.adapters { try self.textureLoom.setEnabled(adapter.id, recipe.enabledLoRAs.contains(adapter.id)) }
             }
-            let source = try await self.engine.importPhoto(photoURL)
+            let source = try await self.engine.importPhoto(URL(fileURLWithPath: recipe.photoPath))
             var depth: TextureDepth?
-            var depthURL: URL?
-            if (recipe.depthChoice == .attached || recipe.depthChoice == .materialCheckpoint), let path = recipe.depthPath {
-                let candidate = URL(fileURLWithPath: path)
-                if FileManager.default.fileExists(atPath: path) {
-                    depth = try await self.engine.importDepth(candidate, matching: source)
-                    depthURL = candidate
-                }
+            if recipe.depthChoice == .attached {
+                guard let path = recipe.depthPath else { throw StudioError("The recipe has no attached height map.") }
+                depth = try await self.engine.importDepth(URL(fileURLWithPath: path), matching: source)
             }
-            let preview = try await self.engine.preview(source.orientedImage)
-            try Task.checkCancellation()
-            self.source = source
-            self.sourcePreview = preview
-            self.materialCache = nil
-            self.recipeCheckpoint = pinnedCheckpoint
-            self.recipeMapCheckpoints = recipe.materialMapCheckpoints
-            self.recipeSpecialistModels = recipe.specialistModels
-            self.specialistModels = recipe.specialistModels ?? [:]
-            self.specialistClassification = recipe.specialistClassification
-            if let fallback = recipe.specialistFallback { self.specialistFallback = fallback }
-            self.selectedMaterialMaps = SelectedMaterialCheckpoint.readAll(heightRegistryURL: self.checkpointRegistryURL)
-            self.lastRegistrySelectionIdentity = runtime?.selectionIdentity
-            self.selectedMaterialCheckpoint = pinnedCheckpoint.flatMap { pin in runtime.map { pin.resolve(using: $0) } } ?? runtime
-            self.settings = recipe.settings
-            self.attachedDepth = depth
-            self.depthURL = depthURL
-            self.generatedDepth = nil
-            self.generatedCheckpointKey = nil
-            self.generatedProvenance = nil
-            self.generatedModelID = nil
-            self.generatedResolution = nil
-            self.generatedModelPath = nil
-            self.generatedFileSignature = nil
-            if recipe.depthChoice == .materialCheckpoint {
-                self.depthChoice = .materialCheckpoint
-            } else {
-                self.depthChoice = recipe.depthChoice == .attached && depth == nil ? .photoDetail : recipe.depthChoice
-            }
-            self.modelID = recipe.modelID
-            self.customInverseDepth = recipe.customInverseDepth
-            self.recipeURL = url
-            self.decision = nil
-            self.exportURL = nil
-            self.warnings = []
-            self.hasEdits = false
-            self.result = nil
-            self.preview = preview
-            self.renderedPreview = .source
+            let preview = try await self.engine.preview(source.orientedImage); try Task.checkCancellation()
+            self.source = source; self.attachedDepth = depth; self.depthURL = recipe.depthPath.map { URL(fileURLWithPath: $0) }
+            self.settings = recipe.settings; self.depthChoice = recipe.depthChoice; self.recipeURL = url
+            self.sourcePreview = preview; self.preview = preview; self.renderedPreview = .source
+            self.materialCache = nil; self.result = nil; self.classification = nil; self.warnings = []; self.hasEdits = false
         }
     }
-
-    func cancel() { materialCheckpointService.cancel(); operation?.cancel() }
-
-    func inspectFullQuality(models: ModelManager) {
+    func inspectFullQuality() {
         guard let source, !isBusy else { return }
         if selectedPreview == .source {
-            ReviewWindowController.shared.open(candidates: [MapReviewCandidate(id: source.url.path, label: source.url.lastPathComponent, mapURL: source.url, numeric: false)])
+            ReviewWindowController.shared.open(candidates: [MapReviewCandidate(label: source.url.lastPathComponent, mapURL: source.url, numeric: false)])
             return
         }
         guard let cache = currentCache, let url = cache.mapURL(selectedPreview) else { return }
-        let choice = selectedPreview
-        let target = choice == .height ? "height" : choice == .normal ? "normal" : choice == .roughness ? "roughness" : "input"
-        let checkpoint = activeMaterialModels[target]
-        var candidates = [MapReviewCandidate(id: url.path,
-            label: "\(source.url.deletingPathExtension().lastPathComponent) · \(choice.rawValue) · \(cache.material.outputSize) × \(cache.material.outputSize)",
-            mapURL: url, numeric: choice != .diffuse, role: choice == .diffuse ? "diffuse" : checkpoint == nil ? "map" : "checkpoint",
-            modelIdentity: checkpoint.map { MapReviewModelIdentity(checkpointPath: $0.checkpointPath,
-                checkpointSHA256: $0.sha256, architecture: $0.modelSummary, mapType: target, modelName: $0.title) })]
-        if choice != .diffuse, let diffuse = cache.mapURL(.diffuse) {
-            candidates.insert(MapReviewCandidate(label: "Diffuse · model input", mapURL: diffuse, numeric: false, role: "diffuse"), at: 0)
-        }
-        ReviewWindowController.shared.open(candidates: candidates, retaining: cache)
+        ReviewWindowController.shared.open(candidates: [MapReviewCandidate(label: selectedPreview.rawValue, mapURL: url, numeric: selectedPreview != .diffuse)], retaining: cache)
     }
-
     func requestAdvice(adviser: OllamaDecisionService) {
         guard let source, !isBusy, !adviser.isBusy else { return }
-        run("Reviewing the photo with local Clef…") {
+        run("Reviewing the photo with Clef…") {
             let image = try await self.engine.preview(source.orientedImage, maxDimension: 768)
-            let decision = try await adviser.propose(image: image)
-            try Task.checkCancellation()
-            self.decision = decision
+            self.decision = try await adviser.propose(image: image)
         }
     }
-
     func applyDecision() {
         guard let decision, !isBusy else { return }
         settings.lightingStrength = switch decision.lighting { case .none: 0; case .mild: 0.35; case .strong: 0.7 }
         settings.heightStrength = switch decision.relief { case .subtle: 0.3; case .medium: 0.65; case .strong: 1 }
         settings.roughnessBase = switch decision.roughness { case .matte: 0.8; case .mixed: 0.55; case .glossy: 0.25 }
-        markEdited()
     }
-
+    func cancel() { operation?.cancel() }
     private func run(_ label: String, work: @escaping @MainActor () async throws -> Void) {
         guard !isBusy else { return }
-        isBusy = true
-        activity = label
-        let previousDepth = generatedDepth
-        let previousProvenance = generatedProvenance
-        let previousModel = generatedModelID
-        let previousResolution = generatedResolution
-        let previousPath = generatedModelPath
-        let previousSignature = generatedFileSignature
-        let previousCheckpointKey = generatedCheckpointKey
+        isBusy = true; activity = label
         operation = Task {
-            defer {
-                self.isBusy = false; self.activity = ""; self.operation = nil
-                if self.pendingCheckpointActivation {
-                    self.pendingCheckpointActivation = false
-                    self.reloadSelectedCheckpoint(activate: true)
-                }
-            }
-            do {
-                try Task.checkCancellation()
-                try await work()
-            }
-            catch is CancellationError {
-                self.generatedDepth = previousDepth
-                self.generatedProvenance = previousProvenance
-                self.generatedModelID = previousModel
-                self.generatedResolution = previousResolution
-                self.generatedModelPath = previousPath
-                self.generatedFileSignature = previousSignature
-                self.generatedCheckpointKey = previousCheckpointKey
-            }
+            defer { self.isBusy = false; self.activity = ""; self.operation = nil }
+            do { try Task.checkCancellation(); try await work() }
+            catch is CancellationError { }
             catch { self.report(error) }
         }
     }
-
-    private func report(_ error: Error) {
-        notice = StudioNotice(title: "Texture Studio", message: error.localizedDescription)
-    }
-
-    private func modelFileSignature(_ url: URL, record: InstalledLocalModel?) -> String {
-        let weight = url.appendingPathComponent("model.safetensors")
-        let config = url.appendingPathComponent("config.json")
-        let files = [url, weight, config].map { file in
-            let values = try? file.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-            return "\(values?.contentModificationDate?.timeIntervalSince1970 ?? 0):\(values?.fileSize ?? -1)"
-        }
-        return files.joined(separator: "|") + "|\(record?.installedAt.timeIntervalSince1970 ?? 0)|\(record?.selectedOutput ?? "")"
-    }
-}
-
-struct StudioError: LocalizedError {
-    let message: String
-    init(_ message: String) { self.message = message }
-    var errorDescription: String? { message }
+    private func report(_ error: Error) { notice = StudioNotice(title: "Texture Studio", message: error.localizedDescription) }
 }

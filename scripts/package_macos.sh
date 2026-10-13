@@ -32,29 +32,7 @@ if [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$PLIST" 2>/dev/nu
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "$SCRIPT_DIR/../script/verify_native_bundle.sh" "$APP_BUNDLE"
-"$SCRIPT_DIR/../script/verify_material_payload.sh" "$APP_BUNDLE"
-for ROLE in review compare dataset train; do
-  case "$ROLE" in
-    review) TOOL_NAME="Material Review"; ICON_NAME=MaterialReview ;;
-    compare) TOOL_NAME="Checkpoint Compare"; ICON_NAME=CheckpointCompare ;;
-    dataset) TOOL_NAME="Material Dataset"; ICON_NAME=MaterialDataset ;;
-    train) TOOL_NAME="Material Trainer"; ICON_NAME=MaterialTrainer ;;
-  esac
-  TOOL_APP="$APP_BUNDLE/Contents/Applications/$TOOL_NAME.app"
-  TOOL_PLIST="$TOOL_APP/Contents/Info.plist"
-  if [[ ! -x "$TOOL_APP/Contents/MacOS/$TOOL_NAME" || ! -f "$TOOL_PLIST" ]] || \
-     [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$TOOL_PLIST")" != "org.ipde.material-$ROLE" ]] || \
-     [[ "$(/usr/libexec/PlistBuddy -c 'Print :MaterialToolRole' "$TOOL_PLIST")" != "$ROLE" ]] || \
-     [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$TOOL_PLIST" 2>/dev/null || true)" != "$ICON_NAME.icns" ]] || \
-     [[ ! -s "$TOOL_APP/Contents/Resources/$ICON_NAME.icns" ]] || \
-     [[ "$(/usr/libexec/PlistBuddy -c 'Print :IPDEBuildConfiguration' "$TOOL_PLIST" 2>/dev/null || true)" != Release ]] || \
-     [[ -e "$TOOL_APP/Contents/Applications" ]]; then
-    echo "Missing or malformed nested material tool: $TOOL_NAME (run make build)." >&2
-    exit 1
-  fi
-  "$SCRIPT_DIR/../script/verify_native_bundle.sh" "$TOOL_APP"
-  /usr/bin/codesign --verify --deep --strict "$TOOL_APP"
-done
+"$SCRIPT_DIR/../script/verify_texture_loom.sh" "$APP_BUNDLE"
 /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
 mkdir -p "$OUTPUT_DIR"
 PACKAGE_DIR="$(/usr/bin/mktemp -d "$OUTPUT_DIR/.texture-studio-package.XXXXXX")"

@@ -8,11 +8,10 @@ FIXTURE="$SCRATCH/repository"
 APPLICATION="$SCRATCH/Texture Studio.app"
 mkdir -p "$APPLICATION/Contents/Resources"
 "$SCRIPT_DIR/verify_native_bundle.sh" "$APPLICATION"
-mkdir "$APPLICATION/Contents/Resources/DiffuseTextureTypeClassifier.mlmodelc"
-"$SCRIPT_DIR/verify_material_payload.sh" "$APPLICATION"
+"$SCRIPT_DIR/verify_texture_loom.sh" "$APPLICATION"
 for PAYLOAD in material.safetensors depth.mlpackage unknown.mlmodelc sample.exr; do
   touch "$APPLICATION/Contents/Resources/$PAYLOAD"
-  if "$SCRIPT_DIR/verify_material_payload.sh" "$APPLICATION" > "$SCRATCH/error" 2>&1; then
+  if "$SCRIPT_DIR/verify_texture_loom.sh" "$APPLICATION" > "$SCRATCH/error" 2>&1; then
     echo "Unexpected material payload accepted: $PAYLOAD" >&2; exit 1
   fi
   /bin/rm "$APPLICATION/Contents/Resources/$PAYLOAD"
@@ -33,6 +32,7 @@ for RESOURCE in .venv venv __pycache__ ipde.egg-info Python.framework MaterialBa
 done
 "$SCRIPT_DIR/verify_native_bundle.sh" "$APPLICATION"
 /usr/bin/xcrun swift "$SCRIPT_DIR/install_macos.swift" --self-test
+"$SCRIPT_DIR/test_install_suite.sh"
 /usr/bin/xcrun swift "$SCRIPT_DIR/check_release_version.swift" --root "$REPOSITORY"
 if TAG=v0.0.0 REF_TYPE=tag /usr/bin/xcrun swift "$SCRIPT_DIR/check_release_version.swift" --root "$REPOSITORY" > "$SCRATCH/error" 2>&1; then
   echo "Mismatched release tag unexpectedly accepted" >&2; exit 1

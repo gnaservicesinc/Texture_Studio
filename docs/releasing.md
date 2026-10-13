@@ -1,93 +1,11 @@
-# Building and releasing Texture Studio
+# macOS releases
 
-Texture Studio is the standalone native SwiftUI application in
-`src/TextureStudio/TextureStudio.xcodeproj`. The shared scheme is
-`TextureStudio`; its executable and application bundle are named **Texture
-Studio**. The bundle identifier is `org.ipde.texture-studio`.
+Texture Studio is one native Apple Silicon application. The retired nested material dataset, trainer, checkpoint and review apps are excluded from every package.
 
-The app requires an Apple Silicon Mac, macOS 26 or later, and a full Xcode
-installation containing the macOS 26 SDK or later. Command Line Tools alone are
-insufficient. The project uses Apple's SwiftUI, AppKit, ImageIO, Core Image,
-Metal, Accelerate, Metal Performance Shaders Graph and Core ML frameworks.
-Qt, CMake, Ninja, Linux, and Windows app build paths have been retired.
+Run `make package` for an optimized Release build and the ZIP in `dist`. Set `TEXTURE_LOOM_PACKAGE` to a complete Loom Factory `.textureloom` export when building a deployment with learned material inference. The integration verifies every registered artifact, compiles Core ML models and embeds the fixed model payload before signing.
 
-The Xcode build phases and native build, package, install and release-check
-targets invoke only shell and Apple tools. The app does not stage an interpreter
-or a source backend. Packaging rejects retired backend resources and interpreter
-files in the parent and every nested material tool.
+Run `make install` at the repository root to build, install and open Texture Studio, Loom Factory and Loom Workshop. The other two applications remain independent repositories; missing local checkouts are cloned from their GitHub origins. All three Release builds and signatures are checked before installed applications are asked to close. Active training can refuse that request, leaving installed applications untouched. The suite never force-quits an app, and each installer stages and verifies its replacement with rollback on failure.
 
-## Local development
+Installation does not create distribution ZIPs or run Debug builds. `CONFIGURATION=Debug` is ignored by this production install target. Use `DESTDIR=/path/to/staging` to install all three into a staging tree without closing or launching applications. Set `INSTALL_LAUNCH=0` for a normal install without relaunching. Alternate Factory and Workshop checkout paths can be supplied as `LOOM_FACTORY_REPO` and `LOOM_WORKSHOP_REPO`.
 
-Open the project in Xcode and select the TextureStudio scheme, or run:
-
-```sh
-make build
-./script/build_and_run.sh
-```
-
-`make build` builds Release into `build/TextureStudio/Build/Products/Release`.
-The run script builds and launches Release by default. Only `--debug` chooses
-Debug and LLDB. It stops only the matching app in this checkout/configuration;
-an installed app is left running. Its optional modes are `--debug`,
-`--logs`, `--telemetry`, and `--verify`. Extra app arguments follow `--`.
-The Codex **Run Release** action uses this script through
-`.codex/environments/environment.toml`.
-
-```sh
-./script/build_and_run.sh --verify
-./script/build_and_run.sh run -- --open /path/to/surface.heic
-make test-native
-make smoke
-```
-
-The native XCTest target tests geometry, map exports, and model management.
-`make test-native` also checks native bundle contents and Swift installation rollback;
-`make test-build-tools` runs those tooling checks independently.
-The Core Image Metal kernels are compiled with `metal -fcikernel` and
-`metallib -cikernel` by the Xcode build and embedded in the app resources.
-No model downloads are needed for the deterministic native checks. Real material
-inference checks require the separately installed selected model and Metal runtime.
-
-`make test` runs native app and build-tool checks. `CONFIGURATION=Debug` changes the build
-configuration; `DERIVED_DATA=/path/to/build` changes the Makefile output root.
-The run script accepts `TEXTURE_STUDIO_DERIVED_DATA` for its output root.
-
-## Packages and versions
-
-```sh
-make package
-make release-check
-# Optional: install the built app, after closing Texture Studio.
-make install
-# Or install under a staging root:
-make DESTDIR=/path/to/staging install
-```
-
-Packaging verifies the app's signature, identity, and arm64 executable, then
-creates `dist/Texture-Studio-macos-arm64.zip` and its SHA-256 checksum. The app
-contains native resources and the four signed material tools under
-`Contents/Applications`. Children are signed before
-the parent bundle is sealed. The installer refuses Debug builds and refuses to
-replace a running installed parent or child; close them and rerun `make install`.
-Optional models are stored outside the application bundle.
-
-Primary development commits stay on `main`. Commit and push source changes after
-validation, build/package Release, and install in `/Applications` when the installed
-suite is closed. Model weights, datasets and generated outputs are excluded;
-configure Git LFS before embedding model binaries. Tags identify deliberately
-published versions; building a Release configuration does not publish a GitHub Release.
-
-The version must agree in `VERSION` and every
-`MARKETING_VERSION` entry in the Xcode project. The tag must be `v` followed by
-that version. `xcrun swift script/check_release_version.swift` checks these without importing
-model runtimes. The current 0.9.x series remains a development prerelease.
-
-The macOS GitHub workflow builds and tests the native app on `macos-26` without
-installing an interpreter. Tagged publication requires the native build job. A workflow
-change is not evidence that remote CI has passed. A local package is not a
-published GitHub Release.
-
-Local and CI packages use ad-hoc signing and are not notarized. A public trusted
-release additionally requires a Developer ID identity, hardened runtime,
-notarization, and stapling; credentials are never stored in this repository.
-Use Xcode's archive/distribution workflow when preparing that release.
+The current local build is ad-hoc signed. Signing with an Apple Developer identity and notarization are separate distribution steps.

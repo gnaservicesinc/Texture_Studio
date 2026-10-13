@@ -1,11 +1,7 @@
 import Foundation
 
 enum MaterialPreview: String, CaseIterable, Identifiable {
-    case source = "Photo"
-    case diffuse = "Diffuse"
-    case roughness = "Roughness"
-    case normal = "Normal"
-    case height = "Displacement"
+    case source = "Photo", diffuse = "Diffuse", roughness = "Roughness", normal = "Normal", height = "Displacement"
     var id: String { rawValue }
     var symbol: String {
         switch self {
@@ -19,68 +15,31 @@ enum MaterialPreview: String, CaseIterable, Identifiable {
 }
 
 enum DepthChoice: String, Codable, CaseIterable, Identifiable {
-    case photoDetail = "Flat surface"
-    case attached = "Attached depth"
-    case model = "Local ML depth"
-    case materialCheckpoint = "Material checkpoint"
-    case specialists = "Automatic specialist models"
+    case textureLoom = "Texture Loom", attached = "Attached height / depth map", photoDetail = "Flat surface"
     var id: String { rawValue }
-    static let studioChoices: [DepthChoice] = [.photoDetail, .attached, .materialCheckpoint, .specialists]
-
-    var title: String {
-        switch self {
-        case .photoDetail: "Flat surface"
-        case .attached: "Attached height / depth map"
-        case .model: "Custom depth model"
-        case .materialCheckpoint: "Trained material model"
-        case .specialists: "Automatic specialist models"
-        }
-    }
-
-
+    var title: String { rawValue }
+    static let studioChoices = allCases
 }
 
 struct TextureRecipe: Codable {
-    var version = 3
+    var version = 4
     var photoPath: String
     var depthPath: String?
     var depthChoice: DepthChoice
-    var modelID: String
-    var customInverseDepth: Bool
     var settings: TextureSettings
-    var materialCheckpoint: MaterialCheckpointIdentity? = nil
-    var materialMapCheckpoints: [String: MaterialCheckpointIdentity]? = nil
-    var specialistModels: [String: SelectedMaterialCheckpoint]? = nil
-    var specialistClassification: NativeDiffuseTextureClassifier.Prediction? = nil
-    var specialistFallback: String? = nil
-}
-
-/// Recipes identify model data, independently of the native runtime.
-struct MaterialCheckpointIdentity: Codable, Sendable {
-    let checkpointPath: String
-    let sha256: String
-    let displayName: String?
-    let modelSummary: String?
-    let target: String
-
-    init(_ checkpoint: SelectedMaterialCheckpoint) {
-        checkpointPath = checkpoint.checkpointPath
-        sha256 = checkpoint.sha256
-        displayName = checkpoint.displayName
-        modelSummary = checkpoint.modelSummary
-        target = checkpoint.target
-    }
-
-    func resolve(using runtime: SelectedMaterialCheckpoint) -> SelectedMaterialCheckpoint {
-        SelectedMaterialCheckpoint(checkpointPath: checkpointPath, sha256: sha256, target: target,
-            workspacePath: runtime.workspacePath,
-            modelDirectory: runtime.modelDirectory,
-            displayName: displayName, modelSummary: modelSummary)
-    }
+    var textureLoomID: String?
+    var textureLoomVersion: String?
+    var enabledLoRAs: [String]
 }
 
 struct StudioNotice: Identifiable {
     let id = UUID()
     let title: String
     let message: String
+}
+
+struct StudioError: LocalizedError {
+    let message: String
+    init(_ message: String) { self.message = message }
+    var errorDescription: String? { message }
 }

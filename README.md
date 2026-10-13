@@ -1,58 +1,43 @@
 # Texture Studio
 
-A standalone SwiftUI app for Apple Silicon that turns a surface photograph into an editable Blender Cycles material. The app uses ImageIO, Core Image, Metal, Accelerate and Apple model APIs. It requires macOS 26 and full Xcode 26 to build.
+Texture Studio turns surface photographs into diffuse, displacement, roughness and OpenGL normal maps for Blender and other material tools. The macOS texture editor, photo correction, full resolution inspection and Blender export remain in this repository.
 
-## Build and launch
+Model development belongs to [Loom Factory](https://github.com/gnaservicesinc/LoomFactory). Texture Studio contains no dataset manager, classifier trainer, full model trainer or checkpoint comparison application. [Loom Workshop](https://github.com/gnaservicesinc/LoomWorkshop) provides the separate guided LoRA training workflow using paired material maps and this build's fixed base.
+
+## Build
+
+Requires Apple Silicon, macOS 26 and Xcode with the macOS Metal toolchain.
 
 ```sh
-make build
-./script/build_and_run.sh
+make install
 ```
 
-Open `src/TextureStudio/TextureStudio.xcodeproj` and select the shared `TextureStudio` scheme. Release is the default configuration. Build, package and install tooling uses shell and Swift. `make test-native` runs native regressions and build-tool checks; `make smoke` exercises EXR formats. `make package` produces an ad-hoc signed local archive and rejects interpreter files or retired backend resources in the bundle. Packaging does not publish or notarize the app.
+This one command builds optimized Release versions of Texture Studio, Loom Factory and Loom Workshop, installs them in `/Applications`, and opens all three. Missing Factory or Workshop checkouts are restored from their GitHub repositories. An app with active training can refuse to quit; finish or cancel the run and repeat the command. The installer never force-quits a training run.
 
-**Model Training** opens the dataset, trainer, checkpoint and review workspaces. Material Review, Checkpoint Compare, Material Dataset and Material Trainer also launch independently from the app bundle. See [native material tools](docs/native-material-tools.md).
+`make build`, `make package` and `make smoke` remain available for Texture Studio development. `make install DESTDIR=/path/to/staging` stages all three apps without closing or launching applications; `INSTALL_LAUNCH=0 make install` installs without opening them. A `CONFIGURATION=Debug` override cannot change the production configuration used by `make install`.
 
-## Photo to material
+A build without a trained Texture Loom package supports photo preparation, attached maps and material export. Its model panel clearly identifies the missing built-in model.
 
-1. Import a HEIC, JPEG, PNG, TIFF or Apple-supported RAW surface photograph.
-2. Correct perspective and framing. Camera metadata can guide focal settings; unknown calibration remains an estimate.
-3. Prepare a balanced diffuse map using broad illumination correction and color processing. Preserve fine detail. Registered companion photographs may reduce capture noise; the photo path applies no spatial denoiser.
-4. Generate material maps with a selected refined material checkpoint, attach a registered surface-height map, or keep flat displacement. Embedded portrait depth does not supply material relief.
-5. Review diffuse, roughness, normal and displacement. Set material width and displacement scale and save the recipe.
-6. Export maps, Blender node instructions and a material setup manifest into a new folder. Generation/export size remains independent of the training size.
+Include one complete Loom Factory export when building a deployment:
 
-| Map | Export | Blender interpretation |
-| --- | --- | --- |
-| Diffuse | 16-bit sRGB PNG | sRGB base color |
-| Roughness | 16- or 32-bit float EXR | Non-Color scalar |
-| Normal | 16- or 32-bit float EXR | Non-Color, tangent-space OpenGL +Y |
-| Displacement | 16- or 32-bit float EXR | Non-Color relative height |
+```sh
+TEXTURE_LOOM_PACKAGE="/absolute/path/Texture-Loom.textureloom" make install
+```
 
-Numeric map exports receive no photographic gamma or tone mapping. Float32 export preserves the current Float32 samples; it cannot recover detail absent from a source or prediction. Original files and precision-preserving HEIF auxiliary exports remain unchanged.
+The build validates the package inventory, compiles Core ML models and embeds one fixed Texture Loom base. End users cannot replace that base. Building against another exported package creates a new deployment.
 
-## Train material models
+## LoRAs
 
-Dataset Studio can [create and refresh a separate diffuse type classifier dataset](docs/diffuse-classifier-dataset.md) for review in Create ML. New compact RGB models use [recorded linear-light input](docs/material-linear-data.md); numeric material targets and EXR exports preserve their data values.
+The LoRA panel imports Loom Workshop adapter packages and enables or disables them. An adapter must match the built-in model ID, model version, dataset version and original base weight hash. Each material override includes its actual LoRA weights and the compiled Core ML inference model; incomplete weights-only exports are rejected. Enabled overrides affect inference without modifying the built-in base.
 
-Open your existing source folder in Loom Room. The files physically inside that folder are the dataset; saved manifests cannot add outside materials or hide current images. Material and map tags determine category membership and the diffuse/target pairs used for training. Browsing originals preserves the chosen category, map and training size. Training requires a category and derives membership from its current file tags. User tags and pairing identities travel with images across renames; pixel edits refresh verification without deleting teaching.
+Opening a `.loomlora` export in Texture Studio installs and enables that compatible adapter, then opens its LoRA manager. Loom Workshop's **Install into Texture Studio** action uses the selected application and checks that installation completed.
 
-Training uses paired diffuse and target crops at one explicitly selected grid. Supported training sizes depend on the available source pixels; the selected grid is never silently reduced. Larger images can supply random crop positions independently of optional flips and rotations. All paired maps receive the same spatial changes, without resizing or padding. A test photo passes through the same diffuse preparation as application generation before reaching the model.
+Photos and original material maps remain unchanged. Application preferences and installed LoRAs live in user storage; the shipped model payload belongs to the signed application build.
 
-Original images remain in the source folder. Category inventories, checksum records and prepared crops are derived app data, stored outside that folder and rebuilt from current files and tags. Cleanup removes owned temporary images while retaining originals, saved models and review choices.
+## Repositories
 
-The native MPSGraph implementation uses a complete pinned PBRnxt material network adapted to native output scale. It refines height, roughness or normal with LoRA. Training settings expose learning rate, AdamW or Adam, gradient accumulation, weight decay, scheduling, clipping and adapter parameters; the effective recipe is saved with each run and model. Enable **Developer mode** in Settings to select decoder scope and export a full fused `.safetensors` checkpoint plus the separate LoRA. Normal mode exports the LoRA. Compatible adapters can be combined with explicit weights against the same base and target modules.
+- Texture Studio: this repository and `/opt/ipde/ipde`.
+- Loom Factory: `/opt/ipde/ipde/LoomFactory`, a fresh project for fully custom Texture Loom deployments.
+- Loom Workshop: `/opt/ipde/ipde/LoomWorkshop`, a fresh paired-map LoRA trainer, developed after the Factory and Studio contracts.
 
-Saved models can be uploaded to Hugging Face using the selected account, repository and visibility. Developer mode offers upload after training. Successfully uploaded models appear in the saved Hub catalog with a download action. App-owned base models can be removed and downloaded again from their recorded origin.
-
-The optional local Clef decision model can advise on photo preparation, dataset suitability and output detail, appeal and artifacts. Review recommendations remain editable. Full-resolution maps and displaced surfaces determine acceptance; a lower loss or an adviser score does not automatically select a shipped model.
-
-See [training workflow](docs/material-training-workflow.md), [data contract](docs/material-training-data.md), [quality acceptance](docs/material-model-vetting.md), and [model setup](docs/model-setup.md). The [standalone product specification](docs/app-product-specification.md) describes the required behavior for a fresh implementation.
-
-## Precision-preserving extraction
-
-The app exports auxiliary buffers exposed by Apple's ImageIO API as original bytes with their data descriptions and checksums. Known scalar formats also receive a lossless NumPy array file; this binary format does not require an interpreter. The exporter applies no gamma, normalization or tone mapping. Its report identifies the API's coverage; original photographs remain unchanged.
-
-Datasets, model weights, generated outputs and app bundles stay outside Git. This repository is in development before V1; removed experiments are not released features and have no compatibility support in the material app. See [release requirements](docs/releasing.md) and [license](LICENSE).
-
-Application work defaults to `~/Library/Application Support/Texture Studio/Material Workspace`; saved paths inside a source checkout migrate there before new output is created. Missing DepthPro weights are acquired and verified automatically when the refiner is used. [Project working principles](AGENTS.md) require completing available recovery paths before reporting an error.
+The retired integrated training implementation is preserved in Git history rather than linked into the new products.
