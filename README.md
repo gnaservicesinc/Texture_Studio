@@ -12,9 +12,9 @@ Requires Apple Silicon, macOS 26 and Xcode with the macOS Metal toolchain.
 make install
 ```
 
-This one command builds optimized Release versions of Texture Studio, Loom Factory and Loom Workshop, installs them in `/Applications`, and opens all three. Missing Factory or Workshop checkouts are restored from their GitHub repositories. An app with active training can refuse to quit; finish or cancel the run and repeat the command. The installer never force-quits a training run.
+This one command builds optimized Release versions of Texture Studio, Loom Factory and Loom Workshop and installs them in `/Applications`. Apps stay closed after installation. Missing Factory or Workshop checkouts are restored from their GitHub repositories. An app with active training can refuse to quit; finish or cancel the run and repeat the command. The installer never force-quits a training run.
 
-`make build`, `make package` and `make smoke` remain available for Texture Studio development. `make install DESTDIR=/path/to/staging` stages all three apps without closing or launching applications; `INSTALL_LAUNCH=0 make install` installs without opening them. A `CONFIGURATION=Debug` override cannot change the production configuration used by `make install`.
+`make build`, `make package` and `make smoke` remain available for Texture Studio development. `make install DESTDIR=/path/to/staging` stages all three apps without closing or launching applications; `make install INSTALL_LAUNCH=1` explicitly opens all three apps after installation. A `CONFIGURATION=Debug` override cannot change the production configuration used by `make install`.
 
 A build without a trained Texture Loom package supports photo preparation, attached maps and material export. Its model panel clearly identifies the missing built-in model.
 
