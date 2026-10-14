@@ -38,7 +38,7 @@ for variable in DERIVED_DATA DESTDIR FACTORY_REPO WORKSHOP_REPO; do
 done
 # Resolve aliases before deciding whether this is a real installation. A symlink
 # to / must not bypass the running-app protection as an alleged staging tree.
-DESTDIR="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$DESTDIR")"
+DESTDIR="$(/usr/bin/xcrun swift -e 'import Foundation; print(URL(fileURLWithPath: CommandLine.arguments[1]).standardizedFileURL.resolvingSymlinksInPath().path)' "$DESTDIR")"
 # Staged installs neither quit a user's apps nor open staged copies.
 if [[ "$DESTDIR" != / ]]; then LAUNCH=false; fi
 
