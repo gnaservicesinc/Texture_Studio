@@ -5,6 +5,7 @@ import CoreML
 /// Every model path is rooted in an immutable build payload or an app-owned adapter.
 /// There is no user preference that can replace the built-in base model.
 struct TextureLoomPackage: Sendable {
+    static let compactArchitecture = "loom-factory-material-compact-naf-v1"
     let root: URL
     let manifest: TextureLoomManifest
     init(root: URL) throws {
@@ -43,6 +44,87 @@ struct TextureLoomPackage: Sendable {
                 }
                 try requireArtifact(model.path)
                 try requireArtifact(model.weightsPath)
+                if model.architecture == Self.compactArchitecture {
+                    let parent = (model.path as NSString).deletingLastPathComponent
+                    let descriptorPath = parent.isEmpty ? "model.json" : parent + "/model.json"
+                    try requireArtifact(descriptorPath)
+                    let descriptorURL = try Self.resolve(descriptorPath, root: self.root)
+                    guard let descriptor = try JSONSerialization.jsonObject(with: Data(contentsOf: descriptorURL)) as? [String: Any] else {
+                        throw StudioError("The compact Texture Loom model descriptor is unreadable.")
+                    }
+                    try Self.validateCompactDescriptor(descriptor, map: model.map)
+                }
+            }
+        }
+    }
+
+    static func validateGrid(architecture: String, width: Int, height: Int) throws {
+        guard architecture != compactArchitecture ||
+            (width >= 32 && height >= 32 && width % 8 == 0 && height % 8 == 0) else {
+            throw StudioError("Compact Texture Loom models need native image dimensions of at least 32 pixels and multiples of eight. Choose a compatible image size.")
+        }
+    }
+
+    func compactFeatureWidth(_ model: TextureLoomManifest.Model) throws -> Int {
+        let parent = (model.path as NSString).deletingLastPathComponent
+        let path = parent.isEmpty ? "model.json" : parent + "/model.json"
+        let url = try Self.resolve(path, root: root)
+        guard let descriptor = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] else {
+            throw StudioError("The compact Texture Loom model descriptor is unreadable.")
+        }
+        try Self.validateCompactDescriptor(descriptor, map: model.map)
+        return (descriptor["architecture_config"] as! [String: Any])["width"] as! Int
+    }
+
+    /// Conservative admission forecast derived from fresh 1K/2K width-32
+    /// measurements. It does not guarantee that a later allocation succeeds.
+    static func compactMemoryForecast(width: Int, height: Int, featureWidth: Int, map: String) -> UInt64 {
+        guard width > 0, height > 0, (8...256).contains(featureWidth) else { return .max }
+        let channels = map == "normal" ? UInt64(3) : 1, feature = UInt64(featureWidth)
+        // Exact parameter count for the registered seven-stage constructor.
+        let parameters = 952 * feature * feature + (775 + 9 * channels) * feature + channels
+        var activation = UInt64(width)
+        for factor in [UInt64(height), feature, 256] {
+            let product = activation.multipliedReportingOverflow(by: factor)
+            guard !product.overflow else { return .max }
+            activation = product.partialValue
+        }
+        let total = activation.addingReportingOverflow(parameters * 12)
+        return total.overflow ? .max : total.partialValue
+    }
+
+    static func compactMemoryBudget(physical: UInt64, recommendedMetal: UInt64?, allocatedMetal: UInt64,
+                                    availableMemory: UInt64?) -> UInt64 {
+        var budget = physical - physical / 4
+        if let recommendedMetal { budget = min(budget, recommendedMetal > allocatedMetal ? recommendedMetal - allocatedMetal : 0) }
+        if let availableMemory { budget = min(budget, availableMemory - availableMemory / 4) }
+        return budget
+    }
+
+    static func validateCompactDescriptor(_ descriptor: [String: Any], map: String) throws {
+        guard descriptor["schema"] as? String == "loom-factory-model-v1",
+              descriptor["status"] as? String == "completed", descriptor["kind"] as? String == "map",
+              descriptor["map"] as? String == map, descriptor["architecture"] as? String == compactArchitecture,
+              let configuration = descriptor["architecture_config"] as? [String: Any],
+              configuration["id"] as? String == compactArchitecture,
+              let width = configuration["width"] as? Int, (8...256).contains(width),
+              configuration["blocks"] as? Int == 1,
+              let training = descriptor["training"] as? [String: Any],
+              training["scalar_loss"] as? String == "linear-detail-v1",
+              let size = descriptor["image_size"] as? Int, (32...8192).contains(size) else {
+            throw StudioError("The compact Texture Loom model is missing its native architecture and linear output contract.")
+        }
+        try validateGrid(architecture: compactArchitecture, width: size, height: size)
+        let expected: [String: Any] = ["input": "RGB sRGB float32 NCHW [0,1]",
+            "output": "float32 NCHW raw linear values", "input_channels": 3, "output_channels": map == "normal" ? 3 : 1,
+            "normal_convention": map == "normal" ? "OpenGL" as Any : NSNull(), "head_activation": "linear",
+            "padding": "reflect-v1", "scale_channels": [width, width * 2, width * 4, width * 8],
+            "blocks_per_stage": 1, "stage_count": 7, "upsampling": "nearest-2x-exact-repeat",
+            "grid_multiple": 8, "minimum_grid_size": 32, "normal_output_transform": "none",
+            "lora_scope": "dense-convolutions-only"]
+        for (key, value) in expected {
+            guard let actual = configuration[key], NSDictionary(dictionary: [key: actual]).isEqual(to: [key: value]) else {
+                throw StudioError("The compact Texture Loom model has an incompatible \(key) contract.")
             }
         }
     }

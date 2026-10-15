@@ -5,6 +5,55 @@ import XCTest
 
 @MainActor
 final class TextureLoomInferenceIntegrationTests: XCTestCase {
+    func testPreparedModelInputRetainsFloat32DifferencesThroughImageFilters() async throws {
+        let width = 8, height = 4
+        let srgb = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
+        var source = [Float](repeating: 1, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let base = (y * width + x) * 4
+                // All red values round to the same half float, but remain
+                // distinct Float32 values in the model's prepared diffuse input.
+                source[base] = 0.375 + Float(x + 1) / 262_144
+                source[base + 1] = 0.625 - Float(y + 1) / 262_144
+                source[base + 2] = 0.25 + Float(x + y + 1) / 262_144
+            }
+        }
+        let image = CIImage(bitmapData: source.withUnsafeBytes { Data($0) }, bytesPerRow: width * 16,
+            size: CGSize(width: width, height: height), format: .RGBAf, colorSpace: srgb)
+        // Blur evaluates intermediate buffers: requesting Float32 only for the
+        // final render cannot restore values already rounded in those buffers.
+        let filtered = image.clampedToExtent().applyingGaussianBlur(sigma: 0.7).cropped(to: image.extent)
+        let referenceContext = CIContext(options: [.workingFormat: CIFormat.RGBAf,
+            .workingColorSpace: srgb, .cacheIntermediates: false])
+        var reference = [Float](repeating: 0, count: source.count)
+        reference.withUnsafeMutableBytes {
+            referenceContext.render(filtered, toBitmap: $0.baseAddress!, rowBytes: width * 16,
+                bounds: filtered.extent, format: .RGBAf, colorSpace: srgb)
+        }
+        let firstRed = reference[0], lastRed = reference[(width - 1) * 4]
+        XCTAssertGreaterThan(lastRed - firstRed, 1e-6)
+        XCTAssertEqual(Float16(firstRed), Float16(lastRed),
+                       "The fixture must exercise distinctions that half-float intermediates discard")
+        XCTAssertNotEqual(firstRed, Float(Float16(firstRed)))
+
+        let tensor = try await TextureLoomService().imageTensor(filtered, width: width, height: height)
+        XCTAssertEqual(tensor.dataType, .float32)
+        XCTAssertEqual(tensor.shape.map(\.intValue), [1, 3, height, width])
+        let strides = tensor.strides.map(\.intValue)
+        let values = tensor.dataPointer.assumingMemoryBound(to: Float.self)
+        for channel in 0..<3 {
+            for y in 0..<height {
+                for x in 0..<width {
+                    XCTAssertEqual(values[channel * strides[1] + y * strides[2] + x * strides[3]],
+                        reference[(y * width + x) * 4 + channel], accuracy: 2e-7)
+                }
+            }
+        }
+        XCTAssertGreaterThan(values[(width - 1) * strides[3]] - values[0], 1e-6,
+                             "Preparing the real model tensor must retain the fine diffuse differences")
+    }
+
     func testRealWorkshopAdapterImportsEnablesNative2048OverrideAndRestoresBaseWhenDisabled() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard let basePath = environment["TEXTURE_LOOM_TEST_ADAPTER_BASE"],

@@ -2,6 +2,7 @@ import CoreImage
 import CoreML
 import CoreVideo
 import Foundation
+import Metal
 
 struct TextureLoomPrediction: @unchecked Sendable {
     let categoryID: String
@@ -19,7 +20,8 @@ struct TextureLoomClassification: Sendable {
 actor TextureLoomService {
     private var models: [String: MLModel] = [:]
     private let computeUnits: MLComputeUnits
-    private let context = CIContext(options: [.workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!, .cacheIntermediates: false])
+    private let context = CIContext(options: [.workingFormat: CIFormat.RGBAf,
+        .workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!, .cacheIntermediates: false])
 
     init(computeUnits: MLComputeUnits = .all) { self.computeUnits = computeUnits }
 
@@ -27,15 +29,34 @@ actor TextureLoomService {
         try Task.checkCancellation()
         let width = Int(diffuse.extent.width), height = Int(diffuse.extent.height)
         guard width > 0, height > 0, width <= 8192, height <= 8192 else { throw StudioError("Texture Loom needs a supported prepared image size.") }
-        let input = try imageTensor(diffuse, width: width, height: height)
-        let provider = try MLDictionaryFeatureProvider(dictionary: ["rgb": MLFeatureValue(multiArray: input)])
         let classification = try classify(diffuse: diffuse, package: package)
         guard let category = package.manifest.categories.first(where: { $0.id == classification.categoryID }) else {
             throw StudioError("The fixed Texture Loom classifier returned a dataset outside its model catalog.")
         }
+        let compactModels = category.models.filter { $0.architecture == TextureLoomPackage.compactArchitecture }
+        if !compactModels.isEmpty {
+            try TextureLoomPackage.validateGrid(architecture: TextureLoomPackage.compactArchitecture, width: width, height: height)
+            let metal = MTLCreateSystemDefaultDevice()
+            let budget = TextureLoomPackage.compactMemoryBudget(physical: ProcessInfo.processInfo.physicalMemory,
+                recommendedMetal: metal?.recommendedMaxWorkingSetSize, allocatedMetal: UInt64(metal?.currentAllocatedSize ?? 0),
+                availableMemory: TextureEngine.availableMemoryBytes())
+            let required = try compactModels.reduce(UInt64(0)) { sum, model in
+                let forecast = TextureLoomPackage.compactMemoryForecast(width: width, height: height,
+                    featureWidth: try package.compactFeatureWidth(model), map: model.map)
+                let total = sum.addingReportingOverflow(forecast)
+                return total.overflow ? .max : total.partialValue
+            }
+            guard required <= budget else {
+                let gib = Double(1 << 30)
+                throw StudioError(String(format: "Whole-field compact inference has a conservative memory forecast of %.1f GiB; the current budget is %.1f GiB. Use a compatible smaller native image or free memory before processing.", Double(required) / gib, Double(budget) / gib))
+            }
+        }
+        let input = try imageTensor(diffuse, width: width, height: height)
+        let provider = try MLDictionaryFeatureProvider(dictionary: ["rgb": MLFeatureValue(multiArray: input)])
         var output: [String: MaterialModelMap] = [:]
         for entry in category.models {
             try Task.checkCancellation()
+            try TextureLoomPackage.validateGrid(architecture: entry.architecture, width: width, height: height)
             let key = category.id + ":" + entry.map
             let url = try overrides[key] ?? TextureLoomPackage.resolve(entry.path, root: package.root)
             let model = try load(url)
@@ -43,32 +64,41 @@ actor TextureLoomService {
             guard let tensor = prediction.featureValue(for: "material_map")?.multiArrayValue else {
                 throw StudioError("The Texture Loom \(entry.map) model did not return a material map.")
             }
-            let channels = entry.map == "normal" ? 3 : 1
-            let shape = tensor.shape.map(\.intValue)
-            guard shape == [1, channels, height, width], tensor.dataType == .float32 else {
-                throw StudioError("The Texture Loom \(entry.map) map does not match the image grid.")
-            }
-            let components = channels == 3 ? 4 : 1
-            var samples = [Float](repeating: 0, count: width * height * components)
-            let strides = tensor.strides.map(\.intValue)
-            let values = tensor.dataPointer.assumingMemoryBound(to: Float.self)
-            for y in 0..<height {
-                if y % 64 == 0 { try Task.checkCancellation() }
-                for x in 0..<width {
-                    for channel in 0..<channels {
-                        let value = values[channel * strides[1] + y * strides[2] + x * strides[3]]
-                        guard value.isFinite else { throw StudioError("The Texture Loom \(entry.map) model returned a nonfinite value.") }
-                        samples[(y * width + x) * components + channel] = min(1, max(0, value))
-                    }
-                    if components == 4 { samples[(y * width + x) * 4 + 3] = 1 }
-                }
-            }
             let target = entry.map == "depth" ? "height" : entry.map
-            let image = CIImage(bitmapData: samples.withUnsafeBytes { Data($0) }, bytesPerRow: width * components * 4,
-                size: CGSize(width: width, height: height), format: components == 4 ? .RGBAf : .Rf, colorSpace: nil)
+            let image = try Self.materialImage(from: tensor, map: entry.map, architecture: entry.architecture,
+                width: width, height: height)
             output[target] = MaterialModelMap(target: target, image: image, sourceLabel: "Texture Loom · \(category.name)")
         }
         return TextureLoomPrediction(categoryID: category.id, categoryName: category.name, confidence: classification.confidence, maps: output)
+    }
+
+    /// Compact exports have an immutable raw linear contract. Other installed
+    /// model types retain their established bounded material-map interpretation.
+    static func materialImage(from tensor: MLMultiArray, map: String, architecture: String,
+                              width: Int, height: Int) throws -> CIImage {
+        try TextureLoomPackage.validateGrid(architecture: architecture, width: width, height: height)
+        let channels = map == "normal" ? 3 : 1
+        guard tensor.shape.map(\.intValue) == [1, channels, height, width], tensor.dataType == .float32 else {
+            throw StudioError("The Texture Loom \(map) map does not match the image grid.")
+        }
+        let components = channels == 3 ? 4 : 1
+        let rawLinear = architecture == TextureLoomPackage.compactArchitecture
+        var samples = [Float](repeating: 0, count: width * height * components)
+        let strides = tensor.strides.map(\.intValue)
+        let values = tensor.dataPointer.assumingMemoryBound(to: Float.self)
+        for y in 0..<height {
+            if y % 64 == 0 { try Task.checkCancellation() }
+            for x in 0..<width {
+                for channel in 0..<channels {
+                    let value = values[channel * strides[1] + y * strides[2] + x * strides[3]]
+                    guard value.isFinite else { throw StudioError("The Texture Loom \(map) model returned a nonfinite value.") }
+                    samples[(y * width + x) * components + channel] = rawLinear ? value : min(1, max(0, value))
+                }
+                if components == 4 { samples[(y * width + x) * 4 + 3] = 1 }
+            }
+        }
+        return CIImage(bitmapData: samples.withUnsafeBytes { Data($0) }, bytesPerRow: width * components * 4,
+            size: CGSize(width: width, height: height), format: components == 4 ? .RGBAf : .Rf, colorSpace: nil)
     }
 
     func classify(diffuse: CIImage, package: TextureLoomPackage) throws -> TextureLoomClassification {
@@ -130,7 +160,7 @@ actor TextureLoomService {
         models[url.path] = model
         return model
     }
-    private func imageTensor(_ image: CIImage, width: Int, height: Int) throws -> MLMultiArray {
+    func imageTensor(_ image: CIImage, width: Int, height: Int) throws -> sending MLMultiArray {
         var pixels = [Float](repeating: 0, count: width * height * 4)
         pixels.withUnsafeMutableBytes { context.render(image, toBitmap: $0.baseAddress!, rowBytes: width * 16,
             bounds: image.extent, format: .RGBAf, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)) }
