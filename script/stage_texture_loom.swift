@@ -28,7 +28,11 @@ func path(_ relative: String, _ root: URL) throws -> URL {
 func hash(_ file: URL) throws -> String {
     let handle = try FileHandle(forReadingFrom: file); defer { try? handle.close() }
     var sha = SHA256()
-    while let chunk = try handle.read(upToCount: 1_048_576), !chunk.isEmpty { sha.update(data: chunk) }
+    while try autoreleasepool(invoking: { () throws -> Bool in
+        guard let chunk = try handle.read(upToCount: 1_048_576), !chunk.isEmpty else { return false }
+        sha.update(data: chunk)
+        return true
+    }) {}
     return sha.finalize().map { String(format: "%02x", $0) }.joined()
 }
 func verify(_ manifest: [String: Any], _ root: URL) throws {

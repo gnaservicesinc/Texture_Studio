@@ -214,7 +214,11 @@ struct TextureLoomPackage: Sendable {
     static func sha256(_ file: URL) throws -> String {
         let handle = try FileHandle(forReadingFrom: file); defer { try? handle.close() }
         var digest = SHA256()
-        while let chunk = try handle.read(upToCount: 1_048_576), !chunk.isEmpty { digest.update(data: chunk) }
+        while try autoreleasepool(invoking: { () throws -> Bool in
+            guard let chunk = try handle.read(upToCount: 1_048_576), !chunk.isEmpty else { return false }
+            digest.update(data: chunk)
+            return true
+        }) {}
         return digest.finalize().map { String(format: "%02x", $0) }.joined()
     }
     static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }

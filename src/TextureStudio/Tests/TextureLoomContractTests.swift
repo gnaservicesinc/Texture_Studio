@@ -4,6 +4,18 @@ import XCTest
 
 @MainActor
 final class TextureLoomContractTests: XCTestCase {
+    func testPackageHashesOriginalBytesAcrossChunkBoundariesAndRepeatedReads() throws {
+        let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("hash-boundaries.bin")
+        let bytes = Data((0..<(3 * 1_048_576 + 17)).map { UInt8($0 % 251) })
+        try bytes.write(to: file)
+        let expected = TextureLoomPackage.hash(bytes)
+        for _ in 0..<4 { XCTAssertEqual(try TextureLoomPackage.sha256(file), expected) }
+        XCTAssertEqual(try Data(contentsOf: file), bytes)
+        try Data().write(to: file)
+        XCTAssertEqual(try TextureLoomPackage.sha256(file), TextureLoomPackage.hash(Data()))
+    }
+
     func testPackageRejectsOutsidePathsAndExternalLinks() throws {
         let root = try temporary(); defer { try? FileManager.default.removeItem(at: root) }
         for path in ["../model.bin", "/tmp/model.bin", "models//weights", "models/./weights", "models\\weights"] {
