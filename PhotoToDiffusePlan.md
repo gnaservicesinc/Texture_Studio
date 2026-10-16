@@ -59,8 +59,8 @@ The complete training and inclusion guide is
    artist-reviewed real neutral references for hard shadows/hotspots; alternate
    lit room captures are not automatically albedo targets. Compare both stages
    together with generated height/normal/roughness under moving light.
-6. Include reviewed exports when building Studio using `PHOTO_REPAIR_MODEL` and
-   `PHOTO_LIGHTING_MODEL`. Manual toggles/strengths sit after crop/lens setup.
+6. Include your material-model package with `TEXTURE_LOOM_PACKAGE` and reviewed
+   photo exports with `PHOTO_REPAIR_MODEL` / `PHOTO_LIGHTING_MODEL` when building Studio. Manual toggles/strengths sit after crop/lens setup.
    First release: opaque SDR1K, finite corrections, no hidden tiling or scaling;
    exact model hashes are pinned in recipes. No weights means no enabled stage.
 7. After useful Repair/Lighting, add optional generated microdetail with its own
