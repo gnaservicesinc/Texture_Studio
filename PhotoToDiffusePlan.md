@@ -12,7 +12,12 @@ more useful as a material. It is not a scientific reflectance measurement.
 
 ## Current implementation
 
-The first implemented milestone is **real capture data preparation**. The tools
+The first implemented milestone is **capture data preparation**, including the
+native Factory **Materials → Synthetic Photos…** generator described in
+[the Factory feature documentation](https://github.com/gnaservicesinc/LoomFactory/blob/main/Docs/SyntheticPhotoData.md).
+It supports all materials or a seeded percentage per category, native 1K crops
+from higher resolutions, independent effects, saved recipes and data review.
+The tools
 in `tools/photo_capture_data/` acquire bounded, identified samples, preserve the
 downloaded bytes, make exact native 1K crop derivatives, and prepare scene-based
 diagnostic splits. They do not train a model or change Factory's source project.
@@ -132,9 +137,14 @@ different network recipes behind the same product flow.
 
 ## Implementation sequence and gates
 
-1. **Real data foundation — implemented.** Pinned bounded download, same-frame
+1. **Real and synthetic data foundation — implemented.** Pinned bounded download, same-frame
    pairing, original checksums, exact native 1K crops, immutable review receipts
-   and physical-scene split preparation. No production membership is changed.
+   and physical-scene split preparation. Factory also generates controlled
+   exposure/blur/noise/illumination and separate reframing pairs from existing
+   color maps, with exact native crops, masks, replayable recipes and disk limits.
+   A 60% real / 30% synthetic / 10% identity sampler is a starting experiment,
+   distinct from the percentage of source materials selected for generation.
+   No production training membership is changed.
 2. **Restoration baseline — next.** Once GPU capacity is available, measure a
    frozen official RGB restoration model on the sampled photos and clean-input
    controls. A pretrained SIDD model may already have seen these scenes: this
