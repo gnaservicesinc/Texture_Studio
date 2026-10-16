@@ -95,7 +95,10 @@ than assuming another PBR download solves them.
 
 Use the acquired real pairs for an initial frozen RGB restoration A/B, including
 clean-reference identity controls, when the user's GPU training is free. Compare
-native fibers/grain and whole-image appearance. Expand physical surface diversity
+native fibers/grain and whole-image appearance. A pretrained SIDD restoration
+model may already have seen the sampled scenes, including carpet. Our diagnostic
+split does not remove its pretraining exposure; do not present that comparison
+as independent generalization. Expand physical surface diversity
 before training or making category claims. Handle lighting as a separate stage
 and allow controlled detail generation as described in the [product plan](../PhotoToDiffusePlan.md).
 

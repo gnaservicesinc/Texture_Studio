@@ -137,7 +137,10 @@ different network recipes behind the same product flow.
    and physical-scene split preparation. No production membership is changed.
 2. **Restoration baseline — next.** Once GPU capacity is available, measure a
    frozen official RGB restoration model on the sampled photos and clean-input
-   controls. Then run one bounded native 1K small-network pilot. Record actual
+   controls. A pretrained SIDD model may already have seen these scenes: this
+   baseline is a sanity check, not an independent generalization test. Reserve
+   genuinely new physical surfaces for subsequent quality claims. Then run one
+   bounded native 1K small-network pilot. Record actual
    step/inference time and unified-memory use before selecting model size or
    proposing an overnight run. Existing model architecture names do not prove
    compatibility with these RGB weights.
