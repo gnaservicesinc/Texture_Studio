@@ -54,6 +54,7 @@ final class CreateMLClassifierContractTests: XCTestCase {
             .standardizedFileURL.resolvingSymlinksInPath()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let compiled = try MLModel.compileModel(at: asset)
+        defer { try? FileManager.default.removeItem(at: compiled) }
         try FileManager.default.copyItem(at: compiled, to: root.appendingPathComponent("classifier.mlmodelc"))
         let configuration = MLModelConfiguration(); configuration.computeUnits = .cpuOnly
         let description = try MLModel(contentsOf: compiled, configuration: configuration).modelDescription

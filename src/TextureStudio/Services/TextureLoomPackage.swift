@@ -29,6 +29,9 @@ struct TextureLoomPackage: Sendable {
         if manifest.classifier.architecture == "create-ml-image-classifier-v1" {
             let classifierURL = try Self.resolve(manifest.classifier.path, root: self.root)
             let compiled = classifierURL.pathExtension == "mlmodelc" ? classifierURL : try MLModel.compileModel(at: classifierURL)
+            defer {
+                if classifierURL.pathExtension != "mlmodelc" { try? FileManager.default.removeItem(at: compiled) }
+            }
             let configuration = MLModelConfiguration(); configuration.computeUnits = .cpuOnly
             let classifier = try MLModel(contentsOf: compiled, configuration: configuration)
             try Self.validateImportedClassifier(classifier.modelDescription, classifier: manifest.classifier)

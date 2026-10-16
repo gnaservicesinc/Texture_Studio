@@ -19,11 +19,19 @@ struct TextureLoomClassification: Sendable {
 
 actor TextureLoomService {
     private var models: [String: MLModel] = [:]
+    private var temporaryCompilations: [URL] = []
     private let computeUnits: MLComputeUnits
     private let context = CIContext(options: [.workingFormat: CIFormat.RGBAf,
         .workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!, .cacheIntermediates: false])
 
     init(computeUnits: MLComputeUnits = .all) { self.computeUnits = computeUnits }
+
+    isolated deinit {
+        // Loaded models can retain mappings into compiled storage. Release them
+        // before removing only the compiler outputs owned by this service.
+        models.removeAll()
+        for url in temporaryCompilations { try? FileManager.default.removeItem(at: url) }
+    }
 
     func predict(diffuse: CIImage, package: TextureLoomPackage, overrides: [String: URL]) throws -> TextureLoomPrediction {
         try Task.checkCancellation()
@@ -156,8 +164,14 @@ actor TextureLoomService {
         if url.pathExtension == "mlmodelc" { compiled = url }
         else { compiled = try MLModel.compileModel(at: url) }
         let configuration = MLModelConfiguration(); configuration.computeUnits = computeUnits
-        let model = try MLModel(contentsOf: compiled, configuration: configuration)
+        let model: MLModel
+        do { model = try MLModel(contentsOf: compiled, configuration: configuration) }
+        catch {
+            if url.pathExtension != "mlmodelc" { try? FileManager.default.removeItem(at: compiled) }
+            throw error
+        }
         models[url.path] = model
+        if url.pathExtension != "mlmodelc" { temporaryCompilations.append(compiled) }
         return model
     }
     func imageTensor(_ image: CIImage, width: Int, height: Int) throws -> sending MLMultiArray {

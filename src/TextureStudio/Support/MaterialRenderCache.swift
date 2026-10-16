@@ -64,23 +64,29 @@ final class MaterialRenderCache: @unchecked Sendable {
     }
 
     func export(to destination: URL, precision: EXRPrecision, settings: TextureSettings, engine: TextureEngine) async throws {
+        try Task.checkCancellation()
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        try TextureEngine.validateExportDestination(destination)
+        let staging = destination.appendingPathComponent(".texture-studio-cache-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: staging) }
         if precision == .float32 {
-            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-            for name in ["diffuse.png", "roughness.exr", "normal.exr", "displacement.exr", "material.json", "Blender-setup.txt"] {
+            for name in TextureEngine.exportFileNames {
                 try Task.checkCancellation()
-                try FileManager.default.copyItem(at: folder.appendingPathComponent(name), to: destination.appendingPathComponent(name))
+                try FileManager.default.copyItem(at: folder.appendingPathComponent(name), to: staging.appendingPathComponent(name))
             }
         } else {
             // Encode existing Float32 maps as half floats; no inference or
             // material processing is repeated for this storage choice.
-            _ = try await engine.export(material, to: destination, precision: precision)
+            _ = try await engine.export(material, to: staging, precision: precision)
         }
-        let metadata = destination.appendingPathComponent("material.json")
+        let metadata = staging.appendingPathComponent("material.json")
         if var document = try JSONSerialization.jsonObject(with: Data(contentsOf: metadata)) as? [String: Any] {
             document["settings"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(settings))
             document["precision"] = precision.rawValue
             try JSONSerialization.data(withJSONObject: document, options: [.prettyPrinted, .sortedKeys]).write(to: metadata, options: .atomic)
         }
+        _ = try TextureEngine.publishExport(from: staging, to: destination)
     }
 
     deinit { try? FileManager.default.removeItem(at: folder) }

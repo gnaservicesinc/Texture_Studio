@@ -57,17 +57,33 @@ final class TextureLoomStore {
         return manifest.id
     }
     func setEnabled(_ id: String, _ enabled: Bool) throws {
-        guard let package, let index = adapters.firstIndex(where: { $0.id == id }) else { throw StudioError("This LoRA is no longer installed.") }
-        _ = try validateAdapter(adapters[index].folder, package: package)
+        guard let index = adapters.firstIndex(where: { $0.id == id }) else { throw StudioError("This LoRA is no longer installed.") }
+        var selection = Set(adapters.filter(\.enabled).map(\.id))
         // Only one override for a dataset/map can be effective at a time.
         if enabled {
             let requested = Set(adapters[index].manifest.categories.flatMap { category in category.adapters.map { category.id + ":" + $0.map } })
             for other in adapters.indices where other != index && adapters[other].enabled {
                 let keys = Set(adapters[other].manifest.categories.flatMap { category in category.adapters.map { category.id + ":" + $0.map } })
-                if !requested.isDisjoint(with: keys) { adapters[other].enabled = false }
+                if !requested.isDisjoint(with: keys) { selection.remove(adapters[other].id) }
             }
+            selection.insert(id)
+        } else { selection.remove(id) }
+        try setEnabledAdapters(selection)
+    }
+    /// Validate a recipe's entire selection before changing shared state or preferences.
+    func setEnabledAdapters(_ selection: Set<String>) throws {
+        guard selection.isSubset(of: Set(adapters.map(\.id))) else { throw StudioError("Import this recipe's LoRAs before opening it.") }
+        if selection.isEmpty && !adapters.contains(where: \.enabled) { return }
+        guard let package else { throw StudioError(statusDescription) }
+        var occupied = Set<String>()
+        for adapter in adapters where selection.contains(adapter.id) {
+            _ = try validateAdapter(adapter.folder, package: package)
+            let keys = Set(adapter.manifest.categories.flatMap { category in category.adapters.map { category.id + ":" + $0.map } })
+            guard occupied.isDisjoint(with: keys) else { throw StudioError("This selection enables more than one LoRA for the same dataset and map.") }
+            occupied.formUnion(keys)
         }
-        adapters[index].enabled = enabled
+        guard selection != Set(adapters.filter(\.enabled).map(\.id)) else { return }
+        for index in adapters.indices { adapters[index].enabled = selection.contains(adapters[index].id) }
         preferences.set(adapters.filter(\.enabled).map(\.id), forKey: "textureLoom.enabledAdapters.v1")
         revision = UUID()
     }
@@ -130,6 +146,7 @@ final class TextureLoomStore {
                 }
                 if !checkedRuntimePaths.contains(runtime.path) {
                     let compiled = runtime.pathExtension == "mlmodelc" ? runtime : try MLModel.compileModel(at: runtime)
+                    defer { if compiled != runtime { try? FileManager.default.removeItem(at: compiled) } }
                     let model = try MLModel(contentsOf: compiled)
                     guard model.modelDescription.inputDescriptionsByName["rgb"]?.type == .multiArray,
                           model.modelDescription.outputDescriptionsByName["material_map"]?.type == .multiArray else {

@@ -102,6 +102,52 @@ final class MaterialRenderCacheTests: XCTestCase {
         XCTAssertEqual((document["settings"] as? [String: Any])?["exrPrecision"] as? String, "float16")
     }
 
+    func testCachedExportPreservesExistingFilesWithoutPublishingEarlierMaps() async throws {
+        let fixture = try RenderCacheFixture()
+        defer { fixture.remove() }
+        let cache = try await MaterialRenderCache.make(material: fixture.material, key: fixture.key, engine: fixture.engine)
+        let destination = fixture.root.appendingPathComponent("existing-export")
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let existing = destination.appendingPathComponent("normal.exr")
+        let original = Data("Keep this existing normal map".utf8)
+        try original.write(to: existing)
+        do {
+            try await cache.export(to: destination, precision: .float32, settings: fixture.material.settings, engine: fixture.engine)
+            XCTFail("An existing material file must reject the whole export")
+        } catch { }
+        XCTAssertEqual(try Data(contentsOf: existing), original)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: destination.path), ["normal.exr"])
+    }
+
+    func testCachedExportMissingMapLeavesNoPartialMaterial() async throws {
+        let fixture = try RenderCacheFixture()
+        defer { fixture.remove() }
+        let cache = try await MaterialRenderCache.make(material: fixture.material, key: fixture.key, engine: fixture.engine)
+        try FileManager.default.removeItem(at: try XCTUnwrap(cache.mapURL(.normal)))
+        let destination = fixture.root.appendingPathComponent("failed-copy")
+        do {
+            try await cache.export(to: destination, precision: .float32, settings: fixture.material.settings, engine: fixture.engine)
+            XCTFail("A missing cached map must reject the whole export")
+        } catch { }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: destination.path), [])
+    }
+
+    func testMetadataFailureLeavesNoPublishedMaterialAtEitherPrecision() async throws {
+        let fixture = try RenderCacheFixture()
+        defer { fixture.remove() }
+        let cache = try await MaterialRenderCache.make(material: fixture.material, key: fixture.key, engine: fixture.engine)
+        var invalidSettings = fixture.material.settings
+        invalidSettings.materialWidthMeters = .nan
+        for precision in EXRPrecision.allCases {
+            let destination = fixture.root.appendingPathComponent("failed-metadata-\(precision.rawValue)")
+            do {
+                try await cache.export(to: destination, precision: precision, settings: invalidSettings, engine: fixture.engine)
+                XCTFail("Metadata encoding failure must reject the whole export")
+            } catch { }
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: destination.path), [])
+        }
+    }
+
     func testReleasingLastOwnerRemovesOnlyItsTemporaryCache() async throws {
         let fixture = try RenderCacheFixture()
         defer { fixture.remove() }

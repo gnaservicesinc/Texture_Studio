@@ -49,10 +49,20 @@ struct PhotoEnhancerDescriptor: Codable, Sendable {
         }
         return result
     }
-    static func available(_ product: String) -> Bool {
-        guard let root = root(product) else { return false }
-        return (try? load(root, product: product)) != nil
-    }
+    // SwiftUI asks about availability on every inspector update. Bundle.main
+    // resources are immutable for this process, so hash their model/weight
+    // payloads once instead of reading both files on every slider movement.
+    // Explicit loads, including mutable resource roots, still verify every time.
+    private static let bundledAvailability: [String: Bool] = {
+        var result: [String: Bool] = [:]
+        for product in ["photo-repair-v1", "photo-lighting-v1"] {
+            guard let root = root(product) else { continue }
+            result[product] = (try? load(root, product: product)) != nil
+        }
+        return result
+    }()
+
+    static func available(_ product: String) -> Bool { bundledAvailability[product] ?? false }
 }
 
 /// Optional build-time RGB products; no material map or normal-vector decoding.

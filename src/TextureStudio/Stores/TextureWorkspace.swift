@@ -271,7 +271,6 @@ final class TextureWorkspace {
                 guard self.textureLoom.package?.manifest.id == recipe.textureLoomID,
                       self.textureLoom.package?.manifest.version == recipe.textureLoomVersion else { throw StudioError("This recipe uses another Texture Loom build.") }
                 guard Set(recipe.enabledLoRAs).isSubset(of: Set(self.textureLoom.adapters.map(\.id))) else { throw StudioError("Import this recipe's LoRAs before opening it.") }
-                for adapter in self.textureLoom.adapters { try self.textureLoom.setEnabled(adapter.id, recipe.enabledLoRAs.contains(adapter.id)) }
             }
             let source = try await self.engine.importPhoto(URL(fileURLWithPath: recipe.photoPath))
             var depth: TextureDepth?
@@ -280,10 +279,14 @@ final class TextureWorkspace {
                 depth = try await self.engine.importDepth(URL(fileURLWithPath: path), matching: source)
             }
             let preview = try await self.engine.preview(source.orientedImage); try Task.checkCancellation()
+            // File loading and cancellation must leave the current document and
+            // the LoRA selection shared by other windows untouched on failure.
+            if recipe.depthChoice == .textureLoom { try self.textureLoom.setEnabledAdapters(Set(recipe.enabledLoRAs)) }
             self.source = source; self.attachedDepth = depth; self.depthURL = recipe.depthPath.map { URL(fileURLWithPath: $0) }
             self.settings = recipe.settings; self.depthChoice = recipe.depthChoice; self.recipeURL = url
             self.sourcePreview = preview; self.preview = preview; self.renderedPreview = .source
-            self.materialCache = nil; self.result = nil; self.classification = nil; self.warnings = []; self.hasEdits = false
+            self.materialCache = nil; self.result = nil; self.classification = nil; self.warnings = []
+            self.decision = nil; self.exportURL = nil; self.hasEdits = false
         }
     }
     func inspectFullQuality() {

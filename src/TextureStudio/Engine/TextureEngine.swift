@@ -320,6 +320,7 @@ actor TextureEngine {
     func export(_ result: MaterialResult, to folder: URL, precision: EXRPrecision) throws -> [URL] {
         try Task.checkCancellation()
         try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true)
+        try Self.validateExportDestination(folder)
         let diskEstimate = Int64(result.outputSize) * Int64(result.outputSize) * 32 + 16 * 1024 * 1024
         if let available = try folder.resourceValues(forKeys:[.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage,
            available < diskEstimate {
@@ -328,7 +329,7 @@ actor TextureEngine {
         let staging = folder.appendingPathComponent(".texture-studio-\(UUID().uuidString)",isDirectory:true)
         try FileManager.default.createDirectory(at:staging,withIntermediateDirectories:true)
         defer { try? FileManager.default.removeItem(at:staging) }
-        let names = ["diffuse.png","roughness.exr","normal.exr","displacement.exr","material.json","Blender-setup.txt"]
+        let names = Self.exportFileNames
         // A previous export stays intact unless the whole replacement can be staged successfully.
         let diffuseURL = staging.appendingPathComponent(names[0])
         try writeDiffuse(result.diffuse, to: diffuseURL)
@@ -374,16 +375,30 @@ actor TextureEngine {
         Height/roughness are material estimates. Review the output under neutral lighting; no scientific accuracy or seamless tiling is implied.
         """
         try blender.write(to:staging.appendingPathComponent(names[5]),atomically:true,encoding:.utf8)
-        for name in names {
+        let published = try Self.publishExport(from: staging, to: folder)
+        context.clearCaches(); dataContext.clearCaches()
+        return published
+    }
+
+    static let exportFileNames = ["diffuse.png","roughness.exr","normal.exr","displacement.exr","material.json","Blender-setup.txt"]
+
+    static func validateExportDestination(_ folder: URL) throws {
+        for name in exportFileNames {
             let existing = folder.appendingPathComponent(name)
             guard !FileManager.default.fileExists(atPath:existing.path) else {
                 throw TextureError.processing("\(name) already exists in this folder. Choose a new export folder to preserve the previous material.")
             }
         }
+    }
+
+    /// Both cached and freshly encoded exports publish only complete materials.
+    /// Recheck after staging in case another export populated the destination.
+    static func publishExport(from staging: URL, to folder: URL) throws -> [URL] {
+        try validateExportDestination(folder)
         var published = [URL]()
         do {
             try Task.checkCancellation()
-            for name in names {
+            for name in exportFileNames {
                 let destination = folder.appendingPathComponent(name)
                 try FileManager.default.moveItem(at:staging.appendingPathComponent(name),to:destination)
                 published.append(destination)
@@ -392,7 +407,6 @@ actor TextureEngine {
             for file in published { try? FileManager.default.removeItem(at:file) }
             throw error
         }
-        context.clearCaches(); dataContext.clearCaches()
         return published
     }
 

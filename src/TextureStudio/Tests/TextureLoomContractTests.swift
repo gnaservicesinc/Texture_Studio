@@ -95,6 +95,77 @@ final class TextureLoomContractTests: XCTestCase {
         XCTAssertTrue(store.statusDescription.contains("Loom Factory"))
         XCTAssertThrowsError(try store.activeOverrides())
     }
+    func testRecipeSelectionRejectsMissingAdaptersAndAvoidsInvalidatingAnUnchangedSelection() throws {
+        let root = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "loom-selection-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let store = TextureLoomStore(bundleRoot: root, storage: root.appendingPathComponent("LoRAs"), preferences: preferences)
+        let revision = store.revision
+        try store.setEnabledAdapters([])
+        XCTAssertEqual(store.revision, revision)
+        XCTAssertThrowsError(try store.setEnabledAdapters([UUID().uuidString]))
+        XCTAssertEqual(store.revision, revision)
+        XCTAssertNil(preferences.object(forKey: "textureLoom.enabledAdapters.v1"))
+        XCTAssertTrue(store.adapters.isEmpty)
+    }
+    func testRecipeAndMultiAdapterFailuresPreserveTheEnabledSelection() async throws {
+        let root = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "loom-selection-transaction-\(UUID().uuidString)"
+        let preferences = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let store = TextureLoomStore(bundleRoot: root, storage: root.appendingPathComponent("LoRAs"), preferences: preferences)
+        let first = try adapterFixture(base: root, name: "First")
+        let second = try adapterFixture(base: root, name: "Second")
+        let firstID = try store.importAdapter(first), secondID = try store.importAdapter(second)
+        try store.setEnabled(firstID, true)
+        let revision = store.revision
+        XCTAssertThrowsError(try store.setEnabledAdapters([firstID, secondID]))
+        XCTAssertEqual(store.adapters.filter(\.enabled).map(\.id), [firstID])
+        XCTAssertEqual(preferences.stringArray(forKey: "textureLoom.enabledAdapters.v1"), [firstID])
+        XCTAssertEqual(store.revision, revision)
+
+        let workspace = TextureWorkspace(textureLoom: store)
+        let recipe = TextureRecipe(photoPath: root.appendingPathComponent("missing-photo.png").path,
+            depthChoice: .textureLoom, settings: TextureSettings(), textureLoomID: store.package?.manifest.id,
+            textureLoomVersion: store.package?.manifest.version, enabledLoRAs: [secondID])
+        let recipeURL = root.appendingPathComponent("missing-photo.texture.json")
+        try JSONEncoder().encode(recipe).write(to: recipeURL)
+        workspace.openRecipe(recipeURL)
+        for _ in 0..<1000 where workspace.isBusy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(workspace.isBusy)
+        XCTAssertNotNil(workspace.notice)
+        XCTAssertEqual(store.adapters.filter(\.enabled).map(\.id), [firstID])
+        XCTAssertEqual(store.revision, revision)
+
+        // A later validation failure must also leave the prior selection intact.
+        let weights = root.appendingPathComponent("LoRAs/\(secondID)/lora.safetensors")
+        try Data("corrupt".utf8).write(to: weights)
+        XCTAssertThrowsError(try store.setEnabledAdapters([secondID]))
+        XCTAssertEqual(store.adapters.filter(\.enabled).map(\.id), [firstID])
+        XCTAssertEqual(preferences.stringArray(forKey: "textureLoom.enabledAdapters.v1"), [firstID])
+        XCTAssertEqual(store.revision, revision)
+    }
+    private func adapterFixture(base: URL, name: String) throws -> URL {
+        let folder = base.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        // Core ML spec v7: one ReLU from Float32 NCHW rgb to material_map.
+        // Only the interface is used; this is not trained material-model evidence.
+        let model = try XCTUnwrap(Data(base64Encoded: "CAcSMwoTCgNyZ2IaDCoKCgQBAyAgEKCABFIcCgxtYXRlcmlhbF9tYXAaDCoKCgQBAyAgEKCABKIfLAomCgxmaXh0dXJlX3JlbHUSA3JnYhoMbWF0ZXJpYWxfbWFwkggCUgAoATAB"))
+        let weights = Data("adapter weights fixture".utf8)
+        try model.write(to: folder.appendingPathComponent("adapter.mlmodel"))
+        try weights.write(to: folder.appendingPathComponent("lora.safetensors"))
+        let package = try TextureLoomPackage(root: base)
+        let document: [String: Any] = ["schema": "texture-loom.adapter.v1", "id": UUID().uuidString,
+            "name": name, "version": "1", "baseModel": ["id": package.manifest.id, "version": package.manifest.version],
+            "categories": [["id": "bricks", "version": "1", "adapters": [["map": "depth", "format": "coreml",
+                "path": "adapter.mlmodel", "weightsPath": "lora.safetensors",
+                "baseSHA256": try package.modelHash(package.manifest.categories[0].models[0])]]]],
+            "files": [["path": "adapter.mlmodel", "sha256": TextureLoomPackage.hash(model)],
+                      ["path": "lora.safetensors", "sha256": TextureLoomPackage.hash(weights)]]]
+        try JSONSerialization.data(withJSONObject: document).write(to: folder.appendingPathComponent("manifest.json"))
+        return folder
+    }
     private func temporary() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("loom-contract-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true); return root
