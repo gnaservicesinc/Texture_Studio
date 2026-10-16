@@ -46,9 +46,9 @@ The retained-dataset test is `NativeMaterialDatasetSetupProductionTests/testReal
 mkdir -p out/validation
 
 TEST_RUNNER_TEXTURE_STUDIO_DATASET_SETUP_VERIFY=1 \
-TEST_RUNNER_TEXTURE_STUDIO_DATASET_SETUP_PATH='/Users/andrewsmith/Documents/Texture Studio Datasets/PolyMat' \
+TEST_RUNNER_TEXTURE_STUDIO_DATASET_SETUP_PATH='/path/to/user/Documents/Texture Studio Datasets/PolyMat' \
 TEST_RUNNER_TEXTURE_STUDIO_DATASET_SETUP_SIZE=1024 \
-TEST_RUNNER_TEXTURE_STUDIO_DATASET_SETUP_REPORT=/opt/ipde/ipde/out/validation/dataset-tier-recheck.json \
+TEST_RUNNER_TEXTURE_STUDIO_DATASET_SETUP_REPORT=/path/to/workspace/ipde/out/validation/dataset-tier-recheck.json \
 xcodebuild -project src/TextureStudio/TextureStudio.xcodeproj -scheme TextureStudio \
   -configuration Release -destination 'platform=macOS,arch=arm64' \
   -derivedDataPath build/DatasetTierSetup111 \

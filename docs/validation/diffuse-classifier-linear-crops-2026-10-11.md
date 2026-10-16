@@ -4,15 +4,15 @@ Texture Studio 0.9.19, build 114.
 
 ## Created classifier dataset
 
-`/opt/ipde/classifer_ds` contains 120 original PNG diffuse examples and three added
+`/path/to/workspace/classifer_ds` contains 120 original PNG diffuse examples and three added
 Other Diffuse examples, in fifteen class folders. Other Fallback remains empty
 for user-supplied examples. The review
-page is `/opt/ipde/classifer_ds-review.html`; the source manifest is
-`/opt/ipde/classifer_ds/.classifier-manifest.json`.
+page is `/path/to/workspace/classifer_ds-review.html`; the source manifest is
+`/path/to/workspace/classifer_ds/.classifier-manifest.json`.
 
 Actual Create ML ingestion rejected the two empty Other folders. They remain
 available for user examples in the review dataset. Refresh creates
-`/opt/ipde/classifer_ds-createml` with only populated class folders for Training
+`/path/to/workspace/classifer_ds-createml` with only populated class folders for Training
 Data; this copy also preserves image bytes and dimensions.
 
 | Class | Images |
@@ -35,7 +35,7 @@ Data; this copy also preserves image bytes and dimensions.
 
 All 120 original files and classifier copies were independently checked against
 the recorded SHA-256 values, and image dimensions were checked with ImageIO.
-`/opt/ipde/classifer_ds-verification.json` records that verification. A second
+`/path/to/workspace/classifer_ds-verification.json` records that verification. A second
 native CLI refresh added zero files and preserved all 120 images. Initial
 labels use Poly Haven provider tags, material names and visually reviewed
 mixed-material examples; all suggestions remain marked for user review.
@@ -52,7 +52,7 @@ The final native refresh preserved all 120 source-linked examples and the
 additional Other Diffuse images. The actual Create ML
 `labeledDirectories(...).labeledImages()` API loaded 123 images across 14
 populated labels. Every training-view copy matched its curated image's SHA-256
-and dimensions. `/opt/ipde/classifer_ds-createml-verification.json` records this
+and dimensions. `/path/to/workspace/classifer_ds-createml-verification.json` records this
 import and byte verification.
 
 The final installed native CLI refresh reported 123 images, 14 populated
@@ -94,7 +94,7 @@ Final focused evidence:
 
 ## Package and installation
 
-`make DERIVED_DATA=/opt/ipde/ipde/build/TextureStudio package` passed after the
+`make DERIVED_DATA=/path/to/workspace/ipde/build/TextureStudio package` passed after the
 populated-class import view was added.
 The build-tool and native installer regression checks passed. The packaged
 parent and four embedded material applications passed native bundle validation
@@ -112,7 +112,7 @@ Texture Studio native smoke passed
 ## Scope
 
 The native computer-use pipe was unavailable, so no live Create ML import or
-visual click-through is claimed. Choose `/opt/ipde/classifer_ds-createml` as Training Data
+visual click-through is claimed. Choose `/path/to/workspace/classifer_ds-createml` as Training Data
 in the supplied Create ML project after reviewing labels. No classifier was
 trained and no automatic specialist routing was enabled.
 

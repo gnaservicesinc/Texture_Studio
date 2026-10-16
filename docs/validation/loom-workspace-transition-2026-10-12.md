@@ -2,7 +2,7 @@
 
 Texture Studio 0.9.26, build 121.
 
-The reported alert appeared because the category workspace still belonged to an indexed dataset while Loom Room now opened its original source folder. The existing workspace referenced `MatterLoom 2k`; all 1,824 registered original-map paths existed under `/opt/ipde/sources_mats`.
+The reported alert appeared because the category workspace still belonged to an indexed dataset while Loom Room now opened its original source folder. The existing workspace referenced `MatterLoom 2k`; all 1,824 registered original-map paths existed under `/path/to/workspace/sources_mats`.
 
 The backend now recognizes that one-way transition from a legacy reference dataset to its actual source folder. It checks existing ownership metadata and original paths without hashing or decoding the corpus, then rebinds the workspace under its lock. Existing categories, reviews, custom groups, classifier curation and model histories are retained. Conflicting or unrelated workspace ownership remains protected.
 

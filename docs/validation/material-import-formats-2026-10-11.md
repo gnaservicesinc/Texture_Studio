@@ -57,7 +57,7 @@ the native sidecar retains the published archive size, SHA-1, member CRC and
 source identity. No original was resampled or converted to another pixel format.
 
 The final real-corpus test then scanned, imported and rescanned the entire
-`/opt/ipde/sources_mats` library with an injected transport that rejects and
+`/path/to/workspace/sources_mats` library with an injected transport that rejects and
 records every network attempt. All 376 original source sets across 122 families
 imported successfully, with zero warnings and zero requests. The rescan correctly
 reported zero new sets and 376 duplicates. Every one of the 1,543 PNGs retained
@@ -66,7 +66,7 @@ against native crops from all three original tiers, including the recovered 2K
 grayscale diffuse. Pixel codes, precision and retained metadata matched.
 
 After that proof passed, a guarded transaction completed the user's aborted
-import into `/Users/andrewsmith/Documents/Texture Studio Datasets/Wolf`. It first
+import into `/path/to/user/Documents/Texture Studio Datasets/Wolf`. It first
 required the dataset to remain empty and native, then bound the preview and index
 hashes before registering all 376 sets as original references. This import also
 completed with zero warnings and zero network calls. The two opt-in real-library

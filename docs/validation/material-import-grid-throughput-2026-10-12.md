@@ -12,7 +12,7 @@ Build: Texture Studio 0.9.24 (119), 2026-10-12.
 
 ## Real dataset evidence
 
-The `/opt/ipde/sources_mats` preview found 456 sets in 0.6177–0.6568 seconds across three runs. Its three remaining warnings identify duplicate `pine_bark` names; there are no AO pairing warnings. Repeating the scan against the populated BadMonkey dataset took 0.7775–0.7885 seconds and identified all 456 sets as already registered without changing its index.
+The `/path/to/workspace/sources_mats` preview found 456 sets in 0.6177–0.6568 seconds across three runs. Its three remaining warnings identify duplicate `pine_bark` names; there are no AO pairing warnings. Repeating the scan against the populated BadMonkey dataset took 0.7775–0.7885 seconds and identified all 456 sets as already registered without changing its index.
 
 A read-only BadMonkey audit found 456 registered originals, including 143 smaller than 2048. The 2048 view contains 313 exact 2048 crops and does not contain `anti_skid_tiles_1k_full`. Dataset registration and review metadata remained unchanged. Original source preservation and exact per-channel crop bytes are also covered by regression fixtures.
 

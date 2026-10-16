@@ -14,7 +14,7 @@ Quarter-turn augmentation now rotates the recorded rectangular-source crop. It c
 
 ## Authorized local dataset preparation
 
-The opt-in `BarkFreshPreparationProductionTests` maintenance case uses the verified source inventory outside the repository. It imports 18 distinct bark families and 51 paired resolution sets from `/opt/ipde/sources_mats`. The title-case Pine Bark folder duplicates `pine_bark` byte for byte and is omitted from membership; both original folders remain intact.
+The opt-in `BarkFreshPreparationProductionTests` maintenance case uses the verified source inventory outside the repository. It imports 18 distinct bark families and 51 paired resolution sets from `/path/to/workspace/sources_mats`. The title-case Pine Bark folder duplicates `pine_bark` byte for byte and is omitted from membership; both original folders remain intact.
 
 Preparation verifies 51 training crops and one extra known-subject diagnostic crop at 1024 × 1024. Every diffuse and 16-bit height crop is compared against its exact native source rectangle; all 221 original PNG hashes are checked before and after preparation. Temporary verification crops are cleaned before publication, leaving no old or newly prepared training cache in the fresh dataset.
 

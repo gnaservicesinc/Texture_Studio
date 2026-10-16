@@ -18,7 +18,7 @@ New folders default to 2048. Undersized originals remain inspectable; they canno
 
 ## Corpus evidence
 
-The real `/opt/ipde/sources_mats` folder snapshot accounted for 1,897 PNG files and 462 native paired sets, with 324 exact 2048 crop views. The final recorded service call, after storing filename-role tags, took 0.7202 seconds and left the source tree unchanged, with no required dataset metadata. Earlier runs during this change took 0.7571–0.9164 seconds. Timing describes the native snapshot service, excluding app process startup and UI rendering.
+The real `/path/to/workspace/sources_mats` folder snapshot accounted for 1,897 PNG files and 462 native paired sets, with 324 exact 2048 crop views. The final recorded service call, after storing filename-role tags, took 0.7202 seconds and left the source tree unchanged, with no required dataset metadata. Earlier runs during this change took 0.7571–0.9164 seconds. Timing describes the native snapshot service, excluding app process startup and UI rendering.
 
 Classifier header discovery took 0.1789 seconds in the final run (0.1690 seconds in an earlier run). It discovered 466 diffuse originals: 321 eligible native tiers, 145 undersized originals and zero unreadable originals. It selected 148 distinct material/folder/color examples. Every selected image has both axes at least 2048; no selected file is 1K. Both Pine Bark folders are retained separately.
 

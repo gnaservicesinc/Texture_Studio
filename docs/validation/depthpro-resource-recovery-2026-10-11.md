@@ -6,7 +6,7 @@ The compatible Core ML package is pinned to `coreml-projects/DepthPro-coreml` re
 
 Native download tasks report intermediate bytes through their download delegate. Cancellation before task registration is remembered; registered cancellation waits for the serialized delegate's file operation to finish before caller cleanup. Package publication checks cancellation before replacing the active directory.
 
-The default material workspace is `~/Library/Application Support/Texture Studio/Material Workspace`. Legacy preferences inside a Git checkout, including nested paths, worktrees and symlink aliases, migrate before new output is created. Missing repository model-download locations also migrate. Existing selected developer weights and completed runs retain their paths. The previously empty `/opt/ipde/ipde/out/material-training` directory was removed with `rmdir`.
+The default material workspace is `~/Library/Application Support/Texture Studio/Material Workspace`. Legacy preferences inside a Git checkout, including nested paths, worktrees and symlink aliases, migrate before new output is created. Missing repository model-download locations also migrate. Existing selected developer weights and completed runs retain their paths. The previously empty `/path/to/workspace/ipde/out/material-training` directory was removed with `rmdir`.
 
 ## Genuine model execution
 

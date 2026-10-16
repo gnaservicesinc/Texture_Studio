@@ -25,7 +25,7 @@ Actual examples include noisy/clean phone photographs of carpet and fixed-camera
 photographs under changing light. Findings, rights and limitations are recorded
 in [PhotoCaptureDatasets.md](docs/PhotoCaptureDatasets.md).
 
-Factory now also has **Photo Enhancers…**: separate native Repair and Lighting
+Factory also has **Photo Training**: separate native Repair and Lighting
 RGB residual training, pair import, exact checkpoint continuation, bounded
 sessions, Save & Stop, and CPU A/B testing of saved exports. Texture Studio has
 manual stage controls after framing; each enabled stage uses a checked, fixed
@@ -36,7 +36,7 @@ the old material-making flow is not treated as a learned cleanup solution.
 No quality-qualified photo enhancer weights are included. A short native1K diagnostic performed four updates across three SIDD scenes to verify execution, not learned quality. No replacement app is installed and no competing GPU work starts
 while the user's material training is active.
 
-## Andrew's next steps for the first usable version
+## First training workflow
 
 The complete training and inclusion guide is
 [Factory Photo Enhancer Training](https://github.com/gnaservicesinc/LoomFactory/blob/main/Docs/PhotoEnhancerTraining.md).
@@ -44,7 +44,7 @@ The complete training and inclusion guide is
 1. Finish the current material job, then install the prepared Factory Release.
 2. In **Synthetic Photos…**, select **Repair**, choose all or a random percentage
    per category, and keep native1K crops from higher tiers. Review the generated
-   pairs. Import that manifest from **Photo Enhancers…**, Repair stage.
+   pairs. Open **Photo Training → Train Repair…** and import that manifest.
 3. Start Compact NAF width32, 1,000,515 parameters, native1K, LR0.0001, batch1,
    WD0, 30 minutes. These are explicit starting settings, not a proven winner.
    The actual model must pass the built-in native1K/Core ML CPU parity check
@@ -241,7 +241,7 @@ data integrity, not that the resulting texture model has learned useful quality.
 
 ## Current material comparison, separate from photo enhancer quality
 
-On 2026-10-16 Andrew's Compact cardboard depth result retains much more fine
+The Compact cardboard depth result reviewed on 2026-10-16 retains much more fine
 texture than the compared Pyramid output, while retaining the corrugated shape.
 Use Compact as the stronger starting point for this material and the first RGB
 repair experiments. This user appearance judgment does not prove every category

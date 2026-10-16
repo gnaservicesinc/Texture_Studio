@@ -8,7 +8,7 @@ Texture Studio 0.9.22, build 117. Evidence is retained outside the repository at
 The user's `Texture Studio Maps 372B11F3` exports contain real low-variation
 Float32 predictions. This is visible before display contrast, gamma conversion,
 8-bit preview conversion, or EXR import. The source displacement PNG is
-byte-identical to `/opt/ipde/sources_mats/Bark Brown 02/bark_brown_02_disp_1k.png`,
+byte-identical to `/path/to/workspace/sources_mats/Bark Brown 02/bark_brown_02_disp_1k.png`,
 SHA-256 `e02b952d984561ca89e5b33e788914d9bda286a4a1914323d0557e910892be98`.
 Its original 16-bit scalar codes are compared directly on the same 1024 grid.
 
