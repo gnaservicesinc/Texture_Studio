@@ -30,6 +30,7 @@ struct TextureRecipe: Codable {
     var textureLoomID: String?
     var textureLoomVersion: String?
     var enabledLoRAs: [String]
+    var photoEnhancerModels: [String:String]? = nil
 }
 
 struct StudioNotice: Identifiable {

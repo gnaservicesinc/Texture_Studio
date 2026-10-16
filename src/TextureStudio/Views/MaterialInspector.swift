@@ -3,6 +3,17 @@ import SwiftUI
 struct MaterialInspector: View {
     @Bindable var workspace: TextureWorkspace
 
+    private func enhancer(_ title: String, product: String, value: Binding<Float>) -> some View {
+        let available = PhotoEnhancerDescriptor.available(product)
+        return VStack(alignment: .leading) {
+            Toggle(title, isOn: Binding(get: { value.wrappedValue > 0 }, set: { value.wrappedValue = $0 ? 0.5 : 0 }))
+                .disabled(!available && value.wrappedValue == 0)
+            if value.wrappedValue > 0 { FloatControl(title: "Strength", value: value, range: 0...1).disabled(!available) }
+            if !available { Text("No compatible trained model included. Train and review this stage in Loom Factory, then include its export when building Texture Studio.")
+                .font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+
     var body: some View {
         Form {
             Section("Material workflow") {
@@ -58,12 +69,18 @@ struct MaterialInspector: View {
                 }
                 .help("Reset tilt, rotation, lens correction and crop. Focal length returns to the photo's camera information.")
             }
-            Section("Balance the photo") {
-                FloatControl(title: "Lighting balance", value: $workspace.settings.lightingStrength, range: 0...1)
-                FloatControl(title: "Lighting scale", value: $workspace.settings.lightingRadius, range: 0...1)
-                Text("Registered companion views can reduce capture noise while retaining source detail. The photo is never passed through a smoothing denoiser.")
+            Section("Photo enhancers · after framing") {
+                Text("Choose the corrections this photo needs. Repair runs first, then lighting. Originals stay untouched. Start at 1K; alpha and HDR enhancement are not supported yet.")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("Broad illumination is reduced while retaining photo detail. Clipped highlights and hidden shadow detail need review.")
+                enhancer("Repair noise / mild blur", product: "photo-repair-v1", value: $workspace.settings.photoRepairStrength)
+                enhancer("Neutral lighting / exposure", product: "photo-lighting-v1", value: $workspace.settings.photoLightingStrength)
+                Text("Detail generation is planned as a separate optional stage. Enhancers depend on the models included in this build; training does not automatically approve them.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Manual lighting balance") {
+                FloatControl(title: "Even out lighting", value: $workspace.settings.lightingStrength, range: 0...1)
+                FloatControl(title: "Lighting scale", value: $workspace.settings.lightingRadius, range: 0.01...0.5)
+                Text("Off by default; saved settings are preserved. This broad correction is optional and can change exposure; leave it off when judging a learned lighting model.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Height / displacement source") {

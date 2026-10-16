@@ -6,6 +6,7 @@ import Metal
 import Darwin
 
 actor TextureEngine {
+    private let photoEnhancers = PhotoEnhancerService()
     private let context: CIContext
     private let dataContext: CIContext
     private let device: MTLDevice?
@@ -168,8 +169,7 @@ actor TextureEngine {
             let gain = LinearColorFrame.exposureGain(reference: reference, hdr: warped, context: context)
             warped = warped.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: log2(gain)])
         }
-        // Keep the photographed high-frequency detail intact. Capture noise can
-        // be reduced with registered companion evidence, never a spatial denoiser.
+        // Geometry and registered evidence precede optional photo stages.
         let photo = warped
         let lighting = photo.clampedToExtent().applyingGaussianBlur(sigma: Double(settings.lightingRadius) * Double(settings.outputSize)).cropped(to:output)
         let target = try meanLuminance(photo)
@@ -178,9 +178,10 @@ actor TextureEngine {
         }
         // First-write PNG evaluation of a lazy HDR graph can introduce a red
         // tile. Freeze the linear result before encoding or numeric-map work.
-        let diffuseFrame = try LinearColorFrame(diffuseGraph, context: context)
+        let enhanced = try await photoEnhancers.apply(diffuseGraph, repair: settings.photoRepairStrength, lighting: settings.photoLightingStrength)
+        let diffuseFrame = try LinearColorFrame(enhanced, context: context)
         return PreparedDiffuse(diffuse: diffuseFrame.color, numeric: diffuseFrame.numeric,
-            extent: extent, output: output, corners: corners, crop: crop, usesHDR: usesHDR, warnings: evidence.warnings)
+            extent: extent, output: output, corners: corners, crop: crop, usesHDR: usesHDR, warnings: evidence.warnings + ((settings.photoRepairStrength > 0 || settings.photoLightingStrength > 0) ? ["Optional RGB photo enhancer candidates are enabled. Inspect native detail and color before accepting the material."] : []))
     }
 
     func writeDiffuse(_ image: CIImage, to url: URL) throws {
@@ -403,7 +404,7 @@ actor TextureEngine {
                 : "Choose a supported material output size: 1024, 2048, 4096 or 8192 pixels.")
         }
         guard settings.lensDistortion.isFinite, abs(settings.lensDistortion) <= 0.15,
-              [settings.lightingStrength,settings.lightingRadius,settings.heightStrength,
+              [settings.photoRepairStrength,settings.photoLightingStrength,settings.lightingStrength,settings.lightingRadius,settings.heightStrength,
                settings.heightDetail,settings.surfacePlaneRemoval,settings.depthCleanup,settings.roughnessBase,settings.roughnessDetail].allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }),
               settings.materialWidthMeters.isFinite, settings.materialWidthMeters > 0,
               settings.displacementScaleMeters.isFinite, settings.displacementScaleMeters >= 0 else {

@@ -25,9 +25,53 @@ Actual examples include noisy/clean phone photographs of carpet and fixed-camera
 photographs under changing light. Findings, rights and limitations are recorded
 in [PhotoCaptureDatasets.md](docs/PhotoCaptureDatasets.md).
 
-There are no newly trained photo-to-diffuse weights or working automatic cleanup
-feature yet. No replacement app is installed and no competing GPU work starts
+Factory now also has **Photo Enhancers…**: separate native Repair and Lighting
+RGB residual training, pair import, exact checkpoint continuation, bounded
+sessions, Save & Stop, and CPU A/B testing of saved exports. Texture Studio has
+manual stage controls after framing; each enabled stage uses a checked, fixed
+build-time RGB product before material prediction. The new default has broad
+manual lighting balance off; explicit saved settings remain intact. Useful crop/lens/HDR/companion handling is retained;
+the old material-making flow is not treated as a learned cleanup solution.
+
+No quality-qualified photo enhancer weights are included. A short native1K diagnostic performed four updates across three SIDD scenes to verify execution, not learned quality. No replacement app is installed and no competing GPU work starts
 while the user's material training is active.
+
+## Andrew's next steps for the first usable version
+
+The complete training and inclusion guide is
+[Factory Photo Enhancer Training](https://github.com/gnaservicesinc/LoomFactory/blob/main/Docs/PhotoEnhancerTraining.md).
+
+1. Finish the current material job, then install the prepared Factory Release.
+2. In **Synthetic Photos…**, select **Repair**, choose all or a random percentage
+   per category, and keep native1K crops from higher tiers. Review the generated
+   pairs. Import that manifest from **Photo Enhancers…**, Repair stage.
+3. Start Compact NAF width32, 1,000,515 parameters, native1K, LR0.0001, batch1,
+   WD0, 30 minutes. These are explicit starting settings, not a proven winner.
+   The actual model must pass the built-in native1K/Core ML CPU parity check
+   before learning. The short native1K update/resume/parity checks passed after
+   the GPU lease became free. Long-run stability and appearance still need pilots.
+4. Test its best export on unfamiliar real photos and on already-good inputs.
+   Use **Test Saved Enhancer…** for a native1K CPU A/B. Reject halos, wiped grain,
+   changed cracks/weaves, and identity failures. Extend/continue only if useful.
+   The six available SIDD pairs are a diagnostic across three scenes, not a
+   sufficient category qualification corpus; import them as Repair only.
+5. Repeat with the **Lighting** synthesis preset and separate weights. Add
+   artist-reviewed real neutral references for hard shadows/hotspots; alternate
+   lit room captures are not automatically albedo targets. Compare both stages
+   together with generated height/normal/roughness under moving light.
+6. Include reviewed exports when building Studio using `PHOTO_REPAIR_MODEL` and
+   `PHOTO_LIGHTING_MODEL`. Manual toggles/strengths sit after crop/lens setup.
+   First release: opaque SDR1K, finite corrections, no hidden tiling or scaling;
+   exact model hashes are pinned in recipes. No weights means no enabled stage.
+7. After useful Repair/Lighting, add optional generated microdetail with its own
+   strength/seed, then qualify carpet types. Alpha rope/nets require a separate
+   opacity/foreground product. Keep the category classifier/router optional
+   until real labels show it helps. Do not merge Ground/Small Particles yet.
+
+The first trainer samples imported pairs uniformly per epoch. The proposed
+60/30/10 real/synthetic/identity mix is an unimplemented experiment, not a
+reported feature. Geometry stays programmatic initially, with one composed warp;
+a learned reframing network is unnecessary for the first usable release.
 
 ## Product flow
 
@@ -145,7 +189,7 @@ different network recipes behind the same product flow.
    A 60% real / 30% synthetic / 10% identity sampler is a starting experiment,
    distinct from the percentage of source materials selected for generation.
    No production training membership is changed.
-2. **Restoration baseline — next.** Once GPU capacity is available, measure a
+2. **Restoration baseline — training path implemented; quality pending.** Once GPU capacity is available, measure a
    frozen official RGB restoration model on the sampled photos and clean-input
    controls. A pretrained SIDD model may already have seen these scenes: this
    baseline is a sanity check, not an independent generalization test. Reserve
@@ -162,11 +206,13 @@ different network recipes behind the same product flow.
    restoration alone against restoration plus generation on unfamiliar surfaces.
    Look for false cracks, repetitive fibers, ringing, fabricated text and changed
    patterns. Plausible added grain is allowed; losing the defining shape is not.
-5. **Native product integration.** Introduce a distinct versioned RGB product
-   and target loader in Factory/Workshop, explicit orientation/ICC/transfer
-   handling, saved-weight identity and continuation guards, CPU/GPU numerical
-   checks, cancellation and preserved originals. Connect only a working stage;
-   do not ship an unused pipeline framework or an unavailable-model button.
+5. **Native product integration — baseline implemented.** Repair/Lighting use a
+   distinct residual RGB constructor, native1K targets, input/output contracts,
+   saved-weight identities, cancellation and exact continuation. Studio has an
+   explicit optional build payload and manual controls; material package-v1 is
+   unchanged. Photo LoRA/Workshop support is intentionally unsupported in v1.
+   CPU export/product/split checks and the short native1K update/parity test
+   pass. Long-run stability and useful learned quality still require pilot runs.
 6. **Photo-drop workflow.** Integrate automatic defaults, independent controls,
    A/B review and Blender export, then qualify supported categories. Add a
    trained router when real decision labels exist. Alpha remains a separate gate.
@@ -192,3 +238,12 @@ Check exact weight licenses and local numerical behavior before using any port.
 The next learned-quality milestone is a visible restoration A/B on real photos,
 followed by a lighting/detail composition review. Data acquisition tests establish
 data integrity, not that the resulting texture model has learned useful quality.
+
+## Current material comparison, separate from photo enhancer quality
+
+On 2026-10-16 Andrew's Compact cardboard depth result retains much more fine
+texture than the compared Pyramid output, while retaining the corrugated shape.
+Use Compact as the stronger starting point for this material and the first RGB
+repair experiments. This user appearance judgment does not prove every category
+must use one architecture, or qualify a new photo enhancer. Keep alternative
+models and judged Blender examples available for A/B comparison.

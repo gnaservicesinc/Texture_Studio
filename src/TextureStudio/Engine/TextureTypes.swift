@@ -20,7 +20,9 @@ struct TextureSettings: Codable, Sendable, Equatable {
     var useHDRGainMap: Bool = true
     var lensDistortion: Double = 0
     var exrPrecision: EXRPrecision = .float32
-    var lightingStrength: Float = 0.65
+    var lightingStrength: Float = 0
+    var photoRepairStrength: Float = 0
+    var photoLightingStrength: Float = 0
     var lightingRadius: Float = 0.12
     var heightStrength: Float = 1
     var heightDetail: Float = 0
@@ -41,7 +43,7 @@ struct TextureSettings: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case rotationX, rotationY, rotationZ, focalLengthPixels, cropScale, cropOffsetX, cropOffsetY,
              outputSize, useSupportingViews, useHDRGainMap, lensDistortion,
-             exrPrecision, lightingStrength, lightingRadius, heightStrength,
+             exrPrecision, lightingStrength, lightingRadius, photoRepairStrength, photoLightingStrength, heightStrength,
              heightDetail, surfacePlaneRemoval, depthCleanup, heightInvert, adaptiveRelief, attachedMapIsHeight,
              roughnessBase, roughnessDetail, materialWidthMeters, displacementScaleMeters
     }
@@ -60,6 +62,8 @@ struct TextureSettings: Codable, Sendable, Equatable {
         useHDRGainMap = try c.decodeIfPresent(Bool.self,forKey:.useHDRGainMap) ?? useHDRGainMap
         lensDistortion = try c.decodeIfPresent(Double.self,forKey:.lensDistortion) ?? lensDistortion
         exrPrecision = try c.decodeIfPresent(EXRPrecision.self,forKey:.exrPrecision) ?? exrPrecision
+        photoRepairStrength = try c.decodeIfPresent(Float.self,forKey:.photoRepairStrength) ?? 0
+        photoLightingStrength = try c.decodeIfPresent(Float.self,forKey:.photoLightingStrength) ?? 0
         lightingStrength = try c.decodeIfPresent(Float.self,forKey:.lightingStrength) ?? lightingStrength
         lightingRadius = try c.decodeIfPresent(Float.self,forKey:.lightingRadius) ?? lightingRadius
         heightStrength = try c.decodeIfPresent(Float.self,forKey:.heightStrength) ?? heightStrength

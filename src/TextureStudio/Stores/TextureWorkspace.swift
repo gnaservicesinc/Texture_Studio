@@ -244,7 +244,8 @@ final class TextureWorkspace {
         guard let source else { throw StudioError("Import a photo before saving a recipe.") }
         return TextureRecipe(photoPath: source.url.path, depthPath: depthURL?.path, depthChoice: depthChoice, settings: settings,
             textureLoomID: textureLoom.package?.manifest.id, textureLoomVersion: textureLoom.package?.manifest.version,
-            enabledLoRAs: textureLoom.adapters.filter(\.enabled).map(\.id))
+            enabledLoRAs: textureLoom.adapters.filter(\.enabled).map(\.id),
+            photoEnhancerModels: try PhotoEnhancerDescriptor.identities(settings))
     }
     func saveRecipe() {
         guard source != nil, !isBusy else { return }
@@ -265,6 +266,7 @@ final class TextureWorkspace {
         run("Opening texture recipe…") {
             let recipe = try JSONDecoder().decode(TextureRecipe.self, from: Data(contentsOf: url))
             guard recipe.version == 4 else { throw StudioError("This recipe belongs to the previous model architecture. Import its photo to create a new recipe.") }
+            guard try PhotoEnhancerDescriptor.identities(recipe.settings) == (recipe.photoEnhancerModels ?? [:]) else { throw StudioError("This recipe uses different photo enhancer models. Open it with the matching build.") }
             if recipe.depthChoice == .textureLoom {
                 guard self.textureLoom.package?.manifest.id == recipe.textureLoomID,
                       self.textureLoom.package?.manifest.version == recipe.textureLoomVersion else { throw StudioError("This recipe uses another Texture Loom build.") }
